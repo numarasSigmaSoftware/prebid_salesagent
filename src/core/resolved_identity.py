@@ -161,6 +161,14 @@ def resolve_identity(
     if auth_token is None:
         auth_token, _ = _extract_auth_token(headers)
 
+    if require_valid_token and not auth_token:
+        from src.core.exceptions import AdCPAuthenticationError
+
+        raise AdCPAuthenticationError(
+            "Authentication token is required for this operation.",
+            details={"error_code": "MISSING_AUTH_TOKEN"},
+        )
+
     # Step 3: Validate token → principal_id (and discover tenant from token if needed)
     principal_id = None
     if auth_token:

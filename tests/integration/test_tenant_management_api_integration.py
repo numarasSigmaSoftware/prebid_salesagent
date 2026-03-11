@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Integration tests for the Tenant Management API - tests with actual database."""
 
+import os
+
 import pytest
 from flask import Flask
 from sqlalchemy import delete
@@ -57,6 +59,7 @@ def app(integration_db, mock_api_key_auth):
     """Create test Flask app with auth configured."""
     # integration_db ensures database is properly initialized
     # mock_api_key_auth ensures API key exists in database
+    os.environ["TENANT_MANAGEMENT_BOOTSTRAP_KEY"] = "bootstrap-test-key"
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(tenant_management_api)
@@ -104,14 +107,21 @@ class TestTenantManagementAPIIntegration:
 
     def test_init_api_key(self, client):
         """Test API key initialization."""
-        response = client.post("/api/v1/tenant-management/init-api-key")
-        # May be 201 (created) or 409 (already exists)
+        response = client.post(
+            "/api/v1/tenant-management/init-api-key",
+            headers={"X-Tenant-Management-Bootstrap-Key": "bootstrap-test-key"},
+        )
         assert response.status_code in [201, 409]
 
         if response.status_code == 201:
             data = response.json
             assert "api_key" in data
             assert data["api_key"].startswith("sk-")
+
+    def test_init_api_key_requires_bootstrap_header(self, client):
+        """Anonymous bootstrap attempts must fail."""
+        response = client.post("/api/v1/tenant-management/init-api-key")
+        assert response.status_code == 401
 
     def test_health_check(self, client, mock_api_key_auth):
         """Test health check endpoint."""

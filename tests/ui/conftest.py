@@ -18,27 +18,37 @@ from tests.integration.conftest import integration_db  # noqa: F401
 def ui_test_mode():
     """Enable UI test authentication mode."""
     os.environ["ADCP_AUTH_TEST_MODE"] = "true"
+    os.environ["TEST_SUPER_ADMIN_PASSWORD"] = "test-super-admin-pass"
+    os.environ["TEST_TENANT_ADMIN_PASSWORD"] = "test-tenant-admin-pass"
+    os.environ["TEST_TENANT_USER_PASSWORD"] = "test-tenant-user-pass"
 
     yield
 
     # Cleanup
     del os.environ["ADCP_AUTH_TEST_MODE"]
+    del os.environ["TEST_SUPER_ADMIN_PASSWORD"]
+    del os.environ["TEST_TENANT_ADMIN_PASSWORD"]
+    del os.environ["TEST_TENANT_USER_PASSWORD"]
 
 
 @pytest.fixture
 def test_users():
     """Provide test user credentials."""
     return {
-        "super_admin": {"email": "test_super_admin@example.com", "password": "test123", "role": "super_admin"},
+        "super_admin": {
+            "email": "test_super_admin@example.com",
+            "password": "test-super-admin-pass",
+            "role": "super_admin",
+        },
         "tenant_admin": {
             "email": "test_tenant_admin@example.com",
-            "password": "test123",
+            "password": "test-tenant-admin-pass",
             "role": "tenant_admin",
             "tenant_id": "test_tenant",
         },
         "tenant_user": {
             "email": "test_tenant_user@example.com",
-            "password": "test123",
+            "password": "test-tenant-user-pass",
             "role": "tenant_user",
             "tenant_id": "test_tenant",
         },

@@ -110,7 +110,7 @@ def test_all_admin_pages():
 
     auth_data = {
         "email": "test_super_admin@example.com",
-        "password": "test123",
+        "password": "test-super-admin-pass",
         "tenant_id": "",
     }
 

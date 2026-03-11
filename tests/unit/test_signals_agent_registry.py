@@ -248,3 +248,13 @@ class TestSignalsAgentRegistry:
             assert result["success"] is False
             assert "error" in result
             assert "Authentication" in result["error"] or "failed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_test_connection_rejects_private_destinations(self):
+        """Unsafe stored destinations must be blocked before any outbound attempt."""
+        registry = SignalsAgentRegistry()
+
+        result = await registry.test_connection("http://127.0.0.1:8000/health")
+
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower() or "private" in result["error"].lower()

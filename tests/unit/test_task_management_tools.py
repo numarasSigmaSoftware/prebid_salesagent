@@ -104,6 +104,16 @@ class TestListTasksTool:
         assert "tasks" in result
         # The query was executed - if there was an AttributeError it would have raised
 
+    async def test_list_tasks_requires_authenticated_principal(self, sample_tenant):
+        """Task listing must reject tenant-only identities."""
+        from fastmcp.exceptions import ToolError
+
+        list_tasks_fn = await self._get_list_tasks_fn()
+        identity = ResolvedIdentity(tenant_id=sample_tenant["tenant_id"], tenant=sample_tenant, protocol="mcp")
+
+        with pytest.raises(ToolError, match="Authentication required"):
+            await list_tasks_fn(identity=identity)
+
 
 class TestGetTaskTool:
     """Test the get_task MCP tool actually works."""
@@ -191,6 +201,16 @@ class TestGetTaskTool:
             with pytest.raises(ToolError, match="not found"):
                 await get_task_fn(task_id="nonexistent", identity=identity)
 
+    async def test_get_task_requires_authenticated_principal(self, sample_tenant):
+        """Task detail reads must reject tenant-only identities."""
+        from fastmcp.exceptions import ToolError
+
+        get_task_fn = await self._get_get_task_fn()
+        identity = ResolvedIdentity(tenant_id=sample_tenant["tenant_id"], tenant=sample_tenant, protocol="mcp")
+
+        with pytest.raises(ToolError, match="Authentication required"):
+            await get_task_fn(task_id="step_123", identity=identity)
+
 
 class TestCompleteTaskTool:
     """Test the complete_task MCP tool actually works."""
@@ -271,3 +291,13 @@ class TestCompleteTaskTool:
 
         with pytest.raises(ToolError, match="Invalid status"):
             await complete_task_fn(task_id="step_123", status="invalid_status", identity=identity)
+
+    async def test_complete_task_requires_authenticated_principal(self, sample_tenant):
+        """Task completion must reject tenant-only identities."""
+        from fastmcp.exceptions import ToolError
+
+        complete_task_fn = await self._get_complete_task_fn()
+        identity = ResolvedIdentity(tenant_id=sample_tenant["tenant_id"], tenant=sample_tenant, protocol="mcp")
+
+        with pytest.raises(ToolError, match="Authentication required"):
+            await complete_task_fn(task_id="step_123", status="completed", identity=identity)

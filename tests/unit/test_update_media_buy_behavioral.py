@@ -74,10 +74,11 @@ def _make_mock_media_buy(media_buy_id="mb_test", currency="USD"):
     return mb
 
 
-def _make_mock_currency_limit(max_daily=None):
+def _make_mock_currency_limit(max_daily=None, min_package_budget=None):
     """Create a mock CurrencyLimit with proper numeric values."""
     cl = MagicMock()
     cl.max_daily_package_spend = Decimal(str(max_daily)) if max_daily else None
+    cl.min_package_budget = Decimal(str(min_package_budget)) if min_package_budget is not None else None
     return cl
 
 
@@ -549,6 +550,79 @@ class TestCampaignBudgetValidationAndPersistence:
         """When total_budget < 0, rejected at schema level (gt=0) per BR-RULE-008."""
         with pytest.raises(ValidationError, match="greater_than"):
             Budget(total=-500.0, currency="USD", pacing="even")
+
+    def test_numeric_budget_update_preserves_existing_currency(self, standard_mocks):
+        """Numeric budget-only updates must keep the media buy's existing currency."""
+        mock_session = _setup_db_session(standard_mocks)
+        mock_media_buy = _make_mock_media_buy("mb_budget", currency="EUR")
+        mock_currency_limit = _make_mock_currency_limit(max_daily=100000)
+        mock_pkg = MagicMock()
+        mock_pkg.package_id = "pkg_budget_1"
+
+        standard_mocks["uow_instance"].media_buys.get_by_id.return_value = mock_media_buy
+        standard_mocks["uow_instance"].media_buys.update_fields.return_value = mock_media_buy
+        standard_mocks["uow_instance"].media_buys.get_packages.return_value = [mock_pkg]
+
+        mock_scalars = MagicMock()
+        mock_scalars.first.side_effect = [mock_currency_limit]
+        mock_session.scalars.return_value = mock_scalars
+
+        identity = _make_identity()
+        req = UpdateMediaBuyRequest(media_buy_id="mb_budget", budget=500.0)
+        result = _update_media_buy_impl(req=req, identity=identity)
+
+        assert isinstance(result, UpdateMediaBuySuccess)
+        standard_mocks["uow_instance"].media_buys.update_fields.assert_called_with(
+            "mb_budget",
+            budget=500.0,
+            currency="EUR",
+        )
+
+    def test_campaign_budget_over_derived_cap_returns_error(self, standard_mocks):
+        """Top-level budget updates must respect derived campaign ceiling."""
+        mock_session = _setup_db_session(standard_mocks)
+        mock_media_buy = _make_mock_media_buy("mb_budget", currency="USD")
+        mock_media_buy.start_time = datetime(2025, 1, 1, tzinfo=UTC)
+        mock_media_buy.end_time = datetime(2025, 1, 11, tzinfo=UTC)
+        mock_currency_limit = _make_mock_currency_limit(max_daily=100)
+        mock_pkg = MagicMock()
+        mock_pkg.package_id = "pkg_budget_1"
+
+        standard_mocks["uow_instance"].media_buys.get_by_id.return_value = mock_media_buy
+        standard_mocks["uow_instance"].media_buys.get_packages.return_value = [mock_pkg]
+
+        mock_scalars = MagicMock()
+        mock_scalars.first.side_effect = [mock_currency_limit]
+        mock_session.scalars.return_value = mock_scalars
+
+        identity = _make_identity()
+        req = UpdateMediaBuyRequest(media_buy_id="mb_budget", budget=2000.0)
+        result = _update_media_buy_impl(req=req, identity=identity)
+
+        assert isinstance(result, UpdateMediaBuyError)
+        assert result.errors[0].code == "budget_limit_exceeded"
+
+    def test_package_budget_below_minimum_spend_returns_error(self, standard_mocks):
+        """Package updates must enforce minimum spend parity with create."""
+        mock_session = _setup_db_session(standard_mocks)
+        mock_media_buy = _make_mock_media_buy("mb_budget", currency="USD")
+        mock_currency_limit = _make_mock_currency_limit(max_daily=100000, min_package_budget=100)
+        mock_package = MagicMock()
+        mock_package.package_config = {}
+
+        standard_mocks["uow_instance"].media_buys.get_by_id.return_value = mock_media_buy
+        standard_mocks["uow_instance"].media_buys.get_package.return_value = mock_package
+
+        mock_scalars = MagicMock()
+        mock_scalars.first.side_effect = [mock_currency_limit]
+        mock_session.scalars.return_value = mock_scalars
+
+        identity = _make_identity()
+        req = UpdateMediaBuyRequest(media_buy_id="mb_budget", packages=[{"package_id": "pkg_1", "budget": 10.0}])
+        result = _update_media_buy_impl(req=req, identity=identity)
+
+        assert isinstance(result, UpdateMediaBuyError)
+        assert result.errors[0].code == "minimum_spend_not_met"
 
 
 # ---------------------------------------------------------------------------

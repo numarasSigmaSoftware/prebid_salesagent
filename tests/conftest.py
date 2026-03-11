@@ -116,6 +116,9 @@ def test_environment(monkeypatch, request):
     # Set testing flags
     monkeypatch.setenv("ADCP_TESTING", "true")
     monkeypatch.setenv("ADCP_AUTH_TEST_MODE", "true")  # Enable test mode for auth
+    monkeypatch.setenv("TEST_SUPER_ADMIN_PASSWORD", "test-super-admin-pass")
+    monkeypatch.setenv("TEST_TENANT_ADMIN_PASSWORD", "test-tenant-admin-pass")
+    monkeypatch.setenv("TEST_TENANT_USER_PASSWORD", "test-tenant-user-pass")
 
     # Check if this is a test that needs the database
     is_integration_test = "integration" in str(request.fspath)
