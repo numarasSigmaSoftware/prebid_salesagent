@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -27,13 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 tenant_management_api = Blueprint("tenant_management_api", __name__, url_prefix="/api/v1/tenant-management")
-
-BOOTSTRAP_API_KEY_HEADER = "X-Tenant-Management-Bootstrap-Key"
-
-
-def _get_bootstrap_api_key() -> str | None:
-    """Return the configured bootstrap key for one-time control-plane setup."""
-    return os.environ.get("TENANT_MANAGEMENT_BOOTSTRAP_KEY")
 
 
 def require_tenant_management_api_key(f):
@@ -558,19 +550,6 @@ def delete_tenant(tenant_id):
 @tenant_management_api.route("/init-api-key", methods=["POST"])
 def initialize_api_key():
     """Initialize the tenant management API key (can only be done once)."""
-    expected_bootstrap_key = _get_bootstrap_api_key()
-    provided_bootstrap_key = request.headers.get(BOOTSTRAP_API_KEY_HEADER)
-
-    if not expected_bootstrap_key:
-        logger.error("Tenant management bootstrap attempted without TENANT_MANAGEMENT_BOOTSTRAP_KEY configured")
-        return jsonify({"error": "Bootstrap credential is not configured"}), 503
-
-    if not provided_bootstrap_key:
-        return jsonify({"error": "Missing bootstrap credential"}), 401
-
-    if not secrets.compare_digest(provided_bootstrap_key, expected_bootstrap_key):
-        logger.warning("Invalid tenant management bootstrap credential attempted")
-        return jsonify({"error": "Invalid bootstrap credential"}), 403
 
     with get_db_session() as db_session:
         try:

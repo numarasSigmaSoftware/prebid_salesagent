@@ -24,15 +24,6 @@ from src.core.resolved_identity import ResolvedIdentity
 logger = logging.getLogger(__name__)
 
 
-def _require_authenticated_task_identity(identity: ResolvedIdentity | None) -> tuple[str, dict[str, Any] | Any]:
-    """Require an authenticated principal and tenant for task operations."""
-    if not identity or not identity.tenant or not identity.principal_id:
-        raise AdCPAuthenticationError(
-            "Authentication required: task operations require a valid principal and tenant context."
-        )
-    return identity.principal_id, identity.tenant
-
-
 async def list_tasks(
     status: str | None = None,
     object_type: str | None = None,
@@ -59,7 +50,11 @@ async def list_tasks(
     if identity is None and context is not None:
         identity = await context.get_state("identity")
 
-    principal_id, tenant = _require_authenticated_task_identity(identity)
+    if not identity or not identity.tenant:
+        raise AdCPAuthenticationError("No tenant context available. Check x-adcp-auth token and host headers.")
+
+    principal_id = identity.principal_id
+    tenant = identity.tenant
 
     with get_db_session() as session:
         stmt = select(WorkflowStep).join(DBContext).filter(DBContext.tenant_id == tenant["tenant_id"])
@@ -141,7 +136,10 @@ async def get_task(
     if identity is None and context is not None:
         identity = await context.get_state("identity")
 
-    _principal_id, tenant = _require_authenticated_task_identity(identity)
+    if not identity or not identity.tenant:
+        raise AdCPAuthenticationError("No tenant context available. Check x-adcp-auth token and host headers.")
+
+    tenant = identity.tenant
 
     with get_db_session() as session:
         stmt = (
@@ -211,7 +209,11 @@ async def complete_task(
     if identity is None and context is not None:
         identity = await context.get_state("identity")
 
-    principal_id, tenant = _require_authenticated_task_identity(identity)
+    if not identity or not identity.tenant:
+        raise AdCPAuthenticationError("No tenant context available. Check x-adcp-auth token and host headers.")
+
+    principal_id = identity.principal_id
+    tenant = identity.tenant
 
     if status not in ["completed", "failed"]:
         raise ValueError(f"Invalid status '{status}'. Must be 'completed' or 'failed'")

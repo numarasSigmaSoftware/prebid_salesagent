@@ -1358,7 +1358,6 @@ class MockAdServer(AdServerAdapter):
                 if media_package:
                     # Update budget in package_config JSON
                     media_package.package_config["budget"] = float(budget)
-                    media_package.budget = float(budget)
                     # Flag the JSON field as modified so SQLAlchemy persists it
                     attributes.flag_modified(media_package, "package_config")
                     session.commit()

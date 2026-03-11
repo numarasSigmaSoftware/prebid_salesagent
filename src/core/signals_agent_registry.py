@@ -36,8 +36,6 @@ from adcp.exceptions import ADCPAuthenticationError, ADCPConnectionError, ADCPEr
 from adcp.types import DeliverTo
 from adcp.types.generated_poc.signals.get_signals_request import GetSignalsRequest1
 
-from src.core.webhook_validator import WebhookURLValidator
-
 logger = logging.getLogger(__name__)
 
 
@@ -131,10 +129,6 @@ class SignalsAgentRegistry:
         agent_configs = []
 
         for agent in agents:
-            is_valid, error_msg = WebhookURLValidator.validate_signals_agent_url(agent.agent_url)
-            if not is_valid:
-                raise ValueError(error_msg)
-
             # Determine auth type and token
             auth_type = "token"  # Default
             auth_token = None
@@ -345,10 +339,6 @@ class SignalsAgentRegistry:
             dict with success status and message/error
         """
         try:
-            is_valid, error_msg = WebhookURLValidator.validate_signals_agent_url(agent_url)
-            if not is_valid:
-                return {"success": False, "error": error_msg}
-
             # Create test agent config
             test_agent = SignalsAgent(
                 agent_url=agent_url,

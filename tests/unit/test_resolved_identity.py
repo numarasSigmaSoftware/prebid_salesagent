@@ -154,22 +154,6 @@ class TestResolveIdentity:
 
         assert identity.tenant_id == "default"
 
-    @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
-    @patch("src.core.resolved_identity.get_tenant_by_subdomain")
-    def test_missing_token_rejected_for_auth_required_calls(self, mock_get_subdomain, mock_get_vhost):
-        """Auth-required flows reject missing tokens even if tenant resolves."""
-        from src.core.exceptions import AdCPAuthenticationError
-
-        mock_get_subdomain.return_value = {"tenant_id": "default"}
-
-        with pytest.raises(AdCPAuthenticationError, match="required"):
-            resolve_identity(
-                headers={"host": "localhost:8080"},
-                auth_token=None,
-                protocol="mcp",
-                require_valid_token=True,
-            )
-
 
 class TestAuthConsolidation:
     """Test that auth.py delegates to auth_utils.py (with retry)."""

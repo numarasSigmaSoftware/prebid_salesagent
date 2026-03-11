@@ -9,7 +9,6 @@ from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
 from src.core.database.models import SignalsAgent, Tenant
-from src.core.webhook_validator import WebhookURLValidator
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +103,6 @@ def add_signals_agent(tenant_id):
 
             if not agent_url:
                 flash("Agent URL is required", "error")
-                return redirect(url_for("signals_agents.add_signals_agent", tenant_id=tenant_id))
-
-            is_valid, error_msg = WebhookURLValidator.validate_signals_agent_url(agent_url)
-            if not is_valid:
-                flash(error_msg, "error")
                 return redirect(url_for("signals_agents.add_signals_agent", tenant_id=tenant_id))
 
             if not name:
@@ -208,11 +202,6 @@ def edit_signals_agent(tenant_id, agent_id):
                 flash("Agent name is required", "error")
                 return redirect(url_for("signals_agents.edit_signals_agent", tenant_id=tenant_id, agent_id=agent_id))
 
-            is_valid, error_msg = WebhookURLValidator.validate_signals_agent_url(agent.agent_url)
-            if not is_valid:
-                flash(error_msg, "error")
-                return redirect(url_for("signals_agents.edit_signals_agent", tenant_id=tenant_id, agent_id=agent_id))
-
             session.commit()
 
             flash(f"Signals agent '{agent.name}' updated successfully", "success")
@@ -272,10 +261,6 @@ def test_signals_agent(tenant_id, agent_id):
                     "type": agent.auth_type,
                     "credentials": agent.auth_credentials,
                 }
-
-            is_valid, error_msg = WebhookURLValidator.validate_signals_agent_url(agent.agent_url)
-            if not is_valid:
-                return jsonify({"success": False, "error": error_msg}), 400
 
             # Test connection
             # Use asyncio.run() instead of new_event_loop() for better compatibility with adcp library

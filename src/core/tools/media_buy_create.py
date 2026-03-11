@@ -1715,16 +1715,18 @@ async def _create_media_buy_impl(
 
             # Validate minimum product spend (legacy + new pricing_options)
             if currency_limit.min_package_budget:
-                from src.core.budget_policy import get_minimum_package_budget
-
                 # Build map of product_id -> minimum spend
                 product_min_spends = {}
                 for product in products:
-                    min_spend = get_minimum_package_budget(
-                        product=product,
-                        currency_limit=currency_limit,
-                        currency_code=request_currency,
-                    )
+                    # Use product pricing_options min_spend if set, otherwise use currency limit minimum
+                    min_spend = currency_limit.min_package_budget
+                    if product.pricing_options and len(product.pricing_options) > 0:
+                        # Find pricing option matching the request currency (not just first option)
+                        matching_option = next(
+                            (po for po in product.pricing_options if po.currency == request_currency), None
+                        )
+                        if matching_option and matching_option.min_spend_per_package is not None:
+                            min_spend = matching_option.min_spend_per_package
                     if min_spend is not None:
                         product_min_spends[product.product_id] = Decimal(str(min_spend))
 
@@ -1762,11 +1764,19 @@ async def _create_media_buy_impl(
                                 # Find minimum spend for this package's currency
                                 package_min_spend: Decimal | None = None
 
-                                package_min_spend = get_minimum_package_budget(
-                                    product=product,
-                                    currency_limit=currency_limit,
-                                    currency_code=package_currency,
-                                )
+                                # First check if product has pricing option for this currency
+                                if product.pricing_options:
+                                    matching_option = next(
+                                        (po for po in product.pricing_options if po.currency == package_currency), None
+                                    )
+                                    if matching_option and matching_option.min_spend_per_package is not None:
+                                        package_min_spend = Decimal(str(matching_option.min_spend_per_package))
+
+                                # If no product override, check currency limit
+                                if package_min_spend is None:
+                                    # Use the already-fetched currency_limit
+                                    if currency_limit.min_package_budget:
+                                        package_min_spend = Decimal(str(currency_limit.min_package_budget))
 
                                 # Validate if minimum spend is set
                                 if package_min_spend and package_budget < package_min_spend:

@@ -9,7 +9,6 @@ from authlib.integrations.flask_client import OAuth
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import select
 
-from src.admin.auth_security import pop_safe_login_next_url
 from src.admin.utils import require_tenant_access
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, User
@@ -370,7 +369,7 @@ def callback():
 
         flash(f"Welcome {user_display_name}!", "success")
         # Redirect to original requested URL if available, otherwise dashboard
-        next_url = pop_safe_login_next_url(session)
+        next_url = session.pop("login_next_url", None)
         if next_url:
             return redirect(next_url)
         return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))

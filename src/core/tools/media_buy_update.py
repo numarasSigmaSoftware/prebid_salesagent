@@ -295,12 +295,6 @@ def _update_media_buy_impl(
             from decimal import Decimal
 
             from src.core.database.models import CurrencyLimit
-            from src.core.database.models import Product as ProductModel
-            from src.core.budget_policy import (
-                extract_budget_amount_and_currency,
-                validate_package_minimum_budget,
-                validate_total_budget_cap,
-            )
 
             # Get media buy from database to check currency and current dates
             media_buy = uow.media_buys.get_by_id(req.media_buy_id)
@@ -309,17 +303,14 @@ def _update_media_buy_impl(
                 # Determine currency (use updated or existing)
                 # Extract currency from Budget object if present (and if it's an object, not plain number)
                 request_currency: str
-                existing_currency = str(media_buy.currency) if media_buy.currency else "USD"
-                request_currency = existing_currency
-                requested_total_budget: Decimal | None = None
-                explicit_budget_currency = False
                 if req.budget:
-                    budget_amount, budget_currency, explicit_budget_currency = extract_budget_amount_and_currency(
-                        req.budget,
-                        fallback_currency=existing_currency,
-                    )
-                    request_currency = budget_currency
-                    requested_total_budget = Decimal(str(budget_amount))
+                    # Check if it's a Budget object with currency attribute, otherwise use existing
+                    if req.budget.currency:
+                        request_currency = str(req.budget.currency)
+                    else:
+                        request_currency = str(media_buy.currency) if media_buy.currency else "USD"
+                else:
+                    request_currency = str(media_buy.currency) if media_buy.currency else "USD"
 
                 # Get currency limit
                 currency_stmt = select(CurrencyLimit).where(
@@ -375,56 +366,6 @@ def _update_media_buy_impl(
                 if flight_days <= 0:
                     flight_days = 1
 
-                package_count = len(uow.media_buys.get_packages(req.media_buy_id)) or 1
-                if requested_total_budget is not None:
-                    if requested_total_budget <= 0:
-                        error_msg = f"Invalid budget: {requested_total_budget}. Budget must be positive."
-                        response_data = UpdateMediaBuyError(
-                            errors=[Error(code="invalid_budget", message=error_msg)],
-                            context=req.context,
-                        )
-                        ctx_manager.update_workflow_step(
-                            step.step_id,
-                            status="failed",
-                            response_data=response_data.model_dump(mode="json"),
-                            error_message=error_msg,
-                        )
-                        return response_data
-
-                    if request_currency != existing_currency and not explicit_budget_currency:
-                        error_msg = "Currency changes require an explicit currency in the update request."
-                        response_data = UpdateMediaBuyError(
-                            errors=[Error(code="invalid_currency_update", message=error_msg)],
-                            context=req.context,
-                        )
-                        ctx_manager.update_workflow_step(
-                            step.step_id,
-                            status="failed",
-                            response_data=response_data.model_dump(mode="json"),
-                            error_message=error_msg,
-                        )
-                        return response_data
-
-                    cap_error = validate_total_budget_cap(
-                        total_budget=requested_total_budget,
-                        currency_limit=currency_limit,
-                        currency_code=request_currency,
-                        flight_days=flight_days,
-                        package_count=package_count,
-                    )
-                    if cap_error:
-                        response_data = UpdateMediaBuyError(
-                            errors=[Error(code="budget_limit_exceeded", message=cap_error)],
-                            context=req.context,
-                        )
-                        ctx_manager.update_workflow_step(
-                            step.step_id,
-                            status="failed",
-                            response_data=response_data.model_dump(mode="json"),
-                            error_message=cap_error,
-                        )
-                        return response_data
-
                 # Validate max daily spend for packages
                 if currency_limit.max_daily_package_spend and req.packages:
                     for pkg_update in req.packages:
@@ -457,40 +398,6 @@ def _update_media_buy_impl(
                                     error_message=error_msg,
                                 )
                                 return response_data
-
-                            if pkg_update.package_id:
-                                package_record = uow.media_buys.get_package(req.media_buy_id, pkg_update.package_id)
-                                product = None
-                                product_id = (
-                                    package_record.package_config.get("product_id")
-                                    if package_record and package_record.package_config
-                                    else None
-                                )
-                                if product_id:
-                                    product_stmt = select(ProductModel).where(
-                                        ProductModel.tenant_id == tenant["tenant_id"],
-                                        ProductModel.product_id == product_id,
-                                    )
-                                    product = session.scalars(product_stmt).first()
-
-                                min_spend_error = validate_package_minimum_budget(
-                                    package_budget=package_budget,
-                                    product=product,
-                                    currency_limit=currency_limit,
-                                    currency_code=request_currency,
-                                )
-                                if min_spend_error:
-                                    response_data = UpdateMediaBuyError(
-                                        errors=[Error(code="minimum_spend_not_met", message=min_spend_error)],
-                                        context=req.context,
-                                    )
-                                    ctx_manager.update_workflow_step(
-                                        step.step_id,
-                                        status="failed",
-                                        response_data=response_data.model_dump(mode="json"),
-                                        error_message=min_spend_error,
-                                    )
-                                    return response_data
 
         # Handle campaign-level updates
         if req.paused is not None:
@@ -580,10 +487,6 @@ def _update_media_buy_impl(
 
                 # Handle budget updates
                 if pkg_update.budget is not None:
-                    from decimal import Decimal
-
-                    from src.core.budget_policy import extract_budget_amount_and_currency
-
                     # Validate package_id is provided (required for budget updates)
                     if not pkg_update.package_id:
                         error_msg = "package_id is required when updating package budget"
@@ -600,12 +503,15 @@ def _update_media_buy_impl(
                         return response_data
 
                     # Extract budget amount - handle both float and Budget object
-                    media_buy_record = uow.media_buys.get_by_id(req.media_buy_id)
-                    fallback_currency = str(media_buy_record.currency) if media_buy_record and media_buy_record.currency else "USD"
-                    budget_amount, currency, _explicit_currency = extract_budget_amount_and_currency(
-                        pkg_update.budget,
-                        fallback_currency=fallback_currency,
-                    )
+                    budget_amount: float
+                    currency: str
+                    if isinstance(pkg_update.budget, int | float):
+                        budget_amount = float(pkg_update.budget)
+                        currency = "USD"  # Default currency for float budgets
+                    else:
+                        # Budget object with .total and .currency attributes
+                        budget_amount = float(pkg_update.budget.total)
+                        currency = str(pkg_update.budget.currency) if pkg_update.budget.currency else "USD"
 
                     result = adapter.update_media_buy(
                         media_buy_id=req.media_buy_id,
@@ -628,18 +534,6 @@ def _update_media_buy_impl(
                             error_message=error_message,
                         )
                         return response_data
-
-                    package_record = uow.media_buys.get_package(req.media_buy_id, pkg_update.package_id)
-                    if package_record:
-                        updated_package_config = dict(package_record.package_config)
-                        updated_package_config["budget"] = budget_amount
-                        updated_package_config["currency"] = currency
-                        uow.media_buys.update_package_fields(
-                            req.media_buy_id,
-                            pkg_update.package_id,
-                            budget=Decimal(str(budget_amount)),
-                            package_config=updated_package_config,
-                        )
 
                     # Track budget update in affected_packages
                     # At this point, pkg_update.package_id is guaranteed to be str (checked above)
@@ -1167,15 +1061,16 @@ def _update_media_buy_impl(
 
         # Handle budget updates (handle both float and Budget object)
         if req.budget is not None:
-            from src.core.budget_policy import extract_budget_amount_and_currency
-
             # Extract budget amount - handle both float and Budget object
-            current_media_buy = uow.media_buys.get_by_id(req.media_buy_id)
-            existing_currency = str(current_media_buy.currency) if current_media_buy and current_media_buy.currency else "USD"
-            total_budget, budget_currency, _explicit_currency = extract_budget_amount_and_currency(
-                req.budget,
-                fallback_currency=existing_currency,
-            )
+            total_budget: float
+            budget_currency: str  # Renamed to avoid redefinition
+            if isinstance(req.budget, int | float):
+                total_budget = float(req.budget)
+                budget_currency = "USD"  # Default currency for float budgets
+            else:
+                # Budget object with .total and .currency attributes
+                total_budget = float(req.budget.total)
+                budget_currency = str(req.budget.currency) if req.budget.currency else "USD"
 
             if total_budget <= 0:
                 error_msg = f"Invalid budget: {total_budget}. Budget must be positive."

@@ -8,7 +8,6 @@ from functools import wraps
 from flask import abort, g, jsonify, redirect, session, url_for
 from sqlalchemy import select
 
-from src.admin.auth_security import build_safe_next_path, is_test_auth_enabled
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantManagementConfig, User
 
@@ -245,7 +244,7 @@ def require_auth(admin_only=False):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             # Check for test mode
-            test_mode = is_test_auth_enabled()
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
             if test_mode and "test_user" in session:
                 g.user = session["test_user"]
                 return f(*args, **kwargs)
@@ -255,7 +254,7 @@ def require_auth(admin_only=False):
                 # Store the original URL to redirect back after login
                 from flask import request
 
-                return redirect(url_for("auth.login", next=build_safe_next_path(request)))
+                return redirect(url_for("auth.login", next=request.url))
 
             # Store user in g for access in view functions
             g.user = session["user"]
@@ -294,7 +293,7 @@ def require_tenant_access(api_mode=False):
             )
 
             # Check for test mode (global env var OR per-tenant auth_setup_mode)
-            test_mode = is_test_auth_enabled()
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
 
             # Also check per-tenant auth_setup_mode if test_user is in session
             if not test_mode and "test_user" in session:
@@ -302,7 +301,7 @@ def require_tenant_access(api_mode=False):
                     with get_db_session() as db_session:
                         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
                         if tenant and getattr(tenant, "auth_setup_mode", False):
-                            test_mode = is_test_auth_enabled(True)
+                            test_mode = True
                             logger.debug(f"Auth setup mode enabled for tenant {tenant_id}")
                 except Exception as e:
                     logger.warning(f"Error checking tenant auth_setup_mode: {e}")
@@ -320,7 +319,7 @@ def require_tenant_access(api_mode=False):
                 if api_mode:
                     return jsonify({"error": "Authentication required"}), 401
                 # Redirect to tenant-specific login (preserves tenant context)
-                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=build_safe_next_path(request)))
+                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=request.url))
 
             user_info = session["user"]
 

@@ -18,13 +18,6 @@ from authlib.integrations.flask_client import OAuth
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from sqlalchemy import select
 
-from src.admin.auth_security import (
-    get_safe_login_next_url,
-    get_test_users,
-    is_test_auth_enabled,
-    pop_safe_login_next_url,
-    store_login_next_url,
-)
 from src.admin.utils import is_super_admin
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant
@@ -228,7 +221,9 @@ def login():
     logger.debug("login route hit, has_user=%s, args=%s", "user" in session, dict(request.args))
 
     # Capture 'next' parameter for redirect after login
-    store_login_next_url(session, request.args.get("next"))
+    next_url = request.args.get("next")
+    if next_url:
+        session["login_next_url"] = next_url
 
     # Don't auto-redirect if user just logged out
     just_logged_out = request.args.get("logged_out") == "1"
@@ -240,7 +235,7 @@ def login():
 
     # Determine test_mode from env var only
     # tenant.auth_setup_mode is only used when NO global OAuth is configured
-    test_mode = is_test_auth_enabled()
+    test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
 
     from src.core.config_loader import is_single_tenant_mode
 
@@ -262,8 +257,8 @@ def login():
                 tenant_context = tenant.tenant_id
                 tenant_name = tenant.name
                 # Only use auth_setup_mode if no global OAuth configured
-                if not oauth_configured and hasattr(tenant, "auth_setup_mode"):
-                    test_mode = is_test_auth_enabled(tenant.auth_setup_mode)
+                if not oauth_configured and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
+                    test_mode = True
                 logger.info(
                     f"Detected tenant context from Approximated headers: {approximated_host} -> {tenant_context}"
                 )
@@ -281,8 +276,8 @@ def login():
                     tenant_context = tenant.tenant_id
                     tenant_name = tenant.name
                     # Only use auth_setup_mode if no global OAuth configured
-                    if not oauth_configured and hasattr(tenant, "auth_setup_mode"):
-                        test_mode = is_test_auth_enabled(tenant.auth_setup_mode)
+                    if not oauth_configured and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
+                        test_mode = True
                     logger.info(f"Detected tenant context from Host header: {tenant_subdomain} -> {tenant_context}")
 
     # Check for tenant-specific OIDC configuration (multi-tenant or single-tenant)
@@ -315,8 +310,8 @@ def login():
                 oidc_configured = True
                 oidc_enabled = config.oidc_enabled
             # Only use auth_setup_mode in single-tenant mode if no global OAuth
-            if not oauth_configured and tenant and hasattr(tenant, "auth_setup_mode"):
-                test_mode = is_test_auth_enabled(tenant.auth_setup_mode)
+            if not oauth_configured and tenant and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
+                test_mode = True
 
         if oidc_enabled and not test_mode and not just_logged_out:
             return redirect(url_for("oidc.login", tenant_id="default"))
@@ -347,7 +342,9 @@ def tenant_login(tenant_id):
     just_logged_out = request.args.get("logged_out") == "1"
 
     # Capture 'next' parameter for redirect after login
-    store_login_next_url(session, request.args.get("next"))
+    next_url = request.args.get("next")
+    if next_url:
+        session["login_next_url"] = next_url
 
     # Check if global OAuth is configured (fallback for all tenants)
     client_id, client_secret, discovery_url, _ = get_oauth_config()
@@ -364,10 +361,10 @@ def tenant_login(tenant_id):
         # - ADCP_AUTH_TEST_MODE env var enables test mode globally
         # - tenant.auth_setup_mode enables test mode for this tenant ONLY if no global OAuth
         #   (for multi-tenant with global OAuth, tenants use global OAuth, not setup mode)
-        test_mode = is_test_auth_enabled()
+        test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
         if not test_mode and not oauth_configured:
             # No global OAuth - use tenant's auth_setup_mode (for single-tenant SSO setup)
-            test_mode = is_test_auth_enabled(tenant.auth_setup_mode if hasattr(tenant, "auth_setup_mode") else True)
+            test_mode = tenant.auth_setup_mode if hasattr(tenant, "auth_setup_mode") else True
 
         # Check if tenant-specific OIDC is configured and enabled
         from src.services.auth_config_service import get_oidc_config_for_auth
@@ -596,7 +593,7 @@ def google_callback():
                 f"Session keys: {list(session.keys())} =========="
             )
             # Check for saved redirect URL
-            next_url = pop_safe_login_next_url(session)
+            next_url = session.pop("login_next_url", None)
             if next_url:
                 return redirect(next_url)
             return redirect(url_for("core.index"))
@@ -697,7 +694,7 @@ def google_callback():
             session.pop("available_tenants", None)
             flash(f"Welcome {user.get('name', email)}!", "success")
             # Check for saved redirect URL
-            next_url = pop_safe_login_next_url(session)
+            next_url = session.pop("login_next_url", None)
             if next_url:
                 return redirect(next_url)
             return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
@@ -759,7 +756,7 @@ def select_tenant():
                 session.pop("available_tenants", None)  # Clean up
                 flash(f"Welcome to {tenant['name']}!", "success")
                 # Check for saved redirect URL
-                next_url = pop_safe_login_next_url(session)
+                next_url = session.pop("login_next_url", None)
                 if next_url:
                     return redirect(next_url)
                 return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
@@ -824,7 +821,7 @@ def test_auth():
         tenant_id = "default"
 
     # Check if test auth is allowed
-    env_test_mode = is_test_auth_enabled()
+    env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
     tenant_setup_mode = False
 
     if tenant_id:
@@ -834,12 +831,57 @@ def test_auth():
                 tenant_setup_mode = tenant.auth_setup_mode
 
     # Allow if env var is set OR tenant is in setup mode
-    if not is_test_auth_enabled(tenant_setup_mode):
+    if not env_test_mode and not tenant_setup_mode:
         abort(404)
 
     # Check for saved redirect URL from login page
-    next_url = get_safe_login_next_url(session)
-    test_users = get_test_users()
+    next_url = session.get("login_next_url")
+
+    # Define test users
+    test_users = {
+        os.environ.get("TEST_SUPER_ADMIN_EMAIL", "test_super_admin@example.com"): {
+            "password": os.environ.get("TEST_SUPER_ADMIN_PASSWORD", "test123"),
+            "name": "Test Super Admin",
+            "role": "super_admin",
+        },
+        os.environ.get("TEST_TENANT_ADMIN_EMAIL", "test_tenant_admin@example.com"): {
+            "password": os.environ.get("TEST_TENANT_ADMIN_PASSWORD", "test123"),
+            "name": "Test Tenant Admin",
+            "role": "tenant_admin",
+        },
+        os.environ.get("TEST_TENANT_USER_EMAIL", "test_tenant_user@example.com"): {
+            "password": os.environ.get("TEST_TENANT_USER_PASSWORD", "test123"),
+            "name": "Test Tenant User",
+            "role": "tenant_user",
+        },
+    }
+
+    # Check if email is a super admin (bypass password check for super admins in test mode)
+    if is_super_admin(email) and password == "test123":
+        session["test_user"] = email
+        session["test_user_name"] = email.split("@")[0].title()
+        session["test_user_role"] = "super_admin"
+        session["user"] = email  # Store as string for is_super_admin check
+        session["user_name"] = email.split("@")[0].title()
+        session["is_super_admin"] = True
+        session["role"] = "super_admin"
+        session["authenticated"] = True
+        session["email"] = email
+
+        if tenant_id:
+            session["test_tenant_id"] = tenant_id
+            session["tenant_id"] = tenant_id  # Set tenant_id for authorization checks
+            # Use saved redirect URL if available
+            if next_url:
+                session.pop("login_next_url", None)
+                return redirect(next_url)
+            return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
+        else:
+            # Use saved redirect URL if available
+            if next_url:
+                session.pop("login_next_url", None)
+                return redirect(next_url)
+            return redirect(url_for("core.index"))
 
     # Check test users
     if email in test_users and test_users[email]["password"] == password:
@@ -861,20 +903,15 @@ def test_auth():
             session["tenant_id"] = tenant_id  # Set tenant_id for authorization checks
             # Use saved redirect URL if available
             if next_url:
-                pop_safe_login_next_url(session)
+                session.pop("login_next_url", None)
                 return redirect(next_url)
             return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
         else:
             # Use saved redirect URL if available
             if next_url:
-                pop_safe_login_next_url(session)
+                session.pop("login_next_url", None)
                 return redirect(next_url)
             return redirect(url_for("core.index"))
-
-    if env_test_mode and not test_users:
-        current_app.logger.error(
-            "Test auth is enabled but no non-default test credentials are configured."
-        )
 
     flash("Invalid test credentials", "error")
     return redirect(request.referrer or url_for("auth.login"))
@@ -887,7 +924,7 @@ def test_login_form():
     Works when ADCP_AUTH_TEST_MODE=true as a global override.
     For per-tenant setup mode, use /tenant/<tenant_id>/login instead.
     """
-    if not is_test_auth_enabled():
+    if os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() != "true":
         abort(404)
 
     from src.core.config_loader import is_single_tenant_mode

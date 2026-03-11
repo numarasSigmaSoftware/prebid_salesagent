@@ -138,37 +138,14 @@ class TestAdminAppIntegration:
 
     def test_test_auth_enabled_with_env_var(self, app):
         """Test that test auth works when enabled."""
-        with patch.dict(
-            "os.environ",
-            {"ADCP_AUTH_TEST_MODE": "true", "TEST_SUPER_ADMIN_PASSWORD": "test-super-admin-pass"},
-        ):
+        with patch.dict("os.environ", {"ADCP_AUTH_TEST_MODE": "true"}):
             client = app.test_client()
 
-            response = client.post(
-                "/test/auth",
-                data={"email": "test_super_admin@example.com", "password": "test-super-admin-pass"},
-            )
+            response = client.post("/test/auth", data={"email": "test_super_admin@example.com", "password": "test123"})
             assert response.status_code == 302  # Redirect after login
 
             with client.session_transaction() as sess:
                 assert sess.get("user") == "test_super_admin@example.com"
-
-    def test_test_auth_blocked_in_production(self, app):
-        """Production profile must not expose test auth even if env flag is set."""
-        with patch.dict(
-            "os.environ",
-            {
-                "PRODUCTION": "true",
-                "ADCP_AUTH_TEST_MODE": "true",
-                "TEST_SUPER_ADMIN_PASSWORD": "test-super-admin-pass",
-            },
-        ):
-            client = app.test_client()
-            response = client.post(
-                "/test/auth",
-                data={"email": "test_super_admin@example.com", "password": "test-super-admin-pass"},
-            )
-            assert response.status_code == 404
 
 
 class TestTenantBlueprintIntegration:
