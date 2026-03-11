@@ -378,7 +378,7 @@ class SetupChecklistService:
                 name="⚠️ Ad Server Configuration",
                 description="BLOCKER: Configure and test ad server connection before proceeding with other setup",
                 is_complete=ad_server_fully_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#adserver",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#adserver",
                 details=config_details,
             )
         )
@@ -403,7 +403,7 @@ class SetupChecklistService:
                     name="⚠️ Single Sign-On (SSO)",
                     description="CRITICAL: Configure SSO and disable setup mode for production security",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=f"/admin/tenant/{self.tenant_id}/users",
                     details=sso_details,
                 )
             )
@@ -419,7 +419,7 @@ class SetupChecklistService:
                     name="Currency Configuration",
                     description="At least one currency must be configured for media buys",
                     is_complete=currency_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                    action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                     details=(
                         f"{currency_count} currencies configured" if currency_count > 0 else "No currencies configured"
                     ),
@@ -455,7 +455,7 @@ class SetupChecklistService:
                 name="Authorized Properties",
                 description="Configure properties with adagents.json for verification",
                 is_complete=is_complete,
-                action_url=f"/tenant/{self.tenant_id}/inventory#publishers-pane",
+                action_url=f"/admin/tenant/{self.tenant_id}/inventory#publishers-pane",
                 details=details,
             )
         )
@@ -479,7 +479,7 @@ class SetupChecklistService:
                         name="Inventory Sync",
                         description="Sync ad units and placements from ad server",
                         is_complete=inventory_synced,
-                        action_url=f"/tenant/{self.tenant_id}/settings#inventory",
+                        action_url=f"/admin/tenant/{self.tenant_id}/settings#inventory",
                         details=inventory_details,
                     )
                 )
@@ -518,7 +518,7 @@ class SetupChecklistService:
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/products",
+                    action_url=f"/admin/tenant/{self.tenant_id}/products",
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )
@@ -532,7 +532,7 @@ class SetupChecklistService:
                 name="Advertisers (Principals)",
                 description="Create principals for advertisers who will buy inventory",
                 is_complete=principal_count > 0,
-                action_url=f"/tenant/{self.tenant_id}/settings#advertisers",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#advertisers",
                 details=(
                     f"{principal_count} advertisers configured" if principal_count > 0 else "No advertisers configured"
                 ),
@@ -555,7 +555,7 @@ class SetupChecklistService:
                 name="Account Name",
                 description="Set a display name for your sales agent",
                 is_complete=has_custom_name,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#account",
                 details=f"Using '{tenant.name}'" if has_custom_name else "Using default name",
             )
         )
@@ -570,7 +570,7 @@ class SetupChecklistService:
                 name="Creative Approval Guidelines",
                 description="Configure auto-approval rules and manual review settings",
                 is_complete=has_approval_config,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=(
                     "Auto-approval formats configured"
                     if has_approval_config
@@ -588,7 +588,7 @@ class SetupChecklistService:
                 name="Naming Conventions",
                 description="Customize order and line item naming templates",
                 is_complete=has_custom_naming,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details="Custom templates configured" if has_custom_naming else "Using default naming templates",
             )
         )
@@ -616,7 +616,7 @@ class SetupChecklistService:
                 name="Budget Controls",
                 description="Set maximum daily budget limits for safety",
                 is_complete=has_budget_limits,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=details,
             )
         )
@@ -645,7 +645,7 @@ class SetupChecklistService:
                 name="AXE Segment Keys",
                 description="Configure custom targeting keys for AXE audience segments (recommended for AdCP compliance)",
                 is_complete=axe_keys_configured,
-                action_url=f"/tenant/{self.tenant_id}/targeting",
+                action_url=f"/admin/tenant/{self.tenant_id}/targeting",
                 details=(
                     ", ".join(axe_details)
                     if axe_keys_configured
@@ -663,7 +663,7 @@ class SetupChecklistService:
                 name="Slack Integration",
                 description="Configure Slack webhooks for order notifications",
                 is_complete=slack_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details="Slack notifications enabled" if slack_configured else "No Slack integration",
             )
         )
@@ -677,7 +677,7 @@ class SetupChecklistService:
                 name="Custom Domain (CNAME)",
                 description="Configure custom domain for your sales agent",
                 is_complete=has_custom_domain,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#account",
                 details=f"Using {virtual_host}" if has_custom_domain else "Using default subdomain",
             )
         )
@@ -708,7 +708,7 @@ class SetupChecklistService:
                     name="Single Sign-On (SSO)",
                     description="Configure tenant-specific SSO authentication",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=f"/admin/tenant/{self.tenant_id}/users",
                     details=sso_details,
                 )
             )
@@ -721,7 +721,7 @@ class SetupChecklistService:
                 name="Signals Discovery Agent",
                 description="Enable AXE signals for advanced targeting",
                 is_complete=signals_enabled,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
             )
         )
@@ -734,7 +734,7 @@ class SetupChecklistService:
                 name="Gemini AI Features",
                 description="Enable AI-assisted product recommendations and creative policy checks",
                 is_complete=gemini_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details=(
                     "AI features enabled" if gemini_configured else "Optional: Configure Gemini API key for AI features"
                 ),
@@ -751,7 +751,7 @@ class SetupChecklistService:
                 name="Multiple Currencies",
                 description="Support international advertisers with EUR, GBP, etc.",
                 is_complete=multiple_currencies,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=(
                     f"{currency_count} currencies supported" if multiple_currencies else "Only 1 currency configured"
                 ),
@@ -806,7 +806,7 @@ class SetupChecklistService:
                 name="⚠️ Ad Server Configuration",
                 description="BLOCKER: Configure and test ad server connection before proceeding with other setup",
                 is_complete=ad_server_fully_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#adserver",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#adserver",
                 details=config_details,
             )
         )
@@ -829,7 +829,7 @@ class SetupChecklistService:
                     name="⚠️ Single Sign-On (SSO)",
                     description="CRITICAL: Configure SSO and disable setup mode for production security",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=f"/admin/tenant/{self.tenant_id}/users",
                     details=sso_details,
                 )
             )
@@ -842,7 +842,7 @@ class SetupChecklistService:
                     name="Currency Configuration",
                     description="At least one currency must be configured for media buys",
                     is_complete=currency_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                    action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                     details=(
                         f"{currency_count} currencies configured" if currency_count > 0 else "No currencies configured"
                     ),
@@ -866,7 +866,7 @@ class SetupChecklistService:
                 name="Authorized Properties",
                 description="Configure properties with adagents.json for verification",
                 is_complete=properties_is_complete,
-                action_url=f"/tenant/{self.tenant_id}/inventory#publishers-pane",
+                action_url=f"/admin/tenant/{self.tenant_id}/inventory#publishers-pane",
                 details=properties_details,
             )
         )
@@ -881,7 +881,7 @@ class SetupChecklistService:
                         name="Inventory Sync",
                         description="Sync ad units and placements from ad server",
                         is_complete=inventory_synced,
-                        action_url=f"/tenant/{self.tenant_id}/settings#inventory",
+                        action_url=f"/admin/tenant/{self.tenant_id}/settings#inventory",
                         details=(
                             f"{gam_inventory_count:,} inventory items synced"
                             if inventory_synced
@@ -920,7 +920,7 @@ class SetupChecklistService:
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/products",
+                    action_url=f"/admin/tenant/{self.tenant_id}/products",
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )
@@ -932,7 +932,7 @@ class SetupChecklistService:
                 name="Advertisers (Principals)",
                 description="Create principals for advertisers who will buy inventory",
                 is_complete=principal_count > 0,
-                action_url=f"/tenant/{self.tenant_id}/settings#advertisers",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#advertisers",
                 details=(
                     f"{principal_count} advertisers configured" if principal_count > 0 else "No advertisers configured"
                 ),
@@ -955,7 +955,7 @@ class SetupChecklistService:
                 name="Account Name",
                 description="Set a display name for your sales agent",
                 is_complete=has_custom_name,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#account",
                 details=f"Using '{tenant.name}'" if has_custom_name else "Using default name",
             )
         )
@@ -970,7 +970,7 @@ class SetupChecklistService:
                 name="Creative Approval Guidelines",
                 description="Configure auto-approval rules and manual review settings",
                 is_complete=has_approval_config,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=(
                     "Auto-approval formats configured"
                     if has_approval_config
@@ -988,7 +988,7 @@ class SetupChecklistService:
                 name="Naming Conventions",
                 description="Customize order and line item naming templates",
                 is_complete=has_custom_naming,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details="Custom templates configured" if has_custom_naming else "Using default naming templates",
             )
         )
@@ -1001,7 +1001,7 @@ class SetupChecklistService:
                 name="Budget Controls",
                 description="Set maximum daily budget limits for safety",
                 is_complete=has_budget_limits,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=(
                     f"{budget_limit_count} currency limit(s) with daily budget controls"
                     if has_budget_limits
@@ -1034,7 +1034,7 @@ class SetupChecklistService:
                 name="AXE Segment Keys",
                 description="Configure custom targeting keys for AXE audience segments (recommended for AdCP compliance)",
                 is_complete=axe_keys_configured,
-                action_url=f"/tenant/{self.tenant_id}/targeting",
+                action_url=f"/admin/tenant/{self.tenant_id}/targeting",
                 details=(
                     ", ".join(axe_details)
                     if axe_keys_configured
@@ -1051,7 +1051,7 @@ class SetupChecklistService:
                 name="Slack Integration",
                 description="Configure Slack webhooks for order notifications",
                 is_complete=slack_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details="Slack notifications enabled" if slack_configured else "No Slack integration",
             )
         )
@@ -1064,7 +1064,7 @@ class SetupChecklistService:
                 name="Custom Domain (CNAME)",
                 description="Configure custom domain for your sales agent",
                 is_complete=has_custom_domain,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#account",
                 details=f"Using {tenant.virtual_host}" if has_custom_domain else "Using default subdomain",
             )
         )
@@ -1094,7 +1094,7 @@ class SetupChecklistService:
                     name="Single Sign-On (SSO)",
                     description="Configure tenant-specific SSO authentication",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=f"/admin/tenant/{self.tenant_id}/users",
                     details=sso_details,
                 )
             )
@@ -1107,7 +1107,7 @@ class SetupChecklistService:
                 name="Signals Discovery Agent",
                 description="Enable AXE signals for advanced targeting",
                 is_complete=signals_enabled,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
             )
         )
@@ -1120,7 +1120,7 @@ class SetupChecklistService:
                 name="Gemini AI Features",
                 description="Enable AI-assisted product recommendations and creative policy checks",
                 is_complete=gemini_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#integrations",
                 details=(
                     "AI features enabled" if gemini_configured else "Optional: Configure Gemini API key for AI features"
                 ),
@@ -1135,7 +1135,7 @@ class SetupChecklistService:
                 name="Multiple Currencies",
                 description="Support international advertisers with EUR, GBP, etc.",
                 is_complete=multiple_currencies,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=f"/admin/tenant/{self.tenant_id}/settings#business-rules",
                 details=(
                     f"{currency_count} currencies supported" if multiple_currencies else "Only 1 currency configured"
                 ),

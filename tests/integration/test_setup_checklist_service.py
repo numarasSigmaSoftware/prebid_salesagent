@@ -344,7 +344,7 @@ class TestSetupChecklistService:
             for task in status["critical"]:
                 if not task["is_complete"] and task["key"] != "gemini_api_key":
                     assert task["action_url"] is not None
-                    assert f"/tenant/{test_tenant_id}" in task["action_url"]
+                    assert f"/admin/tenant/{test_tenant_id}" in task["action_url"]
 
     def test_get_next_steps(self, integration_db, setup_minimal_tenant, test_tenant_id):
         """Test get_next_steps returns prioritized actions."""

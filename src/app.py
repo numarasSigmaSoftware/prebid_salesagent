@@ -266,15 +266,8 @@ from src.admin.app import create_app  # noqa: E402
 flask_admin_app = create_app()
 admin_wsgi = WSGIMiddleware(flask_admin_app)
 
-# Mount Flask admin at all paths it handles.
-# Order matters: specific routes before catch-all.
-_ADMIN_PATHS = ["/admin", "/static", "/auth", "/api", "/callback", "/logout", "/login", "/signup", "/test"]
-
-for _path in _ADMIN_PATHS:
-    app.mount(_path, admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
-
-# Tenant-specific admin: /tenant/{tenant_id}/admin/...
-app.mount("/tenant", admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
+# Mount Flask admin only at the canonical external admin prefix.
+app.mount("/admin", admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +290,7 @@ async def _handle_landing_page(request: Request):
     )
 
     if result.type == "admin":
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse(url="/admin/login", status_code=302)
 
     if result.type in ("custom_domain", "subdomain") and result.tenant:
         try:
