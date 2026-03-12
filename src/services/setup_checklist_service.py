@@ -518,7 +518,7 @@ class SetupChecklistService:
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/admin/tenant/{self.tenant_id}/products",
+                    action_url=f"/admin/tenant/{self.tenant_id}/products/",
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )
@@ -920,7 +920,7 @@ class SetupChecklistService:
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/admin/tenant/{self.tenant_id}/products",
+                    action_url=f"/admin/tenant/{self.tenant_id}/products/",
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )

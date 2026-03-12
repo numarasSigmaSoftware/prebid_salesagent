@@ -9,7 +9,7 @@
             <nav aria-label="breadcrumb">
                 <ol class="breadcrumb">
                     <li class="breadcrumb-item"><a href="{{ request.script_root }}/tenant/{{ tenant_id }}">{{ tenant_name }}</a></li>
-                    <li class="breadcrumb-item"><a href="{{ request.script_root }}/tenant/{{ tenant_id }}/products">Products</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('products.list_products', tenant_id=tenant_id) }}">Products</a></li>
                     <li class="breadcrumb-item"><a href="{{ request.script_root }}/tenant/{{ tenant_id }}/products/{{ product.product_id }}/edit">{{ product.name }}</a></li>
                     <li class="breadcrumb-item active">Configure Inventory</li>
                 </ol>

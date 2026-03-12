@@ -2051,7 +2051,7 @@ Exclude any products that don't match the brand's tone.</pre>
                         </p>
                     </div>
                     <div style="display: flex; gap: 0.5rem;">
-                        <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}/products" class="btn btn-small">Manage</a>
+                        <a href="{{ url_for('products.list_products', tenant_id=tenant.tenant_id) }}" class="btn btn-small">Manage</a>
                         <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}/products/add" class="btn btn-primary btn-small">Add New</a>
                     </div>
                 </div>
