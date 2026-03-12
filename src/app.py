@@ -30,14 +30,13 @@ def _install_admin_mounts() -> None:
     remaining paths.
     """
 
+    from a2wsgi import WSGIMiddleware
     from starlette.routing import Mount
 
     filtered_routes = []
     for route in app.router.routes:
-        if isinstance(route, Mount) and route.app.__class__.__name__ == "WSGIMiddleware" and route.path in {
-            "/admin",
-            "",
-        }:
+        # Remove any prior compatibility mounts so we can re-add them at the end.
+        if isinstance(route, Mount) and isinstance(route.app, WSGIMiddleware) and route.path in {"/admin", ""}:
             continue
         filtered_routes.append(route)
 
