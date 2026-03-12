@@ -71,7 +71,7 @@ class TestSlackNotificationUrls:
         url = actions_block["elements"][0]["url"]
 
         # Should fall back to global workflows
-        assert url == "https://sales-agent.example.com/workflows"
+        assert url == "https://sales-agent.example.com/admin/workflows"
         assert "localhost" not in url
 
     def test_notify_media_buy_event_with_tenant_and_buy_id(self, slack_notifier, mock_webhook_delivery):
@@ -144,7 +144,7 @@ class TestSlackNotificationUrls:
         url = actions_block["elements"][0]["url"]
 
         # Should fall back to global workflows
-        assert url == "https://sales-agent.example.com/workflows"
+        assert url == "https://sales-agent.example.com/admin/workflows"
         assert "localhost" not in url
 
     def test_notify_creative_pending_with_tenant_id(self, slack_notifier, mock_webhook_delivery):

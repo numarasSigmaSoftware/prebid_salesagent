@@ -334,7 +334,9 @@ class TestAdminCanonicalMount:
         from src.app import app
 
         admin_mounts = [
-            route.path for route in app.routes if isinstance(route, Mount) and route.app.__class__.__name__ == "WSGIMiddleware"
+            route.path
+            for route in app.routes
+            if isinstance(route, Mount) and route.app.__class__.__name__ == "WSGIMiddleware"
         ]
 
         assert "/admin" in admin_mounts
