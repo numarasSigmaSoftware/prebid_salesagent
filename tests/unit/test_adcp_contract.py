@@ -125,8 +125,9 @@ class TestSchemaMatchesLibrary:
         # product_selectors — internal-only field
         # buying_mode — local extension for buying mode selection
         # account — local extension for account-based product lookup (library has account_id)
+        # preferred_delivery_types — spec field not yet present in adcp library
         # adcp 3.6.0: brand, catalog, buyer_campaign_ref, pagination are now in the library
-        local_extensions = {"product_selectors", "buying_mode", "account"}
+        local_extensions = {"product_selectors", "buying_mode", "account", "preferred_delivery_types"}
         assert lib_fields == local_fields - local_extensions, (
             f"GetProductsRequest drift: lib={lib_fields}, local={local_fields}"
         )
