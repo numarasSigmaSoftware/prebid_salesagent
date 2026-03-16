@@ -227,7 +227,7 @@ class GetProductsRequest(LibraryGetProductsRequest):
     Library provides: account_id, brand, brief, buyer_campaign_ref, catalog,
     context, ext, filters, pagination, property_list — all inherited from AdCP 3.6.
 
-    Local extensions: buying_mode, account.
+    Local extensions: buying_mode, account, preferred_delivery_types.
 
     Internal-only: product_selectors (excluded from external serialization).
     """
@@ -245,6 +245,13 @@ class GetProductsRequest(LibraryGetProductsRequest):
     account: dict[str, Any] | None = Field(
         None,
         description="Account for product lookup. Returns products with pricing specific to this account's rate card (spec: account-ref.json)",
+    )
+    preferred_delivery_types: list[Any] | None = Field(
+        None,
+        description=(
+            "Preferred delivery types from the evolving AdCP get-products request schema. "
+            "Kept permissive until the upstream adcp library adds the typed field."
+        ),
     )
 
     # Internal-only fields (not in AdCP spec)
