@@ -13,12 +13,13 @@ Configuration priority:
 import json
 import logging
 import os
+from urllib.parse import unquote, urlsplit
 
 from authlib.integrations.flask_client import OAuth
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from sqlalchemy import select
 
-from src.admin.utils import is_super_admin
+from src.admin.utils import is_admin_production, is_super_admin
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant
 from src.core.domain_config import (
@@ -33,6 +34,42 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 auth_bp = Blueprint("auth", __name__)
+
+
+def _safe_redirect(url: str | None, fallback: str) -> str:
+    """Return *url* only if it is a safe relative path, otherwise *fallback*.
+
+    Rejects:
+    - Absolute URLs with a scheme (``http://``, ``https://``, ``ftp://`` …)
+    - Scheme-relative URLs starting with ``//``
+    - Backslash-prefixed host tricks
+    - Non-path relative values like ``dashboard`` or ``?next=...``
+    - Percent-encoded variants of the above (``%2F%2F``)
+
+    Args:
+        url: Candidate redirect URL from user input (e.g. session or query param).
+        fallback: Safe URL to use when *url* is rejected.
+
+    Returns:
+        *url* if safe, else *fallback*.
+    """
+    if not url:
+        return fallback
+
+    # Decode once so encoded variants like %2F%2F and http%3A don't slip through.
+    decoded = unquote(url).strip()
+    parts = urlsplit(decoded)
+    if (
+        parts.scheme
+        or parts.netloc
+        or decoded.startswith(("//", "\\\\"))
+        or "\\" in decoded
+        or not decoded.startswith("/")
+    ):
+        logger.warning("[SECURITY] Rejected unsafe redirect URL: %r", url)
+        return fallback
+    return decoded
+
 
 # Well-known OIDC discovery URLs for common providers
 OIDC_PROVIDERS = {
@@ -220,8 +257,8 @@ def login():
     """
     logger.debug("login route hit, has_user=%s, args=%s", "user" in session, dict(request.args))
 
-    # Capture 'next' parameter for redirect after login
-    next_url = request.args.get("next")
+    # Capture 'next' parameter for redirect after login — validate before storing
+    next_url = _safe_redirect(request.args.get("next"), fallback="")
     if next_url:
         session["login_next_url"] = next_url
 
@@ -593,10 +630,8 @@ def google_callback():
                 f"Session keys: {list(session.keys())} =========="
             )
             # Check for saved redirect URL
-            next_url = session.pop("login_next_url", None)
-            if next_url:
-                return redirect(next_url)
-            return redirect(url_for("core.index"))
+            next_url = _safe_redirect(session.pop("login_next_url", None), fallback=url_for("core.index"))
+            return redirect(next_url)
 
         # Check if this is a signup flow (only for non-super-admin users)
         if session.get("signup_flow"):
@@ -694,10 +729,11 @@ def google_callback():
             session.pop("available_tenants", None)
             flash(f"Welcome {user.get('name', email)}!", "success")
             # Check for saved redirect URL
-            next_url = session.pop("login_next_url", None)
-            if next_url:
-                return redirect(next_url)
-            return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
+            next_url = _safe_redirect(
+                session.pop("login_next_url", None),
+                fallback=url_for("tenants.dashboard", tenant_id=tenant_id),
+            )
+            return redirect(next_url)
 
         # Multi-tenant mode or multiple tenants: show tenant selector
         flash(f"Welcome {user.get('name', email)}!", "success")
@@ -756,10 +792,11 @@ def select_tenant():
                 session.pop("available_tenants", None)  # Clean up
                 flash(f"Welcome to {tenant['name']}!", "success")
                 # Check for saved redirect URL
-                next_url = session.pop("login_next_url", None)
-                if next_url:
-                    return redirect(next_url)
-                return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
+                next_url = _safe_redirect(
+                    session.pop("login_next_url", None),
+                    fallback=url_for("tenants.dashboard", tenant_id=tenant_id),
+                )
+                return redirect(next_url)
 
         flash("Invalid tenant selection", "error")
         return redirect(url_for("auth.select_tenant"))
@@ -820,7 +857,16 @@ def test_auth():
     if is_single_tenant_mode() and not tenant_id:
         tenant_id = "default"
 
-    # Check if test auth is allowed
+    # F-02: Hard-block test auth in production regardless of any other flag.
+    # Production-like deployments must never expose test auth, regardless of flags.
+    if is_admin_production():
+        logger.warning(
+            "[SECURITY] test_auth blocked: production mode detected. "
+            "Switch to SSO or disable production mode for non-production use."
+        )
+        abort(404)
+
+    # Non-production: allow if env var is set OR tenant is in setup mode
     env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
     tenant_setup_mode = False
 
@@ -830,7 +876,6 @@ def test_auth():
             if tenant and hasattr(tenant, "auth_setup_mode"):
                 tenant_setup_mode = tenant.auth_setup_mode
 
-    # Allow if env var is set OR tenant is in setup mode
     if not env_test_mode and not tenant_setup_mode:
         abort(404)
 
@@ -856,33 +901,7 @@ def test_auth():
         },
     }
 
-    # Check if email is a super admin (bypass password check for super admins in test mode)
-    if is_super_admin(email) and password == "test123":
-        session["test_user"] = email
-        session["test_user_name"] = email.split("@")[0].title()
-        session["test_user_role"] = "super_admin"
-        session["user"] = email  # Store as string for is_super_admin check
-        session["user_name"] = email.split("@")[0].title()
-        session["is_super_admin"] = True
-        session["role"] = "super_admin"
-        session["authenticated"] = True
-        session["email"] = email
-
-        if tenant_id:
-            session["test_tenant_id"] = tenant_id
-            session["tenant_id"] = tenant_id  # Set tenant_id for authorization checks
-            # Use saved redirect URL if available
-            if next_url:
-                session.pop("login_next_url", None)
-                return redirect(next_url)
-            return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
-        else:
-            # Use saved redirect URL if available
-            if next_url:
-                session.pop("login_next_url", None)
-                return redirect(next_url)
-            return redirect(url_for("core.index"))
-
+    # All credential checks go through the test_users dict — no hardcoded password shortcuts.
     # Check test users
     if email in test_users and test_users[email]["password"] == password:
         user_info = test_users[email]
@@ -901,17 +920,16 @@ def test_auth():
         if tenant_id:
             session["test_tenant_id"] = tenant_id
             session["tenant_id"] = tenant_id  # Set tenant_id for authorization checks
-            # Use saved redirect URL if available
-            if next_url:
-                session.pop("login_next_url", None)
-                return redirect(next_url)
-            return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
+            dest = _safe_redirect(
+                session.pop("login_next_url", None),
+                fallback=url_for("tenants.dashboard", tenant_id=tenant_id),
+            )
         else:
-            # Use saved redirect URL if available
-            if next_url:
-                session.pop("login_next_url", None)
-                return redirect(next_url)
-            return redirect(url_for("core.index"))
+            dest = _safe_redirect(
+                session.pop("login_next_url", None),
+                fallback=url_for("core.index"),
+            )
+        return redirect(dest)
 
     flash("Invalid test credentials", "error")
     return redirect(request.referrer or url_for("auth.login"))

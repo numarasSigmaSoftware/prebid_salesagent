@@ -37,6 +37,7 @@ from src.admin.blueprints.signals_agents import signals_agents_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp
+from src.admin.utils.helpers import is_admin_production
 from src.core.config_loader import is_single_tenant_mode
 from src.core.domain_config import (
     get_session_cookie_domain,
@@ -206,6 +207,16 @@ def create_app(config=None):
 
     # Initialize OAuth
     init_oauth(app)
+
+    # F-02: Warn loudly at startup if test credentials could be active in production.
+    if os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true":
+        log = logger.critical if is_admin_production() else logger.warning
+        log(
+            "[SECURITY] ADCP_AUTH_TEST_MODE=true is set. "
+            "Test credentials are active. "
+            "Production mode blocks /test/auth, but this configuration is still dangerous. "
+            "Disable ADCP_AUTH_TEST_MODE in production deployments."
+        )
 
     # Initialize Flask-Caching for improved performance
     from flask_caching import Cache
