@@ -49,6 +49,7 @@ from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
+    Budget,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
     UpdateMediaBuySuccess,
@@ -372,22 +373,22 @@ def _update_media_buy_impl(
                             else:
                                 pkg_budget_amount = float(pkg_update.budget.total)
 
-                            error_msg = validate_max_daily_package_spend(
+                            package_daily_spend_error: str | None = validate_max_daily_package_spend(
                                 package_budget=Decimal(str(pkg_budget_amount)),
                                 flight_days=flight_days,
                                 max_daily_spend=currency_limit.max_daily_package_spend,
                                 currency=request_currency,
                             )
-                            if error_msg:
+                            if package_daily_spend_error:
                                 response_data = UpdateMediaBuyError(
-                                    errors=[Error(code="budget_limit_exceeded", message=error_msg)],
+                                    errors=[Error(code="budget_limit_exceeded", message=package_daily_spend_error)],
                                     context=req.context,
                                 )
                                 ctx_manager.update_workflow_step(
                                     step.step_id,
                                     status="failed",
                                     response_data=response_data.model_dump(mode="json"),
-                                    error_message=error_msg,
+                                    error_message=package_daily_spend_error,
                                 )
                                 return response_data
 
@@ -510,20 +511,20 @@ def _update_media_buy_impl(
                     assert uow.currency_limits is not None
                     _cl = uow.currency_limits.get_for_currency(currency)
                     if _cl and _cl.min_package_budget:
-                        error_msg = validate_min_package_budget(
+                        package_min_budget_error: str | None = validate_min_package_budget(
                             package_budget=Decimal(str(budget_amount)),
                             min_package_budget=Decimal(str(_cl.min_package_budget)),
                             currency=currency,
                         )
-                        if error_msg:
+                        if package_min_budget_error:
                             response_data = UpdateMediaBuyError(
-                                errors=[Error(code="budget_below_minimum", message=error_msg)],
+                                errors=[Error(code="budget_below_minimum", message=package_min_budget_error)],
                                 context=req.context,
                             )
                             ctx_manager.update_workflow_step(
                                 step.step_id,
                                 status="failed",
-                                error_message=error_msg,
+                                error_message=package_min_budget_error,
                             )
                             return response_data
 
@@ -1323,7 +1324,7 @@ def _build_update_request(
     # Preserve bare float budgets when no extra budget metadata is provided.
     # This lets _impl reuse the existing media buy currency instead of forcing USD
     # at the transport boundary.
-    budget_obj = None
+    budget_obj: Budget | float | None = None
     if budget is not None:
         if currency is None and pacing is None and daily_budget is None:
             budget_obj = float(budget)

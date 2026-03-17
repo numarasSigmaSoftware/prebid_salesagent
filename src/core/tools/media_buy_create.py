@@ -1629,7 +1629,7 @@ async def _create_media_buy_impl(
                             )
 
             # Get currency from product pricing options (per AdCP spec)
-            request_currency = None
+            request_currency: str | None = None
 
             # First, try to get currency from first package's pricing option
             if req.packages and len(req.packages) > 0:
@@ -1809,7 +1809,7 @@ async def _create_media_buy_impl(
                                         package_min_spend = Decimal(str(currency_limit.min_package_budget))
 
                                 # Validate if minimum spend is set
-                                error_msg = (
+                                min_budget_error: str | None = (
                                     validate_min_package_budget(
                                         package_budget=package_budget,
                                         min_package_budget=package_min_spend,
@@ -1818,12 +1818,12 @@ async def _create_media_buy_impl(
                                     if package_min_spend
                                     else None
                                 )
-                                if error_msg:
-                                    error_msg = error_msg.replace(
+                                if min_budget_error:
+                                    min_budget_error = min_budget_error.replace(
                                         "The same minimum applies to updates as to creation.",
                                         "for products in this package",
                                     )
-                                    raise ValueError(error_msg)
+                                    raise ValueError(min_budget_error)
                     else:
                         # Legacy mode: single total_budget for all products
                         applicable_min_spends = list(product_min_spends.values())
@@ -1831,20 +1831,20 @@ async def _create_media_buy_impl(
                             required_min_spend = max(applicable_min_spends)
                             budget_decimal = Decimal(str(total_budget))
 
-                            error_msg = validate_min_package_budget(
+                            legacy_min_budget_error: str | None = validate_min_package_budget(
                                 package_budget=budget_decimal,
                                 min_package_budget=required_min_spend,
                                 currency=request_currency,
                             )
-                            if error_msg:
-                                error_msg = error_msg.replace(
+                            if legacy_min_budget_error:
+                                legacy_min_budget_error = legacy_min_budget_error.replace(
                                     "Package budget",
                                     "Total budget",
                                 ).replace(
                                     "The same minimum applies to updates as to creation.",
                                     "for the selected products",
                                 )
-                                raise ValueError(error_msg)
+                                raise ValueError(legacy_min_budget_error)
 
             # Validate maximum daily spend per package (if set)
             # This is per-package to prevent buyers from splitting large budgets across many packages
@@ -1863,32 +1863,32 @@ async def _create_media_buy_impl(
                             continue
                         # Package.budget is now always float | None (per AdCP spec)
                         package_budget = Decimal(str(package.budget))
-                        error_msg = validate_max_daily_package_spend(
+                        daily_package_spend_error: str | None = validate_max_daily_package_spend(
                             package_budget=package_budget,
                             flight_days=flight_days,
                             max_daily_spend=Decimal(str(currency_limit.max_daily_package_spend)),
                             currency=request_currency,
                         )
-                        if error_msg:
-                            error_msg = error_msg.replace(
+                        if daily_package_spend_error:
+                            daily_package_spend_error = daily_package_spend_error.replace(
                                 "exceeds maximum",
                                 "exceeds maximum daily spend per package",
                             ).replace(
                                 "Flight date changes that reduce daily budget are not allowed to bypass limits.",
                                 "This protects against accidental large budgets and prevents GAM line item proliferation.",
                             )
-                            raise ValueError(error_msg)
+                            raise ValueError(daily_package_spend_error)
                 else:
                     # Legacy mode: validate total budget
-                    error_msg = validate_max_daily_package_spend(
+                    legacy_daily_spend_error: str | None = validate_max_daily_package_spend(
                         package_budget=Decimal(str(total_budget)),
                         flight_days=flight_days,
                         max_daily_spend=Decimal(str(currency_limit.max_daily_package_spend)),
                         currency=request_currency,
                     )
 
-                    if error_msg:
-                        error_msg = error_msg.replace(
+                    if legacy_daily_spend_error:
+                        legacy_daily_spend_error = legacy_daily_spend_error.replace(
                             "Package daily budget",
                             "Daily budget",
                         ).replace(
@@ -1898,7 +1898,7 @@ async def _create_media_buy_impl(
                             "Flight date changes that reduce daily budget are not allowed to bypass limits.",
                             "This protects against accidental large budgets.",
                         )
-                        raise ValueError(error_msg)
+                        raise ValueError(legacy_daily_spend_error)
 
         # Validate targeting doesn't use managed-only dimensions (targeting_overlay is at package level per AdCP spec)
         if req.packages:
