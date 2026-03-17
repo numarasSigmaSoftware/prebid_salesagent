@@ -210,10 +210,15 @@ def test_workflow_step_receives_request_model_with_protocol_metadata(standard_mo
 
     _update_media_buy_impl(req=req, identity=identity)
 
-    standard_mocks["ctx_mgr_instance"].create_workflow_step.assert_called_once()
-    call_kwargs = standard_mocks["ctx_mgr_instance"].create_workflow_step.call_args.kwargs
-    assert call_kwargs["request_data"] is req
-    assert call_kwargs["request_metadata"] == {"protocol": "mcp"}
+    standard_mocks["ctx_mgr_instance"].create_workflow_step.assert_called_once_with(
+        context_id="ctx_001",
+        step_type="tool_call",
+        owner="principal",
+        status="in_progress",
+        tool_name="update_media_buy",
+        request_data=req,
+        request_metadata={"protocol": "mcp"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1897,11 +1902,15 @@ class TestUC003ManualApproval:
         assert isinstance(result, UpdateMediaBuySuccess)
         # The workflow step was created (step_id="step_001")
         # and the response allows the buyer to track the status
-        standard_mocks["ctx_mgr_instance"].create_workflow_step.assert_called_once()
-        call_kwargs = standard_mocks["ctx_mgr_instance"].create_workflow_step.call_args.kwargs
-        assert call_kwargs["tool_name"] == "update_media_buy"
-        assert call_kwargs["request_data"] is req
-        assert call_kwargs["request_metadata"] == {"protocol": "mcp"}
+        standard_mocks["ctx_mgr_instance"].create_workflow_step.assert_called_once_with(
+            context_id="ctx_001",
+            step_type="tool_call",
+            owner="principal",
+            status="in_progress",
+            tool_name="update_media_buy",
+            request_data=req,
+            request_metadata={"protocol": "mcp"},
+        )
 
 
 # ---------------------------------------------------------------------------
