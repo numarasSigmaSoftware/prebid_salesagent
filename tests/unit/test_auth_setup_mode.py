@@ -86,36 +86,50 @@ class TestSetupModeLogic:
 
 
 class TestTestAuthEndpointLogic:
-    """Tests for the /test/auth endpoint logic with setup mode."""
+    """Tests for the /test/auth endpoint logic with setup mode.
 
-    def test_test_auth_allowed_with_env_var(self):
-        """Test auth should be allowed when ADCP_AUTH_TEST_MODE=true."""
+    F-02 fix: test auth now requires BOTH env_test_mode AND tenant_setup_mode.
+    The env var alone is no longer sufficient to bypass a tenant that has
+    explicitly disabled Setup Mode via the Admin UI.
+    """
+
+    def test_test_auth_allowed_when_both_enabled(self):
+        """Test auth is allowed only when env var AND tenant setup mode are both on."""
         with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
+            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            tenant_setup_mode = True
+
+            should_abort = not env_test_mode or not tenant_setup_mode
+            assert should_abort is False
+
+    def test_test_auth_blocked_when_env_var_only(self):
+        """Test auth must be blocked when ADCP_AUTH_TEST_MODE=true but tenant setup mode is off.
+
+        F-02: This was the vulnerable case — env var alone allowed bypass.
+        """
+        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
+            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            tenant_setup_mode = False  # Tenant disabled setup mode via UI
+
+            should_abort = not env_test_mode or not tenant_setup_mode
+            assert should_abort is True
+
+    def test_test_auth_blocked_when_setup_mode_only(self):
+        """Test auth must be blocked when tenant is in setup mode but env var is not set."""
+        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
+            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            tenant_setup_mode = True
+
+            should_abort = not env_test_mode or not tenant_setup_mode
+            assert should_abort is True
+
+    def test_test_auth_blocked_when_both_disabled(self):
+        """Test auth must be blocked when both env var and setup mode are off."""
+        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
             env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
             tenant_setup_mode = False
 
-            # Should NOT abort (allow access)
-            should_abort = not env_test_mode and not tenant_setup_mode
-            assert should_abort is False
-
-    def test_test_auth_allowed_with_tenant_setup_mode(self):
-        """Test auth should be allowed when tenant has auth_setup_mode=True."""
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = True  # Tenant is in setup mode
-
-            # Should NOT abort (allow access)
-            should_abort = not env_test_mode and not tenant_setup_mode
-            assert should_abort is False
-
-    def test_test_auth_blocked_when_both_disabled(self):
-        """Test auth should 404 when both env var and setup mode are off."""
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = False  # Tenant disabled setup mode
-
-            # SHOULD abort (deny access)
-            should_abort = not env_test_mode and not tenant_setup_mode
+            should_abort = not env_test_mode or not tenant_setup_mode
             assert should_abort is True
 
 
