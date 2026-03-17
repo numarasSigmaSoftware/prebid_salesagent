@@ -9,6 +9,9 @@ Auth setup mode allows test credentials to work per-tenant:
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from src.admin.app import create_app
 from src.core.database.models import Tenant
 
 
@@ -85,52 +88,110 @@ class TestSetupModeLogic:
         assert tenant.auth_setup_mode is True
 
 
-class TestTestAuthEndpointLogic:
-    """Tests for the /test/auth endpoint logic with setup mode.
+def _make_flask_client(auth_setup_mode: bool):
+    """Create a Flask test client with a mocked tenant DB lookup.
 
-    F-02 fix: test auth now requires BOTH env_test_mode AND tenant_setup_mode.
-    The env var alone is no longer sufficient to bypass a tenant that has
-    explicitly disabled Setup Mode via the Admin UI.
+    The mock returns a tenant whose auth_setup_mode matches the argument,
+    so tests can exercise the actual /test/auth endpoint instead of
+    re-implementing the gate logic in test code.
+    """
+    app = create_app({"TESTING": True, "SECRET_KEY": "test-secret", "WTF_CSRF_ENABLED": False})
+    client = app.test_client()
+
+    mock_tenant = MagicMock()
+    mock_tenant.auth_setup_mode = auth_setup_mode
+    mock_session = MagicMock()
+    mock_session.scalars.return_value.first.return_value = mock_tenant
+
+    return client, mock_session
+
+
+class TestTestAuthEndpoint:
+    """Endpoint-level tests for the /test/auth gate.
+
+    F-02 fix: test auth now requires BOTH ADCP_AUTH_TEST_MODE=true AND
+    the tenant's auth_setup_mode=True. These tests exercise the actual
+    Flask endpoint so a gate change in auth.py would cause a real failure.
     """
 
     def test_test_auth_allowed_when_both_enabled(self):
-        """Test auth is allowed only when env var AND tenant setup mode are both on."""
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = True
+        """POST /test/auth returns 302 when env var and tenant setup mode are both on."""
+        client, mock_session = _make_flask_client(auth_setup_mode=True)
 
-            should_abort = not env_test_mode or not tenant_setup_mode
-            assert should_abort is False
+        with patch("src.admin.blueprints.auth.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true", "PRODUCTION": "", "ENVIRONMENT": ""}):
+                response = client.post(
+                    "/test/auth",
+                    data={
+                        "email": "test_super_admin@example.com",
+                        "password": "test123",
+                        "tenant_id": "default",
+                    },
+                )
+
+        assert response.status_code == 302
 
     def test_test_auth_blocked_when_env_var_only(self):
-        """Test auth must be blocked when ADCP_AUTH_TEST_MODE=true but tenant setup mode is off.
+        """POST /test/auth returns 404 when env var is set but tenant has disabled setup mode.
 
-        F-02: This was the vulnerable case — env var alone allowed bypass.
+        F-02 regression: this was the vulnerable case before the fix.
         """
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = False  # Tenant disabled setup mode via UI
+        client, mock_session = _make_flask_client(auth_setup_mode=False)
 
-            should_abort = not env_test_mode or not tenant_setup_mode
-            assert should_abort is True
+        with patch("src.admin.blueprints.auth.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true", "PRODUCTION": "", "ENVIRONMENT": ""}):
+                response = client.post(
+                    "/test/auth",
+                    data={
+                        "email": "test_super_admin@example.com",
+                        "password": "test123",
+                        "tenant_id": "default",
+                    },
+                )
+
+        assert response.status_code == 404
 
     def test_test_auth_blocked_when_setup_mode_only(self):
-        """Test auth must be blocked when tenant is in setup mode but env var is not set."""
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = True
+        """POST /test/auth returns 404 when tenant is in setup mode but env var is not set."""
+        client, mock_session = _make_flask_client(auth_setup_mode=True)
 
-            should_abort = not env_test_mode or not tenant_setup_mode
-            assert should_abort is True
+        with patch("src.admin.blueprints.auth.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "", "PRODUCTION": "", "ENVIRONMENT": ""}):
+                response = client.post(
+                    "/test/auth",
+                    data={
+                        "email": "test_super_admin@example.com",
+                        "password": "test123",
+                        "tenant_id": "default",
+                    },
+                )
+
+        assert response.status_code == 404
 
     def test_test_auth_blocked_when_both_disabled(self):
-        """Test auth must be blocked when both env var and setup mode are off."""
-        with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}):
-            env_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-            tenant_setup_mode = False
+        """POST /test/auth returns 404 when both env var and tenant setup mode are off."""
+        client, mock_session = _make_flask_client(auth_setup_mode=False)
 
-            should_abort = not env_test_mode or not tenant_setup_mode
-            assert should_abort is True
+        with patch("src.admin.blueprints.auth.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "", "PRODUCTION": "", "ENVIRONMENT": ""}):
+                response = client.post(
+                    "/test/auth",
+                    data={
+                        "email": "test_super_admin@example.com",
+                        "password": "test123",
+                        "tenant_id": "default",
+                    },
+                )
+
+        assert response.status_code == 404
 
 
 class TestTenantLoginLogic:
