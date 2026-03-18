@@ -1814,15 +1814,12 @@ async def _create_media_buy_impl(
                                         package_budget=package_budget,
                                         min_package_budget=package_min_spend,
                                         currency=package_currency,
+                                        context="for products in this package",
                                     )
                                     if package_min_spend
                                     else None
                                 )
                                 if min_budget_error:
-                                    min_budget_error = min_budget_error.replace(
-                                        "The same minimum applies to updates as to creation.",
-                                        "for products in this package",
-                                    )
                                     raise ValueError(min_budget_error)
                     else:
                         # Legacy mode: single total_budget for all products
@@ -1835,15 +1832,10 @@ async def _create_media_buy_impl(
                                 package_budget=budget_decimal,
                                 min_package_budget=required_min_spend,
                                 currency=request_currency,
+                                subject="Total",
+                                context="for the selected products",
                             )
                             if legacy_min_budget_error:
-                                legacy_min_budget_error = legacy_min_budget_error.replace(
-                                    "Package budget",
-                                    "Total budget",
-                                ).replace(
-                                    "The same minimum applies to updates as to creation.",
-                                    "for the selected products",
-                                )
                                 raise ValueError(legacy_min_budget_error)
 
             # Validate maximum daily spend per package (if set)
@@ -1868,15 +1860,10 @@ async def _create_media_buy_impl(
                             flight_days=flight_days,
                             max_daily_spend=Decimal(str(currency_limit.max_daily_package_spend)),
                             currency=request_currency,
+                            limit_label="maximum daily spend per package",
+                            context="This protects against accidental large budgets and prevents GAM line item proliferation.",
                         )
                         if daily_package_spend_error:
-                            daily_package_spend_error = daily_package_spend_error.replace(
-                                "exceeds maximum",
-                                "exceeds maximum daily spend per package",
-                            ).replace(
-                                "Flight date changes that reduce daily budget are not allowed to bypass limits.",
-                                "This protects against accidental large budgets and prevents GAM line item proliferation.",
-                            )
                             raise ValueError(daily_package_spend_error)
                 else:
                     # Legacy mode: validate total budget
@@ -1885,19 +1872,12 @@ async def _create_media_buy_impl(
                         flight_days=flight_days,
                         max_daily_spend=Decimal(str(currency_limit.max_daily_package_spend)),
                         currency=request_currency,
+                        subject="Daily",
+                        limit_label="maximum daily spend",
+                        context="This protects against accidental large budgets.",
                     )
 
                     if legacy_daily_spend_error:
-                        legacy_daily_spend_error = legacy_daily_spend_error.replace(
-                            "Package daily budget",
-                            "Daily budget",
-                        ).replace(
-                            "exceeds maximum",
-                            "exceeds maximum daily spend",
-                        ).replace(
-                            "Flight date changes that reduce daily budget are not allowed to bypass limits.",
-                            "This protects against accidental large budgets.",
-                        )
                         raise ValueError(legacy_daily_spend_error)
 
         # Validate targeting doesn't use managed-only dimensions (targeting_overlay is at package level per AdCP spec)

@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from adcp import PushNotificationConfig
 
@@ -153,6 +153,7 @@ def _update_media_buy_impl(
     # Single UoW for entire update operation — one session, one transaction
     with MediaBuyUoW(tenant["tenant_id"]) as uow:
         assert uow.media_buys is not None
+        # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
         assert uow.session is not None
         session = uow.session
 
@@ -1329,10 +1330,6 @@ def _build_update_request(
         if currency is None and pacing is None and daily_budget is None:
             budget_obj = float(budget)
         else:
-            from typing import Literal
-
-            from src.core.schemas import Budget
-
             pacing_val: Literal["even", "asap", "daily_budget"] = "even"
             if pacing == "asap":
                 pacing_val = "asap"
