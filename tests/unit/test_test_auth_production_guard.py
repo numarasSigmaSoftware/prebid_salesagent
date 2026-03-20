@@ -149,6 +149,7 @@ class TestSuperAdminCredentialPath:
         """Custom env var credentials are accepted at the /test/auth endpoint.
 
         Confirms the super-admin email and password come from env vars, not hardcoded values.
+        Asserts the full session state set by the endpoint on success.
         """
         with make_auth_test_client(auth_setup_mode=True) as (client, _):
             with patch.dict(os.environ, self._CUSTOM_CREDS_ENV):
@@ -158,9 +159,12 @@ class TestSuperAdminCredentialPath:
                     follow_redirects=False,
                 )
 
-        assert response.status_code == 302
-        with client.session_transaction() as sess:
-            assert sess.get("authenticated") is True
+            assert response.status_code == 302
+            with client.session_transaction() as sess:
+                assert sess.get("authenticated") is True
+                assert sess.get("role") == "super_admin"
+                assert sess.get("is_super_admin") is True
+                assert sess.get("tenant_id") == "default"
 
     def test_default_password_rejected_when_env_var_overrides_it(self, make_auth_test_client):
         """The old hardcoded password is rejected when env vars override the credentials.
@@ -176,6 +180,6 @@ class TestSuperAdminCredentialPath:
                     follow_redirects=False,
                 )
 
-        assert response.status_code == 302
-        with client.session_transaction() as sess:
-            assert "authenticated" not in sess
+            assert response.status_code == 302
+            with client.session_transaction() as sess:
+                assert "authenticated" not in sess
