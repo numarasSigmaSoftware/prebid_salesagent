@@ -61,69 +61,68 @@ async def test_complete_task_creative_approval_applies_shared_review_flow(integr
         )
 
         identity = env.identity
+        audit_logger = Mock()
+        notifier = Mock()
 
-    audit_logger = Mock()
-    notifier = Mock()
+        with (
+            patch(
+                "src.services.creative_review_service._call_webhook_for_creative_status",
+                new=AsyncMock(return_value=True),
+            ) as webhook,
+            patch("src.services.slack_notifier.get_slack_notifier", return_value=notifier) as get_notifier,
+            patch("src.core.audit_logger.AuditLogger", return_value=audit_logger),
+            patch("src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)) as execute_buy,
+        ):
+            result = await complete_task(
+                task_id=step.step_id,
+                status="completed",
+                response_data={"decision": "approved", "reviewer": "qa@example.com"},
+                identity=identity,
+            )
 
-    with (
-        patch(
-            "src.services.creative_review_service._call_webhook_for_creative_status",
-            new=AsyncMock(return_value=True),
-        ) as webhook,
-        patch("src.services.slack_notifier.get_slack_notifier", return_value=notifier) as get_notifier,
-        patch("src.core.audit_logger.AuditLogger", return_value=audit_logger),
-        patch("src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)) as execute_buy,
-    ):
-        result = await complete_task(
-            task_id=step.step_id,
-            status="completed",
-            response_data={"decision": "approved", "reviewer": "qa@example.com"},
-            identity=identity,
-        )
+            assert result["status"] == "completed"
 
-        assert result["status"] == "completed"
+            with get_db_session() as session:
+                refreshed_creative = session.scalars(
+                    select(Creative).filter_by(
+                        creative_id=creative.creative_id,
+                        tenant_id=tenant.tenant_id,
+                        principal_id=principal.principal_id,
+                    )
+                ).one()
+                refreshed_media_buy = session.scalars(
+                    select(MediaBuy).filter_by(
+                        media_buy_id=media_buy.media_buy_id,
+                        tenant_id=tenant.tenant_id,
+                    )
+                ).one()
+                refreshed_step = session.scalars(select(WorkflowStep).filter_by(step_id=step.step_id)).one()
+                human_review = session.scalars(
+                    select(CreativeReview).filter_by(
+                        creative_id=creative.creative_id,
+                        tenant_id=tenant.tenant_id,
+                        principal_id=principal.principal_id,
+                        review_type="human",
+                        final_decision="approved",
+                    )
+                ).first()
 
-        with get_db_session() as session:
-            refreshed_creative = session.scalars(
-                select(Creative).filter_by(
-                    creative_id=creative.creative_id,
-                    tenant_id=tenant.tenant_id,
-                    principal_id=principal.principal_id,
-                )
-            ).one()
-            refreshed_media_buy = session.scalars(
-                select(MediaBuy).filter_by(
-                    media_buy_id=media_buy.media_buy_id,
-                    tenant_id=tenant.tenant_id,
-                )
-            ).one()
-            refreshed_step = session.scalars(select(WorkflowStep).filter_by(step_id=step.step_id)).one()
-            human_review = session.scalars(
-                select(CreativeReview).filter_by(
-                    creative_id=creative.creative_id,
-                    tenant_id=tenant.tenant_id,
-                    principal_id=principal.principal_id,
-                    review_type="human",
-                    final_decision="approved",
-                )
-            ).first()
+            assert refreshed_creative.status == "approved"
+            assert refreshed_creative.approved_by == principal.principal_id
+            assert refreshed_step.status == "completed"
+            assert human_review is not None
+            assert refreshed_media_buy.status == "active"
 
-        assert refreshed_creative.status == "approved"
-        assert refreshed_creative.approved_by == principal.principal_id
-        assert refreshed_step.status == "completed"
-        assert human_review is not None
-        assert refreshed_media_buy.status == "active"
-
-        webhook.assert_awaited_once_with(creative_id=creative.creative_id, tenant_id=tenant.tenant_id)
-        get_notifier.assert_called_once_with({"features": {"slack_webhook_url": tenant.slack_webhook_url}})
-        notifier.send_message.assert_called_once()
-        execute_buy.assert_called_once_with(media_buy.media_buy_id, tenant.tenant_id)
-        audit_logger.log_operation.assert_called_once_with(
-            operation="complete_task",
-            principal_name=principal.principal_id,
-            principal_id=principal.principal_id,
-            adapter_id="admin_ui",
-            success=True,
-            details=ANY,
-            tenant_id=tenant.tenant_id,
-        )
+            webhook.assert_awaited_once_with(creative_id=creative.creative_id, tenant_id=tenant.tenant_id)
+            get_notifier.assert_called_once_with({"features": {"slack_webhook_url": tenant.slack_webhook_url}})
+            notifier.send_message.assert_called_once()
+            execute_buy.assert_called_once_with(media_buy.media_buy_id, tenant.tenant_id)
+            audit_logger.log_operation.assert_called_once_with(
+                operation="complete_task",
+                principal_name=principal.principal_id,
+                principal_id=principal.principal_id,
+                adapter_id="admin_ui",
+                success=True,
+                details=ANY,
+                tenant_id=tenant.tenant_id,
+            )
