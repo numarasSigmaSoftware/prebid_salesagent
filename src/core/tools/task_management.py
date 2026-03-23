@@ -270,8 +270,11 @@ async def complete_task(
         if not task:
             raise ValueError(f"Task {task_id} not found")
 
-        if task.status not in ["pending", "in_progress", "requires_approval"]:
-            raise ValueError(f"Task {task_id} is already {task.status} and cannot be completed")
+        original_status = task.status
+        task_type = task.step_type
+
+        if original_status not in ["pending", "in_progress", "requires_approval"]:
+            raise ValueError(f"Task {task_id} is already {original_status} and cannot be completed")
 
         completed_time = datetime.now(UTC)
 
@@ -282,7 +285,7 @@ async def complete_task(
                 completed_at=completed_time,
                 response_data=response_data or {"manually_completed": True, "completed_by": principal_id},
             )
-            if task.step_type == "creative_approval":
+            if task_type == "creative_approval":
                 _apply_creative_task_decision(
                     tenant_id=tenant["tenant_id"],
                     task_id=task_id,
@@ -308,8 +311,8 @@ async def complete_task(
             details={
                 "task_id": task_id,
                 "new_status": status,
-                "original_status": "pending",
-                "task_type": task.step_type,
+                "original_status": original_status,
+                "task_type": task_type,
             },
         )
 
