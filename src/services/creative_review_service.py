@@ -177,6 +177,7 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
                 dry_run=False,
                 context=step.request_data.get("context") if isinstance(step.request_data, dict) else None,
             )
+            response_payload = response.model_dump(mode="json")
 
             push_config = None
             protocol = "mcp"
@@ -196,13 +197,13 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
                     task_id=step.context_id,
                     status=GeneratedTaskStatus.completed,
                     context_id=step.context_id,
-                    result=response,
+                    result=response_payload,
                 )
             else:
                 mcp_payload_dict = create_mcp_webhook_payload(
                     task_id=step.context_id,
                     status=GeneratedTaskStatus.completed,
-                    result=response,
+                    result=response_payload,
                 )
                 payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
 
