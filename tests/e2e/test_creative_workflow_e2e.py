@@ -178,7 +178,8 @@ class TestCreativeWorkflow:
     @pytest.mark.asyncio
     async def test_creative_visible_via_list_creatives(self, docker_services_e2e, live_server, test_auth_token):
         """Synced creatives must be visible via list_creatives."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup, client_cm = await self._bootstrap_review_client(live_server)
+        async with client_cm as client:
             # Get product format_id
             products_result = await client.call_tool(
                 "get_products",
@@ -210,7 +211,10 @@ class TestCreativeWorkflow:
 
             assert "creatives" in list_data, "list_creatives must return creatives key"
             creative_ids = [c["creative_id"] for c in list_data["creatives"]]
-            assert creative_id in creative_ids, f"Synced creative {creative_id} must appear in list_creatives response"
+            assert creative_id in creative_ids, (
+                f"Synced creative {creative_id} must appear in list_creatives response for "
+                f"{setup['tenant_subdomain']}"
+            )
 
     @pytest.mark.asyncio
     async def test_creative_assigned_to_package_after_sync(self, docker_services_e2e, live_server, test_auth_token):
@@ -245,7 +249,12 @@ class TestCreativeWorkflow:
             create_result = await client.call_tool("create_media_buy", media_buy_request)
             create_data = parse_tool_result(create_result)
             media_buy_id = create_data["media_buy_id"]
-            package_id = get_package_id_by_buyer_ref(live_server, media_buy_id, pkg_buyer_ref)
+            package_id = None
+            response_packages = create_data.get("packages", [])
+            if response_packages:
+                package_id = response_packages[0].get("package_id")
+            if not package_id:
+                package_id = get_package_id_by_buyer_ref(live_server, media_buy_id, pkg_buyer_ref)
 
             # Force-approve so we can assign creatives
             force_approve_media_buy_in_db(live_server, media_buy_id)

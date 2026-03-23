@@ -319,6 +319,14 @@ def unique_suffix(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+def _normalize_domain_label(value: str) -> str:
+    """Return a DNS-safe lowercase label sequence for E2E-generated domains."""
+    normalized = value.lower().replace("_", "-")
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-") or "e2e"
+
+
 async def provision_sellable_product(
     live_server: dict[str, Any],
     tenant_id: str,
@@ -331,7 +339,7 @@ async def provision_sellable_product(
     """Create the minimum publisher setup needed for a sellable product."""
     admin_session = create_admin_session(live_server, tenant_id)
     new_tag = unique_suffix(f"sell_ready_tag_{product_suffix}").lower()
-    publisher_domain = f"{product_suffix}.e2e.example.com"
+    publisher_domain = f"{_normalize_domain_label(product_suffix)}.e2e.example.com"
     principal_name = f"E2E Principal {product_suffix}"
     product_id = f"prod_{product_suffix}"
     product_name = f"E2E Sellable Product {product_suffix}"
