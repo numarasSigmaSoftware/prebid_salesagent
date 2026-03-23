@@ -9,17 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
-from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
-from adcp.types import CreativeAction, McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.webhooks import GeneratedTaskStatus
-
-from src.core.database.models import (
-    PushNotificationConfig as DBPushNotificationConfig,
+from src.services.creative_review_service import (
+    _call_webhook_for_creative_status,
+    apply_creative_review_decision,
+    execute_creative_review_side_effects,
 )
-from src.core.database.repositories.creative import CreativeRepository
-from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 # TODO: Missing module - these functions need to be implemented
 # from creative_formats import discover_creative_formats_from_url, parse_creative_spec
@@ -69,204 +63,6 @@ def _cleanup_completed_tasks():
         for task_id in completed_tasks:
             del _ai_review_tasks[task_id]
             logger.debug(f"Cleaned up completed AI review task: {task_id}")
-
-
-def _compute_media_buy_status_from_flight_dates(media_buy) -> str:
-    """Compute status based on flight dates: 'active' if within window, else 'scheduled'."""
-    now = datetime.now(UTC)
-
-    start_time = None
-    if media_buy.start_time:
-        raw_start = media_buy.start_time
-        start_time = raw_start.replace(tzinfo=UTC) if raw_start.tzinfo is None else raw_start.astimezone(UTC)
-    elif media_buy.start_date:
-        start_time = datetime.combine(media_buy.start_date, datetime.min.time()).replace(tzinfo=UTC)
-
-    end_time = None
-    if media_buy.end_time:
-        raw_end = media_buy.end_time
-        end_time = raw_end.replace(tzinfo=UTC) if raw_end.tzinfo is None else raw_end.astimezone(UTC)
-    elif media_buy.end_date:
-        end_time = datetime.combine(media_buy.end_date, datetime.max.time()).replace(tzinfo=UTC)
-
-    # If start time passed and end time not passed, set to active
-    if start_time and end_time and now >= start_time and now <= end_time:
-        return "active"
-
-    return "scheduled"
-
-
-async def _call_webhook_for_creative_status(
-    creative_id,
-    tenant_id: str,
-):
-    """Send protocol-level push notification for creative status update.
-
-    Creates its own database session via UoW (read-only — no writes needed).
-    Checks if all creatives in the sync_creatives task have been reviewed.
-    Only fires the webhook when ALL creatives have been reviewed (approved or rejected).
-
-    Returns:
-        bool: True if webhook delivered successfully, False otherwise (or if no config found)
-    """
-    if not tenant_id:
-        raise ValueError("tenant_id is required for _call_webhook_for_creative_status")
-
-    from src.core.schemas import CreativeStatusEnum
-
-    try:
-        with AdminCreativeUoW(tenant_id) as uow:
-            assert uow.workflows is not None
-            assert uow.creatives is not None
-            mapping = uow.workflows.get_latest_mapping_for_object("creative", creative_id)
-
-            if not mapping:
-                logger.debug(f"No workflow mapping found for creative {creative_id}; skipping webhook notification")
-                return False
-
-            step = uow.workflows.get_step_by_id(mapping.step_id)
-            if not step or not step.request_data:
-                logger.debug(
-                    f"Workflow step missing or has no request_data for creative {creative_id}; skipping webhook notification"
-                )
-                return False
-
-            # Get ALL creatives associated with this workflow step
-            all_mappings = [m for m in uow.workflows.get_mappings_for_step(step.step_id) if m.object_type == "creative"]
-
-            if not all_mappings:
-                logger.debug(f"No creative mappings found for workflow step {step.step_id}")
-                return False
-
-            # Get creative statuses for all creatives in this task
-            creative_ids = [m.object_id for m in all_mappings]
-            all_creatives = uow.creatives.admin_get_by_ids(creative_ids)
-
-            # Check if ANY creative is still pending review
-            pending_count = sum(1 for c in all_creatives if c.status == CreativeStatusEnum.pending_review.value)
-
-            if pending_count > 0:
-                logger.info(
-                    f"Creative {creative_id} reviewed, but {pending_count}/{len(all_creatives)} "
-                    f"creatives still pending in task {step.step_id}; not firing webhook yet"
-                )
-                return False
-
-            # ALL creatives have been reviewed! Build complete result for webhook
-            logger.info(f"All {len(all_creatives)} creatives in task {step.step_id} have been reviewed; firing webhook")
-
-            # Build SyncCreativesResponse with all creative results
-
-            creatives: list[SyncCreativeResult] = [
-                SyncCreativeResult(
-                    creative_id=c.creative_id,
-                    platform_id="",  # we need to populate this. Currently not storing any internal id of our own per creative
-                    action=CreativeAction.failed if c.status != "approved" else CreativeAction.created,
-                    errors=[c.data.get("rejection_reason")] if c.data and c.data.get("rejection_reason") else [],
-                )
-                for c in all_creatives
-            ]
-
-            # Convert context dict to ContextObject if present
-            context_data = step.request_data.get("context")
-            context_obj: ContextObject | None = None
-            if context_data and isinstance(context_data, dict):
-                context_obj = ContextObject.model_construct(**context_data)
-
-            complete_result = SyncCreativesSuccessResponse(creatives=creatives, dry_run=False, context=context_obj)
-
-            # build push notification config from step request data
-            # this is because we don't store push notification config in the database when creating the creative
-            from uuid import uuid4
-
-            cfg_dict = step.request_data.get("push_notification_config") or {}
-            url = cfg_dict.get("url")
-            if not url:
-                logger.error(f"No push notification URL present for creative {creative_id}")
-                return False
-
-            authentication = cfg_dict.get("authentication") or {}
-            schemes = authentication.get("schemes") or []
-            auth_type = schemes[0] if isinstance(schemes, list) and schemes else None
-            auth_token = authentication.get("credentials")
-
-            # Derive principal/tenant from the step context if available
-            context_obj = getattr(step, "context", None)
-            derived_tenant_id = tenant_id or (getattr(context_obj, "tenant_id", None))
-            derived_principal_id = getattr(context_obj, "principal_id", None)
-
-            push_notification_config = DBPushNotificationConfig(
-                id=cfg_dict.get("id") or f"pnc_{uuid4().hex[:16]}",
-                tenant_id=derived_tenant_id,
-                principal_id=derived_principal_id,
-                url=url,
-                authentication_type=auth_type,
-                authentication_token=auth_token,
-                is_active=True,
-            )
-
-            # Extract step attributes before UoW closes (avoid DetachedInstanceError)
-            step_tool_name = step.tool_name
-            step_step_id = step.step_id
-            step_request_data = step.request_data
-            step_context_id = step.context_id
-
-        # --- Session closed here; webhook delivery is outside the transaction ---
-
-        service = get_protocol_webhook_service()
-        try:
-            logger.info(f"tool name: {step_tool_name}")
-            logger.info(f"task id: {step_step_id}")
-            logger.info(f"task type: {step_tool_name}")
-            logger.info("status: completed")
-            logger.info(f"result: {complete_result}")
-            logger.info("error: None")
-            logger.info(f"push_notification_config: {push_notification_config}")
-
-            # Determine protocol type from workflow step request_data
-            protocol = step_request_data.get("protocol", "mcp")  # Default to MCP for backward compatibility
-
-            # Create appropriate webhook payload based on protocol
-            # Convert result to dict for webhook payload functions
-            result_dict = complete_result.model_dump(mode="json")
-
-            payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
-            if protocol == "a2a":
-                payload = create_a2a_webhook_payload(
-                    task_id=step_step_id,
-                    status=GeneratedTaskStatus.completed,
-                    result=result_dict,
-                    context_id=step_context_id,
-                )
-            else:
-                # TODO: Fix in adcp python client - create_mcp_webhook_payload should return
-                # McpWebhookPayload instead of dict[str, Any] for proper type safety
-                mcp_payload_dict = create_mcp_webhook_payload(step_step_id, GeneratedTaskStatus.completed, result_dict)
-                payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
-
-            metadata = {
-                "task_type": step_tool_name
-                # TODO: @yusuf - check if we were passing principal_id and tenant to this previously
-                # TODO: @yusuf - check if we want to make metadata typed
-            }
-
-            await service.send_notification(
-                push_notification_config=push_notification_config, payload=payload, metadata=metadata
-            )
-
-            logger.info(
-                f"Successfully sent protocol webhook for sync_creatives task {step_step_id} "
-                f"with {len(all_creatives)} reviewed creatives"
-            )
-
-            return True
-        except Exception as send_e:
-            logger.error(f"Failed to send protocol webhook for creative {creative_id}: {send_e}")
-            return False
-
-    except Exception as e:
-        logger.error(f"Error sending protocol webhook for creative {creative_id}: {e}", exc_info=True)
-        return False
 
 
 @creatives_bp.route("/", methods=["GET"])
@@ -404,98 +200,6 @@ def analyze(tenant_id, **kwargs):
         return jsonify({"error": str(e)}), 500
 
 
-def _create_human_review_record(
-    creative_repo: CreativeRepository,
-    *,
-    creative_id: str,
-    tenant_id: str,
-    principal_id: str,
-    reviewer_email: str,
-    reason: str,
-    is_override: bool,
-    final_decision: str,
-):
-    """Create and add a human CreativeReview record via the repository."""
-    from src.core.database.models import CreativeReview
-
-    review_id = f"review_{uuid.uuid4().hex[:12]}"
-    human_review = CreativeReview(
-        review_id=review_id,
-        creative_id=creative_id,
-        tenant_id=tenant_id,
-        principal_id=principal_id,
-        reviewed_at=datetime.now(UTC),
-        review_type="human",
-        reviewer_email=reviewer_email,
-        ai_decision=None,
-        confidence_score=None,
-        policy_triggered=None,
-        reason=reason,
-        recommendations=None,
-        human_override=is_override,
-        final_decision=final_decision,
-    )
-    creative_repo.create_review(human_review)
-    return human_review
-
-
-def _send_post_commit_side_effects(
-    *,
-    webhook_data: dict[str, Any],
-    slack_data: dict[str, Any],
-    audit_data: dict[str, Any],
-    operation: str,
-    tenant_id: str,
-    actor: str,
-):
-    """Execute post-commit side effects: webhook, Slack notification, audit log.
-
-    All calls are best-effort — failures are logged but do not propagate.
-
-    Args:
-        webhook_data: Dict with creative_id/tenant_id for webhook call.
-        slack_data: Dict with slack_webhook_url and message.
-        audit_data: Dict with details for audit logging.
-        operation: Audit operation name (e.g. "approve_creative").
-        tenant_id: Tenant scope for audit logger.
-        actor: The user who performed the action (for audit principal_name/id).
-    """
-    from src.core.audit_logger import AuditLogger
-
-    # Send webhook
-    if webhook_data:
-        asyncio.run(
-            _call_webhook_for_creative_status(
-                creative_id=webhook_data["creative_id"],
-                tenant_id=webhook_data["tenant_id"],
-            )
-        )
-
-    # Send Slack notification
-    if slack_data:
-        try:
-            from src.services.slack_notifier import get_slack_notifier
-
-            tenant_config = {"features": {"slack_webhook_url": slack_data["slack_webhook_url"]}}
-            notifier = get_slack_notifier(tenant_config)
-            notifier.send_message(slack_data["message"])
-        except Exception as slack_e:
-            logger.warning(f"Failed to send Slack notification: {slack_e}")
-
-    # Log audit trail
-    if audit_data:
-        audit_logger = AuditLogger(adapter_name="AdminUI", tenant_id=tenant_id)
-        audit_logger.log_operation(
-            operation=operation,
-            principal_name=actor,
-            principal_id=actor,
-            adapter_id="admin_ui",
-            success=True,
-            details=audit_data,
-            tenant_id=tenant_id,
-        )
-
-
 @creatives_bp.route("/review/<creative_id>/approve", methods=["POST"])
 @log_admin_action("approve_creative")
 @require_tenant_access()
@@ -504,143 +208,22 @@ def approve_creative(tenant_id, creative_id, **kwargs):
     try:
         data = request.get_json() or {}
         approved_by = data.get("approved_by", "admin")
-
-        # Collect data needed for post-commit side effects
-        webhook_data: dict[str, Any] = {}
-        slack_data: dict[str, Any] = {}
-        audit_data: dict[str, Any] = {}
-        media_buy_actions: list[dict[str, Any]] = []
+        side_effect = None
 
         with AdminCreativeUoW(tenant_id) as uow:
-            assert uow.creatives is not None
-            assert uow.assignments is not None
-            assert uow.media_buys is not None
-            assert uow.tenant_config is not None
-
-            creative = uow.creatives.admin_get_by_id(creative_id)
-
-            if not creative:
-                return jsonify({"error": "Creative not found"}), 404
-
-            # Check if there was a prior AI review that disagreed
-            prior_ai_review = uow.creatives.get_prior_ai_review(creative_id)
-
-            # Check if this is a human override (AI recommended reject, human approved)
-            is_override = bool(prior_ai_review and prior_ai_review.ai_decision in ["rejected", "reject"])
-
-            _create_human_review_record(
-                uow.creatives,
+            side_effect = apply_creative_review_decision(
+                uow,
                 creative_id=creative_id,
-                tenant_id=tenant_id,
-                principal_id=creative.principal_id,
-                reviewer_email=approved_by,
-                reason="Human approval",
-                is_override=is_override,
-                final_decision="approved",
+                decision="approved",
+                actor=approved_by,
             )
 
-            # Update creative status
-            creative.status = "approved"
-            creative.approved_at = datetime.now(UTC)
-            creative.approved_by = approved_by
-
-            # Collect webhook data for post-commit
-            webhook_data = {"creative_id": creative_id, "tenant_id": tenant_id}
-
-            # Collect Slack data for post-commit
-            tenant = uow.tenant_config.get_tenant()
-            if tenant and tenant.slack_webhook_url:
-                principal_name = uow.creatives.get_principal_name(creative.principal_id)
-
-                slack_data = {
-                    "slack_webhook_url": tenant.slack_webhook_url,
-                    "message": f"\u2705 Creative approved: {creative.name} ({creative.format}) from {principal_name}",
-                }
-
-            # Collect audit data for post-commit
-            audit_data = {
-                "creative_id": creative_id,
-                "creative_name": creative.name,
-                "format": creative.format,
-                "principal_id": creative.principal_id,
-                "human_override": is_override,
-            }
-
-            # Check if this creative approval unblocks any media buys
-            assignments = uow.assignments.get_by_creative(creative_id)
-
-            logger.info(
-                f"[CREATIVE APPROVAL] Creative {creative_id} approved, checking {len(assignments)} media buy assignments"
-            )
-
-            for assignment in assignments:
-                media_buy_id = assignment.media_buy_id
-                media_buy = uow.media_buys.get_by_id(media_buy_id)
-
-                if not media_buy:
-                    continue
-
-                logger.info(f"[CREATIVE APPROVAL] Media buy {media_buy_id} status: {media_buy.status}")
-
-                if media_buy.status in {"pending_creatives", "draft"}:
-                    # Get all creative assignments for this media buy
-                    all_assignments = uow.assignments.get_by_media_buy(media_buy_id)
-
-                    creative_ids = [a.creative_id for a in all_assignments]
-                    all_creatives = uow.creatives.admin_get_by_ids(creative_ids)
-
-                    unapproved_creatives = [
-                        c.creative_id for c in all_creatives if c.status not in ["approved", "active"]
-                    ]
-
-                    logger.info(
-                        f"[CREATIVE APPROVAL] Media buy {media_buy_id} has {len(unapproved_creatives)} unapproved creatives remaining"
-                    )
-
-                    if not unapproved_creatives:
-                        media_buy_actions.append({"media_buy_id": media_buy_id, "media_buy": media_buy})
-                    else:
-                        logger.info(
-                            f"[CREATIVE APPROVAL] Media buy {media_buy_id} still waiting for {len(unapproved_creatives)} creatives: {unapproved_creatives}"
-                        )
-
-            # UoW auto-commits here
-
-        # --- Post-commit side effects (outside transaction) ---
-        _send_post_commit_side_effects(
-            webhook_data=webhook_data,
-            slack_data=slack_data,
-            audit_data=audit_data,
-            operation="approve_creative",
+        execute_creative_review_side_effects(
+            [side_effect] if side_effect else [],
             tenant_id=tenant_id,
             actor=approved_by,
+            operation="approve_creative",
         )
-
-        # Execute adapter creation for unblocked media buys
-        for action in media_buy_actions:
-            logger.info(
-                f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
-            )
-
-            from src.core.tools.media_buy_create import execute_approved_media_buy
-
-            success, error_msg = execute_approved_media_buy(action["media_buy_id"], tenant_id)
-
-            if success:
-                # Update media buy status in a separate UoW
-                with AdminCreativeUoW(tenant_id) as uow2:
-                    assert uow2.media_buys is not None
-                    mb = uow2.media_buys.get_by_id(action["media_buy_id"])
-                    if mb:
-                        new_status = _compute_media_buy_status_from_flight_dates(mb)
-                        mb.status = new_status
-                        mb.approved_at = datetime.now(UTC)
-                        mb.approved_by = "system"
-                    # auto-commits
-
-                logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
-            else:
-                logger.error(f"[CREATIVE APPROVAL] Adapter creation failed for {action['media_buy_id']}: {error_msg}")
 
         return jsonify({"success": True, "status": "approved"})
 
@@ -662,84 +245,22 @@ def reject_creative(tenant_id, creative_id, **kwargs):
         if not rejection_reason:
             return jsonify({"error": "Rejection reason is required"}), 400
 
-        # Collect data for post-commit side effects
-        webhook_data: dict[str, Any] = {}
-        slack_data: dict[str, Any] = {}
-        audit_data: dict[str, Any] = {}
+        side_effect = None
 
         with AdminCreativeUoW(tenant_id) as uow:
-            assert uow.creatives is not None
-            assert uow.tenant_config is not None
-
-            creative = uow.creatives.admin_get_by_id(creative_id)
-
-            if not creative:
-                return jsonify({"error": "Creative not found"}), 404
-
-            # Check if there was a prior AI review that disagreed
-            prior_ai_review = uow.creatives.get_prior_ai_review(creative_id)
-
-            # Check if this is a human override (AI recommended approve, human rejected)
-            is_override = bool(prior_ai_review and prior_ai_review.ai_decision in ["approved", "approve"])
-
-            _create_human_review_record(
-                uow.creatives,
+            side_effect = apply_creative_review_decision(
+                uow,
                 creative_id=creative_id,
-                tenant_id=tenant_id,
-                principal_id=creative.principal_id,
-                reviewer_email=rejected_by,
-                reason=rejection_reason,
-                is_override=is_override,
-                final_decision="rejected",
+                decision="rejected",
+                actor=rejected_by,
+                rejection_reason=rejection_reason,
             )
 
-            # Update creative status
-            creative.status = "rejected"
-            creative.approved_at = datetime.now(UTC)
-            creative.approved_by = rejected_by
-
-            # Store rejection reason in data field
-            if not creative.data:
-                creative.data = {}
-            creative.data["rejection_reason"] = rejection_reason
-            creative.data["rejected_at"] = datetime.now(UTC).isoformat()
-
-            # Flag JSONB field as modified
-            uow.creatives.update_data(creative, creative.data)
-
-            # Collect webhook data for post-commit
-            webhook_data = {"creative_id": creative_id, "tenant_id": tenant_id}
-
-            # Collect Slack data for post-commit
-            tenant = uow.tenant_config.get_tenant()
-            if tenant and tenant.slack_webhook_url:
-                principal_name = uow.creatives.get_principal_name(creative.principal_id)
-
-                slack_data = {
-                    "slack_webhook_url": tenant.slack_webhook_url,
-                    "message": f"\u274c Creative rejected: {creative.name} ({creative.format}) from {principal_name}\nReason: {rejection_reason}",
-                }
-
-            # Collect audit data for post-commit
-            audit_data = {
-                "creative_id": creative_id,
-                "creative_name": creative.name,
-                "format": creative.format,
-                "principal_id": creative.principal_id,
-                "rejection_reason": rejection_reason,
-                "human_override": is_override,
-            }
-
-            # UoW auto-commits here
-
-        # --- Post-commit side effects (outside transaction) ---
-        _send_post_commit_side_effects(
-            webhook_data=webhook_data,
-            slack_data=slack_data,
-            audit_data=audit_data,
-            operation="reject_creative",
+        execute_creative_review_side_effects(
+            [side_effect] if side_effect else [],
             tenant_id=tenant_id,
             actor=rejected_by,
+            operation="reject_creative",
         )
 
         return jsonify({"success": True, "status": "rejected"})

@@ -17,49 +17,9 @@ from src.core.audit_logger import get_audit_logger
 from src.core.database.repositories.uow import AdminCreativeUoW, WorkflowUoW
 from src.core.exceptions import AdCPAuthenticationError
 from src.core.resolved_identity import ResolvedIdentity
+from src.services.creative_review_service import apply_creative_review_decision, execute_creative_review_side_effects
 
 logger = logging.getLogger(__name__)
-
-
-def _apply_creative_task_decision(
-    *,
-    tenant_id: str,
-    task_id: str,
-    response_data: dict[str, Any] | None,
-    completed_by: str | None,
-) -> None:
-    """Apply creative approval/rejection decisions for workflow-backed creative tasks."""
-    decision = (response_data or {}).get("decision")
-    if decision not in {"approved", "rejected"}:
-        return
-
-    with AdminCreativeUoW(tenant_id) as creative_uow:
-        assert creative_uow.workflows is not None
-        assert creative_uow.creatives is not None
-
-        mappings = creative_uow.workflows.get_mappings_for_step(task_id)
-        creative_ids = [mapping.object_id for mapping in mappings if mapping.object_type == "creative"]
-        if not creative_ids:
-            return
-
-        creatives = creative_uow.creatives.admin_get_by_ids(creative_ids)
-        completed_at = datetime.now(UTC)
-
-        for creative in creatives:
-            if decision == "approved":
-                creative.status = "approved"
-                creative.approved_at = completed_at
-                creative.approved_by = completed_by or "task_management"
-                continue
-
-            creative.status = "rejected"
-            creative.approved_at = completed_at
-            creative.approved_by = completed_by or "task_management"
-            if not creative.data:
-                creative.data = {}
-            creative.data["rejection_reason"] = (response_data or {}).get("reason", "Rejected via complete_task")
-            creative.data["rejected_at"] = completed_at.isoformat()
-            creative_uow.creatives.update_data(creative, creative.data)
 
 
 async def list_tasks(
@@ -262,7 +222,8 @@ async def complete_task(
     if status not in ["completed", "failed"]:
         raise ValueError(f"Invalid status '{status}'. Must be 'completed' or 'failed'")
 
-    with WorkflowUoW(tenant["tenant_id"]) as uow:
+    post_commit_side_effects = []
+    with AdminCreativeUoW(tenant["tenant_id"]) as uow:
         assert uow.workflows is not None
 
         task = uow.workflows.get_by_step_id(task_id)
@@ -279,19 +240,30 @@ async def complete_task(
         completed_time = datetime.now(UTC)
 
         if status == "completed":
+            if task_type == "creative_approval":
+                mappings = uow.workflows.get_mappings_for_step(task_id)
+                decision = (response_data or {}).get("decision")
+                rejection_reason = (response_data or {}).get("rejection_reason") or (response_data or {}).get("reason")
+
+                if decision in {"approved", "rejected"}:
+                    creative_ids = [mapping.object_id for mapping in mappings if mapping.object_type == "creative"]
+                    for creative_id in creative_ids:
+                        post_commit_side_effects.append(
+                            apply_creative_review_decision(
+                                uow,
+                                creative_id=creative_id,
+                                decision=decision,
+                                actor=principal_id or "task_management",
+                                rejection_reason=rejection_reason,
+                            )
+                        )
+
             uow.workflows.update_status(
                 task_id,
                 status=status,
                 completed_at=completed_time,
                 response_data=response_data or {"manually_completed": True, "completed_by": principal_id},
             )
-            if task_type == "creative_approval":
-                _apply_creative_task_decision(
-                    tenant_id=tenant["tenant_id"],
-                    task_id=task_id,
-                    response_data=response_data,
-                    completed_by=principal_id,
-                )
         else:
             uow.workflows.update_status(
                 task_id,
@@ -315,11 +287,18 @@ async def complete_task(
                 "task_type": task_type,
             },
         )
+    if post_commit_side_effects:
+        execute_creative_review_side_effects(
+            post_commit_side_effects,
+            tenant_id=tenant["tenant_id"],
+            actor=principal_id or "task_management",
+            operation="complete_task",
+        )
 
-        return {
+    return {
             "task_id": task_id,
             "status": status,
             "message": f"Task {task_id} marked as {status}",
             "completed_at": completed_time.isoformat(),
             "completed_by": principal_id,
-        }
+    }

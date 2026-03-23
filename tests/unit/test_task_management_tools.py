@@ -263,7 +263,7 @@ class TestCompleteTaskTool:
 
         identity = self._make_identity(sample_tenant)
 
-        with patch("src.core.tools.task_management.WorkflowUoW", return_value=mock_uow):
+        with patch("src.core.tools.task_management.AdminCreativeUoW", return_value=mock_uow):
             result = await complete_task_fn(task_id="step_123", status="completed", identity=identity)
 
         assert result["status"] == "completed"
@@ -289,3 +289,113 @@ class TestCompleteTaskTool:
 
         with pytest.raises(ToolError, match="Invalid status"):
             await complete_task_fn(task_id="step_123", status="invalid_status", identity=identity)
+
+    async def test_complete_task_creative_approval_approved_runs_shared_review_flow(
+        self, mock_uow, mock_workflow_repo, sample_tenant
+    ):
+        """Creative approval completion must use the shared review flow and side effects."""
+        complete_task_fn = await self._get_complete_task_fn()
+
+        approval_step = Mock(spec=WorkflowStep)
+        approval_step.step_id = "step_creative_123"
+        approval_step.context_id = "ctx_123"
+        approval_step.status = "requires_approval"
+        approval_step.step_type = "creative_approval"
+        approval_step.tool_name = "sync_creatives"
+        approval_step.owner = "publisher"
+        approval_step.created_at = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        approval_step.completed_at = None
+        approval_step.request_data = {}
+        approval_step.response_data = None
+        approval_step.error_message = None
+        approval_step.comments = []
+
+        mock_mapping = Mock()
+        mock_mapping.object_type = "creative"
+        mock_mapping.object_id = "creative_123"
+
+        mock_workflow_repo.get_by_step_id.return_value = approval_step
+        mock_workflow_repo.get_mappings_for_step.return_value = [mock_mapping]
+
+        identity = self._make_identity(sample_tenant)
+        side_effect = Mock()
+
+        with (
+            patch("src.core.tools.task_management.AdminCreativeUoW", return_value=mock_uow),
+            patch("src.core.tools.task_management.apply_creative_review_decision", return_value=side_effect) as review,
+            patch("src.core.tools.task_management.execute_creative_review_side_effects") as execute_side_effects,
+        ):
+            result = await complete_task_fn(
+                task_id="step_creative_123",
+                status="completed",
+                response_data={"decision": "approved", "reviewer": "qa@example.com"},
+                identity=identity,
+            )
+
+        assert result["status"] == "completed"
+        review.assert_called_once_with(
+            mock_uow,
+            creative_id="creative_123",
+            decision="approved",
+            actor="principal_123",
+            rejection_reason=None,
+        )
+        execute_side_effects.assert_called_once_with(
+            [side_effect],
+            tenant_id="test_tenant",
+            actor="principal_123",
+            operation="complete_task",
+        )
+
+    async def test_complete_task_creative_approval_rejected_prefers_rejection_reason(
+        self, mock_uow, mock_workflow_repo, sample_tenant
+    ):
+        """Creative rejection completion must persist the normalized rejection reason."""
+        complete_task_fn = await self._get_complete_task_fn()
+
+        rejection_step = Mock(spec=WorkflowStep)
+        rejection_step.step_id = "step_creative_456"
+        rejection_step.context_id = "ctx_456"
+        rejection_step.status = "requires_approval"
+        rejection_step.step_type = "creative_approval"
+        rejection_step.tool_name = "sync_creatives"
+        rejection_step.owner = "publisher"
+        rejection_step.created_at = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        rejection_step.completed_at = None
+        rejection_step.request_data = {}
+        rejection_step.response_data = None
+        rejection_step.error_message = None
+        rejection_step.comments = []
+
+        mock_mapping = Mock()
+        mock_mapping.object_type = "creative"
+        mock_mapping.object_id = "creative_456"
+
+        mock_workflow_repo.get_by_step_id.return_value = rejection_step
+        mock_workflow_repo.get_mappings_for_step.return_value = [mock_mapping]
+
+        identity = self._make_identity(sample_tenant)
+
+        with (
+            patch("src.core.tools.task_management.AdminCreativeUoW", return_value=mock_uow),
+            patch("src.core.tools.task_management.apply_creative_review_decision", return_value=Mock()) as review,
+            patch("src.core.tools.task_management.execute_creative_review_side_effects"),
+        ):
+            await complete_task_fn(
+                task_id="step_creative_456",
+                status="completed",
+                response_data={
+                    "decision": "rejected",
+                    "reason": "legacy value",
+                    "rejection_reason": "Policy violation",
+                },
+                identity=identity,
+            )
+
+        review.assert_called_once_with(
+            mock_uow,
+            creative_id="creative_456",
+            decision="rejected",
+            actor="principal_123",
+            rejection_reason="Policy violation",
+        )
