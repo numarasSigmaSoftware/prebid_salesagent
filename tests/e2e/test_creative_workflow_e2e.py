@@ -221,8 +221,7 @@ class TestCreativeWorkflow:
             assert "creatives" in list_data, "list_creatives must return creatives key"
             creative_ids = [c["creative_id"] for c in list_data["creatives"]]
             assert creative_id in creative_ids, (
-                f"Synced creative {creative_id} must appear in list_creatives response for "
-                f"{setup['tenant_subdomain']}"
+                f"Synced creative {creative_id} must appear in list_creatives response for {setup['tenant_subdomain']}"
             )
 
     @pytest.mark.asyncio

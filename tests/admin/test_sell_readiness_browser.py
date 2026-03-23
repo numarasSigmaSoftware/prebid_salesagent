@@ -8,6 +8,7 @@ import uuid
 
 import pytest
 
+from tests.admin.browser_flow_helpers import browser_page, install_dialog_recorder, login_as_tenant_admin
 from tests.e2e.adcp_request_builder import build_adcp_media_buy_request, get_test_date_range, parse_tool_result
 from tests.e2e.admin_flow_helpers import (
     bootstrap_tenant_via_container,
@@ -24,7 +25,6 @@ from tests.e2e.admin_flow_helpers import (
 )
 from tests.e2e.conftest import GAM_TEST_NETWORK_CODE
 from tests.e2e.utils import make_mcp_client
-from tests.admin.browser_flow_helpers import browser_page, install_dialog_recorder, login_as_tenant_admin
 
 pytestmark = [pytest.mark.ui, pytest.mark.e2e, pytest.mark.requires_server]
 
@@ -117,7 +117,9 @@ def test_workflow_approval_browser_flow(docker_services_e2e, live_server):
                 {"brief": "display advertising", "context": {"e2e": "browser_approval_discovery"}},
             )
             products_payload = parse_tool_result(products_result)
-            product = next(product for product in products_payload["products"] if product["product_id"] == setup["product_id"])
+            product = next(
+                product for product in products_payload["products"] if product["product_id"] == setup["product_id"]
+            )
 
             start_time, end_time = get_test_date_range(days_from_now=1, duration_days=14)
             create_request = build_adcp_media_buy_request(

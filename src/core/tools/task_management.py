@@ -296,9 +296,9 @@ async def complete_task(
         )
 
     return {
-            "task_id": task_id,
-            "status": status,
-            "message": f"Task {task_id} marked as {status}",
-            "completed_at": completed_time.isoformat(),
-            "completed_by": principal_id,
+        "task_id": task_id,
+        "status": status,
+        "message": f"Task {task_id} marked as {status}",
+        "completed_at": completed_time.isoformat(),
+        "completed_by": principal_id,
     }
