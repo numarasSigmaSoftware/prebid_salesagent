@@ -331,6 +331,9 @@ def bootstrap_tenant_via_container(
     tenant_id: str,
     subdomain: str,
     name: str,
+    auth_setup_mode: bool = True,
+    human_review_required: bool = False,
+    approval_mode: str = "auto-approve",
 ) -> None:
     """Create a minimal tenant and baseline records inside the app container."""
     bootstrap_script = f"""
@@ -344,6 +347,9 @@ from src.core.database.models import CurrencyLimit, PropertyTag, Tenant, TenantA
 tenant_id = {tenant_id!r}
 subdomain = {subdomain!r}
 name = {name!r}
+auth_setup_mode = {auth_setup_mode!r}
+human_review_required = {human_review_required!r}
+approval_mode = {approval_mode!r}
 
 with get_db_session() as session:
     tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -357,13 +363,18 @@ with get_db_session() as session:
             enable_axe_signals=True,
             is_active=True,
             authorized_emails=["ci-test@example.com"],
-            auth_setup_mode=False,
+            auth_setup_mode=auth_setup_mode,
             auto_approve_format_ids=[],
-            human_review_required=False,
+            human_review_required=human_review_required,
+            approval_mode=approval_mode,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
         session.add(tenant)
+    else:
+        tenant.auth_setup_mode = auth_setup_mode
+        tenant.human_review_required = human_review_required
+        tenant.approval_mode = approval_mode
 
     tag = session.scalars(select(PropertyTag).filter_by(tenant_id=tenant_id, tag_id="all_inventory")).first()
     if not tag:
@@ -422,3 +433,34 @@ with get_db_session() as session:
         raise AssertionError(
             f"Failed to bootstrap tenant {tenant_id}: rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
         )
+
+
+async def bootstrap_review_ready_tenant(
+    live_server: dict[str, Any],
+    *,
+    tenant_prefix: str,
+    seed_auth_token: str = "ci-test-token",
+) -> dict[str, str]:
+    """Create a tenant explicitly configured for manual-review approval flows."""
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"{tenant_prefix}_{suffix}"
+    subdomain = tenant_id.replace("_", "-")
+
+    bootstrap_tenant_via_container(
+        tenant_id=tenant_id,
+        subdomain=subdomain,
+        name=f"{tenant_prefix.replace('_', ' ').title()} {suffix}",
+        auth_setup_mode=True,
+        human_review_required=True,
+        approval_mode="require-human",
+    )
+
+    provisioned = await provision_sellable_product(
+        live_server,
+        tenant_id,
+        product_suffix=f"{tenant_prefix}_{suffix}",
+        seed_auth_token=seed_auth_token,
+    )
+    provisioned["tenant_id"] = tenant_id
+    provisioned["tenant_subdomain"] = subdomain
+    return provisioned

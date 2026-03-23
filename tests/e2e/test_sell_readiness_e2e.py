@@ -13,6 +13,7 @@ from tests.e2e.adcp_request_builder import (
 )
 from tests.e2e.admin_flow_helpers import (
     approve_workflow_step,
+    bootstrap_review_ready_tenant,
     create_admin_session,
     create_principal,
     get_latest_workflow_step_for_media_buy,
@@ -85,14 +86,11 @@ class TestMediaBuyApproval:
 
     @pytest.mark.asyncio
     async def test_media_buy_real_approval_e2e(self, docker_services_e2e, live_server):
-        ci_tenant_id = get_tenant_id_by_subdomain(live_server, "ci-test")
         suffix = uuid.uuid4().hex[:8]
-        setup = await provision_sellable_product(
+        setup = await bootstrap_review_ready_tenant(
             live_server,
-            ci_tenant_id,
-            product_suffix=f"approval_{suffix}",
+            tenant_prefix=f"approval_{suffix}",
         )
-        setup["tenant_subdomain"] = "ci-test"
 
         async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
             products_result = await client.call_tool(
@@ -136,11 +134,11 @@ class TestMediaBuyApproval:
                 step_id = latest_step["step_id"]
                 workflow_id = latest_step["workflow_id"]
 
-            admin_session = create_admin_session(live_server, ci_tenant_id)
+            admin_session = create_admin_session(live_server, setup["tenant_id"])
             approve_workflow_step(
                 admin_session,
                 live_server,
-                ci_tenant_id,
+                setup["tenant_id"],
                 workflow_id=workflow_id,
                 step_id=step_id,
             )

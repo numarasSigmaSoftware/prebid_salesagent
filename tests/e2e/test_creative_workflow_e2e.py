@@ -8,8 +8,8 @@ Covers the creative approval gate:
     → complete_task (approve)
     → list_creatives (verify approved status)
 
-The CI tenant uses approval_mode="require-human" (Tenant default), so every
-sync_creatives call with status="pending_review" triggers a workflow task.
+These assertions run against a purpose-built require-human tenant so the
+workflow gate stays stable even if shared CI tenant defaults change.
 
 Note: complete_task marks the workflow step as done. The creative status
 transition (pending_review → approved) is validated via list_creatives.
@@ -26,6 +26,7 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
+from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client
 
 
@@ -38,12 +39,24 @@ class TestCreativeWorkflow:
             {"brief": "display advertising", "context": {"e2e": context_label}},
         )
         products_data = parse_tool_result(products_result)
-        assert len(products_data["products"]) > 0, "CI tenant must have at least one product"
+        assert len(products_data["products"]) > 0, "Review-ready tenant must have at least one product"
 
         product = products_data["products"][0]
         format_ids = product.get("format_ids", [])
         assert len(format_ids) > 0, "Product must have at least one format_id"
         return format_ids[0]
+
+    async def _bootstrap_review_client(self, live_server):
+        setup = await bootstrap_review_ready_tenant(
+            live_server,
+            tenant_prefix="creative_workflow",
+        )
+        client_cm = make_mcp_client(
+            live_server,
+            setup["access_token"],
+            tenant=setup["tenant_subdomain"],
+        )
+        return setup, client_cm
 
     async def _sync_pending_review_creative(self, client, *, context_label: str, creative_prefix: str) -> str:
         format_id = await self._get_display_format_id(client, context_label)
@@ -68,7 +81,8 @@ class TestCreativeWorkflow:
     @pytest.mark.asyncio
     async def test_sync_creatives_creates_workflow_task(self, docker_services_e2e, live_server, test_auth_token):
         """sync_creatives with pending_review status must create workflow tasks visible via list_tasks."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup, client_cm = await self._bootstrap_review_client(live_server)
+        async with client_cm as client:
             creative_id = await self._sync_pending_review_creative(
                 client,
                 context_label="creative_workflow",
@@ -85,7 +99,8 @@ class TestCreativeWorkflow:
             assert "tasks" in tasks_data, "list_tasks must return tasks key"
             tasks = tasks_data["tasks"]
             assert len(tasks) > 0, (
-                f"Pending-review creative {creative_id} must create a workflow task in ci-test, "
+                f"Pending-review creative {creative_id} must create a workflow task in "
+                f"{setup['tenant_subdomain']}, "
                 "but list_tasks returned no tasks"
             )
 
@@ -105,7 +120,8 @@ class TestCreativeWorkflow:
     @pytest.mark.asyncio
     async def test_complete_task_approves_creative(self, docker_services_e2e, live_server, test_auth_token):
         """complete_task on a creative_review task must approve the creative and complete the task."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup, client_cm = await self._bootstrap_review_client(live_server)
+        async with client_cm as client:
             creative_id = await self._sync_pending_review_creative(
                 client,
                 context_label="creative_complete_task",
@@ -119,7 +135,8 @@ class TestCreativeWorkflow:
             tasks_data = parse_tool_result(tasks_result)
             tasks = tasks_data.get("tasks", [])
             assert len(tasks) > 0, (
-                f"Pending-review creative {creative_id} must expose a pending workflow task in ci-test"
+                f"Pending-review creative {creative_id} must expose a pending workflow task in "
+                f"{setup['tenant_subdomain']}"
             )
 
             task_id = tasks[0]["task_id"]

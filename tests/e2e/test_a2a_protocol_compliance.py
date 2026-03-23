@@ -28,11 +28,11 @@ class TestA2AProtocolCompliance:
     @pytest.mark.asyncio
     async def test_update_media_buy_request_schema_structure(self):
         """
-        Test that update_media_buy schema uses 'packages' field.
+        Test that update_media_buy schema keeps the current AdCP field shape.
 
         This test validates:
         1. Schema uses 'packages' field (not 'updates')
-        2. Schema structure matches AdCP v2.0+ spec
+        2. Schema exposes the current identifier and concurrency fields
 
         Regression test for: A2A server expecting 'updates' instead of 'packages'
         """
@@ -40,12 +40,15 @@ class TestA2AProtocolCompliance:
             # Load official AdCP schema
             schema = await validator.get_schema("/schemas/v1/media-buy/update-media-buy-request.json")
 
-            # Verify schema uses 'packages' field (not 'updates')
-            assert "packages" in schema["properties"], "AdCP schema should define 'packages' field"
-            assert "updates" not in schema["properties"], "AdCP schema should NOT have legacy 'updates' field"
+            properties = schema["properties"]
 
-            # Verify other required structure
-            assert "oneOf" in schema, "Schema should have oneOf constraint for media_buy_id/buyer_ref"
+            # Verify schema uses 'packages' field (not 'updates')
+            assert "packages" in properties, "AdCP schema should define 'packages' field"
+            assert "updates" not in properties, "AdCP schema should NOT have legacy 'updates' field"
+
+            # The current upstream schema no longer exposes the older oneOf gate here.
+            assert "media_buy_id" in properties, "Schema should expose media_buy_id"
+            assert "revision" in properties, "Schema should expose optimistic-concurrency revision"
 
     @pytest.mark.asyncio
     async def test_update_media_buy_schema_validates_correctly(self):
@@ -127,14 +130,19 @@ class TestA2AProtocolCompliance:
         """
         Test that get_media_buy_delivery uses correct parameter names.
 
-        Validates the request accepts AdCP-compliant field names.
+        Validates the request accepts the current AdCP-compliant field names.
         """
         async with AdCPSchemaValidator(offline_mode=False) as validator:
             schema = await validator.get_schema("/schemas/v1/media-buy/get-media-buy-delivery-request.json")
 
+            properties = schema["properties"]
+
             # Verify expected fields from AdCP spec
-            assert "media_buy_ids" in schema["properties"], "Should accept media_buy_ids (plural) per AdCP spec"
-            assert "buyer_refs" in schema["properties"], "Should accept buyer_refs for querying by buyer reference"
+            assert "media_buy_ids" in properties, "Should accept media_buy_ids (plural) per AdCP spec"
+            assert "account" in properties, "Should expose account-scoped delivery filtering"
+            assert "start_date" in properties and "end_date" in properties, (
+                "Should expose date-range reporting fields from the current AdCP schema"
+            )
 
             # Validate a minimal valid request
             valid_request = {"media_buy_ids": ["mb_1", "mb_2"]}
