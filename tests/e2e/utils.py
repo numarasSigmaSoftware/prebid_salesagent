@@ -1,9 +1,38 @@
 import subprocess
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 import psycopg2
 import pytest
+
+
+@asynccontextmanager
+async def make_mcp_client(live_server: dict[str, Any], auth_token: str, tenant: str = "ci-test") -> AsyncIterator:
+    """
+    Async context manager that creates an MCP Client for E2E tests.
+
+    This is a shared helper to avoid repeating the headers + transport setup
+    in every test method. Unlike the e2e_client fixture, this does NOT set
+    X-Dry-Run, so state-changing calls (create, update, complete) work.
+
+    Usage::
+
+        async with make_mcp_client(live_server, test_auth_token) as client:
+            result = await client.call_tool("get_products", {...})
+    """
+    from fastmcp.client import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    headers = {
+        "x-adcp-auth": auth_token,
+        "x-adcp-tenant": tenant,
+    }
+    transport = StreamableHttpTransport(url=f"{live_server['mcp']}/mcp/", headers=headers)
+    async with Client(transport=transport) as client:
+        yield client
 
 
 def wait_for_server_readiness(mcp_url: str, timeout: int = 60):

@@ -29,7 +29,7 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
-from tests.e2e.utils import force_approve_media_buy_in_db, wait_for_server_readiness
+from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client, wait_for_server_readiness
 
 
 class DeliveryWebhookReceiver(BaseHTTPRequestHandler):
@@ -317,3 +317,77 @@ class TestDailyDeliveryWebhookFlow:
                     f"Expected notification_type 'scheduled', got {result.get('notification_type')}"
                 )
                 assert "next_expected_at" in result, "Missing next_expected_at in result"
+
+
+class TestUpdatePerformanceIndex:
+    """E2E test for the update_performance_index tool."""
+
+    @pytest.mark.asyncio
+    async def test_update_performance_index_accepted(
+        self,
+        docker_services_e2e,
+        live_server,
+        test_auth_token,
+    ):
+        """
+        update_performance_index must accept valid performance data for an existing media buy.
+
+        Flow:
+          get_products → create_media_buy → force_approve → update_performance_index
+        """
+        async with make_mcp_client(live_server, test_auth_token) as client:
+            # Discover product
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "perf_index"}},
+            )
+            products_data = parse_tool_result(products_result)
+            assert len(products_data["products"]) > 0
+            product = products_data["products"][0]
+            product_id = product["product_id"]
+            pricing_option_id = product["pricing_options"][0]["pricing_option_id"]
+
+            # Create media buy
+            _, end_time = get_test_date_range(days_from_now=0, duration_days=7)
+            media_buy_request = build_adcp_media_buy_request(
+                product_ids=[product_id],
+                total_budget=1000.0,
+                start_time="asap",
+                end_time=end_time,
+                brand={"domain": "perftest.com"},
+                pricing_option_id=pricing_option_id,
+                context={"e2e": "perf_index"},
+            )
+            create_result = await client.call_tool("create_media_buy", media_buy_request)
+            create_data = parse_tool_result(create_result)
+            media_buy_id = create_data["media_buy_id"]
+
+            # Force-approve so the media buy is visible to performance tools
+            force_approve_media_buy_in_db(live_server, media_buy_id)
+
+            # Submit performance feedback
+            perf_result = await client.call_tool(
+                "update_performance_index",
+                {
+                    "media_buy_id": media_buy_id,
+                    "performance_data": [
+                        {
+                            "product_id": product_id,
+                            "performance_index": 0.85,
+                        }
+                    ],
+                    "context": {"e2e": "perf_index"},
+                },
+            )
+            perf_data = parse_tool_result(perf_result)
+
+            # update_performance_index currently returns an acknowledgement-only contract.
+            # Until there is a production read path for the submitted performance index,
+            # assert the strongest stable tool response available.
+            assert perf_data["status"] == "success", f"Expected success status, got: {perf_data}"
+            assert perf_data["detail"] == "Performance index updated for 1 products", (
+                f"Unexpected performance update detail: {perf_data}"
+            )
+            assert perf_data.get("context", {}).get("e2e") == "perf_index", (
+                f"Expected context echo for perf_index update, got: {perf_data}"
+            )

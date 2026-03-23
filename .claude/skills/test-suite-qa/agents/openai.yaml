@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Suite QA"
+  short_description: "Review new tests for real regression coverage"
+  default_prompt: "Use $test-suite-qa to review the latest branch changes for meaningful tests and regression-catching coverage."
