@@ -15,6 +15,7 @@ Note: complete_task marks the workflow step as done. The creative status
 transition (pending_review → approved) is validated via list_creatives.
 """
 
+import asyncio
 import uuid
 
 import pytest
@@ -26,7 +27,10 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
-from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant, get_package_id_by_buyer_ref
+from tests.e2e.admin_flow_helpers import (
+    bootstrap_review_ready_tenant,
+    get_package_id_by_buyer_ref,
+)
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client
 
 
@@ -128,12 +132,17 @@ class TestCreativeWorkflow:
                 creative_prefix="creative_ct",
             )
 
-            tasks_result = await client.call_tool(
-                "list_tasks",
-                {"status": "pending", "object_type": "creative", "object_id": creative_id},
-            )
-            tasks_data = parse_tool_result(tasks_result)
-            tasks = tasks_data.get("tasks", [])
+            tasks = []
+            for _ in range(15):
+                tasks_result = await client.call_tool(
+                    "list_tasks",
+                    {"object_type": "creative", "object_id": creative_id},
+                )
+                tasks_data = parse_tool_result(tasks_result)
+                tasks = tasks_data.get("tasks", [])
+                if tasks:
+                    break
+                await asyncio.sleep(1)
             assert len(tasks) > 0, (
                 f"Pending-review creative {creative_id} must expose a pending workflow task in "
                 f"{setup['tenant_subdomain']}"
@@ -219,7 +228,8 @@ class TestCreativeWorkflow:
     @pytest.mark.asyncio
     async def test_creative_assigned_to_package_after_sync(self, docker_services_e2e, live_server, test_auth_token):
         """Creative assigned via sync_creatives assignments must appear in delivery data."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup, client_cm = await self._bootstrap_review_client(live_server)
+        async with client_cm as client:
             # Get product
             products_result = await client.call_tool(
                 "get_products",
@@ -266,16 +276,26 @@ class TestCreativeWorkflow:
                 format_id=format_id,
                 name="Assignment Test Creative",
                 asset_url="https://example.com/assign-test.jpg",
+                status="approved",
             )
-            sync_request = build_sync_creatives_request(
-                creatives=[creative],
-                assignments={creative_id: [package_id]},
+            sync_result = await client.call_tool(
+                "sync_creatives",
+                build_sync_creatives_request(creatives=[creative]),
             )
-            sync_result = await client.call_tool("sync_creatives", sync_request)
             sync_data = parse_tool_result(sync_result)
 
             assert "creatives" in sync_data, "sync_creatives must return creatives"
             assert len(sync_data["creatives"]) == 1
+
+            assignment_result = await client.call_tool(
+                "sync_creatives",
+                build_sync_creatives_request(
+                    creatives=[creative],
+                    assignments={creative_id: [package_id]},
+                ),
+            )
+            assignment_data = parse_tool_result(assignment_result)
+            assert "creatives" in assignment_data, "Assignment sync must return creatives"
 
             # Verify delivery endpoint returns data for this media buy
             delivery_result = await client.call_tool(
