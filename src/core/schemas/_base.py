@@ -1614,6 +1614,8 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     - media_buy_id: optional (library variant1 requires it; oneOf handled at app level)
     - start_time/end_time: accept raw datetime/str (backward compat with A2A path)
     - packages: use our AdCPPackageUpdate (adds creative_ids)
+    - revision/canceled/cancellation_reason/new_packages: forward-compatible spec fields
+      not yet present in the adcp library version we consume
     - budget: campaign-level budget (not in library — convenience field)
     - today: internal testing field
     """
@@ -1626,6 +1628,13 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     end_time: datetime | None = None
     # Override packages to use our extended type with creative_ids
     packages: list[AdCPPackageUpdate] | None = None  # type: ignore[assignment]
+    # Forward-compatible AdCP fields missing from the current library release.
+    # Keep these permissive so spec-aligned clients are accepted even before the
+    # generated library models catch up.
+    revision: int | None = None
+    canceled: bool | None = None
+    cancellation_reason: str | None = None
+    new_packages: list[dict[str, Any]] | None = None
     # Campaign-level budget (not in library spec — convenience field)
     # Bare float is accepted so transport wrappers can preserve existing DB currency
     # when the caller updates only the amount.
@@ -1706,6 +1715,10 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
                 self.start_time,
                 self.end_time,
                 self.packages,
+                self.revision,
+                self.canceled,
+                self.cancellation_reason,
+                self.new_packages,
                 self.budget,
                 self.push_notification_config,
                 self.reporting_webhook,
