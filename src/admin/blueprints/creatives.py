@@ -34,6 +34,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.core.database.repositories.creative import CreativeRepository
 from src.core.database.repositories.uow import AdminCreativeUoW
 
 # Note: CreativeFormat table was dropped in migration f2addf453200

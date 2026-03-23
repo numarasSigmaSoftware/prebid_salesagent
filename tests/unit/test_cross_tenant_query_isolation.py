@@ -238,7 +238,7 @@ class TestAdminDeliveryTenantIsolation:
         which enforces tenant_id on every query by construction.
         Verify the repository is used rather than raw select() calls.
         """
-        source_path = ROOT / "src/admin/blueprints/creatives.py"
+        source_path = ROOT / "src/services/creative_review_service.py"
         tree = ast.parse(source_path.read_text())
 
         func_node = None
@@ -258,7 +258,7 @@ class TestAdminDeliveryTenantIsolation:
 
         # Verify no raw select(Creative) calls bypass the repository
         selects = _extract_select_calls(
-            "src/admin/blueprints/creatives.py",
+            "src/services/creative_review_service.py",
             "_call_webhook_for_creative_status",
         )
         creative_selects = [s for s in selects if s["model"] in ("Creative", "CreativeModel")]

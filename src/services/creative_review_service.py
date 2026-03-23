@@ -153,6 +153,7 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
 
             logger.info(f"All {len(all_creatives)} creatives in task {step.step_id} have been reviewed; firing webhook")
 
+            from a2a.types import Task, TaskStatusUpdateEvent
             from adcp.types import McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
             from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
             from adcp.webhooks import GeneratedTaskStatus
@@ -189,25 +190,26 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
 
             webhook_service = get_protocol_webhook_service()
 
+            payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
             if protocol == "a2a":
                 payload = create_a2a_webhook_payload(
                     task_id=step.context_id,
-                    status=GeneratedTaskStatus.COMPLETED,
-                    response=response,
+                    status=GeneratedTaskStatus.completed,
+                    context_id=step.context_id,
+                    result=response,
                 )
             else:
-                payload = create_mcp_webhook_payload(
-                    payload=McpWebhookPayload(
-                        task_id=step.context_id,
-                        status=GeneratedTaskStatus.COMPLETED,
-                        response=response,
-                    )
+                mcp_payload_dict = create_mcp_webhook_payload(
+                    task_id=step.context_id,
+                    status=GeneratedTaskStatus.completed,
+                    result=response,
                 )
+                payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
 
-            return webhook_service.send(
+            return await webhook_service.send_notification(
                 push_notification_config=push_config,
                 payload=payload,
-                protocol=protocol,
+                metadata={"task_type": step.tool_name},
             )
     except Exception as e:
         logger.warning(f"Failed to send creative status webhook for {creative_id}: {e}")
