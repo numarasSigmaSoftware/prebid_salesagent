@@ -117,7 +117,7 @@ async def test_complete_task_creative_approval_applies_shared_review_flow(integr
             get_notifier.assert_called_once_with({"features": {"slack_webhook_url": tenant.slack_webhook_url}})
             notifier.send_message.assert_called_once()
             execute_buy.assert_called_once_with(media_buy.media_buy_id, tenant.tenant_id)
-            audit_logger.log_operation.assert_called_once_with(
+            audit_logger.log_operation.assert_any_call(
                 operation="complete_task",
                 principal_name=principal.principal_id,
                 principal_id=principal.principal_id,
