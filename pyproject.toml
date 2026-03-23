@@ -52,6 +52,7 @@ dependencies = [
     "cryptography>=46.0.5",  # GHSA-r6ph-v2qm-q3c2
     "pillow>=12.1.1",  # GHSA-cfh3-3jmp-rvhc
     "python-multipart>=0.0.22",  # GHSA-wp53-j4wj-2cfg
+    "pyasn1>=0.6.3",  # GHSA-jr27-m4p2-rc6r
 ]
 
 
@@ -102,6 +103,8 @@ dev = [
     "types-pytz>=2025.2.0.20250809",
     "types-waitress>=3.0.1.20250801",
     "pytest-json-report>=1.5.0",
+    "pytest-bdd>=7.0.0",
+    "semgrep>=1.50.0",
     "pylint>=4.0.5",
     # Security patches for transitive dev dependencies
     "black>=26.3.1",  # GHSA-3936-cmfr-pm3m
