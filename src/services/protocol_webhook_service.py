@@ -23,7 +23,12 @@ from uuid import uuid4
 
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import extract_webhook_result_data, get_adcp_signed_headers_for_webhook
+from adcp import (
+    create_a2a_webhook_payload,
+    create_mcp_webhook_payload,
+    extract_webhook_result_data,
+    get_adcp_signed_headers_for_webhook,
+)
 from adcp.types import McpWebhookPayload
 
 from src.core.audit_logger import get_audit_logger
@@ -134,6 +139,43 @@ class ProtocolWebhookService:
         # Send notification with retry logic and logging
         return await self._send_with_retry_and_logging(
             url=url, payload=payload_dict, headers=headers, metadata=metadata
+        )
+
+    async def send_creative_review_notification(
+        self,
+        *,
+        push_notification_config: PushNotificationConfig,
+        protocol: str,
+        context_id: str,
+        response_payload: dict[str, Any],
+        tool_name: str | None = None,
+    ) -> bool:
+        """Build protocol payload for creative review completion and deliver webhook.
+
+        Encapsulates the A2A vs MCP payload-building so callers remain transport-agnostic.
+        """
+        from adcp.webhooks import GeneratedTaskStatus
+
+        payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
+        if protocol == "a2a":
+            payload = create_a2a_webhook_payload(
+                task_id=context_id,
+                status=GeneratedTaskStatus.completed,
+                context_id=context_id,
+                result=response_payload,
+            )
+        else:
+            mcp_payload_dict = create_mcp_webhook_payload(
+                task_id=context_id,
+                status=GeneratedTaskStatus.completed,
+                result=response_payload,
+            )
+            payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
+
+        return await self.send_notification(
+            push_notification_config=push_notification_config,
+            payload=payload,
+            metadata={"task_type": tool_name},
         )
 
     @staticmethod

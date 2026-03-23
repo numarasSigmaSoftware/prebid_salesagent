@@ -11,8 +11,8 @@ from src.core.context_manager import ContextManager
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeReview, MediaBuy, WorkflowStep
 from src.core.tools.task_management import complete_task
-from tests.harness._base import IntegrationEnv
 from tests.factories import CreativeAssignmentFactory, CreativeFactory, MediaBuyFactory, PrincipalFactory, TenantFactory
+from tests.harness._base import IntegrationEnv
 
 
 @pytest.mark.integration
@@ -66,12 +66,14 @@ async def test_complete_task_creative_approval_applies_shared_review_flow(integr
 
         with (
             patch(
-                "src.services.creative_review_service._call_webhook_for_creative_status",
+                "src.services.creative_review_service.call_webhook_for_creative_status",
                 new=AsyncMock(return_value=True),
             ) as webhook,
             patch("src.services.slack_notifier.get_slack_notifier", return_value=notifier) as get_notifier,
             patch("src.core.audit_logger.AuditLogger", return_value=audit_logger),
-            patch("src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)) as execute_buy,
+            patch(
+                "src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)
+            ) as execute_buy,
         ):
             result = await complete_task(
                 task_id=step.step_id,

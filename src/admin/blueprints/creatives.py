@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src.services.creative_review_service import (
-    _call_webhook_for_creative_status,
     apply_creative_review_decision,
+    call_webhook_for_creative_status,
     execute_creative_review_side_effects,
 )
 
@@ -380,7 +380,7 @@ async def _ai_review_creative_async(
                 logger.warning(f"[AI Review Async] Failed to send Slack notification: {slack_e}")
 
         if should_call_webhook:
-            asyncio.run(_call_webhook_for_creative_status(creative_id=creative_id, tenant_id=tenant_id))
+            await call_webhook_for_creative_status(creative_id=creative_id, tenant_id=tenant_id)
             logger.info(f"[AI Review Async] Webhook called for {creative_id}")
 
     except Exception as e:

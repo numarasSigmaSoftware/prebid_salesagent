@@ -232,7 +232,7 @@ class TestAdminDeliveryTenantIsolation:
     """salesagent-gcjx: admin blueprints + delivery queries missing tenant_id."""
 
     def test_webhook_creative_query_scopes_by_tenant(self):
-        """_call_webhook_for_creative_status Creative access must be tenant-scoped.
+        """call_webhook_for_creative_status Creative access must be tenant-scoped.
 
         Creative access was migrated to CreativeRepository (salesagent-p6i),
         which enforces tenant_id on every query by construction.
@@ -245,7 +245,7 @@ class TestAdminDeliveryTenantIsolation:
         for node in ast.walk(tree):
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "_call_webhook_for_creative_status"
+                and node.name == "call_webhook_for_creative_status"
             ):
                 func_node = node
                 break
@@ -253,17 +253,17 @@ class TestAdminDeliveryTenantIsolation:
         assert func_node is not None
         source_text = ast.get_source_segment(source_path.read_text(), func_node)
         assert "AdminCreativeUoW" in source_text, (
-            "_call_webhook_for_creative_status must use AdminCreativeUoW for tenant-scoped access"
+            "call_webhook_for_creative_status must use AdminCreativeUoW for tenant-scoped access"
         )
 
         # Verify no raw select(Creative) calls bypass the repository
         selects = _extract_select_calls(
             "src/services/creative_review_service.py",
-            "_call_webhook_for_creative_status",
+            "call_webhook_for_creative_status",
         )
         creative_selects = [s for s in selects if s["model"] in ("Creative", "CreativeModel")]
         assert not creative_selects, (
-            f"_call_webhook_for_creative_status should use CreativeRepository, not raw select(Creative). "
+            f"call_webhook_for_creative_status should use CreativeRepository, not raw select(Creative). "
             f"Found {len(creative_selects)} raw query(ies)."
         )
 

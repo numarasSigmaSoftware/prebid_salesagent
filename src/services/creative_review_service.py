@@ -110,7 +110,7 @@ def _create_human_review_record(
     return human_review
 
 
-async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) -> bool:
+async def call_webhook_for_creative_status(creative_id: str, tenant_id: str) -> bool:
     """Send protocol-level push notification for creative status update."""
     if not tenant_id:
         raise ValueError("tenant_id is required for _call_webhook_for_creative_status")
@@ -153,10 +153,7 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
 
             logger.info(f"All {len(all_creatives)} creatives in task {step.step_id} have been reviewed; firing webhook")
 
-            from a2a.types import Task, TaskStatusUpdateEvent
-            from adcp.types import McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
-            from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
-            from adcp.webhooks import GeneratedTaskStatus
+            from adcp.types import SyncCreativeResult, SyncCreativesSuccessResponse
 
             creatives: list[SyncCreativeResult] = [
                 SyncCreativeResult(
@@ -191,26 +188,12 @@ async def _call_webhook_for_creative_status(creative_id: str, tenant_id: str) ->
 
             webhook_service = get_protocol_webhook_service()
 
-            payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
-            if protocol == "a2a":
-                payload = create_a2a_webhook_payload(
-                    task_id=step.context_id,
-                    status=GeneratedTaskStatus.completed,
-                    context_id=step.context_id,
-                    result=response_payload,
-                )
-            else:
-                mcp_payload_dict = create_mcp_webhook_payload(
-                    task_id=step.context_id,
-                    status=GeneratedTaskStatus.completed,
-                    result=response_payload,
-                )
-                payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
-
-            return await webhook_service.send_notification(
+            return await webhook_service.send_creative_review_notification(
                 push_notification_config=push_config,
-                payload=payload,
-                metadata={"task_type": step.tool_name},
+                protocol=protocol,
+                context_id=step.context_id,
+                response_payload=response_payload,
+                tool_name=step.tool_name,
             )
     except Exception as e:
         logger.warning(f"Failed to send creative status webhook for {creative_id}: {e}")
@@ -334,7 +317,7 @@ def execute_creative_review_side_effects(
     for effect in side_effects:
         if effect.webhook_data:
             _run_async_side_effect(
-                _call_webhook_for_creative_status(
+                call_webhook_for_creative_status(
                     creative_id=effect.webhook_data["creative_id"],
                     tenant_id=effect.webhook_data["tenant_id"],
                 )
@@ -370,7 +353,9 @@ def execute_creative_review_side_effects(
     from src.core.tools.media_buy_create import execute_approved_media_buy
 
     for media_buy_id in sorted(media_buy_ids_to_execute):
-        logger.info(f"[CREATIVE REVIEW] All creatives approved for media buy {media_buy_id}, executing adapter creation")
+        logger.info(
+            f"[CREATIVE REVIEW] All creatives approved for media buy {media_buy_id}, executing adapter creation"
+        )
         success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
         if success:
             with AdminCreativeUoW(tenant_id) as uow:
