@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -212,6 +213,13 @@ def get_latest_workflow_step_for_media_buy(live_server: dict[str, Any], media_bu
     return {"step_id": row[0], "workflow_id": row[1]}
 
 
+def get_media_buy_status(live_server: dict[str, Any], media_buy_id: str) -> str | None:
+    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT status FROM media_buys WHERE media_buy_id = %s", (media_buy_id,))
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def approve_workflow_step(
     session: requests.Session,
     live_server: dict[str, Any],
@@ -250,6 +258,72 @@ def wait_until(
 
 def unique_suffix(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+async def provision_sellable_product(
+    live_server: dict[str, Any],
+    tenant_id: str,
+    *,
+    product_suffix: str,
+    seed_auth_token: str = "ci-test-token",
+    enable_mock: bool = True,
+    gam_advertiser_id: str | None = None,
+) -> dict[str, str]:
+    """Create the minimum publisher setup needed for a sellable product."""
+    admin_session = create_admin_session(live_server, tenant_id)
+    new_tag = unique_suffix(f"sell_ready_tag_{product_suffix}").lower()
+    publisher_domain = f"{product_suffix}.e2e.example.com"
+    principal_name = f"E2E Principal {product_suffix}"
+    product_id = f"prod_{product_suffix}"
+    product_name = f"E2E Sellable Product {product_suffix}"
+
+    create_property_tag(
+        admin_session,
+        live_server,
+        tenant_id,
+        tag_id=new_tag,
+        name=f"Sell Ready {product_suffix}",
+        description="E2E readiness tag",
+    )
+    create_authorized_property(
+        admin_session,
+        live_server,
+        tenant_id,
+        name=f"E2E Property {product_suffix}",
+        publisher_domain=publisher_domain,
+        tags=[new_tag],
+    )
+    principal = create_principal(
+        admin_session,
+        live_server,
+        tenant_id,
+        name=principal_name,
+        enable_mock=enable_mock,
+        gam_advertiser_id=gam_advertiser_id,
+    )
+
+    format_ref, _ = await get_seeded_format_and_product(live_server, seed_auth_token)
+    create_product(
+        admin_session,
+        live_server,
+        tenant_id,
+        product_id=product_id,
+        name=product_name,
+        tag_scope=f"{publisher_domain}:{new_tag}",
+        formats_json=json.dumps([format_ref]),
+        extra_form_data={
+            "allowed_principal_ids": [principal["principal_id"]],
+        },
+    )
+
+    return {
+        "product_id": product_id,
+        "product_name": product_name,
+        "principal_id": principal["principal_id"],
+        "access_token": principal["access_token"],
+        "publisher_domain": publisher_domain,
+        "property_tag": new_tag,
+    }
 
 
 def bootstrap_tenant_via_container(

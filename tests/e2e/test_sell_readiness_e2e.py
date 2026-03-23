@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 
 import pytest
@@ -15,81 +14,14 @@ from tests.e2e.adcp_request_builder import (
 from tests.e2e.admin_flow_helpers import (
     approve_workflow_step,
     create_admin_session,
-    create_authorized_property,
     create_principal,
-    create_product,
-    create_property_tag,
-    get_db_connection,
     get_latest_workflow_step_for_media_buy,
-    get_seeded_format_and_product,
+    get_media_buy_status,
     get_tenant_id_by_subdomain,
-    unique_suffix,
+    provision_sellable_product,
     wait_until,
 )
 from tests.e2e.utils import make_mcp_client
-
-
-def _get_media_buy_status(live_server, media_buy_id: str) -> str | None:
-    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
-        cursor.execute("SELECT status FROM media_buys WHERE media_buy_id = %s", (media_buy_id,))
-        row = cursor.fetchone()
-    return row[0] if row else None
-
-
-async def _provision_sellable_product(live_server, ci_tenant_id: str, product_suffix: str) -> dict[str, str]:
-    """Drive the admin setup flow to create a sellable product for a fresh principal."""
-    admin_session = create_admin_session(live_server, ci_tenant_id)
-    new_tag = unique_suffix(f"sell_ready_tag_{product_suffix}").lower()
-    publisher_domain = f"{product_suffix}.e2e.example.com"
-    principal_name = f"E2E Principal {product_suffix}"
-    product_id = f"prod_{product_suffix}"
-    product_name = f"E2E Sellable Product {product_suffix}"
-
-    create_property_tag(
-        admin_session,
-        live_server,
-        ci_tenant_id,
-        tag_id=new_tag,
-        name=f"Sell Ready {product_suffix}",
-        description="E2E readiness tag",
-    )
-    create_authorized_property(
-        admin_session,
-        live_server,
-        ci_tenant_id,
-        name=f"E2E Property {product_suffix}",
-        publisher_domain=publisher_domain,
-        tags=[new_tag],
-    )
-    principal = create_principal(
-        admin_session,
-        live_server,
-        ci_tenant_id,
-        name=principal_name,
-        enable_mock=True,
-    )
-
-    format_ref, _ = await get_seeded_format_and_product(live_server, "ci-test-token")
-    create_product(
-        admin_session,
-        live_server,
-        ci_tenant_id,
-        product_id=product_id,
-        name=product_name,
-        tag_scope=f"{publisher_domain}:{new_tag}",
-        formats_json=json.dumps([format_ref]),
-        extra_form_data={
-            "allowed_principal_ids": [principal["principal_id"]],
-        },
-    )
-
-    return {
-        "product_id": product_id,
-        "product_name": product_name,
-        "principal_id": principal["principal_id"],
-        "access_token": principal["access_token"],
-        "tenant_subdomain": "ci-test",
-    }
 
 
 class TestSellReadiness:
@@ -119,7 +51,11 @@ class TestSellReadiness:
             assert future_product_id not in {p["product_id"] for p in before_payload["products"]}
 
         # Provision a fully sellable product through real admin routes.
-        provisioned = await _provision_sellable_product(live_server, ci_tenant_id, f"readiness_{suffix}")
+        provisioned = await provision_sellable_product(
+            live_server,
+            ci_tenant_id,
+            product_suffix=f"readiness_{suffix}",
+        )
         restricted_product_id = provisioned["product_id"]
 
         # The legacy CI principal must not see the principal-restricted product.
@@ -151,7 +87,12 @@ class TestMediaBuyApproval:
     async def test_media_buy_real_approval_e2e(self, docker_services_e2e, live_server):
         ci_tenant_id = get_tenant_id_by_subdomain(live_server, "ci-test")
         suffix = uuid.uuid4().hex[:8]
-        setup = await _provision_sellable_product(live_server, ci_tenant_id, f"approval_{suffix}")
+        setup = await provision_sellable_product(
+            live_server,
+            ci_tenant_id,
+            product_suffix=f"approval_{suffix}",
+        )
+        setup["tenant_subdomain"] = "ci-test"
 
         async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
             products_result = await client.call_tool(
@@ -211,7 +152,7 @@ class TestMediaBuyApproval:
             assert approved_task["status"] == "approved", approved_task
 
             final_status = wait_until(
-                lambda: _get_media_buy_status(live_server, media_buy_id),
+                lambda: get_media_buy_status(live_server, media_buy_id),
                 timeout_s=30,
                 interval_s=1,
                 description=f"media buy {media_buy_id} to leave pending approval",
