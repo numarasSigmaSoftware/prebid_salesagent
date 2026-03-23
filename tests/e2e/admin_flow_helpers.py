@@ -35,6 +35,27 @@ def create_admin_session(live_server: dict[str, Any], tenant_id: str) -> request
         allow_redirects=False,
         timeout=10,
     )
+    if response.status_code == 404:
+        with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT name, subdomain FROM tenants WHERE tenant_id = %s", (tenant_id,))
+            row = cursor.fetchone()
+        assert row, f"Tenant {tenant_id!r} not found while enabling test auth"
+        bootstrap_tenant_via_container(
+            tenant_id=tenant_id,
+            subdomain=row[1],
+            name=row[0],
+            auth_setup_mode=True,
+        )
+        response = session.post(
+            f"{live_server['admin']}/test/auth",
+            data={
+                "email": _super_admin_email(),
+                "password": _super_admin_password(),
+                "tenant_id": tenant_id,
+            },
+            allow_redirects=False,
+            timeout=10,
+        )
     assert response.status_code == 302, f"Admin test auth failed: {response.status_code} {response.text[:500]}"
     return session
 
@@ -175,15 +196,35 @@ def create_product(
         allow_redirects=False,
         timeout=15,
     )
+    if response.status_code == 200:
+        with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM products WHERE tenant_id = %s AND product_id = %s LIMIT 1",
+                (tenant_id, product_id),
+            )
+            if cursor.fetchone():
+                return
     assert response.status_code == 302, f"Product creation failed: {response.status_code} {response.text[:800]}"
 
 
 async def get_seeded_format_and_product(live_server, auth_token: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Reuse an existing discoverable product to source a valid format reference."""
+    """Reuse live discovery endpoints to source a valid format reference."""
     from tests.e2e.adcp_request_builder import parse_tool_result
     from tests.e2e.utils import make_mcp_client
 
     async with make_mcp_client(live_server, auth_token) as client:
+        formats_result = await client.call_tool("list_creative_formats", {})
+        formats_payload = parse_tool_result(formats_result)
+        assert formats_payload["formats"], "Expected default creative agent formats for E2E readiness tests"
+        format_ref = next(
+            (
+                fmt["format_id"]
+                for fmt in formats_payload["formats"]
+                if isinstance(fmt.get("format_id"), dict) and "display" in fmt["format_id"].get("id", "").lower()
+            ),
+            formats_payload["formats"][0]["format_id"],
+        )
+
         result = await client.call_tool(
             "get_products",
             {"brief": "display advertising", "context": {"e2e": "sell_readiness_seed_formats"}},
@@ -191,8 +232,26 @@ async def get_seeded_format_and_product(live_server, auth_token: str) -> tuple[d
         payload = parse_tool_result(result)
         assert payload["products"], "Expected seeded CI products for E2E readiness tests"
         product = payload["products"][0]
-        assert product["format_ids"], "Expected seeded product to have at least one format"
-        return product["format_ids"][0], product
+        return format_ref, product
+
+
+def get_package_id_by_buyer_ref(live_server: dict[str, Any], media_buy_id: str, package_buyer_ref: str) -> str:
+    """Resolve a package buyer_ref to the persisted package_id used by assignment APIs."""
+    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT package_id
+            FROM media_packages
+            WHERE media_buy_id = %s
+              AND package_config->>'buyer_ref' = %s
+            ORDER BY package_id
+            LIMIT 1
+            """,
+            (media_buy_id, package_buyer_ref),
+        )
+        row = cursor.fetchone()
+    assert row, f"Package with buyer_ref {package_buyer_ref!r} not found for media buy {media_buy_id}"
+    return row[0]
 
 
 def get_latest_workflow_step_for_media_buy(live_server: dict[str, Any], media_buy_id: str) -> dict[str, str]:

@@ -26,7 +26,7 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
-from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
+from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant, get_package_id_by_buyer_ref
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client
 
 
@@ -195,9 +195,14 @@ class TestCreativeWorkflow:
                 format_id=format_id,
                 name="List Creatives Test",
                 asset_url="https://example.com/lc-test-creative.jpg",
+                status="approved",
             )
             sync_request = build_sync_creatives_request(creatives=[creative])
-            await client.call_tool("sync_creatives", sync_request)
+            sync_result = await client.call_tool("sync_creatives", sync_request)
+            sync_data = parse_tool_result(sync_result)
+            assert any(c["creative_id"] == creative_id for c in sync_data.get("creatives", [])), (
+                f"sync_creatives must return {creative_id}, got {sync_data}"
+            )
 
             # Verify list_creatives returns the synced creative
             list_result = await client.call_tool("list_creatives", {})
@@ -240,6 +245,7 @@ class TestCreativeWorkflow:
             create_result = await client.call_tool("create_media_buy", media_buy_request)
             create_data = parse_tool_result(create_result)
             media_buy_id = create_data["media_buy_id"]
+            package_id = get_package_id_by_buyer_ref(live_server, media_buy_id, pkg_buyer_ref)
 
             # Force-approve so we can assign creatives
             force_approve_media_buy_in_db(live_server, media_buy_id)
@@ -254,7 +260,7 @@ class TestCreativeWorkflow:
             )
             sync_request = build_sync_creatives_request(
                 creatives=[creative],
-                assignments={creative_id: [pkg_buyer_ref]},
+                assignments={creative_id: [package_id]},
             )
             sync_result = await client.call_tool("sync_creatives", sync_request)
             sync_data = parse_tool_result(sync_result)

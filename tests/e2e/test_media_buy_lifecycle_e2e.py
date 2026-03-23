@@ -24,6 +24,7 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
+from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client
 
 
@@ -33,7 +34,11 @@ class TestMediaBuyLifecycle:
     @pytest.mark.asyncio
     async def test_pending_approval_creates_workflow_task(self, docker_services_e2e, live_server, test_auth_token):
         """create_media_buy must create a workflow task visible via list_tasks / get_task."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup = await bootstrap_review_ready_tenant(
+            live_server,
+            tenant_prefix="media_buy_lifecycle",
+        )
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
             # Get product so we can reference a real product_id and pricing_option_id
             products_result = await client.call_tool(
                 "get_products",
@@ -105,7 +110,11 @@ class TestMediaBuyLifecycle:
     @pytest.mark.asyncio
     async def test_pause_and_resume_lifecycle(self, docker_services_e2e, live_server, test_auth_token):
         """Force-approve a media buy, then pause and resume it via update_media_buy."""
-        async with make_mcp_client(live_server, test_auth_token) as client:
+        setup = await bootstrap_review_ready_tenant(
+            live_server,
+            tenant_prefix="media_buy_pause_resume",
+        )
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
             # Get product
             products_result = await client.call_tool(
                 "get_products",
@@ -136,10 +145,10 @@ class TestMediaBuyLifecycle:
             # Force-approve so we can test pause/resume (same approach as test_adcp_full_lifecycle.py)
             force_approve_media_buy_in_db(live_server, media_buy_id)
 
-            # Pause the media buy (active=False)
+            # Pause the media buy (paused=True)
             pause_request = build_update_media_buy_request(
                 media_buy_id=media_buy_id,
-                active=False,
+                paused=True,
             )
             pause_result = await client.call_tool("update_media_buy", pause_request)
             pause_data = parse_tool_result(pause_result)
@@ -150,10 +159,10 @@ class TestMediaBuyLifecycle:
                 f"Pause failed: {pause_data.get('errors')}"
             )
 
-            # Resume the media buy (active=True)
+            # Resume the media buy (paused=False)
             resume_request = build_update_media_buy_request(
                 media_buy_id=media_buy_id,
-                active=True,
+                paused=False,
             )
             resume_result = await client.call_tool("update_media_buy", resume_request)
             resume_data = parse_tool_result(resume_result)

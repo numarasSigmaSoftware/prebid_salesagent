@@ -14,6 +14,7 @@ from tests.e2e.adcp_request_builder import (
 from tests.e2e.admin_flow_helpers import (
     approve_workflow_step,
     bootstrap_review_ready_tenant,
+    bootstrap_tenant_via_container,
     create_admin_session,
     create_principal,
     get_latest_workflow_step_for_media_buy,
@@ -31,6 +32,12 @@ class TestSellReadiness:
     @pytest.mark.asyncio
     async def test_sell_readiness_mock_e2e(self, docker_services_e2e, live_server):
         ci_tenant_id = get_tenant_id_by_subdomain(live_server, "ci-test")
+        bootstrap_tenant_via_container(
+            tenant_id=ci_tenant_id,
+            subdomain="ci-test",
+            name="CI Test Tenant",
+            auth_setup_mode=True,
+        )
         suffix = uuid.uuid4().hex[:8]
 
         # New principal should not see the future product before it exists.

@@ -256,6 +256,7 @@ def build_update_media_buy_request(
     media_buy_id: str | None = None,
     buyer_ref: str | None = None,
     active: bool | None = None,
+    paused: bool | None = None,
     budget: dict[str, Any] | None = None,
     packages: list[dict[str, Any]] | None = None,
     webhook_url: str | None = None,
@@ -268,7 +269,8 @@ def build_update_media_buy_request(
     Args:
         media_buy_id: Media buy ID to update
         buyer_ref: Buyer reference to update (alternative to media_buy_id)
-        active: Optional active status update
+        active: Deprecated active status update
+        paused: Optional paused status update
         budget: Optional budget update
         packages: Optional package updates
         webhook_url: Optional webhook for async notifications
@@ -293,8 +295,10 @@ def build_update_media_buy_request(
         request["buyer_ref"] = buyer_ref
 
     # Add optional fields
-    if active is not None:
-        request["active"] = active
+    if paused is not None:
+        request["paused"] = paused
+    elif active is not None:
+        request["paused"] = not active
     if budget is not None:
         request["budget"] = budget
     if packages is not None:
