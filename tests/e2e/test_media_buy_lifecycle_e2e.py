@@ -24,7 +24,13 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
-from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
+from tests.e2e.admin_flow_helpers import (
+    bootstrap_review_ready_tenant,
+    create_admin_session,
+    get_media_buy_status,
+    reject_workflow_step,
+    resolve_media_buy_workflow_step,
+)
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client
 
 
@@ -180,4 +186,112 @@ class TestMediaBuyLifecycle:
 
             assert "deliveries" in delivery_data or "media_buy_deliveries" in delivery_data, (
                 f"get_media_buy_delivery must return deliveries, got: {list(delivery_data.keys())}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_reject_workflow_step_sets_terminal_state(self, docker_services_e2e, live_server, test_auth_token):
+        """Rejecting the media buy approval step via admin marks the step as rejected."""
+        setup = await bootstrap_review_ready_tenant(
+            live_server,
+            tenant_prefix="media_buy_reject",
+        )
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "lifecycle_reject"}},
+            )
+            products_data = parse_tool_result(products_result)
+            product = products_data["products"][0]
+            product_id = product["product_id"]
+            pricing_option_id = product["pricing_options"][0]["pricing_option_id"]
+
+            start_time, end_time = get_test_date_range(days_from_now=1, duration_days=30)
+            media_buy_request = build_adcp_media_buy_request(
+                product_ids=[product_id],
+                total_budget=1000.0,
+                start_time=start_time,
+                end_time=end_time,
+                brand={"domain": "rejecttest.com"},
+                pricing_option_id=pricing_option_id,
+                context={"e2e": "lifecycle_reject"},
+            )
+            create_result = await client.call_tool("create_media_buy", media_buy_request)
+            create_data = parse_tool_result(create_result)
+            media_buy_id = create_data["media_buy_id"]
+
+            # Confirm workflow task was created
+            tasks_result = await client.call_tool("list_tasks", {"object_type": "media_buy", "object_id": media_buy_id})
+            tasks_data = parse_tool_result(tasks_result)
+            assert tasks_data["tasks"], f"No workflow task for media buy {media_buy_id}"
+
+            # Resolve step and workflow IDs
+            step_id, workflow_id = resolve_media_buy_workflow_step(tasks_data["tasks"], live_server, media_buy_id)
+
+            # Reject via admin endpoint (synchronous — commits before returning)
+            admin_session = create_admin_session(live_server, setup["tenant_id"])
+            reject_workflow_step(
+                admin_session,
+                live_server,
+                setup["tenant_id"],
+                workflow_id=workflow_id,
+                step_id=step_id,
+                reason="E2E rejection test",
+            )
+
+            # Workflow step must be rejected
+            get_task_result = await client.call_tool("get_task", {"task_id": step_id})
+            task_detail = parse_tool_result(get_task_result)
+            assert task_detail["status"] == "rejected", (
+                f"Workflow step {step_id} must be 'rejected' after admin rejection, got: {task_detail['status']!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_budget_after_approval(self, docker_services_e2e, live_server, test_auth_token):
+        """update_media_buy with a new budget must succeed on an already-approved media buy."""
+        setup = await bootstrap_review_ready_tenant(
+            live_server,
+            tenant_prefix="media_buy_budget_update",
+        )
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "budget_update"}},
+            )
+            products_data = parse_tool_result(products_result)
+            product = products_data["products"][0]
+            product_id = product["product_id"]
+            pricing_option_id = product["pricing_options"][0]["pricing_option_id"]
+
+            start_time, end_time = get_test_date_range(days_from_now=1, duration_days=30)
+            media_buy_request = build_adcp_media_buy_request(
+                product_ids=[product_id],
+                total_budget=1000.0,
+                start_time=start_time,
+                end_time=end_time,
+                brand={"domain": "budgetupdate.com"},
+                pricing_option_id=pricing_option_id,
+                context={"e2e": "budget_update"},
+            )
+            create_result = await client.call_tool("create_media_buy", media_buy_request)
+            create_data = parse_tool_result(create_result)
+            media_buy_id = create_data["media_buy_id"]
+
+            # Force-approve so the media buy is in an active/scheduled state
+            force_approve_media_buy_in_db(live_server, media_buy_id)
+
+            mb_status = get_media_buy_status(live_server, media_buy_id)
+            assert mb_status in {"approved", "scheduled", "active", "pending_creatives"}, (
+                f"Expected approved media buy, got status: {mb_status!r}"
+            )
+
+            # Update the budget
+            update_request = build_update_media_buy_request(
+                media_buy_id=media_buy_id,
+                budget=2500.0,
+            )
+            update_result = await client.call_tool("update_media_buy", update_request)
+            update_data = parse_tool_result(update_result)
+
+            assert "errors" not in update_data or len(update_data.get("errors", [])) == 0, (
+                f"Budget update failed: {update_data.get('errors')}"
             )

@@ -11,9 +11,21 @@ Each call uses a clearly invalid token and asserts that the server returns
 an error (MCP error or a structured response indicating authentication failure).
 """
 
+import uuid
+
 import pytest
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
+
+from tests.e2e.adcp_request_builder import (
+    build_adcp_media_buy_request,
+    build_creative,
+    build_sync_creatives_request,
+    get_test_date_range,
+    parse_tool_result,
+)
+from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
+from tests.e2e.utils import make_mcp_client
 
 INVALID_TOKEN = "this-token-is-definitely-invalid-00000000"
 AUTH_ERROR_KEYWORDS = (
@@ -225,3 +237,187 @@ class TestAuthEnforcement:
                 "status": "completed",
             },
         )
+
+
+def _is_not_found_or_denied(exc: Exception) -> bool:
+    """Return True if the exception message indicates not-found or cross-tenant denial."""
+    text = str(exc).lower()
+    return any(
+        kw in text
+        for kw in ("not found", "does not exist", "no task", "404", "401", "403", "unauthorized", "forbidden")
+    )
+
+
+class TestTenantIsolation:
+    """Verify that tenant-scoped objects are not accessible from a different tenant's token.
+
+    Each test bootstraps two independent tenants (A and B), creates data under tenant A,
+    then asserts that tenant B's token cannot see or mutate tenant A's data.
+    """
+
+    @pytest.mark.asyncio
+    async def test_task_not_accessible_from_wrong_tenant(self, docker_services_e2e, live_server, test_auth_token):
+        """get_task with tenant B's token must not return tenant A's workflow step."""
+        setup_a = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_task_a")
+        setup_b = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_task_b")
+
+        # Create a media buy in tenant A → produces a workflow task
+        async with make_mcp_client(
+            live_server, setup_a["access_token"], tenant=setup_a["tenant_subdomain"]
+        ) as client_a:
+            products = parse_tool_result(
+                await client_a.call_tool(
+                    "get_products", {"brief": "display advertising", "context": {"e2e": "iso_task_a"}}
+                )
+            )
+            product_a = products["products"][0]
+            start_time, end_time = get_test_date_range(days_from_now=1, duration_days=14)
+            create_data = parse_tool_result(
+                await client_a.call_tool(
+                    "create_media_buy",
+                    build_adcp_media_buy_request(
+                        product_ids=[product_a["product_id"]],
+                        total_budget=500.0,
+                        start_time=start_time,
+                        end_time=end_time,
+                        brand={"domain": "iso-tenant-a.example.com"},
+                        pricing_option_id=product_a["pricing_options"][0]["pricing_option_id"],
+                        context={"e2e": "iso_task_a"},
+                    ),
+                )
+            )
+            media_buy_id_a = create_data["media_buy_id"]
+
+            tasks_a = parse_tool_result(
+                await client_a.call_tool("list_tasks", {"object_type": "media_buy", "object_id": media_buy_id_a})
+            )
+            assert tasks_a["tasks"], f"Tenant A must have at least one workflow task for {media_buy_id_a}"
+            task_id_a = tasks_a["tasks"][0]["task_id"]
+
+        # Tenant B must not see tenant A's task in list_tasks
+        async with make_mcp_client(
+            live_server, setup_b["access_token"], tenant=setup_b["tenant_subdomain"]
+        ) as client_b:
+            tasks_b = parse_tool_result(await client_b.call_tool("list_tasks", {}))
+            ids_visible_to_b = {t["task_id"] for t in tasks_b.get("tasks", [])}
+            assert task_id_a not in ids_visible_to_b, (
+                f"Tenant A's task {task_id_a} leaked into tenant B's list_tasks result"
+            )
+
+            # get_task with tenant A's task_id must fail for tenant B
+            try:
+                result = await client_b.call_tool("get_task", {"task_id": task_id_a})
+                # If no exception, the structured response must indicate not-found
+                data = result.structured_content if hasattr(result, "structured_content") else {}
+                assert _looks_like_auth_denial(data) or "not found" in _stringify_auth_payload(data).lower(), (
+                    f"Tenant B was able to read tenant A's task {task_id_a}: {data}"
+                )
+            except Exception as exc:
+                assert not _is_non_auth_transport_error(exc), (
+                    f"get_task failed with a transport error instead of a tenant-isolation error: {exc!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_creatives_scoped_to_tenant(self, docker_services_e2e, live_server, test_auth_token):
+        """list_creatives via tenant B must not expose creatives synced under tenant A."""
+        setup_a = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_cr_a")
+        setup_b = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_cr_b")
+
+        # Sync an approved creative under tenant A
+        async with make_mcp_client(
+            live_server, setup_a["access_token"], tenant=setup_a["tenant_subdomain"]
+        ) as client_a:
+            products = parse_tool_result(
+                await client_a.call_tool(
+                    "get_products", {"brief": "display advertising", "context": {"e2e": "iso_cr_a"}}
+                )
+            )
+            format_id = products["products"][0]["format_ids"][0]
+            creative_id_a = f"cr_iso_a_{uuid.uuid4().hex[:8]}"
+            await client_a.call_tool(
+                "sync_creatives",
+                build_sync_creatives_request(
+                    creatives=[
+                        build_creative(
+                            creative_id=creative_id_a,
+                            format_id=format_id,
+                            name="Tenant A Isolation Creative",
+                            asset_url="https://example.com/iso-a.jpg",
+                            status="approved",
+                        )
+                    ]
+                ),
+            )
+
+        # Tenant B's list_creatives must not include tenant A's creative
+        async with make_mcp_client(
+            live_server, setup_b["access_token"], tenant=setup_b["tenant_subdomain"]
+        ) as client_b:
+            list_b = parse_tool_result(await client_b.call_tool("list_creatives", {}))
+            creative_ids_b = {c["creative_id"] for c in list_b.get("creatives", [])}
+            assert creative_id_a not in creative_ids_b, (
+                f"Tenant A's creative {creative_id_a} leaked into tenant B's list_creatives result"
+            )
+
+    @pytest.mark.asyncio
+    async def test_complete_task_blocked_for_wrong_tenant(self, docker_services_e2e, live_server, test_auth_token):
+        """complete_task on a task belonging to tenant A must fail for tenant B's token."""
+        setup_a = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_ct_a")
+        setup_b = await bootstrap_review_ready_tenant(live_server, tenant_prefix="iso_ct_b")
+
+        # Create a pending workflow task under tenant A
+        async with make_mcp_client(
+            live_server, setup_a["access_token"], tenant=setup_a["tenant_subdomain"]
+        ) as client_a:
+            products = parse_tool_result(
+                await client_a.call_tool(
+                    "get_products", {"brief": "display advertising", "context": {"e2e": "iso_ct_a"}}
+                )
+            )
+            product_a = products["products"][0]
+            start_time, end_time = get_test_date_range(days_from_now=1, duration_days=14)
+            create_data = parse_tool_result(
+                await client_a.call_tool(
+                    "create_media_buy",
+                    build_adcp_media_buy_request(
+                        product_ids=[product_a["product_id"]],
+                        total_budget=500.0,
+                        start_time=start_time,
+                        end_time=end_time,
+                        brand={"domain": "iso-ct-a.example.com"},
+                        pricing_option_id=product_a["pricing_options"][0]["pricing_option_id"],
+                        context={"e2e": "iso_ct_a"},
+                    ),
+                )
+            )
+            tasks_a = parse_tool_result(
+                await client_a.call_tool(
+                    "list_tasks",
+                    {"object_type": "media_buy", "object_id": create_data["media_buy_id"]},
+                )
+            )
+            assert tasks_a["tasks"], "Tenant A must have a pending approval task"
+            task_id_a = tasks_a["tasks"][0]["task_id"]
+
+        # Tenant B must not be able to complete tenant A's task
+        async with make_mcp_client(
+            live_server, setup_b["access_token"], tenant=setup_b["tenant_subdomain"]
+        ) as client_b:
+            try:
+                result = await client_b.call_tool(
+                    "complete_task",
+                    {
+                        "task_id": task_id_a,
+                        "status": "completed",
+                        "response_data": {"decision": "approved"},
+                    },
+                )
+                data = result.structured_content if hasattr(result, "structured_content") else {}
+                assert _looks_like_auth_denial(data) or "not found" in _stringify_auth_payload(data).lower(), (
+                    f"Tenant B was able to complete tenant A's task {task_id_a}: {data}"
+                )
+            except Exception as exc:
+                assert not _is_non_auth_transport_error(exc), (
+                    f"complete_task failed with a transport error instead of tenant isolation: {exc!r}"
+                )
+                # Expected: not found or auth error — the task doesn't exist in tenant B's scope

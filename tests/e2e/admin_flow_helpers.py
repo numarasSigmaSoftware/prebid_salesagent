@@ -272,11 +272,61 @@ def get_latest_workflow_step_for_media_buy(live_server: dict[str, Any], media_bu
     return {"step_id": row[0], "workflow_id": row[1]}
 
 
+def resolve_media_buy_workflow_step(
+    tasks: list[dict[str, Any]],
+    live_server: dict[str, Any],
+    media_buy_id: str,
+) -> tuple[str, str]:
+    """Return (step_id, workflow_id) from a task list, with DB fallback if context_id is absent."""
+    task = tasks[0]
+    step_id: str = task["task_id"]
+    workflow_id: str | None = task.get("context_id")
+    if not workflow_id:
+        latest_step = get_latest_workflow_step_for_media_buy(live_server, media_buy_id)
+        step_id = latest_step["step_id"]
+        workflow_id = latest_step["workflow_id"]
+    return step_id, workflow_id
+
+
 def get_media_buy_status(live_server: dict[str, Any], media_buy_id: str) -> str | None:
     with get_db_connection(live_server) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT status FROM media_buys WHERE media_buy_id = %s", (media_buy_id,))
         row = cursor.fetchone()
     return row[0] if row else None
+
+
+def set_media_buy_status(live_server: dict[str, Any], media_buy_id: str, status: str) -> None:
+    """Set media buy status directly in the database for test setup."""
+    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+        cursor.execute("UPDATE media_buys SET status = %s WHERE media_buy_id = %s", (status, media_buy_id))
+        conn.commit()
+
+
+def get_creative_status(live_server: dict[str, Any], creative_id: str, tenant_id: str) -> str | None:
+    """Query creative status directly from the database."""
+    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM creatives WHERE creative_id = %s AND tenant_id = %s",
+            (creative_id, tenant_id),
+        )
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_workflow_step_creatives(live_server: dict[str, Any], step_id: str) -> list[str]:
+    """Return all creative IDs mapped to a workflow step, ordered by insertion."""
+    with get_db_connection(live_server) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT object_id
+            FROM object_workflow_mappings
+            WHERE step_id = %s AND object_type = 'creative'
+            ORDER BY created_at
+            """,
+            (step_id,),
+        )
+        rows = cursor.fetchall()
+    return [row[0] for row in rows]
 
 
 def approve_workflow_step(
@@ -295,6 +345,27 @@ def approve_workflow_step(
     assert response.status_code == 200, f"Workflow approval failed: {response.status_code} {response.text[:800]}"
     payload = response.json()
     assert payload.get("success") is True, f"Unexpected approval payload: {payload}"
+
+
+def reject_workflow_step(
+    session: requests.Session,
+    live_server: dict[str, Any],
+    tenant_id: str,
+    *,
+    workflow_id: str,
+    step_id: str,
+    reason: str = "Rejected by E2E test",
+) -> None:
+    """Reject a workflow step via the admin HTTP endpoint."""
+    response = session.post(
+        f"{live_server['admin']}/tenant/{tenant_id}/workflows/{workflow_id}/steps/{step_id}/reject",
+        json={"reason": reason},
+        allow_redirects=False,
+        timeout=15,
+    )
+    assert response.status_code == 200, f"Workflow rejection failed: {response.status_code} {response.text[:800]}"
+    payload = response.json()
+    assert payload.get("success") is True, f"Unexpected rejection payload: {payload}"
 
 
 def wait_until(

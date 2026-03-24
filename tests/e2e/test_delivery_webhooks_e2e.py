@@ -10,6 +10,7 @@ This follows the reference E2E patterns and calls real MCP tools:
 All TODOs are left for you to fill in assertions and any spec-specific checks.
 """
 
+import asyncio
 import json
 import socket
 import uuid
@@ -26,9 +27,11 @@ from fastmcp.client.transports import StreamableHttpTransport
 from tests.e2e.adcp_request_builder import (
     build_adcp_media_buy_request,
     build_creative,
+    build_sync_creatives_request,
     get_test_date_range,
     parse_tool_result,
 )
+from tests.e2e.admin_flow_helpers import bootstrap_review_ready_tenant
 from tests.e2e.utils import force_approve_media_buy_in_db, make_mcp_client, wait_for_server_readiness
 
 
@@ -390,4 +393,166 @@ class TestUpdatePerformanceIndex:
             )
             assert perf_data.get("context", {}).get("e2e") == "perf_index", (
                 f"Expected context echo for perf_index update, got: {perf_data}"
+            )
+
+
+async def _sync_creative_with_webhook(
+    client,
+    *,
+    format_id: str,
+    creative_prefix: str,
+    webhook_url: str,
+    context_label: str,
+) -> str:
+    """Sync a pending_review creative with push_notification_config. Returns creative_id."""
+    creative_id = f"{creative_prefix}_{uuid.uuid4().hex[:8]}"
+    creative = build_creative(
+        creative_id=creative_id,
+        format_id=format_id,
+        name=f"Webhook Test Creative ({context_label})",
+        asset_url="https://example.com/wh-test.jpg",
+        click_through_url="https://example.com/landing",
+        status="pending_review",
+    )
+    result = await client.call_tool(
+        "sync_creatives",
+        build_sync_creatives_request(creatives=[creative], webhook_url=webhook_url),
+    )
+    sync_data = parse_tool_result(result)
+    assert any(c["creative_id"] == creative_id for c in sync_data.get("creatives", [])), (
+        f"sync_creatives must return {creative_id}"
+    )
+    return creative_id
+
+
+async def _poll_creative_review_task(client, creative_id: str, *, retries: int = 15) -> str:
+    """Poll list_tasks until a review task appears for the creative. Returns task_id."""
+    for _ in range(retries):
+        tasks_result = await client.call_tool("list_tasks", {"object_type": "creative", "object_id": creative_id})
+        tasks = parse_tool_result(tasks_result).get("tasks", [])
+        if tasks:
+            return tasks[0]["task_id"]
+        await asyncio.sleep(1)
+    raise AssertionError(f"No workflow task appeared for creative {creative_id} after {retries}s")
+
+
+async def _wait_for_webhook(received: list, *, timeout_s: int = 15) -> None:
+    """Poll until at least one webhook arrives or timeout."""
+    for _ in range(timeout_s * 2):  # 0.5s intervals
+        if received:
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError(f"No webhook received after {timeout_s}s")
+
+
+class TestCreativeReviewWebhookFlow:
+    """E2E tests for creative-review push notifications via push_notification_config."""
+
+    @pytest.mark.asyncio
+    async def test_creative_review_approval_fires_webhook(
+        self, docker_services_e2e, live_server, test_auth_token, delivery_webhook_server
+    ):
+        """Approving a creative review task must fire the push_notification_config webhook.
+
+        Asserts the webhook payload contains:
+        - status == "completed"
+        - result.creatives[0].creative_id matches the synced creative
+        - result.creatives[0].status == "approved"
+
+        Note: The `pending_count` guard in call_webhook_for_creative_status ensures the
+        webhook fires only after all creatives on a step are reviewed. With the standard
+        one-step-per-creative sync flow this is always satisfied on the first review.
+        """
+        setup = await bootstrap_review_ready_tenant(live_server, tenant_prefix="cr_wh_approve")
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "cr_wh_approve"}},
+            )
+            products_data = parse_tool_result(products_result)
+            format_id = products_data["products"][0]["format_ids"][0]
+
+            creative_id = await _sync_creative_with_webhook(
+                client,
+                format_id=format_id,
+                creative_prefix="cr_wh_app",
+                webhook_url=delivery_webhook_server["url"],
+                context_label="cr_wh_approve",
+            )
+            task_id = await _poll_creative_review_task(client, creative_id)
+
+            await client.call_tool(
+                "complete_task",
+                {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "response_data": {"decision": "approved", "reviewer": "e2e-test"},
+                },
+            )
+
+            await _wait_for_webhook(delivery_webhook_server["received"])
+            payload = delivery_webhook_server["received"][0]
+
+            assert payload.get("status") == "completed", f"Expected status 'completed', got: {payload.get('status')}"
+            result = payload.get("result") or {}
+            creatives_in_result = result.get("creatives", [])
+            assert creatives_in_result, f"Webhook result must include creatives, got: {result}"
+            matching = [c for c in creatives_in_result if c.get("creative_id") == creative_id]
+            assert matching, f"Creative {creative_id} must appear in webhook result, got: {creatives_in_result}"
+            assert matching[0]["status"] == "approved", (
+                f"Creative must show 'approved' in webhook, got: {matching[0]['status']}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_creative_review_rejection_fires_webhook(
+        self, docker_services_e2e, live_server, test_auth_token, delivery_webhook_server
+    ):
+        """Rejecting a creative review task must fire the push_notification_config webhook.
+
+        Asserts the webhook payload contains:
+        - status == "completed"
+        - result.creatives[0].creative_id matches the synced creative
+        - result.creatives[0].status == "rejected"
+        """
+        setup = await bootstrap_review_ready_tenant(live_server, tenant_prefix="cr_wh_reject")
+        async with make_mcp_client(live_server, setup["access_token"], tenant=setup["tenant_subdomain"]) as client:
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "cr_wh_reject"}},
+            )
+            products_data = parse_tool_result(products_result)
+            format_id = products_data["products"][0]["format_ids"][0]
+
+            creative_id = await _sync_creative_with_webhook(
+                client,
+                format_id=format_id,
+                creative_prefix="cr_wh_rej",
+                webhook_url=delivery_webhook_server["url"],
+                context_label="cr_wh_reject",
+            )
+            task_id = await _poll_creative_review_task(client, creative_id)
+
+            await client.call_tool(
+                "complete_task",
+                {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "response_data": {
+                        "decision": "rejected",
+                        "reviewer": "e2e-test",
+                        "reason": "policy violation",
+                    },
+                },
+            )
+
+            await _wait_for_webhook(delivery_webhook_server["received"])
+            payload = delivery_webhook_server["received"][0]
+
+            assert payload.get("status") == "completed", f"Expected status 'completed', got: {payload.get('status')}"
+            result = payload.get("result") or {}
+            creatives_in_result = result.get("creatives", [])
+            matching = [c for c in creatives_in_result if c.get("creative_id") == creative_id]
+            assert matching, f"Creative {creative_id} must appear in webhook result, got: {creatives_in_result}"
+            assert matching[0]["status"] == "rejected", (
+                f"Creative must show 'rejected' in webhook, got: {matching[0]['status']}"
             )

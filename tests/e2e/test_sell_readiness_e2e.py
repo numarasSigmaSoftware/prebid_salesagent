@@ -17,10 +17,10 @@ from tests.e2e.admin_flow_helpers import (
     bootstrap_tenant_via_container,
     create_admin_session,
     create_principal,
-    get_latest_workflow_step_for_media_buy,
     get_media_buy_status,
     get_tenant_id_by_subdomain,
     provision_sellable_product,
+    resolve_media_buy_workflow_step,
     wait_until,
 )
 from tests.e2e.utils import make_mcp_client
@@ -133,13 +133,7 @@ class TestMediaBuyApproval:
             tasks_payload = parse_tool_result(tasks_result)
             assert tasks_payload["tasks"], f"Expected workflow task for media buy {media_buy_id}"
 
-            task = tasks_payload["tasks"][0]
-            step_id = task["task_id"]
-            workflow_id = task.get("context_id")
-            if not workflow_id:
-                latest_step = get_latest_workflow_step_for_media_buy(live_server, media_buy_id)
-                step_id = latest_step["step_id"]
-                workflow_id = latest_step["workflow_id"]
+            step_id, workflow_id = resolve_media_buy_workflow_step(tasks_payload["tasks"], live_server, media_buy_id)
 
             admin_session = create_admin_session(live_server, setup["tenant_id"])
             approve_workflow_step(

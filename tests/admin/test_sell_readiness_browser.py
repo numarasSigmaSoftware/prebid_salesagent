@@ -173,6 +173,85 @@ def test_workflow_approval_browser_flow(docker_services_e2e, live_server):
         page.get_by_text("Approved", exact=False).first.wait_for(state="visible", timeout=15000)
 
 
+def test_workflow_rejection_browser_flow(docker_services_e2e, live_server):
+    """Reject a pending media buy workflow step from the browser review page."""
+    tenant_id = get_tenant_id_by_subdomain(live_server, "ci-test")
+    suffix = uuid.uuid4().hex[:8]
+    setup = asyncio.run(
+        provision_sellable_product(
+            live_server,
+            tenant_id,
+            product_suffix=f"browser_reject_{suffix}",
+        )
+    )
+
+    async def _create_pending_media_buy() -> tuple[str, str]:
+        async with make_mcp_client(live_server, setup["access_token"], tenant="ci-test") as client:
+            products_result = await client.call_tool(
+                "get_products",
+                {"brief": "display advertising", "context": {"e2e": "browser_reject_discovery"}},
+            )
+            products_payload = parse_tool_result(products_result)
+            product = next(p for p in products_payload["products"] if p["product_id"] == setup["product_id"])
+            start_time, end_time = get_test_date_range(days_from_now=1, duration_days=14)
+            create_request = build_adcp_media_buy_request(
+                product_ids=[setup["product_id"]],
+                total_budget=1500.0,
+                start_time=start_time,
+                end_time=end_time,
+                brand={"domain": f"browser-reject-{suffix}.example.com"},
+                pricing_option_id=product["pricing_options"][0]["pricing_option_id"],
+                buyer_ref=f"browser_reject_{suffix}",
+                context={"e2e": "browser_reject_create"},
+            )
+            create_result = await client.call_tool("create_media_buy", create_request)
+            create_payload = parse_tool_result(create_result)
+            media_buy_id = create_payload["media_buy_id"]
+            workflow_step = get_latest_workflow_step_for_media_buy(live_server, media_buy_id)
+            return media_buy_id, workflow_step["step_id"]
+
+    media_buy_id, step_id = asyncio.run(_create_pending_media_buy())
+
+    dialogs: list[str] = []
+
+    def _handle_dialog(dialog):
+        dialogs.append(dialog.message)
+        # Accept prompt with a non-empty reason so JS proceeds; also handles the
+        # success alert that fires after the POST completes.
+        dialog.accept("Rejected by browser E2E test")
+
+    with browser_page(live_server["admin"]) as page:
+        page.on("dialog", _handle_dialog)
+        login_as_tenant_admin(page, live_server["admin"], tenant_id)
+        page.goto(f"{live_server['admin']}/tenant/{tenant_id}/workflows", wait_until="networkidle")
+
+        review_link = page.locator(f'tr#{media_buy_id} a:has-text("Review & Approve")').first
+        review_link.wait_for(state="visible", timeout=15000)
+        review_link.click()
+        page.wait_for_url(re.compile(rf".*/tenant/{re.escape(tenant_id)}/media-buy/{re.escape(media_buy_id)}/approve$"))
+
+        page.get_by_role("button", name=re.compile("Reject")).click()
+        # Wait for the success alert to be dismissed and the redirect to settle
+        page.wait_for_load_state("networkidle")
+
+    # The rejection prompt must have been shown
+    assert any("reject" in message.lower() for message in dialogs), (
+        f"Expected a rejection prompt dialog, but got: {dialogs}"
+    )
+
+    # Verify the workflow step is in the rejected terminal state via MCP get_task
+    async def _get_step_status() -> str:
+        async with make_mcp_client(live_server, setup["access_token"], tenant="ci-test") as client:
+            result = await client.call_tool("get_task", {"task_id": step_id})
+            return parse_tool_result(result)["status"]
+
+    step_status = asyncio.run(_get_step_status())
+    assert step_status == "rejected", (
+        f"Workflow step {step_id} for media buy {media_buy_id} must be 'rejected' "
+        f"after browser rejection, got: {step_status!r}"
+    )
+
+
 @pytest.mark.requires_gam
 def test_gam_sync_browser_flow(docker_services_e2e, live_server, gam_service_account_json):
     """Configure GAM and trigger inventory sync from the browser UI."""
