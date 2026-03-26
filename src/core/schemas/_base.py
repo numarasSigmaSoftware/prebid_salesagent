@@ -1614,8 +1614,8 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     - media_buy_id: optional (library variant1 requires it; oneOf handled at app level)
     - start_time/end_time: accept raw datetime/str (backward compat with A2A path)
     - packages: use our AdCPPackageUpdate (adds creative_ids)
-    - revision/canceled/cancellation_reason/new_packages: forward-compatible spec fields
-      not yet present in the adcp library version we consume
+    - revision/canceled/cancellation_reason/new_packages/invoice_recipient/idempotency_key:
+      forward-compatible spec fields not yet present in the adcp library version we consume
     - budget: campaign-level budget (not in library — convenience field)
     - today: internal testing field
     """
@@ -1635,6 +1635,15 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     canceled: bool | None = None
     cancellation_reason: str | None = None
     new_packages: list[dict[str, Any]] | None = None
+    invoice_recipient: dict[str, Any] | None = Field(
+        None,
+        description="Override who receives the invoice for this buy (business-entity.json). "
+        "When provided, the seller invoices this entity instead of the account's default billing_entity.",
+    )
+    idempotency_key: str | None = Field(
+        None,
+        description="Client-supplied idempotency key to deduplicate concurrent update requests.",
+    )
     # Campaign-level budget (not in library spec — convenience field)
     # Bare float is accepted so transport wrappers can preserve existing DB currency
     # when the caller updates only the amount.

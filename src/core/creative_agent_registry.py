@@ -433,6 +433,10 @@ class CreativeAgentRegistry:
                 logger.error(f"Creative agent fallback connection failed: {mcp_url} — {exc}")
                 raise RuntimeError(f"Connection failed: {mcp_url} — {exc}") from exc
         else:
+            # for/else: this block runs only when the loop exhausts all attempts without a `break`.
+            # `break` fires only on success (line above response.raise_for_status()).
+            # HTTPStatusError, TimeoutException (last attempt), and RequestError all raise immediately.
+            # The only path here is repeated 429 responses that exhaust retries via `continue`.
             raise RuntimeError(f"Creative agent HTTP error after {max_retries} retries") from last_exc
 
         # Parse SSE or JSON response

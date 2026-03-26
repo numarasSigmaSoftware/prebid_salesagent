@@ -246,6 +246,39 @@ class CreativeRepository:
         self._session.add(review)
         return review
 
+    def create_human_review(
+        self,
+        *,
+        creative_id: str,
+        principal_id: str,
+        reviewer_email: str,
+        reason: str,
+        is_override: bool,
+        final_decision: str,
+    ) -> CreativeReview:
+        """Construct and persist a human CreativeReview record. Does NOT commit."""
+        import uuid
+        from datetime import UTC, datetime
+
+        review = CreativeReview(
+            review_id=f"review_{uuid.uuid4().hex[:12]}",
+            creative_id=creative_id,
+            tenant_id=self._tenant_id,
+            principal_id=principal_id,
+            reviewed_at=datetime.now(UTC),
+            review_type="human",
+            reviewer_email=reviewer_email,
+            ai_decision=None,
+            confidence_score=None,
+            policy_triggered=None,
+            reason=reason,
+            recommendations=None,
+            human_override=is_override,
+            final_decision=final_decision,
+        )
+        self._session.add(review)
+        return review
+
     def get_provenance_policies(self) -> list[dict]:
         """Get creative_policy dicts from products that require AI provenance.
 

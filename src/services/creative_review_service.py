@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -48,7 +47,11 @@ def _run_async_side_effect(coro):
 
     if "value" in error:
         raise error["value"]
-    return result.get("value")
+    if "value" not in result:
+        raise RuntimeError(
+            "Async side effect thread completed without result or error — possible unhandled BaseException"
+        )
+    return result["value"]
 
 
 def _compute_media_buy_status_from_flight_dates(media_buy) -> str:
@@ -86,28 +89,15 @@ def _create_human_review_record(
     is_override: bool,
     final_decision: str,
 ):
-    """Create and add a human CreativeReview record via the repository."""
-    from src.core.database.models import CreativeReview
-
-    review_id = f"review_{uuid.uuid4().hex[:12]}"
-    human_review = CreativeReview(
-        review_id=review_id,
+    """Create and persist a human CreativeReview record via the repository factory."""
+    return creative_repo.create_human_review(
         creative_id=creative_id,
-        tenant_id=tenant_id,
         principal_id=principal_id,
-        reviewed_at=datetime.now(UTC),
-        review_type="human",
         reviewer_email=reviewer_email,
-        ai_decision=None,
-        confidence_score=None,
-        policy_triggered=None,
         reason=reason,
-        recommendations=None,
-        human_override=is_override,
+        is_override=is_override,
         final_decision=final_decision,
     )
-    creative_repo.create_review(human_review)
-    return human_review
 
 
 async def call_webhook_for_creative_status(creative_id: str, tenant_id: str) -> bool:
