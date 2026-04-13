@@ -12,6 +12,7 @@ Usage::
     buy = MediaBuyFactory(tenant=tenant, principal__tenant=tenant)
 """
 
+from tests.factories.account import AccountFactory, AgentAccountAccessFactory
 from tests.factories.core import (
     AdapterConfigFactory,
     CurrencyLimitFactory,
@@ -20,6 +21,9 @@ from tests.factories.core import (
     TenantFactory,
 )
 from tests.factories.creative import CreativeAssignmentFactory, CreativeFactory
+from tests.factories.creative_asset import CreativeAssetFactory
+from tests.factories.format import FormatFactory, FormatIdFactory
+from tests.factories.inventory_profile import InventoryProfileFactory
 from tests.factories.media_buy import MediaBuyFactory, MediaPackageFactory
 from tests.factories.metrics import FormatPerformanceMetricsFactory
 from tests.factories.principal import PrincipalFactory
@@ -28,11 +32,14 @@ from tests.factories.webhook import PushNotificationConfigFactory
 
 ALL_FACTORIES = [
     TenantFactory,
+    AccountFactory,
+    AgentAccountAccessFactory,
     AdapterConfigFactory,
     CurrencyLimitFactory,
     PropertyTagFactory,
     PublisherPartnerFactory,
     PrincipalFactory,
+    InventoryProfileFactory,
     ProductFactory,
     PricingOptionFactory,
     MediaBuyFactory,
@@ -45,9 +52,15 @@ ALL_FACTORIES = [
 
 __all__ = [
     "ALL_FACTORIES",
+    "AccountFactory",
     "AdapterConfigFactory",
+    "AgentAccountAccessFactory",
+    "CreativeAssetFactory",
     "CreativeAssignmentFactory",
     "CreativeFactory",
+    "FormatFactory",
+    "FormatIdFactory",
+    "InventoryProfileFactory",
     "CurrencyLimitFactory",
     "FormatPerformanceMetricsFactory",
     "MediaBuyFactory",

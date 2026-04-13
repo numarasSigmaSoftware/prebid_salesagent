@@ -14,8 +14,6 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
-from adcp import GetProductsRequest as GetProductsRequestGenerated
-
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     AdapterPackageDelivery,
@@ -25,6 +23,7 @@ from src.core.schemas import (
     GetProductsResponse,
     ReportingPeriod,
 )
+from src.core.schemas import GetProductsRequest as GetProductsRequestGenerated
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.core.tools.products import _get_products_impl
 from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retry
@@ -133,6 +132,13 @@ class DeliveryPollMixin:
         """Call _get_media_buy_delivery_impl with the given parameters."""
         self._commit_factory_data()  # type: ignore[attr-defined]
 
+        # Pop identity — it's injected by call_via for transport dispatch
+        # but is not a GetMediaBuyDeliveryRequest field.
+        # Use sentinel to distinguish "not provided" from "explicitly None".
+        _no_identity = object()
+        raw_identity = extra.pop("identity", _no_identity)
+        identity = self.identity if raw_identity is _no_identity else raw_identity  # type: ignore[attr-defined]
+
         kwargs: dict[str, Any] = {}
         if media_buy_ids is not None:
             kwargs["media_buy_ids"] = media_buy_ids
@@ -147,7 +153,7 @@ class DeliveryPollMixin:
         kwargs.update(extra)
 
         req = GetMediaBuyDeliveryRequest(**kwargs)
-        return _get_media_buy_delivery_impl(req, self.identity)  # type: ignore[attr-defined]
+        return _get_media_buy_delivery_impl(req, identity)
 
     @staticmethod
     def _make_default_adapter_response() -> AdapterGetMediaBuyDeliveryResponse:
@@ -252,6 +258,20 @@ class CircuitBreakerMixin:
         mock_response = MagicMock()
         mock_response.status_code = status_code
         self.mock["client"].return_value.__enter__.return_value.post.return_value = mock_response  # type: ignore[attr-defined]
+
+    def set_http_status(self, code: int, text: str = "") -> None:
+        """Alias for set_http_response — BDD steps use this name consistently."""
+        self.set_http_response(code)
+
+    def set_http_sequence(self, responses: list[tuple[int, str]]) -> None:
+        """Configure httpx Client to return a sequence of responses."""
+        mocks = []
+        for code, text in responses:
+            r = MagicMock()
+            r.status_code = code
+            r.text = text
+            mocks.append(r)
+        self.mock["client"].return_value.__enter__.return_value.post.side_effect = mocks  # type: ignore[attr-defined]
 
     def call_send(
         self,
@@ -403,6 +423,10 @@ class ProductMixin:
         """
         self._commit_factory_data()  # type: ignore[attr-defined]
 
+        # Pop identity — injected by call_via for transport dispatch
+        # but not a GetProductsRequest field.
+        identity = extra.pop("identity", None) or self.identity  # type: ignore[attr-defined]
+
         if brand is None:
             brand = {"domain": "test.com"}
 
@@ -414,4 +438,4 @@ class ProductMixin:
             context=context,
             **extra,
         )
-        return await _get_products_impl(req, self.identity)  # type: ignore[attr-defined]
+        return await _get_products_impl(req, identity)

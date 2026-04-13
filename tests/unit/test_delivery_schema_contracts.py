@@ -52,9 +52,10 @@ class TestDeliveryStatusEnum:
         actual = {m.value for m in DeliveryStatus}
         assert actual == self.EXPECTED_MEMBERS
 
-    def test_is_str_enum(self):
-        assert issubclass(DeliveryStatus, str)
-        assert DeliveryStatus.delivering == "delivering"
+    def test_values_are_strings(self):
+        """DeliveryStatus members have string values (adcp library uses plain Enum, not str Enum)."""
+        assert all(isinstance(m.value, str) for m in DeliveryStatus)
+        assert DeliveryStatus.delivering.value == "delivering"
 
 
 class TestDeliveryTypeEnum:
@@ -112,6 +113,7 @@ class TestPackageDeliveryFields:
         "pricing_model",
         "rate",
         "currency",
+        "by_placement",
     }
 
     def test_field_names(self):
@@ -326,7 +328,7 @@ class TestGetMediaBuyDeliveryResponseMethods:
 
 class TestAdapterPackageDelivery:
     def test_fields(self):
-        assert set(AdapterPackageDelivery.model_fields.keys()) == {"package_id", "impressions", "spend"}
+        assert set(AdapterPackageDelivery.model_fields.keys()) == {"package_id", "impressions", "spend", "by_placement"}
 
     def test_construction(self):
         obj = AdapterPackageDelivery(package_id="pkg_1", impressions=1000, spend=5.0)

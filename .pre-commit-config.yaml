@@ -192,16 +192,6 @@ repos:
       #   always_run: true
 
 
-      # Check Pydantic-AdCP schema alignment (prevents client validation errors like missing promoted_offering)
-      - id: pydantic-adcp-alignment
-        name: Pydantic model alignment with AdCP schemas (REGRESSION PREVENTION)
-        entry: uv run pytest tests/unit/test_pydantic_schema_alignment.py::TestSpecificFieldValidation -v --tb=short
-        language: system
-        files: '^(src/core/schemas\.py|schemas/v1/.*\.json)$'
-        pass_filenames: false
-        always_run: true
-
-
       # Prevent problematic function call patterns
       - id: no-fn-calls
         name: No .fn() call patterns
@@ -261,6 +251,14 @@ repos:
         always_run: false  # Only run when test files change
 
 
+      # ast-grep BDD guards (structural AST pattern detection)
+      - id: ast-grep-bdd-guards
+        name: ast-grep BDD step guards
+        entry: ast-grep scan --rule .ast-grep/rules/
+        language: system
+        files: '^tests/bdd/steps/.*\.py$'
+        pass_filenames: false
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -281,7 +279,7 @@ repos:
         language_version: python3
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.11
+    rev: v0.14.10
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]

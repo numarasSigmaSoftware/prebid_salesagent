@@ -15,7 +15,7 @@ from src.admin.app import create_app
 
 admin_app = create_app()
 
-pytestmark = [pytest.mark.integration, pytest.mark.requires_db, pytest.mark.ui]
+pytestmark = [pytest.mark.integration, pytest.mark.requires_db, pytest.mark.admin]
 
 
 class TestTemplateUrlValidation:
@@ -84,6 +84,8 @@ class TestTemplateUrlValidation:
                             test_params["filename"] = "test.js"
                         if "user_id" in params:
                             test_params["user_id"] = "test_user"
+                        if "account_id" in params:
+                            test_params["account_id"] = "test_account"
 
                         # Try to build the URL
                         url = url_for(endpoint, **test_params)

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.creative_agent_registry import CreativeAgent, CreativeAgentRegistry
+from src.core.exceptions import AdCPAdapterError
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ class TestStructuredContentFallbackTrigger:
 
     @pytest.mark.asyncio
     async def test_failed_status_with_other_error_raises_value_error(self, registry, agent):
-        """SDK returns TaskResult(status='failed', error='some other error') → raises ValueError."""
+        """SDK returns TaskResult(status='failed', error='some other error') → raises AdCPAdapterError."""
         mock_result = MagicMock()
         mock_result.status = "failed"
         mock_result.error = "Connection refused"
@@ -67,7 +68,7 @@ class TestStructuredContentFallbackTrigger:
         mock_client.agent.return_value = mock_agent_proxy
 
         with patch.object(registry, "_build_adcp_client", return_value=mock_client):
-            with pytest.raises(ValueError, match="Creative agent format fetch failed"):
+            with pytest.raises(AdCPAdapterError, match="Creative agent format fetch failed"):
                 await registry._fetch_formats_from_agent(mock_client, agent)
 
 
@@ -124,8 +125,11 @@ class TestFetchFormatsRawMcp:
             assert formats[0].format_id.id == "display_image"
 
     @pytest.mark.asyncio
-    async def test_unexpected_format_returns_empty(self, registry, agent):
-        """Raw HTTP returns unexpected format → returns empty list."""
+    async def test_unexpected_format_raises_runtime_error(self, registry, agent):
+        """Raw HTTP returns unexpected format (no 'result' key) → raises AdCPAdapterError.
+
+        Fix for salesagent-kwws: silent return [] masked failures as 'no formats'.
+        """
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.headers = {"content-type": "application/json"}
@@ -137,8 +141,8 @@ class TestFetchFormatsRawMcp:
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_http):
-            formats = await registry._fetch_formats_raw_mcp(agent)
-            assert formats == []
+            with pytest.raises(AdCPAdapterError, match="No parseable result"):
+                await registry._fetch_formats_raw_mcp(agent)
 
     @pytest.mark.asyncio
     async def test_auth_headers_forwarded(self, registry, agent):
@@ -146,7 +150,11 @@ class TestFetchFormatsRawMcp:
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.headers = {"content-type": "application/json"}
-        mock_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": {"content": []}}
+        mock_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": '{"formats": []}'}]},
+        }
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -158,6 +166,58 @@ class TestFetchFormatsRawMcp:
             call_kwargs = mock_http.post.call_args
             headers = call_kwargs.kwargs.get("headers", {})
             assert headers.get("x-test-auth") == "test-token"
+
+
+class TestFetchFormatsRawMcpErrorHandling:
+    """Test error handling in the raw HTTP fallback."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises_runtime_error(self, registry, agent):
+        """httpx timeout → RuntimeError with message."""
+        import httpx
+
+        mock_http = AsyncMock()
+        mock_http.post.side_effect = httpx.ReadTimeout("timed out")
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(RuntimeError, match="Request timed out"):
+                await registry._fetch_formats_raw_mcp(agent)
+
+    @pytest.mark.asyncio
+    async def test_connection_error_raises_runtime_error(self, registry, agent):
+        """httpx connection error → RuntimeError with message."""
+        import httpx
+
+        mock_http = AsyncMock()
+        mock_http.post.side_effect = httpx.ConnectError("connection refused")
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(RuntimeError, match="Connection failed"):
+                await registry._fetch_formats_raw_mcp(agent)
+
+    @pytest.mark.asyncio
+    async def test_http_status_error_raises_runtime_error(self, registry, agent):
+        """httpx HTTP 500 → RuntimeError with status code."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Server Error", request=MagicMock(), response=mock_response
+        )
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(RuntimeError, match="HTTP error: 500"):
+                await registry._fetch_formats_raw_mcp(agent)
 
 
 class TestParseMcpToolResult:
@@ -172,18 +232,24 @@ class TestParseMcpToolResult:
         assert len(formats) == 1
         assert formats[0].name == "Display Image"
 
-    def test_no_text_content_returns_empty(self, registry):
-        """Content with no text items → returns []."""
+    def test_no_text_content_raises(self, registry):
+        """Content with no text items → raises AdCPAdapterError.
+
+        Fix for salesagent-kwws: silent return [] masked failures as 'no formats'.
+        """
         import logging
 
         result = {"content": [{"type": "image", "data": "..."}]}
-        formats = registry._parse_mcp_tool_result(result, logging.getLogger())
-        assert formats == []
+        with pytest.raises(AdCPAdapterError, match="No text content"):
+            registry._parse_mcp_tool_result(result, logging.getLogger())
 
-    def test_empty_content_returns_empty(self, registry):
-        """Empty content list → returns []."""
+    def test_empty_content_raises(self, registry):
+        """Empty content list → raises AdCPAdapterError.
+
+        Fix for salesagent-kwws: silent return [] masked failures as 'no formats'.
+        """
         import logging
 
         result = {"content": []}
-        formats = registry._parse_mcp_tool_result(result, logging.getLogger())
-        assert formats == []
+        with pytest.raises(AdCPAdapterError, match="No text content"):
+            registry._parse_mcp_tool_result(result, logging.getLogger())

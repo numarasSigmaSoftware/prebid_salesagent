@@ -42,13 +42,22 @@ class CreativeFormatsEnv(IntegrationEnv):
     REST_ENDPOINT = "/api/v1/creative-formats"
 
     def _configure_mocks(self) -> None:
-        """Set up happy-path defaults for external mocks."""
-        from src.core.creative_agent_registry import FormatFetchResult
+        """Set up happy-path defaults for external mocks.
+
+        Seeds a minimal set of default formats so scenarios that don't
+        explicitly call set_registry_formats() still get non-empty results.
+        Scenarios needing specific formats override via set_registry_formats().
+        """
+        from src.core.creative_agent_registry import FormatFetchResult, _get_mock_formats
+
+        default_formats = _get_mock_formats()
 
         # Registry: return a mock with async list_all_formats + list_all_formats_with_errors
         mock_registry = MagicMock()
-        mock_registry.list_all_formats = AsyncMock(return_value=[])
-        mock_registry.list_all_formats_with_errors = AsyncMock(return_value=FormatFetchResult(formats=[], errors=[]))
+        mock_registry.list_all_formats = AsyncMock(return_value=default_formats)
+        mock_registry.list_all_formats_with_errors = AsyncMock(
+            return_value=FormatFetchResult(formats=default_formats, errors=[])
+        )
         self.mock["registry"].return_value = mock_registry
 
         # Audit logger: no-op
@@ -78,24 +87,12 @@ class CreativeFormatsEnv(IntegrationEnv):
         return _list_creative_formats_impl(**kwargs)
 
     def call_a2a(self, **kwargs: Any) -> ListCreativeFormatsResponse:
-        """Call list_creative_formats_raw (A2A wrapper)."""
-        from src.core.tools.creative_formats import list_creative_formats_raw
-
-        self._commit_factory_data()
-        kwargs.setdefault("identity", self.identity)
-        kwargs.setdefault("req", None)
-        return list_creative_formats_raw(**kwargs)
+        """Call list_creative_formats via real AdCPRequestHandler — full A2A pipeline."""
+        return self._run_a2a_handler("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> ListCreativeFormatsResponse:
-        """Call list_creative_formats MCP wrapper with mock Context.
-
-        Pops 'req' kwarg (MCP wrapper takes individual params, not req object).
-        """
-        from src.core.tools.creative_formats import list_creative_formats
-
-        # MCP wrapper takes individual params, not 'req'
-        kwargs.pop("req", None)
-        return self._run_mcp_wrapper(list_creative_formats, ListCreativeFormatsResponse, **kwargs)
+        """Call list_creative_formats via Client(mcp) — full pipeline dispatch."""
+        return self._run_mcp_client("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Convert kwargs to ListCreativeFormatsBody shape for REST POST.

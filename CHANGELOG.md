@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0](https://github.com/prebid/salesagent/compare/v1.6.0...v1.7.0) (2026-04-09)
+
+
+### Features
+
+* Account management, adcp 3.10 migration, and BDD test infrastructure ([#1170](https://github.com/prebid/salesagent/issues/1170)) ([ccf91eb](https://github.com/prebid/salesagent/commit/ccf91eb933466598a7532cd24542e18df4236f0f))
+* introduce BDD behavioral test suite (delivery metrics, creative formats) ([#1146](https://github.com/prebid/salesagent/issues/1146)) ([7f0d45a](https://github.com/prebid/salesagent/commit/7f0d45a4e7eb5beeb02657c66e69d5365e3e5a31))
+* universal request normalization for AdCP backward compatibility ([#1175](https://github.com/prebid/salesagent/issues/1175)) ([1ad11b6](https://github.com/prebid/salesagent/commit/1ad11b67a8c42cd0aaada1f3924fee1cd0a4be3d))
+
+
+### Bug Fixes
+
+* add missing AdCP spec fields to UpdateMediaBuyRequest and correct e2e assertions ([#1152](https://github.com/prebid/salesagent/issues/1152)) ([e9a7a67](https://github.com/prebid/salesagent/commit/e9a7a674ba7b224f7c3f1ff24098cf320cdd586f))
+* apply SSRF protection to signals agent URL ingestion (F-04) ([c18ac11](https://github.com/prebid/salesagent/commit/c18ac111b09f8078a69d3df7ea0805a189d1c94f))
+* ci e2e port allocation and setting | crypto package update ([#1188](https://github.com/prebid/salesagent/issues/1188)) ([e48edda](https://github.com/prebid/salesagent/commit/e48edda516e39a07433ed464d05c4177af8ec3c8))
+* enforce update budget guardrails and preserve currency in media … ([#1140](https://github.com/prebid/salesagent/issues/1140)) ([1e1aa6d](https://github.com/prebid/salesagent/commit/1e1aa6d03bcdfdc07baabc4c5c0656d0d3d8cfd7))
+* harden login redirect validation and test-auth gate (F-06, F-02) ([#1141](https://github.com/prebid/salesagent/issues/1141)) ([cd56496](https://github.com/prebid/salesagent/commit/cd56496bb594c96a9c5082fc3544fe3d0850780b))
+* raise on anomalous empty format responses instead of silent return [] ([#1167](https://github.com/prebid/salesagent/issues/1167)) ([149f58b](https://github.com/prebid/salesagent/commit/149f58b819d1f99bbaa61a9d50c9dcf8353547eb))
+* replace dict subscript with attribute access on FormatId objects ([#1166](https://github.com/prebid/salesagent/issues/1166)) ([80c5776](https://github.com/prebid/salesagent/commit/80c577631164757a49f871a7be145bbbf23c2759))
+* require authenticated principal for task management tools ([#1139](https://github.com/prebid/salesagent/issues/1139)) ([ff1006d](https://github.com/prebid/salesagent/commit/ff1006ddc9f967b7bf745a390465198b40ed29a2))
+* resolve CI failures on PR [#1143](https://github.com/prebid/salesagent/issues/1143) ([5c5f34f](https://github.com/prebid/salesagent/commit/5c5f34f0f93e473817ac7e936e00dc851b985ff1))
+* use request.script_root for dynamic URL prefixing ([#1160](https://github.com/prebid/salesagent/issues/1160)) ([0b304ed](https://github.com/prebid/salesagent/commit/0b304ed589c7e7a01cabb21a84e4479ad1869db9))
+* video/display format template appears unselected after saving product ([#1168](https://github.com/prebid/salesagent/issues/1168)) ([9e395c5](https://github.com/prebid/salesagent/commit/9e395c5dc2b8eb800483a2dc18bc533fe040452e))
+
+
+### Performance Improvements
+
+* **ci:** parallelize integration tests + local mock creative agent ([#1148](https://github.com/prebid/salesagent/issues/1148)) ([9c65617](https://github.com/prebid/salesagent/commit/9c6561776b78d19a0670bc8a0edf93a518ae142b))
+
+
+### Code Refactoring
+
+* AdapterConfigRepository + GAM service account auth consolidation ([#1171](https://github.com/prebid/salesagent/issues/1171)) ([5e89166](https://github.com/prebid/salesagent/commit/5e891667d0eb8a332dd70131fd16429d55925179))
+
+
+### Documentation
+
+* add architecture patterns reference for contributors ([#1145](https://github.com/prebid/salesagent/issues/1145)) ([2d61ea1](https://github.com/prebid/salesagent/commit/2d61ea1133b24eb66f0e8ae8bb319827cf7c2c4e))
+
+## [1.6.0](https://github.com/prebid/salesagent/compare/v1.5.0...v1.6.0) (2026-03-19)
+
+
+### Features
+
+* consolidate security-sensitive code — SSRF protection and OAuth normalization ([#1125](https://github.com/prebid/salesagent/issues/1125)) ([a683f86](https://github.com/prebid/salesagent/commit/a683f8693aecb37c69285606ffa177eb0043875b))
+
+
+### Bug Fixes
+
+* coerce AnyUrl to str before passing to yarl.URL() ([#1106](https://github.com/prebid/salesagent/issues/1106)) ([#1118](https://github.com/prebid/salesagent/issues/1118)) ([641ee9e](https://github.com/prebid/salesagent/commit/641ee9e10b529bf1cfcdf6e571fe1d68b48aa2fa))
+* creative agent TextContent fallback for adcp SDK 3.6.0 ([#1135](https://github.com/prebid/salesagent/issues/1135)) ([d83ed14](https://github.com/prebid/salesagent/commit/d83ed14dfac25828d5d46eb872a930d25bacc194))
+* normalize admin UI to canonical /admin routes ([0283124](https://github.com/prebid/salesagent/commit/02831240a2f286b33ca86e5def8771cfdbb617e4))
+* persist platform_line_item_ids in execute_approved_media_buy ([#1126](https://github.com/prebid/salesagent/issues/1126)) ([6a9776d](https://github.com/prebid/salesagent/commit/6a9776d1f8cd647f1b6b054dd6314746b1da95a0))
+* remove unauthenticated /init-api-key endpoint and harden control-plane auth ([#1103](https://github.com/prebid/salesagent/issues/1103)) ([3a336ef](https://github.com/prebid/salesagent/commit/3a336efb412465f5c345cc87bf020b4118381f31))
+* resolve forked Alembic migration graph and prevent recurrence ([#1144](https://github.com/prebid/salesagent/issues/1144)) ([a4cd866](https://github.com/prebid/salesagent/commit/a4cd8666f3e33bc5ad8ab4cb906af722c2c99917))
+* restore pre-[#1066](https://github.com/prebid/salesagent/issues/1066) admin routes via flask fallback mount ([4b919f3](https://github.com/prebid/salesagent/commit/4b919f3b95e4cf2757f8f5e92ddf822fcb506e5e))
+* Skip format validation when creative agent returns no formats ([#1137](https://github.com/prebid/salesagent/issues/1137)) ([1173473](https://github.com/prebid/salesagent/commit/1173473c6dcdcf17f9a52530d984165752dff5da))
+
+
+### Code Refactoring
+
+* complete delivery schema extraction from _base.py ([#1121](https://github.com/prebid/salesagent/issues/1121)) ([46624e9](https://github.com/prebid/salesagent/commit/46624e99508b377bc3b9f33b3181c8b3f272c5d3))
+* Eliminate get_db_session() from business logic — complete repository pattern adoption ([#1097](https://github.com/prebid/salesagent/issues/1097)) ([1965f1d](https://github.com/prebid/salesagent/commit/1965f1df3b0ce4719845db6ee2c40d17b6358ddc))
+* extract shared delivery helpers and migrate all adapters ([#1124](https://github.com/prebid/salesagent/issues/1124)) ([e8a9b8a](https://github.com/prebid/salesagent/commit/e8a9b8a320a267d4b44899ce4b40a77db69f625e))
+
 ## [1.5.0](https://github.com/prebid/salesagent/compare/v1.4.0...v1.5.0) (2026-03-09)
 
 
