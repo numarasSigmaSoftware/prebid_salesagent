@@ -334,6 +334,28 @@ class CircuitBreakerMixin:
         """Alias for call_send to satisfy BaseTestEnv interface."""
         return self.call_send(**kwargs)
 
+    def get_breaker_state(self) -> str:
+        """Return circuit breaker state for this tenant's endpoints.
+
+        Scans all circuit breakers keyed to this tenant and returns the
+        worst observed state: 'open' > 'half_open' > 'closed'.
+
+        Returns:
+            State string: 'closed', 'open', or 'half_open'
+        """
+        from src.services.webhook_delivery_service import CircuitState
+
+        service = self.get_service()
+        tenant_prefix = f"{self._tenant_id}:"  # type: ignore[attr-defined]
+        worst = CircuitState.CLOSED
+        for key, cb in service._circuit_breakers.items():
+            if key.startswith(tenant_prefix):
+                if cb.state == CircuitState.OPEN:
+                    return CircuitState.OPEN.value
+                if cb.state == CircuitState.HALF_OPEN:
+                    worst = CircuitState.HALF_OPEN
+        return worst.value
+
 
 class ProductMixin:
     """Shared fluent API for _get_products_impl testing.

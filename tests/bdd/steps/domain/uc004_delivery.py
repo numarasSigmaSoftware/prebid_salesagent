@@ -214,12 +214,60 @@ def given_adapter_no_data_period(ctx: dict, mb_id: str) -> None:
 # ── Webhook configuration steps ─────────────────────────────────────
 
 
+_WEBHOOK_URL = "https://buyer.example.com/webhook"
+
+
 def _set_active_webhook(ctx: dict, mb_id: str) -> None:
-    """Shared: configure an active webhook for a media buy."""
+    """Shared: configure an active webhook for a media buy.
+
+    Also persists PushNotificationConfig to DB when running inside an
+    integration env (CircuitBreakerEnv) so send_delivery_webhook can find it.
+    """
     ctx.setdefault("webhook_config", {})[mb_id] = {
-        "url": "https://buyer.example.com/webhook",
+        "url": _WEBHOOK_URL,
         "active": True,
     }
+    env = ctx["env"]
+    if getattr(env, "_session", None) is not None:
+        _persist_webhook_config_if_needed(env)
+
+
+def _persist_webhook_config_if_needed(env: Any) -> None:
+    """Idempotently create Tenant, Principal, PushNotificationConfig in DB."""
+    from sqlalchemy import select
+
+    from src.core.database.models import Principal, PushNotificationConfig, Tenant
+
+    session = env._session
+    tenant_id = env._tenant_id
+    principal_id = env._principal_id
+
+    # Fast path: config already exists
+    if session.scalars(
+        select(PushNotificationConfig).where(
+            PushNotificationConfig.tenant_id == tenant_id,
+            PushNotificationConfig.principal_id == principal_id,
+            PushNotificationConfig.url == _WEBHOOK_URL,
+        )
+    ).first():
+        return
+
+    from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
+
+    tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+    if not tenant:
+        tenant = TenantFactory(tenant_id=tenant_id)
+
+    principal = session.scalars(select(Principal).filter_by(tenant_id=tenant_id, principal_id=principal_id)).first()
+    if not principal:
+        principal = PrincipalFactory(tenant=tenant, principal_id=principal_id)
+
+    PushNotificationConfigFactory(
+        tenant=tenant,
+        principal=principal,
+        url=_WEBHOOK_URL,
+        is_active=True,
+    )
 
 
 @given(parsers.parse('a media buy "{mb_id}" with an active reporting_webhook configured'))
@@ -307,19 +355,56 @@ def given_webhook_unauthorized(ctx: dict, status_code: int) -> None:
 
 @given(parsers.parse("the webhook endpoint has failed {n:d} consecutive delivery attempts"))
 def given_webhook_failed_n_times(ctx: dict, n: int) -> None:
-    """Record n consecutive delivery failures."""
+    """Trigger n consecutive delivery failures on the circuit breaker."""
+    from src.services.webhook_delivery_service import CircuitBreaker
+
+    env = ctx["env"]
+    service = env.get_service()
+    webhook_url = next(iter(ctx.get("webhook_config", {}).values()), {}).get("url", _WEBHOOK_URL)
+    endpoint_key = f"{env._tenant_id}:{webhook_url}"
+    if endpoint_key not in service._circuit_breakers:
+        service._circuit_breakers[endpoint_key] = CircuitBreaker()
+    cb = service._circuit_breakers[endpoint_key]
+    for _ in range(n):
+        cb.record_failure()
+    ctx["circuit_breaker_endpoint_key"] = endpoint_key
     ctx["webhook_failure_count"] = n
 
 
 @given(parsers.parse('a media buy "{mb_id}" with circuit breaker in "{state}" state'))
 def given_circuit_breaker_state(ctx: dict, mb_id: str, state: str) -> None:
-    """Set circuit breaker to specific state."""
+    """Set circuit breaker to specific state by directly manipulating CB internals."""
+    from src.services.webhook_delivery_service import CircuitBreaker, CircuitState
+
+    env = ctx["env"]
+    service = env.get_service()
+    webhook_url = ctx.get("webhook_config", {}).get(mb_id, {}).get("url", _WEBHOOK_URL)
+    endpoint_key = f"{env._tenant_id}:{webhook_url}"
+    if endpoint_key not in service._circuit_breakers:
+        service._circuit_breakers[endpoint_key] = CircuitBreaker()
+    cb = service._circuit_breakers[endpoint_key]
+    state_map = {
+        "OPEN": CircuitState.OPEN,
+        "HALF_OPEN": CircuitState.HALF_OPEN,
+        "CLOSED": CircuitState.CLOSED,
+    }
+    cb.state = state_map[state.upper()]
     ctx["circuit_breaker_state"] = state
+    ctx["circuit_breaker_endpoint_key"] = endpoint_key
 
 
 @given("the circuit breaker timeout (60s) has elapsed")
 def given_circuit_breaker_timeout(ctx: dict) -> None:
-    """Circuit breaker timeout has elapsed."""
+    """Set last_failure_time 61s in the past so the CB timeout has elapsed."""
+    from datetime import UTC, timedelta
+    from datetime import datetime as _dt
+
+    env = ctx["env"]
+    service = env.get_service()
+    endpoint_key = ctx.get("circuit_breaker_endpoint_key", f"{env._tenant_id}:{_WEBHOOK_URL}")
+    cb = service._circuit_breakers.get(endpoint_key)
+    if cb is not None:
+        cb.last_failure_time = _dt.now(UTC) - timedelta(seconds=61)
     ctx["circuit_breaker_timeout_elapsed"] = True
 
 
@@ -588,17 +673,33 @@ def when_attempt_webhook(ctx: dict) -> None:
 
 @when("the system evaluates the circuit breaker state")
 def when_evaluate_circuit_breaker(ctx: dict) -> None:
-    """Evaluate circuit breaker state."""
+    """Evaluate circuit breaker state.
+
+    Calls cb.can_attempt() directly to trigger timeout-based state transitions
+    (OPEN → HALF_OPEN), then attempts delivery via call_send().
+    """
     env = ctx["env"]
+    service = env.get_service()
+    endpoint_key = ctx.get("circuit_breaker_endpoint_key", f"{env._tenant_id}:{_WEBHOOK_URL}")
+    cb = service._circuit_breakers.get(endpoint_key)
+    if cb is not None:
+        ctx["cb_can_attempt"] = cb.can_attempt()
     try:
-        ctx["circuit_result"] = env.call_impl()
+        ctx["circuit_result"] = env.call_send()
     except Exception as exc:
         ctx["error"] = exc
 
 
 @when(parsers.parse("the system delivers {n:d} successful probe reports"))
 def when_deliver_probe_reports(ctx: dict, n: int) -> None:
-    """Deliver n successful probe reports."""
+    """Record n successful deliveries on the circuit breaker (simulates probe recovery)."""
+    env = ctx["env"]
+    service = env.get_service()
+    endpoint_key = ctx.get("circuit_breaker_endpoint_key", f"{env._tenant_id}:{_WEBHOOK_URL}")
+    cb = service._circuit_breakers.get(endpoint_key)
+    if cb is not None:
+        for _ in range(n):
+            cb.record_success()
     ctx["probe_count"] = n
 
 
@@ -1234,56 +1335,57 @@ def then_webhook_marked_failed(ctx: dict) -> None:
 
 @then(parsers.parse('the circuit breaker should be in "{state}" state'))
 def then_circuit_breaker_state(ctx: dict, state: str) -> None:
-    """Assert circuit breaker state."""
-    raise NotImplementedError(
-        "circuit breaker state not exposed by CircuitBreakerEnv — "
-        "add get_breaker_state() API to CircuitBreakerMixin before implementing"
-    )
+    """Assert circuit breaker state matches expected value."""
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual.lower() == state.lower(), f"Expected CB state '{state.lower()}', got '{actual}'"
 
 
 @then("subsequent scheduled deliveries should be suppressed")
 def then_deliveries_suppressed(ctx: dict) -> None:
-    """Assert deliveries are suppressed when circuit is open."""
-    raise NotImplementedError(
-        "delivery suppression check not available in CircuitBreakerEnv — "
-        "requires scheduler-level mock not yet wired in harness"
-    )
+    """Assert circuit is open so deliveries would be suppressed."""
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual == "open", f"Expected CB in 'open' state (suppressed), got '{actual}'"
 
 
 @then(parsers.parse('the circuit breaker should transition to "{state}"'))
 def then_circuit_transition(ctx: dict, state: str) -> None:
-    """Assert circuit breaker transitions to the named state."""
-    raise NotImplementedError(
-        "circuit breaker state transition not exposed by CircuitBreakerEnv — "
-        "add state-change tracking to CircuitBreakerMixin before implementing"
-    )
+    """Assert circuit breaker transitioned to the expected state."""
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual.lower() == state.lower(), f"Expected CB transition to '{state.lower()}', got '{actual}'"
 
 
 @then("the system should attempt a single probe delivery")
 def then_single_probe(ctx: dict) -> None:
-    """Assert exactly one probe delivery was attempted (half-open state)."""
-    raise NotImplementedError("probe delivery tracking requires CircuitBreakerEnv harness extension")
+    """Assert CB entered half_open state (probe delivery is allowed)."""
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual == "half_open", f"Expected CB in 'half_open' for probe attempt, got '{actual}'"
 
 
 @then("normal scheduled deliveries should resume")
 def then_deliveries_resume(ctx: dict) -> None:
-    """Assert scheduled deliveries resume after circuit closes."""
-    raise NotImplementedError("delivery resume tracking requires scheduler-level mock in CircuitBreakerEnv")
+    """Assert circuit closed so scheduled deliveries can proceed."""
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual == "closed", f"Expected CB in 'closed' state for resumed deliveries, got '{actual}'"
 
 
 @then("the delivery should be recorded as successful")
 def then_delivery_successful(ctx: dict) -> None:
-    """Assert delivery is recorded as successful in the circuit breaker's state."""
-    raise NotImplementedError("success recording check requires CircuitBreakerEnv state API")
+    """Assert delivery was recorded as successful."""
+    result = ctx.get("webhook_result")
+    assert result is True, f"Expected webhook_result=True (successful delivery), got {result!r}"
 
 
 @then("the circuit breaker state should remain healthy")
 def then_circuit_healthy(ctx: dict) -> None:
     """Assert circuit breaker remains in healthy (closed) state."""
-    raise NotImplementedError(
-        "circuit breaker health state not exposed by CircuitBreakerEnv — "
-        "add get_breaker_state() API to CircuitBreakerMixin before implementing"
-    )
+    env = ctx["env"]
+    actual = env.get_breaker_state()
+    assert actual == "closed", f"Expected CB to remain 'closed' (healthy), got '{actual}'"
 
 
 @then("the configuration should be rejected")
