@@ -203,8 +203,12 @@ class TestEnableOIDC:
             oidc_verified_at=datetime.now(UTC),
             oidc_verified_redirect_uri=verified_uri,
         )
-        # Close the factory session's open transaction so the Flask handler's
-        # scoped_session reads see the committed factory rows.
+        # Defensive commit boundary. Factories use ``sqlalchemy_session_persistence="commit"``
+        # so rows are already persisted, but the enable-OIDC handler opens its own
+        # scoped_session and reads ``oidc_verified_at`` / ``oidc_verified_redirect_uri``
+        # as preconditions. Forcing an explicit commit here keeps the precondition
+        # unambiguous so the test only fails for the scoped_session bug the xfail
+        # is meant to surface, not for a visibility artifact in the setup.
         factory_session.commit()
         _auth_session(client, tenant.tenant_id)
 

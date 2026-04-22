@@ -86,8 +86,8 @@ class TestAddUser:
             f"/tenant/{tenant.tenant_id}/users/add",
             data={"email": "new@example.com", "name": "New User", "role": "manager"},
         )
-        # Endpoint redirects back to the list page on success/failure.
-        assert response.status_code in (200, 302)
+        # All terminal paths of the add_user handler return redirect(url_for(...)).
+        assert response.status_code == 302
 
         user = factory_session.scalars(
             select(User).filter_by(tenant_id=tenant.tenant_id, email="new@example.com")
@@ -119,7 +119,7 @@ class TestToggleUser:
         _auth_session(client, tenant.tenant_id)
 
         response = client.post(f"/tenant/{tenant.tenant_id}/users/{user.user_id}/toggle")
-        assert response.status_code in (200, 302)
+        assert response.status_code == 302
 
         factory_session.expire_all()
         refreshed = factory_session.get(User, user.user_id)

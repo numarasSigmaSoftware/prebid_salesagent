@@ -24,6 +24,12 @@ def factory_session(integration_db):  # noqa: F811 — fixture parameter, not a 
     Factories are unbound on teardown so the binding doesn't leak into other tests.
 
     Returns the bound session for use in post-POST DB state assertions.
+
+    Note: the factory session binding is stored on class attributes of each factory,
+    so this fixture mutates process-wide state. Two tests in the same worker cannot
+    use ``factory_session`` concurrently — the ``assert ... is None`` precondition
+    below catches nesting. Parallel test runners must assign distinct workers per
+    test (pytest-xdist's default ``--dist=load`` is fine; avoid ``--dist=each``).
     """
     from src.core.database.database_session import get_engine
     from tests.factories import ALL_FACTORIES
