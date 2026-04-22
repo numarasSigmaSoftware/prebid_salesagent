@@ -69,6 +69,7 @@ KNOWN_SCHEMA_LIBRARY_MISMATCHES: dict[str, set[str]] = {
         "time_budget",  # Schema defines time budget, library doesn't have it yet
     },
     "/schemas/latest/media-buy/update-media-buy-request.json": {
+        "account",  # Schema adds account (object) field, not exposed by library or our model yet
         "idempotency_key",  # Schema defines request deduplication key, library doesn't have it yet
         "invoice_recipient",  # Schema refs BusinessEntity type, not in library or our models yet
     },
