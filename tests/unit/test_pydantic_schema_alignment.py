@@ -594,11 +594,9 @@ class TestSpecificFieldValidation:
     def test_create_media_buy_accepts_brand_manifest(self):
         """REGRESSION TEST: brand must be accepted per AdCP v3.6.0 (replaced brand_manifest)."""
         request = CreateMediaBuyRequest(
-            buyer_ref="test_ref",  # Required per AdCP spec
             brand={"domain": "nike.com"},
             packages=[
                 {
-                    "buyer_ref": "pkg_1",
                     "product_id": "prod_1",
                     "budget": 5000.0,
                     "pricing_option_id": "test_pricing",
