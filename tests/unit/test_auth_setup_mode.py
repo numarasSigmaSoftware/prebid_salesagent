@@ -37,13 +37,13 @@ Auth setup mode allows test credentials to work per-tenant:
 # ---
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from src.core.database.models import Tenant
 
 
 class TestTenantAuthSetupMode:
-    """Tests for the auth_setup_mode field on Tenant model."""
+    """Characterization tests for the auth_setup_mode field on the Tenant ORM model."""
 
     def test_tenant_has_auth_setup_mode_field(self):
         """Tenant model should have auth_setup_mode field."""
@@ -115,9 +115,12 @@ class TestDisableSetupModeEndpoint:
 class TestTestAuthEndpoint:
     """Endpoint-level tests for the /test/auth gate.
 
-    F-02 fix: test auth now requires BOTH ADCP_AUTH_TEST_MODE=true AND
+    F-02 fix: test auth requires BOTH ADCP_AUTH_TEST_MODE=true AND
     the tenant's auth_setup_mode=True. These tests exercise the actual
-    Flask endpoint so a gate change in auth.py would cause a real failure.
+    Flask endpoint so a gate change in auth.py causes a real failure.
+
+    (Previously removed in e1dbe47d and replaced with tests that
+    re-implemented the endpoint conditional inline — restored here.)
     """
 
     def test_test_auth_allowed_when_both_enabled(self, make_auth_test_client):
@@ -173,8 +176,6 @@ class TestMigration:
 
     def test_migration_file_exists(self):
         """Migration file for auth_setup_mode should exist."""
-        import os
-
         migration_path = "alembic/versions/add_auth_setup_mode.py"
         assert os.path.exists(migration_path), f"Migration file not found: {migration_path}"
 
@@ -187,7 +188,6 @@ class TestMigration:
         migration = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(migration)
 
-        # Check revision chain
         assert migration.revision == "add_auth_setup_mode"
         assert migration.down_revision == "add_tenant_auth_config"
         assert callable(migration.upgrade)
