@@ -24,9 +24,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from adcp.types import MediaBuyStatus
 
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError
 from src.core.schemas import GetMediaBuyDeliveryRequest
 from src.core.schemas.delivery import GetCreativeDeliveryResponse, GetMediaBuyDeliveryResponse
+from src.core.tools._media_buy_status import CANONICAL_STATUSES
 from src.core.tools.media_buy_delivery import (
     _get_media_buy_delivery_impl,
     _resolve_delivery_status_filter,
@@ -141,7 +142,7 @@ class TestValidStatusValuesAccepted:
         "status_input",
         [
             MediaBuyStatus.active,
-            MediaBuyStatus.pending_activation,
+            MediaBuyStatus.pending_start,
             MediaBuyStatus.paused,
             MediaBuyStatus.completed,
         ],
@@ -168,17 +169,15 @@ class TestValidStatusValuesAccepted:
 
         Covers: UC-004-ALT-STATUS-FILTERED-DELIVERY-07
         """
-        valid_internal = {"active", "ready", "paused", "completed", "failed"}
-
         # Use a mock with .value = "all" to simulate the "all" special case
         mock_status = MagicMock()
         mock_status.value = "all"
 
         # Act — pure function test, harness not applicable
-        result = _resolve_delivery_status_filter(mock_status, valid_internal, lambda s: s.value)
+        result = _resolve_delivery_status_filter(mock_status, set(CANONICAL_STATUSES))
 
         # Assert — all valid statuses returned
-        assert set(result) == valid_internal
+        assert set(result) == set(CANONICAL_STATUSES)
 
 
 # ---------------------------------------------------------------------------
@@ -364,10 +363,10 @@ class TestUC004EXTA02AuthenticationFailure:
             # Call _impl directly with identity=None (bypassing env.call_impl which provides identity)
             req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb_001"])
 
-            with pytest.raises(AdCPValidationError) as exc_info:
+            with pytest.raises(AdCPAuthenticationError) as exc_info:
                 _get_media_buy_delivery_impl(req, identity=None)
 
-            assert exc_info.value.message == "Context is required"
+            assert exc_info.value.message == "Authentication required: no identity in request."
 
 
 # ---------------------------------------------------------------------------
@@ -389,52 +388,41 @@ class TestUC004EXTA02AuthenticationFailure:
 # ---------------------------------------------------------------------------
 
 
-class TestBuyerRefResolution:
-    """Verify that buyer_refs resolve media buys when media_buy_ids is absent.
+class TestMediaBuyIdResolution:
+    """Verify that media_buy_ids resolve media buys.
 
     Covers: UC-004-MAIN-02
     """
 
-    def test_buyer_refs_resolve_media_buys(self):
-        """buyer_refs resolve media buys when media_buy_ids absent.
+    def test_media_buy_ids_resolve_media_buys(self):
+        """media_buy_ids resolve media buys.
 
         Covers: UC-004-MAIN-02
         """
         from tests.harness.delivery_poll_unit import DeliveryPollEnv
 
         with DeliveryPollEnv() as env:
-            env.add_buy(media_buy_id="mb_100", buyer_ref="my_campaign_1")
+            env.add_buy(media_buy_id="mb_100")
             env.set_adapter_response("mb_100", impressions=5000, spend=250.0)
 
-            response = env.call_impl(buyer_refs=["my_campaign_1"])
+            response = env.call_impl(media_buy_ids=["mb_100"])
 
             assert len(response.media_buy_deliveries) == 1
             assert response.media_buy_deliveries[0].media_buy_id == "mb_100"
 
-            # Verify repo was called with buyer_refs
-            uow_instance = env.mock["uow"].return_value
-            uow_instance.media_buys.get_by_principal.assert_called_once_with(
-                "test_principal", buyer_refs=["my_campaign_1"]
-            )
-
-    # test_full_impl_returns_delivery_via_buyer_ref — migrated to integration
-
-    def test_buyer_refs_ignored_when_media_buy_ids_present(self):
-        """media_buy_ids takes precedence over buyer_refs per INV-2 rule.
+    def test_media_buy_ids_used_for_fetch(self):
+        """media_buy_ids is the identifier for delivery requests (adcp 3.12).
 
         Covers: UC-004-MAIN-02
         """
         from tests.harness.delivery_poll_unit import DeliveryPollEnv
 
         with DeliveryPollEnv() as env:
-            env.add_buy(media_buy_id="mb_300", buyer_ref="my_campaign_1")
+            env.add_buy(media_buy_id="mb_300")
             env.set_adapter_response("mb_300", impressions=5000, spend=250.0)
 
-            response = env.call_impl(media_buy_ids=["mb_300"], buyer_refs=["my_campaign_1"])
+            response = env.call_impl(media_buy_ids=["mb_300"])
 
-            # media_buy_ids takes precedence — repo called with media_buy_ids, not buyer_refs
-            uow_instance = env.mock["uow"].return_value
-            uow_instance.media_buys.get_by_principal.assert_called_once_with("test_principal", media_buy_ids=["mb_300"])
             assert len(response.media_buy_deliveries) == 1
 
 
@@ -597,10 +585,7 @@ def _make_media_buy_delivery_response(
         MediaBuyDeliveryData,
     )
 
-    rp = {
-        "start": datetime(2025, 1, 1, tzinfo=UTC),
-        "end": datetime(2025, 1, 31, tzinfo=UTC),
-    }
+    rp = {"start": datetime(2025, 1, 1, tzinfo=UTC), "end": datetime(2025, 1, 31, tzinfo=UTC)}
     deliveries = [
         MediaBuyDeliveryData(
             media_buy_id=f"mb_{i:03d}",
@@ -629,10 +614,7 @@ def _make_creative_delivery_response(
 
     from src.core.schemas.delivery import CreativeDeliveryData
 
-    rp = {
-        "start": datetime(2025, 1, 1, tzinfo=UTC),
-        "end": datetime(2025, 1, 31, tzinfo=UTC),
-    }
+    rp = {"start": datetime(2025, 1, 1, tzinfo=UTC), "end": datetime(2025, 1, 31, tzinfo=UTC)}
     creatives = [CreativeDeliveryData(creative_id=f"cr_{i:03d}") for i in range(creative_count)]
     return GetCreativeDeliveryResponse(
         reporting_period=rp,
@@ -755,12 +737,13 @@ class TestNextExpectedAtSerialization:
 
 
 class TestMissingPrincipalIdReturnsError:
-    """_get_media_buy_delivery_impl returns error when principal_id is missing.
+    """_get_media_buy_delivery_impl raises AdCPAuthenticationError when principal_id is missing.
 
     Covers lines 91-93 of media_buy_delivery.py.
     """
 
-    def test_none_principal_id_returns_error_response(self):
+    def test_none_principal_id_raises_auth_error(self):
+        from src.core.exceptions import AdCPAuthenticationError
         from src.core.resolved_identity import ResolvedIdentity
 
         identity = ResolvedIdentity(
@@ -770,11 +753,11 @@ class TestMissingPrincipalIdReturnsError:
         )
         req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb_001"])
 
-        response = _get_media_buy_delivery_impl(req, identity)
-        assert response.errors is not None
-        assert any(e.code == "principal_id_missing" for e in response.errors)
+        with pytest.raises(AdCPAuthenticationError):
+            _get_media_buy_delivery_impl(req, identity)
 
-    def test_empty_string_principal_id_returns_error_response(self):
+    def test_empty_string_principal_id_raises_auth_error(self):
+        from src.core.exceptions import AdCPAuthenticationError
         from src.core.resolved_identity import ResolvedIdentity
 
         identity = ResolvedIdentity(
@@ -784,9 +767,8 @@ class TestMissingPrincipalIdReturnsError:
         )
         req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb_001"])
 
-        response = _get_media_buy_delivery_impl(req, identity)
-        assert response.errors is not None
-        assert any(e.code == "principal_id_missing" for e in response.errors)
+        with pytest.raises(AdCPAuthenticationError):
+            _get_media_buy_delivery_impl(req, identity)
 
 
 class TestMissingTenantRaisesAuthError:
@@ -806,7 +788,7 @@ class TestMissingTenantRaisesAuthError:
         )
         req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb_001"])
 
-        with patch("src.core.tools.media_buy_delivery.get_principal_object", return_value=MagicMock()):
+        with patch("src.core.auth.get_principal_object", return_value=MagicMock()):
             with pytest.raises(AdCPAuthenticationError, match="No tenant context"):
                 _get_media_buy_delivery_impl(req, identity)
 
@@ -818,11 +800,9 @@ class TestStatusFilterRawString:
     """
 
     def test_raw_string_active_is_recognized(self):
-        valid = {"active", "ready", "paused", "completed", "failed"}
-        result = _resolve_delivery_status_filter("active", valid, lambda s: s.value)
+        result = _resolve_delivery_status_filter("active", set(CANONICAL_STATUSES))
         assert result == ["active"]
 
     def test_unknown_raw_string_defaults_to_active(self):
-        valid = {"active", "ready", "paused", "completed", "failed"}
-        result = _resolve_delivery_status_filter("nonexistent", valid, lambda s: s.value)
+        result = _resolve_delivery_status_filter("nonexistent", set(CANONICAL_STATUSES))
         assert result == ["active"]

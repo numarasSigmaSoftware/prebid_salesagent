@@ -7,9 +7,9 @@ These tests verify that:
 4. AdCP protocol requirements are met
 """
 
-import warnings
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import Enum
 
 import pytest
 from adcp.types import CreativePolicy
@@ -56,6 +56,7 @@ from src.core.schemas import (
 from src.core.schemas import (
     Product as ProductSchema,
 )
+from tests.factories.creative_asset import build_assets, image_spec, url_spec, video_spec
 
 
 class TestSchemaMatchesLibrary:
@@ -121,21 +122,21 @@ class TestSchemaMatchesLibrary:
         lib_fields = set(LibGetProductsRequest.model_fields.keys())
         local_fields = set(GetProductsRequest.model_fields.keys())
         # product_selectors — internal-only field (not in AdCP spec)
+        # push_notification_config — in JSON schema but not yet in adcp library's
+        #   GetProductsWholesaleRequest (library gap); declared locally per Pattern #1
         # buying_mode and account are now in the library (adcp 3.9) but overridden locally
         # (buying_mode widened to str|None, account made optional)
-        local_extensions = {"product_selectors"}
+        local_extensions = {"product_selectors", "push_notification_config"}
         assert lib_fields == local_fields - local_extensions, (
             f"GetProductsRequest drift: lib={lib_fields}, local={local_fields}"
         )
 
-        # GetMediaBuyDeliveryRequest - local extends library with spec fields
+        # GetMediaBuyDeliveryRequest - local now matches library exactly
+        # (SDK 5.7 provides time_granularity, include_window_breakdown,
+        # include_package_daily_breakdown — no local extensions needed)
         lib_fields = set(LibGetMediaBuyDeliveryRequest.model_fields.keys())
         local_fields = set(LocalGetMediaBuyDeliveryRequest.model_fields.keys())
-        # adcp 3.9: all fields now in library — no local extensions remaining
-        local_extensions: set[str] = set()
-        assert lib_fields == local_fields - local_extensions, (
-            f"GetMediaBuyDeliveryRequest drift: lib={lib_fields}, local={local_fields}"
-        )
+        assert lib_fields == local_fields, f"GetMediaBuyDeliveryRequest drift: lib={lib_fields}, local={local_fields}"
 
         # Document known drift for other schemas (to be fixed)
         # These assertions document the current state and will fail when fixed
@@ -213,7 +214,7 @@ class TestSchemaMatchesLibrary:
 
         # Library should require brand for CreateMediaBuyRequest
         with pytest.raises(ValidationError):
-            LibraryCreateMediaBuyRequest(buyer_ref="test")
+            LibraryCreateMediaBuyRequest()
 
     def test_schema_validation_matches_library(self):
         """Compare our schema validation against library for common cases."""
@@ -304,6 +305,14 @@ class TestAdCPContract:
                 "provider": "test_provider",
                 "notes": "Test measurement",
             },  # Required per AdCP spec
+            "reporting_capabilities": {
+                "available_reporting_frequencies": ["daily"],
+                "expected_delay_minutes": 60,
+                "timezone": "UTC",
+                "supports_webhooks": True,
+                "available_metrics": ["impressions", "clicks"],
+                "date_range_support": {"minimum_days": 1, "maximum_days": 90},
+            },  # Required per AdCP 4.3 spec
         }
 
         # Should be convertible to AdCP schema
@@ -377,10 +386,7 @@ class TestAdCPContract:
             principal_id="test_principal",
             name="Test Advertiser",
             access_token="secure_token_123",
-            platform_mappings={
-                "google_ad_manager": {"advertiser_id": "123456"},
-                "mock": {"id": "test"},
-            },
+            platform_mappings={"google_ad_manager": {"advertiser_id": "123456"}, "mock": {"id": "test"}},
         )
 
         # Convert to schema format
@@ -451,10 +457,7 @@ class TestAdCPContract:
             description="Test product with exposure estimates",
             format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             delivery_type="guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },  # Required per AdCP spec
+            delivery_measurement={"provider": "test_provider", "notes": "Test measurement"},  # Required per AdCP spec
             pricing_options=[
                 create_test_cpm_pricing_option(
                     pricing_option_id="cpm_usd_fixed",
@@ -480,10 +483,7 @@ class TestAdCPContract:
             description="Test product with CPM guidance",
             format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "video_15s"}],
             delivery_type="non_guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },  # Required per AdCP spec
+            delivery_measurement={"provider": "test_provider", "notes": "Test measurement"},  # Required per AdCP spec
             pricing_options=[
                 {
                     "pricing_option_id": "cpm_eur_auction",
@@ -544,10 +544,7 @@ class TestAdCPContract:
             description="Product with full property objects",
             format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "video_15s"}],
             delivery_type="non_guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },  # Required per AdCP spec
+            delivery_measurement={"provider": "test_provider", "notes": "Test measurement"},  # Required per AdCP spec
             publisher_properties=[
                 create_test_publisher_properties_by_tag(
                     publisher_domain="example.com", property_tags=["premium_sports"]
@@ -643,24 +640,15 @@ class TestAdCPContract:
         # In adcp 3.6.0, brand_manifest is replaced by brand (BrandReference with domain field)
         request = CreateMediaBuyRequest(
             brand={"domain": "nike.com"},  # Required in adcp 3.6.0 (was brand_manifest)
-            buyer_ref="nike_jordan_2025_q1",  # Required per AdCP spec
+            # Required per AdCP spec
             packages=[
-                {
-                    "product_id": "product_1",
-                    "buyer_ref": "pkg_1",
-                    "budget": 2500.0,
-                    "pricing_option_id": "opt_1",
-                },
-                {
-                    "product_id": "product_2",
-                    "buyer_ref": "pkg_2",
-                    "budget": 2500.0,
-                    "pricing_option_id": "opt_2",
-                },
+                {"product_id": "product_1", "budget": 2500.0, "pricing_option_id": "opt_1"},
+                {"product_id": "product_2", "budget": 2500.0, "pricing_option_id": "opt_2"},
             ],
             start_time=start_time,
             end_time=end_time,
             po_number="PO-12345",  # Optional per spec
+            idempotency_key="unit-test-key-adcp-create-mb",
         )
 
         # Verify AdCP requirements
@@ -670,7 +658,6 @@ class TestAdCPContract:
 
         # Verify spec-compliant fields are present
         assert request.brand is not None
-        assert request.buyer_ref == "nike_jordan_2025_q1"
         assert len(request.packages) == 2
 
     def test_format_schema_compliance(self):
@@ -681,13 +668,12 @@ class TestAdCPContract:
         format_obj = Format(
             format_id=create_test_format_id("native_feed"),
             name="Native Feed Ad",
-            type="native",
         )
 
         # AdCP format requirements (new spec structure)
         assert format_obj.format_id is not None
         # format_obj.type is an enum, check its value
-        assert format_obj.type.value in ["display", "video", "audio", "native", "dooh"]
+        # type removed from Format in adcp 3.12
         assert format_obj.name == "Native Feed Ad"
 
     def test_field_mapping_consistency(self):
@@ -833,10 +819,7 @@ class TestAdCPContract:
                 "auto_intenders_q1_2025",
                 "high_income_households",
             ],
-            key_value_pairs={
-                "custom_audience_1": "abc123",
-                "lookalike_model": "xyz789",
-            },
+            key_value_pairs={"custom_audience_1": "abc123", "lookalike_model": "xyz789"},
         )
 
         # Verify signals are supported in Targeting schema
@@ -863,15 +846,10 @@ class TestAdCPContract:
             creative_id="test_creative_123",
             name="Test AdCP Creative",
             format_id=FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
-            assets={
-                "banner_image": {
-                    "url": "https://example.com/creative.jpg",
-                    "width": 300,
-                    "height": 250,
-                    "asset_type": "image",
-                },
-                "click_url": {"url": "https://example.com/landing", "url_type": "clickthrough"},
-            },
+            assets=build_assets(
+                image_spec("banner_image", url="https://example.com/creative.jpg"),
+                url_spec("click_url", url="https://example.com/landing", url_type="clickthrough"),
+            ),
             tags=["display", "banner"],
             # Internal fields (optional, added by sales agent)
             principal_id="test_principal",
@@ -924,6 +902,11 @@ class TestAdCPContract:
         )
 
         signal = Signal(
+            signal_id={
+                "source": "catalog",
+                "data_provider_domain": "acmedata.com",
+                "id": "signal_auto_intenders_q1_2025",
+            },
             signal_agent_segment_id="signal_auto_intenders_q1_2025",
             name="Auto Intenders Q1 2025",
             description="Consumers showing purchase intent for automotive products in Q1 2025",
@@ -1013,7 +996,6 @@ class TestAdCPContract:
         package = Package(
             package_id="pkg_test_123",
             paused=False,  # Changed from status="active" in adcp 2.12.0
-            buyer_ref="buyer_ref_abc",
             product_id="product_xyz",  # singular, not plural
             impressions=50000,
             creative_assignments=[
@@ -1042,7 +1024,6 @@ class TestAdCPContract:
         # Per adcp library Package schema (response schema, not request)
         # Test with fields that were actually set in the Package object above
         expected_optional_fields = {
-            "buyer_ref",  # We set this
             "product_id",  # We set this
             "impressions",  # We set this
             "creative_assignments",  # We set this
@@ -1392,15 +1373,10 @@ class TestAdCPContract:
             variants=[],
             name="Test Creative",
             format_id=FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
-            assets={
-                "banner_image": {
-                    "url": "https://example.com/creative.jpg",
-                    "width": 300,
-                    "height": 250,
-                    "asset_type": "image",
-                },
-                "click_url": {"url": "https://example.com/click", "url_type": "clickthrough"},
-            },
+            assets=build_assets(
+                image_spec("banner_image", url="https://example.com/creative.jpg"),
+                url_spec("click_url", url="https://example.com/click", url_type="clickthrough"),
+            ),
             tags=["sports", "premium"],
             # Internal fields (added by sales agent during processing)
             principal_id="principal_456",
@@ -1409,7 +1385,9 @@ class TestAdCPContract:
         )
 
         # Test with spec-compliant fields only (adcp 3.9)
-        from adcp.types.generated_poc.creative.sync_creatives_request import Assignment
+        from adcp.types.generated_poc.creative.sync_creatives_request import (
+            Assignment,
+        )  # TODO: no stable alias in adcp.types  # TODO: no stable alias in adcp.types
 
         request = SyncCreativesRequest(
             creatives=[creative],
@@ -1443,7 +1421,7 @@ class TestAdCPContract:
         # These are correctly excluded from output when None
 
         # Verify non-spec fields are NOT present
-        non_spec_fields = ["media_buy_id", "buyer_ref", "assign_to_packages", "upsert", "patch"]
+        non_spec_fields = ["media_buy_id", "assign_to_packages", "upsert", "patch"]
         for field in non_spec_fields:
             assert field not in adcp_response, f"Non-spec field '{field}' should not be in response"
 
@@ -1494,13 +1472,13 @@ class TestAdCPContract:
                 SyncCreativeResult(
                     creative_id="creative_456",
                     action="updated",
-                    status="pending",
+                    status="pending_review",
                     changes=["url", "name"],
                 ),
                 SyncCreativeResult(
                     creative_id="creative_789",
                     action="failed",
-                    errors=["Invalid format"],
+                    errors=[{"code": "invalid_format", "message": "Invalid format"}],
                 ),
             ],
         )
@@ -1533,8 +1511,10 @@ class TestAdCPContract:
         from adcp.types import CreativeFilters as LibraryCreativeFilters
 
         # adcp 3.6.0: Request pagination uses PaginationRequest (cursor + max_results)
-        from adcp.types.generated_poc.core.pagination_request import PaginationRequest
-        from adcp.types.generated_poc.creative.list_creatives_request import Sort as LibrarySort
+        from adcp.types import PaginationRequest
+        from adcp.types.generated_poc.creative.list_creatives_request import (
+            Sort as LibrarySort,
+        )  # TODO: different Sort from adcp.types.Sort
 
         from src.core.schemas import ListCreativesRequest
 
@@ -1549,7 +1529,6 @@ class TestAdCPContract:
                 created_after=datetime.now(UTC) - timedelta(days=30),
                 created_before=datetime.now(UTC),
                 media_buy_ids=["mb_123"],
-                buyer_refs=["buyer_456"],
             ),
             pagination=PaginationRequest(max_results=50),  # Request pagination uses cursor/max_results
             sort=LibrarySort(field="created_date", direction="desc"),  # type: ignore[arg-type]
@@ -1575,7 +1554,6 @@ class TestAdCPContract:
         assert "created_after" in filters, "filters.created_after should be present"
         assert "created_before" in filters, "filters.created_before should be present"
         assert filters["media_buy_ids"] == ["mb_123"], "filters.media_buy_ids should match input"
-        assert filters["buyer_refs"] == ["buyer_456"], "filters.buyer_refs should match input"
 
         # Verify pagination structure (adcp 3.6.0: cursor-based pagination)
         pagination = adcp_response["pagination"]
@@ -1593,18 +1571,25 @@ class TestAdCPContract:
         assert "include_assignments" in adcp_response, "Field with default should be present"
         assert adcp_response["include_assignments"] is True, "Default value should match"
 
-        # Verify all spec fields are present (per adcp 3.10 library schema)
+        # Verify all spec fields are present (per adcp 5.7 library schema)
         spec_fields = {
+            "account",
+            "adcp_major_version",
+            "adcp_version",
             "context",
             "ext",
             "fields",
             "filters",
             "include_assignments",
             "include_items",
+            "include_pricing",
+            "include_purged",
             "include_snapshot",
             "include_variables",
+            "include_webhook_activity",
             "pagination",
             "sort",
+            "webhook_activity_limit",
         }
         assert set(adcp_response.keys()) == spec_fields, f"Fields should match spec: {set(adcp_response.keys())}"
 
@@ -1615,14 +1600,9 @@ class TestAdCPContract:
             variants=[],
             name="Test Creative 1",
             format_id=FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
-            assets={
-                "banner_image": {
-                    "url": "https://example.com/creative1.jpg",
-                    "width": 300,
-                    "height": 250,
-                    "asset_type": "image",
-                }
-            },
+            assets=build_assets(
+                image_spec("banner_image", url="https://example.com/creative1.jpg", width=300, height=250)
+            ),
             tags=["sports"],
             # Internal fields
             principal_id="principal_1",
@@ -1636,14 +1616,9 @@ class TestAdCPContract:
             variants=[],
             name="Test Creative 2",
             format_id=FormatId(agent_url="https://creative.adcontextprotocol.org", id="video_1280x720"),
-            assets={
-                "video_file": {
-                    "url": "https://example.com/creative2.mp4",
-                    "width": 1280,
-                    "height": 720,
-                    "asset_type": "video",
-                }
-            },
+            assets=build_assets(
+                video_spec("video_file", url="https://example.com/creative2.mp4", width=1280, height=720)
+            ),
             tags=["premium"],
             # Internal fields
             principal_id="principal_1",
@@ -1727,8 +1702,7 @@ class TestAdCPContract:
 
         successful_response = CreateMediaBuySuccess(
             media_buy_id="mb_12345",
-            buyer_ref="br_67890",
-            packages=[{"package_id": "pkg_1", "buyer_ref": "br_67890", "paused": False}],
+            packages=[{"package_id": "pkg_1", "paused": False}],
             creative_deadline=datetime.now(UTC) + timedelta(days=7),
         )
 
@@ -1736,7 +1710,7 @@ class TestAdCPContract:
         adcp_response = successful_response.model_dump()
 
         # Verify required AdCP domain fields present and non-null
-        required_fields = ["buyer_ref"]  # buyer_ref is required, media_buy_id is optional
+        required_fields = []
         for field in required_fields:
             assert field in adcp_response, f"Required AdCP field '{field}' missing from response"
             assert adcp_response[field] is not None, f"Required AdCP field '{field}' is None"
@@ -1772,7 +1746,6 @@ class TestAdCPContract:
 
         success_via_union: CreateMediaBuyResponse = CreateMediaBuySuccess(
             media_buy_id="mb_union",
-            buyer_ref="br_union",
             packages=[],
         )
         error_via_union: CreateMediaBuyResponse = CreateMediaBuyError(
@@ -1806,10 +1779,7 @@ class TestAdCPContract:
                 {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_728x90"},
             ],
             delivery_type="guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },  # Required per AdCP spec
+            delivery_measurement={"provider": "test_provider", "notes": "Test measurement"},  # Required per AdCP spec
             measurement=None,
             creative_policy=None,
             is_custom=False,
@@ -1851,7 +1821,7 @@ class TestAdCPContract:
         # Verify optional status field (AdCP PR #77 - MCP Status System)
         # Status field is optional and only present when explicitly set
         if "status" in adcp_response:
-            assert isinstance(adcp_response["status"], str), "status must be string when present"
+            assert isinstance(adcp_response["status"], (str, Enum)), "status must be string/enum when present"
 
         # Verify specific field types and constraints
         assert isinstance(adcp_response["products"], list), "products must be array"
@@ -1870,10 +1840,9 @@ class TestAdCPContract:
         assert empty_adcp_response["products"] == [], "Empty products list should be empty array"
         # Verify __str__() provides appropriate empty message
         assert str(empty_response) == "No products matched your requirements."
-        # Allow 2 or 3 fields (status is optional and may not be present, message removed)
-        assert len(empty_adcp_response) >= 2 and len(empty_adcp_response) <= 3, (
-            f"GetProductsResponse should have 2-3 fields (status optional), got {len(empty_adcp_response)}"
-        )
+        # SDK 5.7 protocol envelope includes cache_scope, replayed, status as defaults
+        assert "products" in empty_adcp_response, "products field must be present"
+        assert "errors" in empty_adcp_response, "errors field must be present"
 
     def test_list_creative_formats_response_adcp_compliance(self):
         """Test that ListCreativeFormatsResponse complies with AdCP list-creative-formats-response schema."""
@@ -1933,7 +1902,7 @@ class TestAdCPContract:
         """Test that UpdateMediaBuyResponse complies with AdCP update-media-buy-response schema.
 
         Per AdCP PR #186, responses use oneOf discriminator for atomic semantics.
-        Success responses have media_buy_id + buyer_ref, error responses have errors array.
+        Success responses have media_buy_id, error responses have errors array.
         """
         # Create successful update response (oneOf success branch)
         # Note: implementation_date must be timezone-aware datetime (adcp 2.0.0)
@@ -1942,16 +1911,15 @@ class TestAdCPContract:
 
         response = UpdateMediaBuySuccess(
             media_buy_id="buy_123",
-            buyer_ref="ref_123",
             implementation_date=datetime.now(UTC) + timedelta(hours=1),
-            affected_packages=[{"package_id": "pkg_1", "buyer_ref": "ref_123", "paused": False}],
+            affected_packages=[{"package_id": "pkg_1", "paused": False}],
         )
 
         # Test AdCP-compliant response
         adcp_response = response.model_dump()
 
         # Verify required AdCP fields present and non-null
-        required_fields = ["media_buy_id", "buyer_ref"]
+        required_fields = ["media_buy_id"]
         for field in required_fields:
             assert field in adcp_response, f"Required AdCP field '{field}' missing from response"
             assert adcp_response[field] is not None, f"Required AdCP field '{field}' is None"
@@ -1977,9 +1945,8 @@ class TestAdCPContract:
 
         # Per oneOf constraint: error responses cannot have success fields
         assert "media_buy_id" not in adcp_error, "Error response cannot have media_buy_id"
-        assert "buyer_ref" not in adcp_error, "Error response cannot have buyer_ref"
 
-        # Verify field count for success response (media_buy_id, buyer_ref are required)
+        # Verify field count for success response (media_buy_id required)
         assert len(adcp_response) >= 2, (
             f"UpdateMediaBuySuccess should have at least 2 required fields, got {len(adcp_response)}"
         )
@@ -1990,7 +1957,6 @@ class TestAdCPContract:
         # Test request with all required + optional fields
         request = GetMediaBuyDeliveryRequest(
             media_buy_ids=["mb_123", "mb_456"],
-            buyer_refs=["br_789", "br_012"],
             status_filter="active",
             start_date="2025-01-01",
             end_date="2025-01-31",
@@ -2000,7 +1966,7 @@ class TestAdCPContract:
         adcp_request = request.model_dump()
 
         # Verify all fields are optional in AdCP spec
-        adcp_optional_fields = ["media_buy_ids", "buyer_refs", "status_filter", "start_date", "end_date"]
+        adcp_optional_fields = ["media_buy_ids", "status_filter", "start_date", "end_date"]
         for field in adcp_optional_fields:
             assert field in adcp_request, f"AdCP optional field '{field}' missing from request"
 
@@ -2008,13 +1974,19 @@ class TestAdCPContract:
         if adcp_request.get("media_buy_ids") is not None:
             assert isinstance(adcp_request["media_buy_ids"], list), "media_buy_ids must be array"
 
-        if adcp_request.get("buyer_refs") is not None:
-            assert isinstance(adcp_request["buyer_refs"], list), "buyer_refs must be array"
-
         if adcp_request.get("status_filter") is not None:
             # Can be string or array according to AdCP spec
-            # AdCP MediaBuyStatus enum: pending_activation, active, paused, completed
-            valid_statuses = ["pending_activation", "active", "paused", "completed"]
+            # AdCP MediaBuyStatus enum: pending_creatives, pending_start, active,
+            # paused, completed, rejected, canceled
+            valid_statuses = [
+                "pending_creatives",
+                "pending_start",
+                "active",
+                "paused",
+                "completed",
+                "rejected",
+                "canceled",
+            ]
             if isinstance(adcp_request["status_filter"], str):
                 assert adcp_request["status_filter"] in valid_statuses, (
                     f"Invalid status: {adcp_request['status_filter']}"
@@ -2060,23 +2032,21 @@ class TestAdCPContract:
         # Create AdCP-compliant delivery data using new models
         package_delivery = PackageDelivery(
             package_id="pkg_123",
-            buyer_ref="br_456",
             impressions=25000.0,
             spend=500.75,
             clicks=125.0,
-            video_completions=None,
+            completed_views=None,
             pacing_index=1.0,
         )
 
         daily_breakdown = DailyBreakdown(date="2025-01-15", impressions=1250.0, spend=25.05)
 
         delivery_totals = DeliveryTotals(
-            impressions=25000.0, spend=500.75, clicks=125.0, ctr=0.005, video_completions=None, completion_rate=None
+            impressions=25000.0, spend=500.75, clicks=125.0, ctr=0.005, completed_views=None, completion_rate=None
         )
 
         delivery_data = MediaBuyDeliveryData(
             media_buy_id="mb_12345",
-            buyer_ref="br_67890",
             status="active",
             totals=delivery_totals,
             by_package=[package_delivery.model_dump()],
@@ -2088,7 +2058,7 @@ class TestAdCPContract:
         reporting_period_dict = {"start": "2025-01-01T00:00:00Z", "end": "2025-01-31T23:59:59Z"}
 
         aggregated_totals = AggregatedTotals(
-            impressions=25000.0, spend=500.75, clicks=125.0, video_completions=None, media_buy_count=1
+            impressions=25000.0, spend=500.75, clicks=125.0, completed_views=None, media_buy_count=1
         )
 
         # Create AdCP-compliant response
@@ -2148,7 +2118,7 @@ class TestAdCPContract:
                 assert delivery[field] is not None, f"delivery {field} must not be None"
 
             # Verify delivery optional fields
-            delivery_optional_fields = ["buyer_ref", "daily_breakdown"]
+            delivery_optional_fields = ["daily_breakdown"]
             for field in delivery_optional_fields:
                 assert field in delivery, f"delivery optional field '{field}' missing"
 
@@ -2350,7 +2320,7 @@ class TestAdCPContract:
         # adcp 3.9: GetSignalsRequest is a regular model (not RootModel).
         # deliver_to replaced with top-level destinations + countries fields.
 
-        from adcp.types.generated_poc.core.destination import Destination1
+        from adcp.types.generated_poc.core.destination import Destination1  # TODO: no stable alias in adcp.types
 
         from src.core.schemas import GetSignalsRequest, SignalFilters
 
@@ -2421,7 +2391,7 @@ class TestAdCPContract:
     def test_update_media_buy_request_adcp_compliance(self):
         """Test that UpdateMediaBuyRequest model complies with AdCP update-media-buy-request schema."""
         # ✅ FIXED: Implementation now matches AdCP spec
-        # AdCP spec requires: oneOf(media_buy_id OR buyer_ref), optional active/start_time/end_time/budget/packages
+        # AdCP spec requires: media_buy_id, optional active/start_time/end_time/budget/packages
 
         from datetime import UTC, datetime
 
@@ -2439,28 +2409,9 @@ class TestAdCPContract:
 
         adcp_response_id = adcp_request_id.model_dump()
 
-        # ✅ VERIFY ADCP COMPLIANCE: OneOf constraint satisfied
+        # ✅ VERIFY ADCP COMPLIANCE: media_buy_id is required
         assert "media_buy_id" in adcp_response_id, "media_buy_id must be present"
         assert adcp_response_id["media_buy_id"] is not None, "media_buy_id must not be None"
-        assert "buyer_ref" not in adcp_response_id or adcp_response_id["buyer_ref"] is None, (
-            "buyer_ref must be None when media_buy_id is provided"
-        )
-
-        # Test AdCP-compliant request with buyer_ref (oneOf option 2)
-        adcp_request_ref = UpdateMediaBuyRequest(
-            buyer_ref="br_67890",
-            paused=True,
-            start_time=datetime(2025, 3, 1, 0, 0, 0, tzinfo=UTC),  # adcp 2.12.0+
-        )
-
-        adcp_response_ref = adcp_request_ref.model_dump()
-
-        # ✅ VERIFY ADCP COMPLIANCE: OneOf constraint satisfied
-        assert "buyer_ref" in adcp_response_ref, "buyer_ref must be present"
-        assert adcp_response_ref["buyer_ref"] is not None, "buyer_ref must not be None"
-        assert "media_buy_id" not in adcp_response_ref or adcp_response_ref["media_buy_id"] is None, (
-            "media_buy_id must be None when buyer_ref is provided"
-        )
 
         # ✅ VERIFY ADCP COMPLIANCE: Optional fields present when provided
         optional_fields = ["paused", "start_time", "end_time", "budget", "packages"]  # adcp 2.12.0+
@@ -2483,40 +2434,16 @@ class TestAdCPContract:
         if adcp_response_id.get("packages"):
             assert isinstance(adcp_response_id["packages"], list), "packages must be array"
             for package in adcp_response_id["packages"]:
-                # Each package must have either package_id OR buyer_ref (oneOf constraint)
+                # Each package must have package_id
                 has_package_id = package.get("package_id") is not None
-                has_buyer_ref = package.get("buyer_ref") is not None
-                assert has_package_id or has_buyer_ref, "Each package must have either package_id or buyer_ref"
-                assert not (has_package_id and has_buyer_ref), "Package cannot have both package_id and buyer_ref"
+                assert has_package_id, "Each package must have package_id"
 
-        # ✅ VERIFY budget structure (currency/pacing in budget object, not top-level)
-        if adcp_response_id.get("budget"):
-            budget = adcp_response_id["budget"]
-            assert isinstance(budget, dict), "budget must be object"
-            assert "total" in budget, "budget must have total field"
-            assert "currency" in budget, "budget must have currency field (not top-level)"
-
-        # AdCP oneOf constraint: exactly one of media_buy_id or buyer_ref required
-        # Now enforced at Pydantic model level (validate_identification_xor validator)
+        # media_buy_id is required for update
         import pytest
+        from pydantic import ValidationError as PydanticValidationError
 
-        with pytest.raises(ValueError, match="media_buy_id or buyer_ref, not both"):
-            UpdateMediaBuyRequest(media_buy_id="mb_123", buyer_ref="br_456")
-
-        with pytest.raises(ValueError, match="media_buy_id or buyer_ref is required"):
-            UpdateMediaBuyRequest(paused=False)  # neither identifier
-
-        # ✅ VERIFY backward compatibility properties work (deprecated)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            flight_start = adcp_request_id.flight_start_date
-            assert flight_start == datetime(2025, 2, 1, 9, 0, 0).date()
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert "flight_start_date is deprecated" in str(w[0].message)
-
-        # Verify field count (6-8 fields including oneOf field that might be None and push_notification_config)
-        assert len(adcp_response_id) <= 8, f"AdCP request should have at most 8 fields, got {len(adcp_response_id)}"
+        with pytest.raises((PydanticValidationError, ValueError)):
+            UpdateMediaBuyRequest(paused=False)  # missing required media_buy_id
 
     def test_task_status_mcp_integration(self):
         """Test TaskStatus integration with MCP response schemas (AdCP PR #77)."""
@@ -2547,12 +2474,11 @@ class TestAdCPContract:
         status = TaskStatus.from_operation_state("unknown_operation")
         assert status == TaskStatus.UNKNOWN
 
-        # Test that response schemas no longer have status field (moved to protocol envelope)
-        # Per AdCP PR #113, status is handled at transport layer via ProtocolEnvelope
+        # SDK 5.7: status is part of the protocol envelope (always present as default)
+        # Per AdCP PR #113, status was moved to protocol envelope — SDK 5.7 includes it
         response = GetProductsResponse(products=[])
-
         data = response.model_dump()
-        assert "status" not in data  # Status field removed from domain models
+        assert "products" in data  # Domain field present
 
     def test_package_excludes_internal_fields(self):
         """Test that Package model_dump excludes internal fields from AdCP responses.
@@ -2564,7 +2490,6 @@ class TestAdCPContract:
         pkg = Package(
             package_id="pkg_test_123",
             paused=False,  # Changed from status="active" in adcp 2.12.0
-            buyer_ref="test_ref_123",
             # Internal fields (should be excluded from external responses)
             platform_line_item_id="gam_987654321",
             tenant_id="tenant_test",
@@ -2577,8 +2502,6 @@ class TestAdCPContract:
         # External response (AdCP protocol) - should exclude internal fields
         external_dump = pkg.model_dump()
         assert "package_id" in external_dump
-        # paused is optional, may or may not be in dump depending on exclude_none
-        assert "buyer_ref" in external_dump
         assert "platform_line_item_id" not in external_dump, "platform_line_item_id should NOT be in AdCP response"
         assert "tenant_id" not in external_dump, "tenant_id should NOT be in AdCP response"
         assert "media_buy_id" not in external_dump, "media_buy_id should NOT be in AdCP response"
@@ -2590,7 +2513,6 @@ class TestAdCPContract:
         internal_dump = pkg.model_dump_internal()
         assert "package_id" in internal_dump
         assert "paused" in internal_dump  # Changed from status in adcp 2.12.0
-        assert "buyer_ref" in internal_dump
         assert "platform_line_item_id" in internal_dump, "platform_line_item_id SHOULD be in internal dump"
         assert internal_dump["platform_line_item_id"] == "gam_987654321"
         assert "tenant_id" in internal_dump, "tenant_id SHOULD be in internal dump"
@@ -2607,21 +2529,14 @@ class TestAdCPContract:
         # adcp 3.6.0: brand_manifest replaced by brand (BrandReference with required domain)
         request = CreateMediaBuyRequest(
             brand={"domain": "flashsale.com"},
-            buyer_ref="flash_sale_2025_q1",
             start_time="asap",  # AdCP v1.7.0 supports literal "asap"
             end_time=end_date,
-            packages=[
-                {
-                    "buyer_ref": "pkg_flash_001",
-                    "product_id": "product_1",
-                    "pricing_option_id": "test_pricing",
-                    "budget": 5000.0,
-                }
-            ],
+            packages=[{"product_id": "product_1", "pricing_option_id": "test_pricing", "budget": 5000.0}],
+            idempotency_key="unit-test-key-asap-start-time",
         )
 
-        # Verify asap is accepted (library wraps in StartTiming)
-        if hasattr(request.start_time, "root"):
+        # Verify asap is accepted (library wraps in StartTiming on some SDK versions)
+        if hasattr(request.start_time, "root"):  # noqa: rootmodel — SDK-version polymorphism
             assert request.start_time.root == "asap"
         else:
             assert request.start_time == "asap"
@@ -2657,21 +2572,14 @@ class TestAdCPContract:
         # adcp 3.6.0: brand_manifest replaced by brand (BrandReference with required domain)
         request = CreateMediaBuyRequest(
             brand={"domain": "scheduled.com"},
-            buyer_ref="scheduled_2025_q1",
             start_time=start_date,
             end_time=end_date,
-            packages=[
-                {
-                    "buyer_ref": "pkg_scheduled_001",
-                    "product_id": "product_1",
-                    "pricing_option_id": "test_pricing",
-                    "budget": 5000.0,
-                }
-            ],
+            packages=[{"product_id": "product_1", "pricing_option_id": "test_pricing", "budget": 5000.0}],
+            idempotency_key="unit-test-key-datetime-start",
         )
 
-        # Verify datetime is still accepted (library wraps in StartTiming)
-        if hasattr(request.start_time, "root"):
+        # Verify datetime is still accepted (library wraps in StartTiming on some SDK versions)
+        if hasattr(request.start_time, "root"):  # noqa: rootmodel — SDK-version polymorphism
             assert isinstance(request.start_time.root, datetime)
             assert request.start_time.root == start_date
         else:
@@ -2693,10 +2601,7 @@ class TestAdCPContract:
             description="Product using full properties",
             format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             delivery_type="guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },  # Required per AdCP spec
+            delivery_measurement={"provider": "test_provider", "notes": "Test measurement"},  # Required per AdCP spec
             publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="example.com")],
             pricing_options=[
                 create_test_cpm_pricing_option(
@@ -2747,26 +2652,18 @@ class TestAdCPContract:
         # Test with inline brand reference
         # Per AdCP spec, budget is at package level, not request level
         request = CreateMediaBuyRequest(
-            buyer_ref="nike_2025_q1",
             brand={"domain": "nike.com"},
-            packages=[
-                {
-                    "buyer_ref": "pkg_001",
-                    "product_id": "product_1",
-                    "pricing_option_id": "test_pricing",
-                    "budget": 5000.0,
-                }
-            ],
+            packages=[{"product_id": "product_1", "pricing_option_id": "test_pricing", "budget": 5000.0}],
             start_time=start_date,
             end_time=end_date,
+            idempotency_key="unit-test-key-brand-inline",
         )
 
         # Verify brand is properly stored
         assert request.brand is not None
         assert request.brand.domain == "nike.com"
 
-        # Verify required fields still work
-        assert request.buyer_ref == "nike_2025_q1"
+        # Verify fields still work
         assert len(request.packages) == 1
 
     def test_create_media_buy_with_brand_and_brand_id(self):
@@ -2776,25 +2673,20 @@ class TestAdCPContract:
 
         # Test with brand reference + optional brand_id
         request = CreateMediaBuyRequest(
-            buyer_ref="nike_2025_q1",
             brand={"domain": "nike.com", "brand_id": "brand_nike_001"},
-            packages=[
-                {
-                    "buyer_ref": "pkg_001",
-                    "product_id": "product_1",
-                    "pricing_option_id": "test_pricing",
-                    "budget": 5000.0,
-                }
-            ],
+            packages=[{"product_id": "product_1", "pricing_option_id": "test_pricing", "budget": 5000.0}],
             start_time=start_date,
             end_time=end_date,
+            idempotency_key="unit-test-key-brand-and-brand-id",
         )
 
         # Verify brand fields
         assert request.brand.domain == "nike.com"
-        # brand_id is wrapped in a BrandId RootModel
+        # brand_id is wrapped in a BrandId RootModel on some SDK versions
         brand_id = request.brand.brand_id
-        brand_id_val = brand_id.root if hasattr(brand_id, "root") else brand_id
+        # noqa applied on the hasattr line for the rootmodel guard.
+        has_root = hasattr(brand_id, "root")  # noqa: rootmodel — SDK-version polymorphism
+        brand_id_val = brand_id.root if has_root else brand_id
         assert brand_id_val == "brand_nike_001"
 
     def test_get_signals_response_adcp_compliance(self):
@@ -2823,6 +2715,7 @@ class TestAdCPContract:
         # Test with all fields
         signal_data = {
             "signal_agent_segment_id": "seg_123",
+            "signal_id": {"id": "seg_123", "source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org"},
             "name": "Premium Audiences",
             "description": "High-value customer segment",
             "signal_type": "marketplace",
@@ -3066,13 +2959,13 @@ class TestProductV36FieldContract:
         assert dump["placements"][0]["name"] == "Top Banner"
         assert dump["placements"][1]["placement_id"] == "sidebar"
 
-    # --- reporting_capabilities (optional, default=None) ---
+    # --- reporting_capabilities (required in adcp 4.3) ---
 
-    def test_reporting_capabilities_absent_when_null(self):
-        """reporting_capabilities not in model_dump when not set."""
+    def test_reporting_capabilities_present_when_null(self):
+        """reporting_capabilities always in model_dump (required in adcp 4.3)."""
         product = self._make_base_product()
         dump = product.model_dump()
-        assert "reporting_capabilities" not in dump
+        assert "reporting_capabilities" in dump
 
     def test_reporting_capabilities_present_when_set(self):
         """reporting_capabilities appears in model_dump with correct structure."""
@@ -3164,11 +3057,7 @@ class TestProductV36FieldContract:
         """data_provider_signals appears in model_dump with discriminated union structure."""
         dps = [
             {"selection_type": "all", "data_provider_domain": "acmedata.com"},
-            {
-                "selection_type": "by_id",
-                "data_provider_domain": "betadata.com",
-                "signal_ids": ["sig_001", "sig_002"],
-            },
+            {"selection_type": "by_id", "data_provider_domain": "betadata.com", "signal_ids": ["sig_001", "sig_002"]},
         ]
         product = self._make_base_product(data_provider_signals=dps)
         dump = product.model_dump()
@@ -3355,12 +3244,12 @@ class TestProductV36FieldContract:
         dump = schema.model_dump()
 
         # None-valued optional fields should be omitted from dump
+        # reporting_capabilities is required in adcp 4.3 — always present with defaults
         absent_fields = [
             "channels",
             "product_card",
             "product_card_detailed",
             "placements",
-            "reporting_capabilities",
             "catalog_match",
             "catalog_types",
             "conversion_tracking",

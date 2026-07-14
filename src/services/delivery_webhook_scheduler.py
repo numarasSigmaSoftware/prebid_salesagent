@@ -13,8 +13,9 @@ from typing import Any
 
 from adcp import create_mcp_webhook_payload
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-from adcp.types import McpWebhookPayload
-from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import NotificationType
+from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
+    NotificationType,
+)  # TODO: no stable alias — response-level NotificationType differs from top-level
 from sqlalchemy import func, select
 
 from src.core.database.database_session import get_db_session
@@ -23,6 +24,7 @@ from src.core.database.models import WebhookDeliveryLog
 from src.core.database.repositories import MediaBuyRepository
 from src.core.schemas import GetMediaBuyDeliveryRequest, GetMediaBuyDeliveryResponse
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
+from src.core.utils import utc_flight_start
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
@@ -218,13 +220,12 @@ class DeliveryWebhookScheduler:
             # by DB status (active/approved) at query time, so the delivery impl
             # should include ended campaigns (dynamic status=completed) rather
             # than filtering them out and reporting "not found" errors.
-            # We exclude "pending_activation" (ready) to avoid returning delivery
+            # We exclude "pending_start" (ready) to avoid returning delivery
             # data for future-dated campaigns that haven't started yet.
             from adcp.types import MediaBuyStatus
 
             req = GetMediaBuyDeliveryRequest(
                 media_buy_ids=[media_buy.media_buy_id],
-                buyer_refs=None,
                 status_filter=[MediaBuyStatus.active, MediaBuyStatus.completed],
                 start_date=start_date_obj.strftime("%Y-%m-%d"),
                 end_date=end_date_obj.strftime("%Y-%m-%d"),
@@ -259,7 +260,7 @@ class DeliveryWebhookScheduler:
 
             # Calculate next_expected_at for daily frequency: start of next day (UTC)
             next_day = datetime.now(UTC).date() + timedelta(days=1)
-            next_expected_at = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC)
+            next_expected_at = utc_flight_start(next_day)
 
             # Set webhook-specific metadata directly on the response model
             # These fields are defined on the library's GetMediaBuyDeliveryResponse
@@ -309,6 +310,15 @@ class DeliveryWebhookScheduler:
                     is_active=True,
                 )
 
+            # Wire vs internal task_type distinction:
+            # - metadata["task_type"] = "media_buy_delivery" -- internal logging/dedup label
+            #   used by protocol_webhook_service guards and WebhookDeliveryLog queries.
+            # - SDK task_type = "update_media_buy" -- AdCP spec TaskType enum value
+            #   for the wire payload (delivery reports are status updates on media buys).
+            # These are intentionally different: the internal label predates the SDK enum
+            # and is used for DB filtering, while the wire value must be spec-compliant.
+            # Renaming the metadata key is not safe without migrating DB records and
+            # updating all 6 protocol_webhook_service guard checks.
             metadata = {
                 "task_type": "media_buy_delivery",
                 "tenant_id": media_buy.tenant_id,
@@ -316,16 +326,15 @@ class DeliveryWebhookScheduler:
                 "media_buy_id": media_buy.media_buy_id,
             }
 
-            # TODO: Fix in adcp python client - create_mcp_webhook_payload should accept
-            # any BaseModel for result (it handles model_dump internally), and return
-            # McpWebhookPayload instead of dict[str, Any]
-            mcp_payload_dict = create_mcp_webhook_payload(
-                task_id=media_buy.media_buy_id,  # TODO: @yusuf - double check if using media buy id is correct for media buy delivery???
-                task_type="media_buy_delivery",
-                result=delivery_response,  # type: ignore[arg-type]  # library handles BaseModel via hasattr(result, "model_dump")
+            # SDK 5.7: returns McpWebhookPayload directly; 3rd arg is task_type.
+            # Delivery reports are status updates on existing media buys,
+            # so we use update_media_buy as the canonical task type.
+            media_buy_delivery_payload = create_mcp_webhook_payload(
+                task_id=media_buy.media_buy_id,
+                task_type="update_media_buy",
+                result=delivery_response,
                 status=AdcpTaskStatus.completed,
             )
-            media_buy_delivery_payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
 
             # Send webhook notification OUTSIDE the session context
             # This ensures the session is closed before async webhook call

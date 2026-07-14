@@ -24,6 +24,7 @@ our control.
 # ---
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -302,11 +303,10 @@ async def test_gam_rejects_cpcv_pricing_model(setup_gam_tenant_with_non_cpm_prod
     """Test that GAM adapter rejects CPCV pricing model with clear error."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
-        buyer_ref="test_buyer",
         brand={"domain": "testbrand.com"},
+        idempotency_key=f"int-key-{uuid.uuid4().hex}",
         packages=[
             create_test_package_request(
-                buyer_ref="pkg_1",
                 product_id="prod_gam_cpcv",
                 pricing_option_id="cpcv_usd_fixed",  # Generated format: {model}_{currency}_{fixed|auction}
                 budget=10000.0,
@@ -339,11 +339,10 @@ async def test_gam_accepts_cpm_pricing_model(setup_gam_tenant_with_non_cpm_produ
 
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
-        buyer_ref="test_buyer",
         brand={"domain": "testbrand.com"},
+        idempotency_key=f"int-key-{uuid.uuid4().hex}",
         packages=[
             create_test_package_request(
-                buyer_ref="pkg_1",
                 product_id="prod_gam_cpm",
                 pricing_option_id="cpm_usd_fixed",  # Generated format: {model}_{currency}_{fixed|auction}
                 budget=10000.0,
@@ -383,11 +382,10 @@ async def test_gam_rejects_cpp_from_multi_pricing_product(setup_gam_tenant_with_
 
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
-        buyer_ref="test_buyer",
         brand={"domain": "testbrand.com"},
+        idempotency_key=f"int-key-{uuid.uuid4().hex}",
         packages=[
             create_test_package_request(
-                buyer_ref="pkg_1",
                 product_id="prod_gam_multi",
                 pricing_option_id="cpp_usd_fixed",  # Generated format: {model}_{currency}_{fixed|auction}
                 budget=15000.0,
@@ -419,11 +417,10 @@ async def test_gam_accepts_cpm_from_multi_pricing_product(setup_gam_tenant_with_
 
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
-        buyer_ref="test_buyer",
         brand={"domain": "testbrand.com"},
+        idempotency_key=f"int-key-{uuid.uuid4().hex}",
         packages=[
             create_test_package_request(
-                buyer_ref="pkg_1",
                 product_id="prod_gam_multi",
                 pricing_option_id="cpm_usd_fixed",  # Generated format: {model}_{currency}_{fixed|auction}
                 budget=10000.0,

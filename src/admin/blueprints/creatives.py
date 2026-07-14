@@ -11,14 +11,19 @@ from typing import Any
 
 from a2a.types import Task, TaskStatusUpdateEvent
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
-from adcp.types import CreativeAction, McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
-from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types import (
+    ContextObject,
+    CreativeAction,
+    McpWebhookPayload,
+)
 from adcp.webhooks import GeneratedTaskStatus
 
 from src.core.database.models import (
     PushNotificationConfig as DBPushNotificationConfig,
 )
 from src.core.database.repositories.creative import CreativeRepository
+from src.core.schemas.creative import SyncCreativeResult, SyncCreativesResponse
+from src.core.webhook_validator import validate_webhook_task_type
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 # TODO: Missing module - these functions need to be implemented
@@ -41,11 +46,15 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.repositories.uow import AdminCreativeUoW
+from src.core.tools.media_buy_create import execute_approved_media_buy, push_creative_to_existing_buy
 
 # Note: CreativeFormat table was dropped in migration f2addf453200
 # All format-related routes have been removed
 
 logger = logging.getLogger(__name__)
+
+# Buy statuses where the order is live in the ad server (retroactive creative push, #1038)
+_LIVE_BUY_STATUSES: frozenset[str] = frozenset({"active", "scheduled", "paused"})
 
 # Create Blueprint
 creatives_bp = Blueprint("creatives", __name__)
@@ -173,7 +182,7 @@ async def _call_webhook_for_creative_status(
             if context_data and isinstance(context_data, dict):
                 context_obj = ContextObject.model_construct(**context_data)
 
-            complete_result = SyncCreativesSuccessResponse(creatives=creatives, dry_run=False, context=context_obj)
+            complete_result = SyncCreativesResponse(creatives=creatives, dry_run=False, context=context_obj)
 
             # build push notification config from step request data
             # this is because we don't store push notification config in the database when creating the creative
@@ -230,6 +239,11 @@ async def _call_webhook_for_creative_status(
             # Convert result to dict for webhook payload functions
             result_dict = complete_result.model_dump(mode="json")
 
+            # step_tool_name is untrusted (workflow_steps DB column). Validate a
+            # COPY for the SDK payload; keep the original label for metadata
+            # (salesagent-yi3s, salesagent-yk7o).
+            wire_task_type = validate_webhook_task_type(step_tool_name or "sync_creatives")
+
             payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
             if protocol == "a2a":
                 payload = create_a2a_webhook_payload(
@@ -239,10 +253,13 @@ async def _call_webhook_for_creative_status(
                     context_id=step_context_id,
                 )
             else:
-                # TODO: Fix in adcp python client - create_mcp_webhook_payload should return
-                # McpWebhookPayload instead of dict[str, Any] for proper type safety
-                mcp_payload_dict = create_mcp_webhook_payload(step_step_id, GeneratedTaskStatus.completed, result_dict)
-                payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
+                # SDK 5.7: returns McpWebhookPayload directly
+                payload = create_mcp_webhook_payload(
+                    task_id=step_step_id,
+                    status=GeneratedTaskStatus.completed,
+                    task_type=wire_task_type,
+                    result=result_dict,
+                )
 
             metadata = {
                 "task_type": step_tool_name
@@ -510,6 +527,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
         slack_data: dict[str, Any] = {}
         audit_data: dict[str, Any] = {}
         media_buy_actions: list[dict[str, Any]] = []
+        push_warnings: list[str] = []
 
         with AdminCreativeUoW(tenant_id) as uow:
             assert uow.creatives is not None
@@ -568,11 +586,15 @@ def approve_creative(tenant_id, creative_id, **kwargs):
 
             # Check if this creative approval unblocks any media buys
             assignments = uow.assignments.get_by_creative(creative_id)
+            # Snapshot IDs as plain strings — ORM objects expire on session close (#1038)
+            assignment_buy_ids = [a.media_buy_id for a in assignments]
 
             logger.info(
                 f"[CREATIVE APPROVAL] Creative {creative_id} approved, checking {len(assignments)} media buy assignments"
             )
 
+            # Snapshot buy statuses here to avoid a second UoW after commit
+            assignment_buy_statuses: dict[str, str] = {}
             for assignment in assignments:
                 media_buy_id = assignment.media_buy_id
                 media_buy = uow.media_buys.get_by_id(media_buy_id)
@@ -580,6 +602,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 if not media_buy:
                     continue
 
+                assignment_buy_statuses[media_buy_id] = media_buy.status
                 logger.info(f"[CREATIVE APPROVAL] Media buy {media_buy_id} status: {media_buy.status}")
 
                 if media_buy.status in {"pending_creatives", "draft"}:
@@ -598,7 +621,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     )
 
                     if not unapproved_creatives:
-                        media_buy_actions.append({"media_buy_id": media_buy_id, "media_buy": media_buy})
+                        media_buy_actions.append({"media_buy_id": media_buy_id})
                     else:
                         logger.info(
                             f"[CREATIVE APPROVAL] Media buy {media_buy_id} still waiting for {len(unapproved_creatives)} creatives: {unapproved_creatives}"
@@ -622,8 +645,6 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
             )
 
-            from src.core.tools.media_buy_create import execute_approved_media_buy
-
             success, error_msg = execute_approved_media_buy(action["media_buy_id"], tenant_id)
 
             if success:
@@ -642,7 +663,32 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             else:
                 logger.error(f"[CREATIVE APPROVAL] Adapter creation failed for {action['media_buy_id']}: {error_msg}")
 
-        return jsonify({"success": True, "status": "approved"})
+        # Retroactive push for already-live buys (#1038):
+        # Buys in pending_creatives/draft were handled above. For buys that are
+        # live in the ad server, push this newly-approved creative to the line item.
+
+        # Use the status snapshot from the first loop — no need for a second UoW
+        buys_to_push = [
+            buy_id for buy_id in assignment_buy_ids if assignment_buy_statuses.get(buy_id) in _LIVE_BUY_STATUSES
+        ]
+
+        for buy_id in buys_to_push:
+            logger.info(f"[CREATIVE APPROVAL] Retroactive push: creative {creative_id} → live buy {buy_id}")
+            push_success, push_err = push_creative_to_existing_buy(
+                creative_id=creative_id,
+                media_buy_id=buy_id,
+                tenant_id=tenant_id,
+            )
+            if not push_success:
+                logger.error(
+                    f"[CREATIVE APPROVAL] Retroactive push failed for creative {creative_id} → buy {buy_id}: {push_err}"
+                )
+                push_warnings.append(f"Creative push to buy {buy_id} failed — see server logs for details")
+
+        response_body: dict[str, Any] = {"success": True, "status": "approved"}
+        if push_warnings:
+            response_body["warnings"] = push_warnings
+        return jsonify(response_body)
 
     except Exception as e:
         logger.error(f"Error approving creative: {e}", exc_info=True)
@@ -985,7 +1031,7 @@ def _ai_review_creative_impl(tenant_id, creative_id, db_session=None, promoted_o
     from src.core.metrics import (
         active_ai_reviews,
         ai_review_duration,
-        ai_review_errors,
+        record_ai_review_error,
     )
 
     start_time = time.time()
@@ -1000,13 +1046,13 @@ def _ai_review_creative_impl(tenant_id, creative_id, db_session=None, promoted_o
         )
     except Exception as e:
         logger.error(f"Error running AI review: {e}", exc_info=True)
-        # Record error metrics
-        ai_review_errors.labels(tenant_id=tenant_id, error_type=type(e).__name__).inc()
+        # Record error metrics (error_type bounded to a fixed enum)
+        record_ai_review_error(tenant_id=tenant_id, error=e)
         return {"status": "pending_review", "error": str(e), "reason": "AI review failed - requires manual approval"}
     finally:
         # Record duration and decrement active reviews
         duration = time.time() - start_time
-        ai_review_duration.labels(tenant_id=tenant_id).observe(duration)
+        ai_review_duration.observe(duration)
         active_ai_reviews.labels(tenant_id=tenant_id).dec()
 
 
@@ -1025,7 +1071,7 @@ def _ai_review_creative_impl_inner(
     from src.core.database.repositories.media_buy import MediaBuyRepository
     from src.core.database.repositories.product import ProductRepository
     from src.core.database.repositories.tenant_config import TenantConfigRepository
-    from src.core.metrics import ai_review_confidence, ai_review_total
+    from src.core.metrics import ai_review_confidence, record_ai_review
     from src.services.ai import AIServiceFactory
     from src.services.ai.agents.review_agent import (
         create_review_agent,
@@ -1167,10 +1213,8 @@ def _ai_review_creative_impl_inner(
                 principal_id=creative.principal_id,
             )
             # Record metrics
-            ai_review_total.labels(
-                tenant_id=tenant_id, decision="pending_review", policy_triggered="sensitive_category"
-            ).inc()
-            ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+            record_ai_review(tenant_id=tenant_id, decision="pending_review", policy_triggered="sensitive_category")
+            ai_review_confidence.labels(decision="pending_review").observe(confidence_score)
             return result_dict
 
         # Apply confidence-based thresholds
@@ -1194,8 +1238,8 @@ def _ai_review_creative_impl_inner(
                     principal_id=creative.principal_id,
                 )
                 # Record metrics
-                ai_review_total.labels(tenant_id=tenant_id, decision="approved", policy_triggered="auto_approve").inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="approved").observe(confidence_score)
+                record_ai_review(tenant_id=tenant_id, decision="approved", policy_triggered="auto_approve")
+                ai_review_confidence.labels(decision="approved").observe(confidence_score)
                 return result_dict
             else:
                 result_dict = {
@@ -1215,10 +1259,10 @@ def _ai_review_creative_impl_inner(
                     principal_id=creative.principal_id,
                 )
                 # Record metrics
-                ai_review_total.labels(
+                record_ai_review(
                     tenant_id=tenant_id, decision="pending_review", policy_triggered="low_confidence_approval"
-                ).inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+                )
+                ai_review_confidence.labels(decision="pending_review").observe(confidence_score)
                 return result_dict
 
         elif "REJECT" in decision:
@@ -1239,8 +1283,8 @@ def _ai_review_creative_impl_inner(
                     principal_id=creative.principal_id,
                 )
                 # Record metrics
-                ai_review_total.labels(tenant_id=tenant_id, decision="rejected", policy_triggered="auto_reject").inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="rejected").observe(confidence_score)
+                record_ai_review(tenant_id=tenant_id, decision="rejected", policy_triggered="auto_reject")
+                ai_review_confidence.labels(decision="rejected").observe(confidence_score)
                 return result_dict
             else:
                 result_dict = {
@@ -1260,10 +1304,8 @@ def _ai_review_creative_impl_inner(
                     principal_id=creative.principal_id,
                 )
                 # Record metrics
-                ai_review_total.labels(
-                    tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain_rejection"
-                ).inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+                record_ai_review(tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain_rejection")
+                ai_review_confidence.labels(decision="pending_review").observe(confidence_score)
                 return result_dict
 
         # Default: uncertain or "REQUIRE HUMAN APPROVAL"
@@ -1283,8 +1325,8 @@ def _ai_review_creative_impl_inner(
             principal_id=creative.principal_id,
         )
         # Record metrics
-        ai_review_total.labels(tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain").inc()
-        ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+        record_ai_review(tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain")
+        ai_review_confidence.labels(decision="pending_review").observe(confidence_score)
         return result_dict
 
 

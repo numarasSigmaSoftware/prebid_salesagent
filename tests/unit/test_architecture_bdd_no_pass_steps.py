@@ -1,8 +1,9 @@
-"""Guard: BDD step functions must not have empty bodies.
+"""Guard: BDD step functions must not have empty or placeholder bodies.
 
-Then steps with ``pass`` or no statements (only docstring) claim to verify
-behavior but assert nothing. Given/When steps with empty bodies promise data
-setup or actions but deliver nothing.
+Then steps with ``pass``, no statements (only docstring), or placeholder
+delegation like ``_pending(...)`` claim to verify behavior but assert nothing.
+Given/When steps with empty bodies promise data setup or actions but deliver
+nothing.
 
 Scanning approach: AST — find functions decorated with ``@given/@when/@then``
 in ``tests/bdd/steps/`` and check that the body contains at least one statement
@@ -17,11 +18,26 @@ import ast
 from pathlib import Path
 from typing import Literal
 
+import pytest
+
+from tests.unit._architecture_helpers import iter_call_expressions
+
 _BDD_STEPS_DIR = Path(__file__).resolve().parents[1] / "bdd" / "steps"
 
 # Allowlist for empty Given/When steps. Must only shrink — never add entries.
 # Fixed in #1181: given_tenant_exists and given_account_not_exists now have real bodies.
-_EMPTY_GIVEN_WHEN_ALLOWLIST: set[tuple[str, str]] = set()
+_EMPTY_GIVEN_WHEN_ALLOWLIST: set[tuple[str, str]] = {
+    # FIXME(salesagent-ebb5): uc019/uc026 stubs pending implementation
+    ("bdd/steps/domain/uc019_query_media_buys.py", "when_query_by_refs"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_request_with_buyer_ref"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_resubmit_buyer_ref"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_buyer_owns_mb_with_ref_and_id"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_buyer_owns_mb_with_buyer_ref"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_cross_buy_request"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_buyer_owns_pkg_by_buyer_ref"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_partition_buyer_ref"),
+    ("bdd/steps/domain/uc026_package_media_buy.py", "given_boundary_buyer_ref"),
+}
 
 
 def _is_decorated_with(func: ast.FunctionDef | ast.AsyncFunctionDef, decorator_name: str) -> bool:
@@ -69,6 +85,13 @@ def _body_has_assert_or_call(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
     return False
 
 
+def _contains_placeholder_call(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Check if the function delegates to a known placeholder helper like _pending()."""
+    for _node in iter_call_expressions(func, name="_pending"):
+        return True
+    return False
+
+
 StepKind = Literal["given", "when", "then"]
 
 
@@ -96,12 +119,15 @@ def _iter_step_functions(
 class TestBddNoPassSteps:
     """Structural guard: BDD steps must have meaningful bodies."""
 
+    @pytest.mark.arch_guard
     def test_no_empty_then_steps(self):
         """Every @then step must contain an assert, function call, or raise."""
         violations = []
         for rel, name, lineno, _, func in _iter_step_functions({"then"}):
             if _body_is_empty(func):
                 violations.append(f"{rel}:{lineno} {name} — empty body (pass/docstring-only)")
+            elif _contains_placeholder_call(func):
+                violations.append(f"{rel}:{lineno} {name} — placeholder delegation (_pending) is not a real assertion")
             elif not _body_has_assert_or_call(func):
                 violations.append(f"{rel}:{lineno} {name} — no assert or function call")
 
@@ -109,6 +135,21 @@ class TestBddNoPassSteps:
             f"  {v}" for v in violations
         )
 
+    @pytest.mark.arch_guard
+    def test_no_placeholder_given_when_steps(self):
+        """Given/When steps must not delegate to placeholder helpers like _pending()."""
+        violations = []
+        for rel, name, lineno, dec_name, func in _iter_step_functions({"given", "when"}):
+            if _contains_placeholder_call(func):
+                violations.append(f"{rel}:{lineno} @{dec_name} {name} — placeholder delegation (_pending)")
+
+        assert not violations, (
+            f"Found {len(violations)} Given/When step(s) using placeholder delegation:\n"
+            + "\n".join(f"  {v}" for v in violations)
+            + "\n\nFix: implement the step with real setup/action logic."
+        )
+
+    @pytest.mark.arch_guard
     def test_no_empty_given_when_steps(self):
         """Every @given/@when step must have a non-empty body.
 
@@ -126,6 +167,7 @@ class TestBddNoPassSteps:
             + "\n\nFix: implement the step, or add to _EMPTY_GIVEN_WHEN_ALLOWLIST with FIXME."
         )
 
+    @pytest.mark.arch_guard
     def test_empty_given_when_allowlist_not_stale(self):
         """Allowlisted empty Given/When steps must still be empty.
 

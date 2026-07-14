@@ -102,10 +102,7 @@ class TestResolveAdapterId:
 
     def test_nested_takes_priority_over_old_field(self):
         """Nested format is preferred over legacy flat field."""
-        mappings = {
-            "google_ad_manager": {"advertiser_id": "nested-1"},
-            "gam_advertiser_id": "legacy-2",
-        }
+        mappings = {"google_ad_manager": {"advertiser_id": "nested-1"}, "gam_advertiser_id": "legacy-2"}
         assert resolve_adapter_id(mappings, "gam") == "nested-1"
 
     def test_unknown_adapter_returns_none(self):
@@ -262,20 +259,16 @@ class TestBuildAgentConfig:
 
 def _make_media_package(
     package_id: str = "pkg-1",
-    buyer_ref: str | None = "buyer-ref-1",
 ) -> MagicMock:
     """Create a minimal MediaPackage-like object for testing response builders."""
     pkg = MagicMock()
     pkg.package_id = package_id
-    pkg.buyer_ref = buyer_ref
     return pkg
 
 
-def _make_create_request(buyer_ref: str | None = "order-ref-1") -> MagicMock:
+def _make_create_request() -> MagicMock:
     """Create a minimal CreateMediaBuyRequest-like object."""
-    req = MagicMock()
-    req.buyer_ref = buyer_ref
-    return req
+    return MagicMock()
 
 
 def _make_adapter_instance() -> Any:
@@ -303,27 +296,25 @@ class TestBuildPackageResponses:
     def test_single_package(self):
         """Single package produces a single ResponsePackage with correct fields."""
         adapter = _make_adapter_instance()
-        packages = [_make_media_package(package_id="p1", buyer_ref="br-1")]
+        packages = [_make_media_package(package_id="p1")]
         result = adapter._build_package_responses(packages)
 
         assert len(result) == 1
         assert result[0].package_id == "p1"
-        assert result[0].buyer_ref == "br-1"
         assert result[0].paused is False
 
     def test_multiple_packages(self):
         """Multiple packages produce corresponding ResponsePackage list."""
         adapter = _make_adapter_instance()
         packages = [
-            _make_media_package(package_id="p1", buyer_ref="br-1"),
-            _make_media_package(package_id="p2", buyer_ref="br-2"),
-            _make_media_package(package_id="p3", buyer_ref="br-3"),
+            _make_media_package(package_id="p1"),
+            _make_media_package(package_id="p2"),
+            _make_media_package(package_id="p3"),
         ]
         result = adapter._build_package_responses(packages)
 
         assert len(result) == 3
         assert [r.package_id for r in result] == ["p1", "p2", "p3"]
-        assert [r.buyer_ref for r in result] == ["br-1", "br-2", "br-3"]
 
     def test_paused_flag_propagated(self):
         """When paused=True, all ResponsePackages have paused=True."""
@@ -332,14 +323,6 @@ class TestBuildPackageResponses:
         result = adapter._build_package_responses(packages, paused=True)
 
         assert result[0].paused is True
-
-    def test_none_buyer_ref_becomes_unknown(self):
-        """When package.buyer_ref is None, ResponsePackage gets 'unknown'."""
-        adapter = _make_adapter_instance()
-        packages = [_make_media_package(buyer_ref=None)]
-        result = adapter._build_package_responses(packages)
-
-        assert result[0].buyer_ref == "unknown"
 
     def test_empty_packages_list(self):
         """Empty packages list produces empty result."""
@@ -352,10 +335,10 @@ class TestBuildCreateSuccess:
     """Tests for AdServerAdapter._build_create_success()."""
 
     def test_basic_success_response(self):
-        """Creates success with buyer_ref, media_buy_id, packages, and deadline."""
+        """Creates success with media_buy_id, packages, and deadline."""
         adapter = _make_adapter_instance()
-        request = _make_create_request(buyer_ref="order-1")
-        packages = [_make_media_package(package_id="p1", buyer_ref="br-1")]
+        request = _make_create_request()
+        packages = [_make_media_package(package_id="p1")]
 
         result = adapter._build_create_success(
             request=request,
@@ -363,7 +346,6 @@ class TestBuildCreateSuccess:
             packages=packages,
         )
 
-        assert result.buyer_ref == "order-1"
         assert result.media_buy_id == "mb-123"
         assert len(result.packages) == 1
         assert result.packages[0].package_id == "p1"
@@ -416,7 +398,7 @@ class TestBuildCreateSuccess:
         from adcp.types.aliases import Package as ResponsePackage
 
         adapter = _make_adapter_instance()
-        pre_built = [ResponsePackage(package_id="custom-p1", buyer_ref="custom-br", paused=False)]
+        pre_built = [ResponsePackage(package_id="custom-p1", paused=False)]
         result = adapter._build_create_success(
             request=_make_create_request(),
             media_buy_id="mb-1",
@@ -426,18 +408,6 @@ class TestBuildCreateSuccess:
 
         assert len(result.packages) == 1
         assert result.packages[0].package_id == "custom-p1"
-        assert result.packages[0].buyer_ref == "custom-br"
-
-    def test_none_buyer_ref_on_request_becomes_unknown(self):
-        """When request.buyer_ref is None, success.buyer_ref is 'unknown'."""
-        adapter = _make_adapter_instance()
-        result = adapter._build_create_success(
-            request=_make_create_request(buyer_ref=None),
-            media_buy_id="mb-1",
-            packages=[_make_media_package()],
-        )
-
-        assert result.buyer_ref == "unknown"
 
     def test_result_is_create_media_buy_success_type(self):
         """Return type is CreateMediaBuySuccess."""

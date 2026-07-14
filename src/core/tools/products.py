@@ -7,22 +7,29 @@ shared implementation pattern from CLAUDE.md.
 import logging
 import os
 import time
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
+# FIXME(#1388): FormatId, ProductFilters have local subclasses; import from src.core.schemas (Pattern #7/#4).
 from adcp import FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
-from adcp.types import PropertyListReference, PushNotificationConfig
-from adcp.types.generated_poc.core.brand_ref import BrandReference
-from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types import BrandReference, ContextObject, PropertyListReference
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
-from pydantic import ValidationError
+from pydantic import Field
 
 from src.adapters import get_adapter_default_channels
 from src.core.audit_logger import get_audit_logger
-from src.core.auth import get_principal_object
-from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
+from src.core.auth import get_principal_object, require_identity, require_tenant
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPAuthenticationError,
+    AdCPAuthorizationError,
+    AdCPError,
+    AdCPPolicyViolationError,
+    AdCPValidationError,
+)
+from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
@@ -31,7 +38,8 @@ from src.core.schemas import (
 )
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tool_context import ToolContext
-from src.core.validation_helpers import format_validation_error, safe_parse_json_field
+from src.core.transport_helpers import resolve_identity_from_context
+from src.core.validation_helpers import adcp_validation_boundary, safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
 
 logger = logging.getLogger(__name__)
@@ -164,28 +172,12 @@ async def _get_products_impl(
         raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
 
     # Extract identity fields
-    if identity is None:
-        raise AdCPValidationError("Identity is required")
+    identity = require_identity(identity, context=req.context)
 
     testing_ctx: AdCPTestContext | None = identity.testing_context or AdCPTestContext()
     principal_id: str | None = identity.principal_id
-    tenant: dict[str, Any] = identity.tenant if identity.tenant else {}
-
-    if tenant:
-        logger.info(f"[GET_PRODUCTS] Tenant context: {tenant['tenant_id']}")
-    elif principal_id:
-        # If we have principal but no tenant, something went wrong
-        logger.error(f"[GET_PRODUCTS] Principal found but no tenant context: principal_id={principal_id}")
-        raise AdCPValidationError(
-            f"Authentication succeeded but tenant context missing. This is a bug. principal_id={principal_id}",
-            recovery="terminal",
-        )
-    else:
-        # No tenant context and no principal - cannot determine which tenant's products to return
-        logger.error("[GET_PRODUCTS] No tenant context available - cannot determine which products to return")
-        raise AdCPAuthenticationError(
-            "Cannot determine tenant context. Please provide valid authentication or ensure tenant can be identified from request headers."
-        )
+    tenant = require_tenant(identity, context=req.context)
+    logger.info(f"[GET_PRODUCTS] Tenant context: {tenant['tenant_id']}")
 
     # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
@@ -302,9 +294,7 @@ async def _get_products_impl(
         # Always block if policy says blocked
         logger.warning(f"Brief blocked by policy: {policy_result.reason}")
         # Raise ToolError to properly signal failure to client
-        raise AdCPAuthorizationError(
-            policy_result.reason or "Blocked by policy", details={"error_code": "POLICY_VIOLATION"}
-        )
+        raise AdCPPolicyViolationError(policy_result.reason or "Blocked by policy")
 
     # If restricted and manual review is required, create a task
     if (
@@ -332,9 +322,8 @@ async def _get_products_impl(
 
         # Raise error for policy violations - explicit failure, not silent return
         restrictions_list = policy_result.restrictions if policy_result.restrictions else []
-        raise AdCPAuthorizationError(
-            f"Request violates content policy: {policy_result.reason}. Restrictions: {', '.join(restrictions_list)}",
-            details={"error_code": "POLICY_VIOLATION"},
+        raise AdCPPolicyViolationError(
+            f"Request violates content policy: {policy_result.reason}. Restrictions: {', '.join(restrictions_list)}"
         )
 
     # Resolve adapter type for delivery_measurement defaults
@@ -357,13 +346,15 @@ async def _get_products_impl(
                 validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
                 products.append(validated_product)
                 logger.debug(f"Successfully converted product {product_obj.product_id}")
+            except AdCPError:
+                raise
             except Exception as e:
                 error_msg = (
                     f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
                     f"This indicates data corruption or migration issue. Error: {e}"
                 )
                 logger.error(error_msg)
-                raise ValueError(error_msg) from e
+                raise AdCPAdapterError(error_msg) from e
 
     logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
 
@@ -415,11 +406,9 @@ async def _get_products_impl(
                 f"[GET_PRODUCTS] After property list filtering: {len(products)} products "
                 f"(allowed {len(allowed_set)} properties)"
             )
+        except AdCPError:
+            raise
         except Exception as e:
-            from src.core.exceptions import AdCPAdapterError
-
-            if isinstance(e, AdCPAdapterError):
-                raise
             logger.error(f"Property list resolution failed: {e}")
             raise AdCPValidationError(f"Failed to resolve property list: {e}", recovery="transient") from e
 
@@ -494,27 +483,7 @@ async def _get_products_impl(
                 if not has_matching_pricing:
                     continue
 
-            # Filter by format_types
-            if req.filters.format_types:
-                # Product.format_ids is list[str] (format IDs), need to look up types from FORMAT_REGISTRY
-                from src.core.schemas import get_format_by_id
-
-                product_format_types = set()
-                for format_id in product.format_ids:
-                    if isinstance(format_id, str):
-                        format_obj = get_format_by_id(format_id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-                    elif isinstance(format_id, FormatId):
-                        # FormatId object — look up the format for its type
-                        format_obj = get_format_by_id(format_id.id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-
-                if not any(fmt_type in product_format_types for fmt_type in req.filters.format_types):
-                    continue
-
-            # Filter by format_ids
+            # Filter by format_ids (format_types removed in adcp 3.12)
             if req.filters.format_ids:
                 # Product.format_ids is list[str] or list[dict] (format IDs)
                 product_format_ids: set[str] = set()
@@ -634,7 +603,7 @@ async def _get_products_impl(
             filtered_products.append(product)
 
         products = filtered_products
-        logger.info(f"Applied filters: {req.filters.model_dump(exclude_none=True)}. {len(products)} products remain.")
+        logger.info("Applied filters: %s. %d products remain.", req.filters, len(products))
 
     # Filter products based on policy compliance (if policy checks are enabled)
     eligible_products = []
@@ -659,9 +628,7 @@ async def _get_products_impl(
         filtered_products = []
         for product in eligible_products:
             # For guaranteed products, check estimated_exposures
-            delivery_type_value = (
-                product.delivery_type.value if hasattr(product.delivery_type, "value") else product.delivery_type
-            )
+            delivery_type_value = enum_value(product.delivery_type)
             if delivery_type_value == "guaranteed":
                 estimated = getattr(product, "estimated_exposures", None)
                 if estimated is not None and estimated >= min_exposures:
@@ -807,12 +774,18 @@ async def _get_products_impl(
 
 
 async def get_products(
-    brand: BrandReference | None = None,
-    brief: str = "",
-    adcp_version: str = "1.0.0",
+    brand: Annotated[
+        BrandReference | dict[str, Any] | str | None,
+        Field(
+            description=(
+                "Brand reference (object with domain), domain/URL string shorthand "
+                "(e.g. 'acme.com' / 'https://acme.com'), or equivalent dict"
+            )
+        ),
+    ] = None,
+    brief: Annotated[str, Field(description="Natural language description of campaign goals and requirements")] = "",
     filters: ProductFilters | None = None,
-    property_list: dict | None = None,
-    push_notification_config: PushNotificationConfig | None = None,
+    property_list: PropertyListReference | None = None,
     context: ContextObject | None = None,  # payload-level context
     ctx: Context | ToolContext | None = None,
 ):
@@ -823,31 +796,30 @@ async def get_products(
     Args:
         brand: Brand reference per adcp 3.6.0. Example: BrandReference(domain="acme.com")
         brief: Brief description of the advertising campaign or requirements (optional)
-        adcp_version: Client's AdCP version (default: 1.0.0). V3+ clients get clean responses.
         filters: Structured filters for product discovery (optional)
         property_list: Property list reference for filtering by buyer's property list (optional)
         context: Application level context per adcp spec
         ctx: FastMCP context (automatically provided)
-        push_notification_config: Optional webhook configuration (accepted, ignored by this operation)
 
     Returns:
         ToolResult with human-readable text and structured data
     """
-    # Build request object for shared implementation
+    # create_get_products_request coerces string/dict brand via to_brand_reference
     try:
-        req = create_get_products_request(
-            brief=brief,
-            brand=brand,
-            filters=filters,
-            property_list=property_list,
-            context=context,
-        )
-
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="get_products request")) from e
+        with adcp_validation_boundary(context="get_products request"):
+            req = create_get_products_request(
+                brief=brief,
+                brand=brand,
+                filters=filters,
+                property_list=property_list,
+                context=context,
+            )
     except ValueError as e:
-        # Convert ValueError from helper to ToolError with clear message
-        raise AdCPValidationError(f"Invalid get_products request: {e}") from e
+        # Helper raises ValueError for semantic (non-Pydantic) input problems.
+        raise AdCPValidationError(
+            f"Invalid get_products request: {e}",
+            suggestion="Correct the get_products request per the AdCP specification and resend.",
+        ) from e
 
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
@@ -857,22 +829,15 @@ async def get_products(
     response = await _get_products_impl(req, identity)
 
     # Return ToolResult with human-readable text and structured data
-    response_dict = response.model_dump(mode="json")
-    # Apply v2.x backward-compat fields only for pre-3.0 clients
-    from src.core.version_compat import apply_version_compat
-
-    response_dict = apply_version_compat("get_products", response_dict, adcp_version)
-    return ToolResult(content=str(response), structured_content=response_dict)
+    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
 
 
 async def get_products_raw(
-    brief: str,
-    brand: dict[str, Any] | BrandReference | None = None,
-    min_exposures: int | None = None,
-    filters: dict | None = None,
-    property_list: dict | None = None,
-    strategy_id: str | None = None,
-    context: dict | None = None,  # Application level context per adcp spec
+    brief: str = "",
+    brand: BrandReference | str | None = None,
+    filters: ProductFilters | None = None,
+    property_list: PropertyListReference | None = None,
+    context: ContextObject | None = None,  # Application level context per adcp spec
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
 ) -> GetProductsResponse:
@@ -884,12 +849,9 @@ async def get_products_raw(
 
     Args:
         brief: Brief description of the advertising campaign or requirements
-        brand: Brand reference per adcp 3.6.0 (BrandReference or dict with domain).
-               Dict is accepted since A2A passes JSON-deserialized dicts.
-        min_exposures: Minimum impressions needed for measurement validity (optional)
+        brand: Brand reference per adcp 3.6.0 (BrandReference or string domain shorthand)
         filters: Structured filters for product discovery (optional)
         property_list: Property list reference for filtering by buyer's property list (optional)
-        strategy_id: Optional strategy ID for linking operations (optional)
         context: Application level context per adcp spec
         ctx: FastMCP context (automatically provided)
         identity: Resolved identity from transport boundary (preferred over ctx)
@@ -899,8 +861,6 @@ async def get_products_raw(
     """
     # Resolve identity from transport context if not provided
     if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
 
     # Create request object - adcp library validates schema

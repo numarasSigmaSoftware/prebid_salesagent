@@ -27,11 +27,7 @@ def mock_principal():
 @pytest.fixture
 def mock_config():
     """Create mock adapter config."""
-    return {
-        "api_key": "test_api_key",
-        "network_id": "net_123",
-        "default_advertiser_id": "adv_default",
-    }
+    return {"api_key": "test_api_key", "network_id": "net_123", "default_advertiser_id": "adv_default"}
 
 
 class TestBroadstreetAdapterInit:
@@ -87,9 +83,11 @@ class TestBroadstreetAdapterInit:
         principal.platform_mappings = {}
         principal.get_adapter_id = lambda adapter: None
 
+        from src.core.exceptions import AdCPConfigurationError
+
         config = {"network_id": "net_123", "api_key": "test_key"}
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(AdCPConfigurationError) as exc_info:
             BroadstreetAdapter(config=config, principal=principal, dry_run=False, tenant_id="test_tenant")
 
         assert "does not have a Broadstreet advertiser ID" in str(exc_info.value)
@@ -157,7 +155,6 @@ class TestBroadstreetAdapterCreateMediaBuy:
 
         # Create a minimal valid request using MagicMock to avoid schema complexity
         request = MagicMock()
-        request.buyer_ref = "buyer_123"
         request.po_number = "PO-001"
 
         # Create package with implementation config
@@ -167,7 +164,6 @@ class TestBroadstreetAdapterCreateMediaBuy:
         package.name = "Test Package"
         package.budget = 10000
         package.impressions = 100000
-        package.buyer_ref = "buyer_pkg_1"
         package.implementation_config = {
             "targeted_zone_ids": ["zone_1", "zone_2"],
             "automation_mode": "automatic",  # Skip workflow for this test
@@ -181,7 +177,6 @@ class TestBroadstreetAdapterCreateMediaBuy:
         )
 
         assert isinstance(result, CreateMediaBuySuccess)
-        assert result.buyer_ref == "buyer_123"
         assert result.media_buy_id.startswith("bs_")
         assert len(result.packages) == 1
         assert result.packages[0].package_id == "pkg_1"
@@ -200,7 +195,6 @@ class TestBroadstreetAdapterCreateMediaBuy:
 
         # Create a minimal valid request using MagicMock
         request = MagicMock()
-        request.buyer_ref = "buyer_123"
         request.po_number = "PO-001"
 
         # Package without zones
@@ -210,21 +204,18 @@ class TestBroadstreetAdapterCreateMediaBuy:
         package.name = "Test Package"
         package.budget = 10000
         package.impressions = 100000
-        package.buyer_ref = "buyer_pkg_1"
         package.implementation_config = {}  # No zones
 
-        result = adapter.create_media_buy(
-            request=request,
-            packages=[package],
-            start_time=start_time,
-            end_time=end_time,
-        )
+        from src.core.exceptions import AdCPValidationError
 
-        # Should fail with error
-        from src.core.schemas import CreateMediaBuyError
-
-        assert isinstance(result, CreateMediaBuyError)
-        assert any("no_zones" in str(err.code).lower() for err in result.errors)
+        with pytest.raises(AdCPValidationError) as exc_info:
+            adapter.create_media_buy(
+                request=request,
+                packages=[package],
+                start_time=start_time,
+                end_time=end_time,
+            )
+        assert exc_info.value.error_code == "VALIDATION_ERROR"
 
 
 class TestBroadstreetAdapterCreatives:
@@ -246,12 +237,7 @@ class TestBroadstreetAdapterCreatives:
                 "format": "display",
                 "media_url": "https://example.com/banner.jpg",
             },
-            {
-                "creative_id": "creative_2",
-                "name": "Test HTML",
-                "format": "html",
-                "html": "<div>Test Ad</div>",
-            },
+            {"creative_id": "creative_2", "name": "Test HTML", "format": "html", "html": "<div>Test Ad</div>"},
         ]
 
         results = adapter.add_creative_assets(
@@ -286,9 +272,7 @@ def _make_mock_db_package(package_id="pkg_1", media_buy_id="bs_12345", ad_ids=No
     pkg = MagicMock()
     pkg.package_id = package_id
     pkg.media_buy_id = media_buy_id
-    pkg.package_config = {
-        "broadstreet_advertisement_ids": ad_ids or ["ad_100", "ad_200"],
-    }
+    pkg.package_config = {"broadstreet_advertisement_ids": ad_ids or ["ad_100", "ad_200"]}
     return pkg
 
 
@@ -326,7 +310,6 @@ class TestBroadstreetAdapterUpdates:
         with _mock_db_session(db_pkgs):
             result = adapter.update_media_buy(
                 media_buy_id="bs_12345",
-                buyer_ref="buyer_123",
                 action="pause_media_buy",
                 package_id=None,
                 budget=None,
@@ -353,7 +336,6 @@ class TestBroadstreetAdapterUpdates:
         with _mock_db_session(db_pkgs):
             result = adapter.update_media_buy(
                 media_buy_id="bs_12345",
-                buyer_ref="buyer_123",
                 action="resume_media_buy",
                 package_id=None,
                 budget=None,
@@ -375,20 +357,18 @@ class TestBroadstreetAdapterUpdates:
             tenant_id="test_tenant",
         )
 
+        from src.core.exceptions import AdCPPackageNotFoundError
+
         with _mock_db_session([]):
-            result = adapter.update_media_buy(
-                media_buy_id="bs_12345",
-                buyer_ref="buyer_123",
-                action="pause_media_buy",
-                package_id=None,
-                budget=None,
-                today=datetime.now(UTC),
-            )
-
-        from src.core.schemas import UpdateMediaBuyError
-
-        assert isinstance(result, UpdateMediaBuyError)
-        assert any("no_packages_found" in str(err.code) for err in result.errors)
+            with pytest.raises(AdCPPackageNotFoundError) as exc_info:
+                adapter.update_media_buy(
+                    media_buy_id="bs_12345",
+                    action="pause_media_buy",
+                    package_id=None,
+                    budget=None,
+                    today=datetime.now(UTC),
+                )
+        assert exc_info.value.error_code == "PACKAGE_NOT_FOUND"
 
     def test_update_media_buy_pause_package_dry_run(self, mock_principal, mock_config):
         """Test pausing a single package in dry-run mode."""
@@ -404,7 +384,6 @@ class TestBroadstreetAdapterUpdates:
         with _mock_db_session(db_pkgs):
             result = adapter.update_media_buy(
                 media_buy_id="bs_12345",
-                buyer_ref="buyer_123",
                 action="pause_package",
                 package_id="pkg_1",
                 budget=None,
@@ -426,19 +405,17 @@ class TestBroadstreetAdapterUpdates:
             tenant_id="test_tenant",
         )
 
-        result = adapter.update_media_buy(
-            media_buy_id="bs_12345",
-            buyer_ref="buyer_123",
-            action="unsupported_action",
-            package_id=None,
-            budget=None,
-            today=datetime.now(UTC),
-        )
+        from src.core.exceptions import AdCPCapabilityNotSupportedError
 
-        from src.core.schemas import UpdateMediaBuyError
-
-        assert isinstance(result, UpdateMediaBuyError)
-        assert any("unsupported_action" in str(err.code) for err in result.errors)
+        with pytest.raises(AdCPCapabilityNotSupportedError) as exc_info:
+            adapter.update_media_buy(
+                media_buy_id="bs_12345",
+                action="UNSUPPORTED_ACTION",
+                package_id=None,
+                budget=None,
+                today=datetime.now(UTC),
+            )
+        assert exc_info.value.error_code == "UNSUPPORTED_FEATURE"
 
     def test_check_media_buy_status_dry_run(self, mock_principal, mock_config):
         """Test checking media buy status in dry-run mode."""
@@ -456,6 +433,77 @@ class TestBroadstreetAdapterUpdates:
 
         assert result.media_buy_id == "bs_12345"
         assert result.status == "active"
+
+
+class TestBroadstreetAdapterBulkUpdateRaiseSites:
+    """Drive the AdCPBulkUpdateError (PARTIAL_FAILURE) raise sites in update_media_buy.
+
+    test_typed_error_wire_codes.py pins the class -> SERVICE_UNAVAILABLE wire
+    mapping; here the production pause path is driven end-to-end (non-dry-run, so
+    the real ``_toggle_advertisements`` runs and collects failed IDs) so removing
+    the ``raise`` or swapping it to a parent fails the test. The PARTIAL_FAILURE
+    internal code asserted is the taxonomy carried as class identity.
+    """
+
+    @staticmethod
+    def _build_live_adapter(mock_principal, mock_config):
+        """A non-dry-run adapter whose Broadstreet client is a no-network mock.
+
+        ``update_advertisement`` raises so the real ``_toggle_advertisements``
+        appends the ad to its ``failed`` list, which is what the production
+        ``update_media_buy`` checks before raising AdCPBulkUpdateError.
+        """
+        with patch("src.adapters.broadstreet.adapter.BroadstreetClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.update_advertisement.side_effect = RuntimeError("Broadstreet API 500")
+            mock_client_cls.return_value = mock_client
+            adapter = BroadstreetAdapter(
+                config=mock_config,
+                principal=mock_principal,
+                dry_run=False,
+                tenant_id="test_tenant",
+            )
+        return adapter
+
+    def test_pause_media_buy_advertisement_failure_raises_bulk_update_error(self, mock_principal, mock_config):
+        """Campaign-level pause where every advertisement toggle fails raises
+        AdCPBulkUpdateError (PARTIAL_FAILURE)."""
+        from src.core.exceptions import AdCPBulkUpdateError
+
+        adapter = self._build_live_adapter(mock_principal, mock_config)
+        db_pkgs = [_make_mock_db_package(ad_ids=["ad_100"])]
+
+        with _mock_db_session(db_pkgs):
+            with pytest.raises(AdCPBulkUpdateError) as exc_info:
+                adapter.update_media_buy(
+                    media_buy_id="bs_12345",
+                    action="pause_media_buy",
+                    package_id=None,
+                    budget=None,
+                    today=datetime.now(UTC),
+                )
+
+        assert exc_info.value.error_code == "PARTIAL_FAILURE"
+
+    def test_pause_package_advertisement_failure_raises_bulk_update_error(self, mock_principal, mock_config):
+        """Package-level pause where the advertisement toggle fails raises
+        AdCPBulkUpdateError (PARTIAL_FAILURE)."""
+        from src.core.exceptions import AdCPBulkUpdateError
+
+        adapter = self._build_live_adapter(mock_principal, mock_config)
+        db_pkgs = [_make_mock_db_package(package_id="pkg_1", ad_ids=["ad_100"])]
+
+        with _mock_db_session(db_pkgs):
+            with pytest.raises(AdCPBulkUpdateError) as exc_info:
+                adapter.update_media_buy(
+                    media_buy_id="bs_12345",
+                    action="pause_package",
+                    package_id="pkg_1",
+                    budget=None,
+                    today=datetime.now(UTC),
+                )
+
+        assert exc_info.value.error_code == "PARTIAL_FAILURE"
 
 
 class TestBroadstreetAdapterDelivery:

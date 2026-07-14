@@ -39,14 +39,7 @@ from src.core.schemas.product import ProductFilters
 
 
 class TestDeliveryStatusEnum:
-    EXPECTED_MEMBERS = {
-        "delivering",
-        "not_delivering",
-        "completed",
-        "budget_exhausted",
-        "flight_ended",
-        "goal_met",
-    }
+    EXPECTED_MEMBERS = {"delivering", "not_delivering", "completed", "budget_exhausted", "flight_ended", "goal_met"}
 
     def test_has_all_six_members(self):
         actual = {m.value for m in DeliveryStatus}
@@ -78,7 +71,7 @@ class TestDeliveryTotalsFields:
         "spend",
         "clicks",
         "ctr",
-        "video_completions",
+        "completed_views",
         "completion_rate",
         "conversions",
         "viewability",
@@ -104,16 +97,20 @@ class TestDeliveryTotalsFields:
 class TestPackageDeliveryFields:
     EXPECTED_FIELDS = {
         "package_id",
-        "buyer_ref",
         "impressions",
         "spend",
         "clicks",
-        "video_completions",
+        "completed_views",
         "pacing_index",
         "pricing_model",
         "rate",
         "currency",
         "by_placement",
+        "by_placement_truncated",
+        "by_geo",
+        "by_geo_truncated",
+        "by_device_type",
+        "by_device_type_truncated",
     }
 
     def test_field_names(self):
@@ -149,7 +146,6 @@ class TestDailyBreakdownFields:
 class TestMediaBuyDeliveryDataFields:
     EXPECTED_FIELDS = {
         "media_buy_id",
-        "buyer_ref",
         "status",
         "expected_availability",
         "is_adjusted",
@@ -247,10 +243,7 @@ class TestGetMediaBuyDeliveryRequestFields:
 def _make_delivery_response(**overrides):
     """Build a minimal GetMediaBuyDeliveryResponse for testing."""
     defaults = {
-        "reporting_period": {
-            "start": "2025-01-01T00:00:00Z",
-            "end": "2025-01-31T23:59:59Z",
-        },
+        "reporting_period": {"start": "2025-01-01T00:00:00Z", "end": "2025-01-31T23:59:59Z"},
         "currency": "USD",
         "aggregated_totals": {"impressions": 1000, "spend": 5.0, "media_buy_count": 1},
         "media_buy_deliveries": [
@@ -328,11 +321,27 @@ class TestGetMediaBuyDeliveryResponseMethods:
 
 class TestAdapterPackageDelivery:
     def test_fields(self):
-        assert set(AdapterPackageDelivery.model_fields.keys()) == {"package_id", "impressions", "spend", "by_placement"}
+        assert set(AdapterPackageDelivery.model_fields.keys()) == {
+            "package_id",
+            "impressions",
+            "spend",
+            "by_placement",
+            "by_geo",
+            "by_device_type",
+        }
 
     def test_construction(self):
         obj = AdapterPackageDelivery(package_id="pkg_1", impressions=1000, spend=5.0)
         assert obj.package_id == "pkg_1"
+
+    def test_by_device_type_defaults_to_none(self):
+        obj = AdapterPackageDelivery(package_id="pkg_1", impressions=0, spend=0.0)
+        assert obj.by_device_type is None
+
+    def test_by_device_type_accepts_raw_dicts(self):
+        raw = [{"device_type": "mobile", "impressions": 500.0, "spend": 2.5}]
+        obj = AdapterPackageDelivery(package_id="pkg_1", impressions=1000, spend=5.0, by_device_type=raw)
+        assert obj.by_device_type == raw
 
 
 class TestAdapterGetMediaBuyDeliveryResponse:
@@ -391,7 +400,6 @@ class TestUpgradeLegacyFormatIds:
 
         pkg = PackageRequest(
             budget=1000,
-            buyer_ref="ref_1",
             pricing_option_id="po_1",
             product_id="prod_1",
             format_ids=[self.LEGACY_FORMAT_ID],
@@ -422,7 +430,6 @@ class TestUpgradeLegacyFormatIds:
         fmt = FormatId(agent_url="https://example.com/agent", id="fmt_video")
         pkg = PackageRequest(
             budget=1000,
-            buyer_ref="ref_1",
             pricing_option_id="po_1",
             product_id="prod_1",
             format_ids=[fmt],

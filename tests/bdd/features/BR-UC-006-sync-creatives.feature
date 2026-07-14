@@ -1,5 +1,5 @@
-# Generated from adcp-req @ 8a219ece2b54628c33f1075d386b73082a0f4832 on 2026-03-20T12:00:24Z
-# DO NOT EDIT -- re-run: python scripts/compile_bdd.py
+# Generated from adcp-req @ a14db6e5894e781a8b2c577e86e1b136876e4915 on 2026-06-03T11:30:04Z (merge mode)
+# DO NOT EDIT -- re-run: python scripts/compile_bdd.py --merge
 
 Feature: BR-UC-006 Sync Creative Assets
   As a Buyer (AI Agent or Human User)
@@ -21,8 +21,9 @@ Feature: BR-UC-006 Sync Creative Assets
     And a valid tenant context exists
 
 
-  @T-UC-006-main-rest @main-flow @rest
-  Scenario: Sync creatives via REST — successful create
+
+  @T-UC-006-main @main-flow
+  Scenario: Sync creatives — successful create
     Given the Buyer is authenticated with a valid principal_id
     And a creative with name "Summer Banner" and a known format_id
     And the creative does not exist in the Seller's library
@@ -32,8 +33,8 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-S1: Buyer knows creative was successfully created
     # POST-S2: Buyer knows action = created
 
-  @T-UC-006-main-rest-update @main-flow @rest
-  Scenario: Sync creatives via REST — successful update
+  @T-UC-006-main-update @main-flow
+  Scenario: Sync creatives — successful update
     Given the Buyer is authenticated with a valid principal_id
     And a creative with name "Summer Banner" and a known format_id
     And the creative already exists in the Seller's library for this principal
@@ -42,8 +43,8 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-S1: Buyer knows creative was updated
     # POST-S2: Buyer knows action = updated
 
-  @T-UC-006-main-rest-unchanged @main-flow @rest
-  Scenario: Sync creatives via REST — creative unchanged
+  @T-UC-006-main-unchanged @main-flow
+  Scenario: Sync creatives — creative unchanged
     Given the Buyer is authenticated with a valid principal_id
     And a creative with name "Summer Banner" and a known format_id
     And the creative already exists with identical data
@@ -51,8 +52,8 @@ Feature: BR-UC-006 Sync Creative Assets
     Then the response should include the creative with action "unchanged"
     # POST-S2: Buyer knows action = unchanged
 
-  @T-UC-006-main-rest-assign @main-flow @rest
-  Scenario: Sync creatives via REST — with package assignments
+  @T-UC-006-main-assign @main-flow
+  Scenario: Sync creatives — with package assignments
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id
     And assignments mapping the creative to valid package_ids
@@ -61,8 +62,8 @@ Feature: BR-UC-006 Sync Creative Assets
     And the assignment results should list the assigned packages
     # POST-S3: Buyer knows which packages each creative was assigned to
 
-  @T-UC-006-main-rest-warnings @main-flow @rest
-  Scenario: Sync creatives via REST — partial success with warnings
+  @T-UC-006-main-warnings @main-flow
+  Scenario: Sync creatives — partial success with warnings
     Given the Buyer is authenticated with a valid principal_id
     And two creatives: one valid and one with an empty name
     When the Buyer Agent syncs both creatives
@@ -70,8 +71,8 @@ Feature: BR-UC-006 Sync Creative Assets
     And the response should include one creative with action "failed"
     # POST-S4: Buyer knows about per-creative warnings
 
-  @T-UC-006-main-rest-approval @main-flow @rest
-  Scenario: Sync creatives via REST — approval workflow routing
+  @T-UC-006-main-approval @main-flow
+  Scenario: Sync creatives — approval workflow routing
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id
     And the tenant has approval_mode set to "require-human"
@@ -80,7 +81,7 @@ Feature: BR-UC-006 Sync Creative Assets
     And a workflow step should be created for the Seller
     # POST-S5: Creative routed to approval workflow
 
-  @T-UC-006-main-rest-lenient-warnings @main-flow @rest
+  @T-UC-006-main-lenient-warnings @main-flow
   Scenario: Sync creatives — lenient mode with mixed assignment results
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id
@@ -93,8 +94,8 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-S3: Buyer knows successful assignments
     # POST-S4: Buyer knows about assignment errors
 
-  @T-UC-006-main-rest-provenance-warning @main-flow @rest
-  Scenario: Sync creatives via REST — provenance warning when policy requires it
+  @T-UC-006-main-provenance-warning @main-flow
+  Scenario: Sync creatives — provenance warning when policy requires it
     Given the Buyer is authenticated with a valid principal_id
     And the tenant has a product with creative_policy.provenance_required = true
     And a creative with a known format_id but no provenance metadata
@@ -104,38 +105,38 @@ Feature: BR-UC-006 Sync Creative Assets
     And the creative should be flagged for review
     # POST-S4: Buyer knows about provenance warning
 
-  @T-UC-006-main-rest-weight @main-flow @rest
-  Scenario: Sync creatives via REST — assignment with explicit weight
+  @T-UC-006-main-weight @main-flow
+  Scenario: Sync creatives — assignment with explicit weight
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id
     And an assignment with package_id "pkg-1" and weight 50
     When the Buyer Agent syncs the creative
     Then the assignment should be created with the specified weight
     # POST-S3: Buyer knows assignment details including weight
-    # --- Main Flow: MCP ---
 
-  @T-UC-006-main-mcp @main-flow @mcp
-  Scenario: Sync creatives via MCP — successful create
+  @T-UC-006-main-async-submitted @main-flow @async
+  Scenario: Sync creatives — async submitted task envelope
     Given the Buyer is authenticated with a valid principal_id
-    And a creative with name "Summer Banner" and a known format_id
-    And the creative does not exist in the Seller's library
-    When the Buyer Agent syncs the creative
-    Then the response should include the creative with action "created"
-    And the creative should have a status reflecting the approval workflow
-    # POST-S1: Buyer knows creative was successfully created
-    # POST-S2: Buyer knows action = created
+    And a batch sync that the Seller cannot confirm within the request window
+    When the Buyer Agent syncs the creatives
+    Then the response should have status "submitted" with a task_id
+    And the response should not include a creatives array
+    And the Buyer can poll tasks/get with the task_id to retrieve per-item results
+    # POST-S1/S2: per-item results land on the task completion artifact, not this envelope
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
 
-  @T-UC-006-main-mcp-update @main-flow @mcp
-  Scenario: Sync creatives via MCP — successful update
+  @T-UC-006-main-delete-missing-conflict @main-flow @error
+  Scenario: Sync creatives — delete_missing rejected when creative_ids filter provided
     Given the Buyer is authenticated with a valid principal_id
-    And a creative with name "Summer Banner" and a known format_id
-    And the creative already exists in the Seller's library for this principal
-    When the Buyer Agent syncs the creative
-    Then the response should include the creative with action "updated"
-    # POST-S1: Buyer knows creative was updated
+    And a sync request with both creative_ids filter and delete_missing set to true
+    When the Buyer Agent syncs the creatives
+    Then the operation should fail with INVALID_REQUEST
+    And the error code should be "INVALID_REQUEST"
+    And the error should explain that delete_missing applies to the entire library scope, not a filtered subset
+    # POST-F1/F2/F3: BR-12 — delete_missing + creative_ids are mutually exclusive
 
-  @T-UC-006-ext-a-rest @extension @ext-a @error @rest
-  Scenario: Authentication required — missing principal_id (REST)
+  @T-UC-006-ext-a @extension @ext-a @error
+  Scenario: Authentication required — missing principal_id
     Given the Buyer has no authentication credentials
     And a creative with a known format_id
     When the Buyer Agent syncs the creative
@@ -148,17 +149,6 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-F2: Error explains missing authentication
     # POST-F3: Suggestion for recovery
 
-  @T-UC-006-ext-a-mcp @extension @ext-a @error @mcp
-  Scenario: Authentication required — missing principal_id (MCP)
-    Given the Buyer has no authentication credentials
-    And a creative with a known format_id
-    When the Buyer Agent syncs the creative
-    Then the operation should fail
-    And the error code should be "AUTH_REQUIRED"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "authentication credentials"
-    # POST-F1, POST-F2, POST-F3
-
   @T-UC-006-ext-a-empty @extension @ext-a @error
   Scenario: Authentication required — empty principal_id
     Given the Buyer has an empty principal_id in the authentication context
@@ -170,8 +160,8 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-F1, POST-F2, POST-F3
     # --- ext-b: TENANT_NOT_FOUND ---
 
-  @T-UC-006-ext-b-rest @extension @ext-b @error @rest
-  Scenario: Tenant not found — principal has no tenant (REST)
+  @T-UC-006-ext-b @extension @ext-b @error
+  Scenario: Tenant not found — principal has no tenant
     Given the Buyer is authenticated with a valid principal_id
     But the principal has no associated tenant
     And a creative with a known format_id
@@ -182,21 +172,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "tenant"
     # POST-F1, POST-F2, POST-F3
-
-  @T-UC-006-ext-b-mcp @extension @ext-b @error @mcp
-  Scenario: Tenant not found — principal has no tenant (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    But the principal has no associated tenant
-    And a creative with a known format_id
-    When the Buyer Agent syncs the creative
-    Then the operation should fail
-    And the error code should be "TENANT_NOT_FOUND"
-    And the error should include a "suggestion" field
-    # POST-F1, POST-F2, POST-F3
     # --- ext-c: CREATIVE_VALIDATION_FAILED ---
 
-  @T-UC-006-ext-c-rest @extension @ext-c @error @rest
-  Scenario: Creative validation failed — schema violation (REST)
+  @T-UC-006-ext-c @extension @ext-c @error
+  Scenario: Creative validation failed — schema violation
     Given the Buyer is authenticated with a valid principal_id
     And a creative with invalid schema structure
     When the Buyer Agent syncs the creative
@@ -207,21 +186,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the suggestion should contain "CreativeAsset schema"
     # POST-F2: Error explains validation failure
     # POST-F3: Suggestion for corrective action
-
-  @T-UC-006-ext-c-mcp @extension @ext-c @error @mcp
-  Scenario: Creative validation failed — schema violation (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with invalid schema structure
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_VALIDATION_FAILED"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "CreativeAsset schema"
-    # POST-F2, POST-F3
     # --- ext-d: CREATIVE_NAME_EMPTY ---
 
-  @T-UC-006-ext-d-rest @extension @ext-d @error @rest
-  Scenario: Creative name empty (REST)
+  @T-UC-006-ext-d @extension @ext-d @error
+  Scenario: Creative name empty
     Given the Buyer is authenticated with a valid principal_id
     And a creative with name "" and a known format_id
     When the Buyer Agent syncs the creative
@@ -230,16 +198,6 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error message should contain "name"
     And the error should include a "suggestion" field
     And the suggestion should contain "non-empty name"
-    # POST-F2, POST-F3
-
-  @T-UC-006-ext-d-mcp @extension @ext-d @error @mcp
-  Scenario: Creative name empty (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with name "" and a known format_id
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_NAME_EMPTY"
-    And the error should include a "suggestion" field
     # POST-F2, POST-F3
 
   @T-UC-006-ext-d-whitespace @extension @ext-d @error
@@ -253,8 +211,8 @@ Feature: BR-UC-006 Sync Creative Assets
     # POST-F2, POST-F3
     # --- ext-e: CREATIVE_FORMAT_REQUIRED ---
 
-  @T-UC-006-ext-e-rest @extension @ext-e @error @rest
-  Scenario: Creative format required — missing format_id (REST)
+  @T-UC-006-ext-e @extension @ext-e @error
+  Scenario: Creative format required — missing format_id
     Given the Buyer is authenticated with a valid principal_id
     And a creative with name "Banner" but no format_id
     When the Buyer Agent syncs the creative
@@ -264,20 +222,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "format_id"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-e-mcp @extension @ext-e @error @mcp
-  Scenario: Creative format required — missing format_id (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with name "Banner" but no format_id
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_FORMAT_REQUIRED"
-    And the error should include a "suggestion" field
-    # POST-F2, POST-F3
     # --- ext-f: CREATIVE_FORMAT_UNKNOWN ---
 
-  @T-UC-006-ext-f-rest @extension @ext-f @error @rest
-  Scenario: Creative format unknown — not in agent registry (REST)
+  @T-UC-006-ext-f @extension @ext-f @error
+  Scenario: Creative format unknown — not in agent registry
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a format_id that does not exist in any agent registry
     When the Buyer Agent syncs the creative
@@ -287,21 +235,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "list_creative_formats"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-f-mcp @extension @ext-f @error @mcp
-  Scenario: Creative format unknown — not in agent registry (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with a format_id that does not exist in any agent registry
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_FORMAT_UNKNOWN"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "list_creative_formats"
-    # POST-F2, POST-F3
     # --- ext-g: CREATIVE_AGENT_UNREACHABLE ---
 
-  @T-UC-006-ext-g-rest @extension @ext-g @error @rest
-  Scenario: Creative agent unreachable (REST)
+  @T-UC-006-ext-g @extension @ext-g @error
+  Scenario: Creative agent unreachable
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a format_id whose agent_url is unreachable
     When the Buyer Agent syncs the creative
@@ -311,21 +248,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "try again"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-g-mcp @extension @ext-g @error @mcp
-  Scenario: Creative agent unreachable (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with a format_id whose agent_url is unreachable
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_AGENT_UNREACHABLE"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "try again"
-    # POST-F2, POST-F3
     # --- ext-h: CREATIVE_PREVIEW_FAILED ---
 
-  @T-UC-006-ext-h-rest @extension @ext-h @error @rest
-  Scenario: Creative preview failed — no previews generated (REST)
+  @T-UC-006-ext-h @extension @ext-h @error
+  Scenario: Creative preview failed — no previews generated
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id but no media_url
     And the creative agent returns no preview URLs
@@ -336,21 +262,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "media_url"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-h-mcp @extension @ext-h @error @mcp
-  Scenario: Creative preview failed — no previews generated (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with a known format_id but no media_url
-    And the creative agent returns no preview URLs
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_PREVIEW_FAILED"
-    And the error should include a "suggestion" field
-    # POST-F2, POST-F3
     # --- ext-i: CREATIVE_GEMINI_KEY_MISSING ---
 
-  @T-UC-006-ext-i-rest @extension @ext-i @error @rest
-  Scenario: Gemini key missing — generative creative without config (REST)
+  @T-UC-006-ext-i @extension @ext-i @error
+  Scenario: Gemini key missing — generative creative without config
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a generative format (output_format_ids present)
     And the Seller Agent does not have GEMINI_API_KEY configured
@@ -361,22 +276,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "seller"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-i-mcp @extension @ext-i @error @mcp
-  Scenario: Gemini key missing — generative creative without config (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with a generative format (output_format_ids present)
-    And the Seller Agent does not have GEMINI_API_KEY configured
-    When the Buyer Agent syncs the creative
-    Then the creative should have action "failed"
-    And the error code should be "CREATIVE_GEMINI_KEY_MISSING"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "seller"
-    # POST-F2, POST-F3
     # --- ext-j: PACKAGE_NOT_FOUND (strict) ---
 
-  @T-UC-006-ext-j-rest @extension @ext-j @error @rest
-  Scenario: Package not found — strict mode aborts (REST)
+  @T-UC-006-ext-j @extension @ext-j @error
+  Scenario: Package not found — strict mode aborts
     Given the Buyer is authenticated with a valid principal_id
     And a creative with a known format_id
     And assignments referencing a non-existent package_id
@@ -388,22 +291,10 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a "suggestion" field
     And the suggestion should contain "media buys"
     # POST-F2, POST-F3
-
-  @T-UC-006-ext-j-mcp @extension @ext-j @error @mcp
-  Scenario: Package not found — strict mode aborts (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with a known format_id
-    And assignments referencing a non-existent package_id
-    And validation_mode is "strict"
-    When the Buyer Agent syncs the creative
-    Then the operation should fail with an assignment error
-    And the error code should be "PACKAGE_NOT_FOUND"
-    And the error should include a "suggestion" field
-    # POST-F2, POST-F3
     # --- ext-k: FORMAT_MISMATCH (strict) ---
 
-  @T-UC-006-ext-k-rest @extension @ext-k @error @rest
-  Scenario: Format mismatch — creative format incompatible with product (REST)
+  @T-UC-006-ext-k @extension @ext-k @error
+  Scenario: Format mismatch — creative format incompatible with product
     Given the Buyer is authenticated with a valid principal_id
     And a creative with format_id "agent1/banner-300x250"
     And assignments to a package whose product only accepts "agent1/video-pre-roll"
@@ -412,19 +303,6 @@ Feature: BR-UC-006 Sync Creative Assets
     Then the operation should fail with an assignment error
     And the error code should be "FORMAT_MISMATCH"
     And the error message should contain "not supported by product"
-    And the error should include a "suggestion" field
-    And the suggestion should contain "list_creative_formats"
-    # POST-F2, POST-F3
-
-  @T-UC-006-ext-k-mcp @extension @ext-k @error @mcp
-  Scenario: Format mismatch — creative format incompatible with product (MCP)
-    Given the Buyer is authenticated with a valid principal_id
-    And a creative with format_id "agent1/banner-300x250"
-    And assignments to a package whose product only accepts "agent1/video-pre-roll"
-    And validation_mode is "strict"
-    When the Buyer Agent syncs the creative
-    Then the operation should fail with an assignment error
-    And the error code should be "FORMAT_MISMATCH"
     And the error should include a "suggestion" field
     And the suggestion should contain "list_creative_formats"
     # POST-F2, POST-F3
@@ -1080,8 +958,6 @@ Feature: BR-UC-006 Sync Creative Assets
       | account_setup_required     | {"account_id": "acc_new_unconfigured"}                                      | the error should be ACCOUNT_SETUP_REQUIRED with suggestion    |
       | account_payment_required   | {"account_id": "acc_overdue"}                                               | the error should be ACCOUNT_PAYMENT_REQUIRED with suggestion  |
       | account_suspended          | {"account_id": "acc_suspended"}                                             | the error should be ACCOUNT_SUSPENDED with suggestion         |
-      | access_denied_id           | {"account_id": "acc_other_agent"}                                           | the error should be AUTHORIZATION_ERROR with suggestion       |
-      | access_denied_natural_key  | {"brand": {"domain": "other-agent.com"}, "operator": "other-agent.com"}    | the error should be AUTHORIZATION_ERROR with suggestion       |
 
   @T-UC-006-partition-idempotency-key @partition @idempotency-key
   Scenario Outline: Idempotency key validation — <partition>
@@ -1324,24 +1200,63 @@ Feature: BR-UC-006 Sync Creative Assets
       | account field absent                            | not provided                                                                | the error should be INVALID_REQUEST with suggestion           |
       | both account_id and brand/operator present      | {"account_id": "acc_001", "brand": {"domain": "x.com"}, "operator": "x"}  | the error should be INVALID_REQUEST with suggestion           |
 
-  @T-UC-006-boundary-idempotency-key @boundary @idempotency-key
-  Scenario Outline: Idempotency key boundary — <boundary_point>
+  @T-UC-006-boundary-delete-missing @boundary @delete-missing
+  Scenario Outline: delete_missing scope boundary — <boundary_point>
     Given the Buyer is authenticated with a valid principal_id
-    And a creative with a known format_id
-    And idempotency_key is <key_value>
+    And a sync request whose scope is <scope_setup>
+    When the Buyer Agent syncs the creatives
+    Then <expected>
+    # --- per-creative advisory status value boundaries (response shape) ---
+    # NOTE: sync_creatives is an upsert-WRITE operation; it has NO creative_status
+    # request filter (that is a list_creatives / UC-018 retrieval concept). The only
+    # status surface here is the advisory CreativeStatus on each per-creative RESULT
+    # of the SyncCreativesSuccess shape. These boundaries fix the enum membership of
+    # that response value.
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+    Examples: Valid scope combinations
+      | boundary_point                          | scope_setup                                              | expected                                                       |
+      | delete_missing=true, creative_ids absent | delete_missing true and no creative_ids filter           | the request should proceed as a full-library replace           |
+      | delete_missing=false, creative_ids absent | delete_missing false and no creative_ids filter         | the request should proceed and leave absent creatives unchanged |
+      | delete_missing omitted                  | neither delete_missing nor creative_ids provided         | the request should proceed and leave absent creatives unchanged |
+      | creative_ids present, delete_missing absent | a creative_ids filter and no delete_missing flag      | the request should proceed scoped to the filtered subset       |
+
+    Examples: Invalid scope combination
+      | boundary_point                          | scope_setup                                              | expected                                            |
+      | delete_missing=true AND creative_ids present | delete_missing true together with a creative_ids filter | the error should be INVALID_REQUEST with suggestion |
+
+  @T-UC-006-boundary-creative-status @boundary @creative-status @response-shape @v3-1
+  Scenario Outline: Per-creative advisory status value boundary — <boundary_point>
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose sync resolves to a non-terminal per-creative action "<action>" carrying advisory status <status_value>
+    When the Buyer Agent syncs the creative
+    Then <expected>
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+    Examples: Valid CreativeStatus members
+      | boundary_point                          | action    | status_value     | expected                                                           |
+      | processing (first enum member)          | created   | "processing"     | the per-creative result should carry advisory status "processing"  |
+      | archived (last enum member)             | updated   | "archived"       | the per-creative result should carry advisory status "archived"    |
+      | approved (review-lifecycle member)      | unchanged | "approved"       | the per-creative result should carry advisory status "approved"    |
+
+    Examples: Invalid status value (not a CreativeStatus member)
+      | boundary_point                              | action  | status_value | expected                                                        |
+      | deleted (a CreativeAction, not a status)    | created | "deleted"    | the per-creative result should be rejected as schema-invalid    |
+
+  @T-UC-006-boundary-creative-status-response @boundary @creative-status @response-shape @v3-1
+  Scenario Outline: Per-creative status omission on terminal action — <boundary_point>
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose sync resolves to <result_shape>
     When the Buyer Agent syncs the creative
     Then <expected>
 
-    Examples:
-      | boundary_point               | key_value                              | expected                                                      |
-      | absent (field not provided)  |                                        | the request should proceed without idempotency check          |
-      | empty string (length 0)      | ""                                     | the error should be IDEMPOTENCY_KEY_TOO_SHORT with suggestion |
-      | length 7 (min - 1)           | "abc1234"                              | the error should be IDEMPOTENCY_KEY_TOO_SHORT with suggestion |
-      | length 8 (min, inclusive)     | "12345678"                             | the request should proceed normally                           |
-      | length 9 (min + 1)           | "123456789"                            | the request should proceed normally                           |
-      | length 254 (max - 1)         | "a]x254"                               | the request should proceed normally                           |
-      | length 255 (max, inclusive)   | "a]x255"                               | the request should proceed normally                           |
-      | length 256 (max + 1)         | "a]x256"                               | the error should be IDEMPOTENCY_KEY_TOO_LONG with suggestion  |
+    Examples: Valid response shape
+      | boundary_point                                                 | result_shape                            | expected                                                            |
+      | action='deleted' with status omitted (sync-creatives-response) | per-creative action "deleted" with no status field | the per-creative result should be accepted with the status omitted |
+
+    Examples: Invalid response shape
+      | boundary_point                                                           | result_shape                                       | expected                                                |
+      | action='failed' with status='rejected' present (sync-creatives-response) | per-creative action "failed" carrying status "rejected" | the per-creative result shape should be rejected as schema-invalid |
 
   @T-UC-006-sandbox-happy @invariant @br-rule-209 @sandbox
   Scenario: Sandbox account sync creatives produces simulated results with sandbox flag
@@ -1380,3 +1295,358 @@ Feature: BR-UC-006 Sync Creative Assets
     # BR-RULE-209 INV-7: sandbox validation errors are real
     # POST-F3: suggestion field present
 
+  @T-UC-006-sandbox-submitted-no-flag @invariant @br-rule-209 @sandbox @async @v3-1
+  Scenario: Sandbox account async submitted sync_creatives envelope omits the sandbox flag
+    Given the Buyer is authenticated with a valid principal_id
+    And the request targets a sandbox account
+    And a batch sync that the Seller cannot confirm within the request window
+    When the Buyer Agent sends a sync_creatives request
+    Then the response should have status "submitted" with a task_id
+    And the response should not include a sandbox field
+    # BR-RULE-209 INV-11: sandbox permitted only on the synchronous success shape;
+    # forbidden on the async submitted envelope (no sandbox property) — a queued
+    # sandbox sync has produced no simulated result yet to flag
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-sandbox-errors-no-flag @invariant @br-rule-209 @sandbox @error @v3-1
+  Scenario: Sandbox account terminal-failure sync_creatives response omits the sandbox flag
+    Given the Buyer is authenticated with a valid principal_id
+    And the request targets a sandbox account
+    And a sync request that fails operation-level validation
+    When the Buyer Agent sends a sync_creatives request
+    Then the response should indicate a validation error
+    And the response should not include a sandbox field
+    And the error should include a "suggestion" field
+    # BR-RULE-209 INV-11: sandbox forbidden on the terminal-failure errors shape
+    # (not.anyOf required:[sandbox]) — the failure carries the real error only
+    # POST-F3: suggestion field present even on the sandbox error shape
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-boundary-sandbox @boundary @sandbox @v3-1
+  Scenario Outline: Sandbox flag response-shape boundary — <boundary_point>
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative with a known format_id
+    And <account_kind>
+    When the Buyer Agent sends a <response_shape>
+    Then <expected>
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+    Examples: Synchronous success shape (sandbox permitted)
+      | boundary_point                                            | account_kind                                       | response_shape                                    | expected                                                |
+      | sandbox: true in response (sandbox account)               | the request targets a sandbox account              | sync_creatives request that completes synchronously | the response should include sandbox equals true       |
+      | sandbox: true on sync_creatives synchronous success shape | the request targets a sandbox account              | sync_creatives request that completes synchronously | the response should include sandbox equals true       |
+      | sandbox absent in response (production account)           | the request targets a production account           | sync_creatives request that completes synchronously | the response should not include a sandbox field       |
+      | sandbox: false in response (explicit production)          | the request targets an explicit production account | sync_creatives request that completes synchronously | the response sandbox field, if present, should be false |
+
+    Examples: Non-success shapes (sandbox forbidden)
+      | boundary_point                                                    | account_kind                          | response_shape                                       | expected                                        |
+      | sandbox present on sync_creatives submitted task envelope         | the request targets a sandbox account | sync_creatives request that is queued as submitted   | the response should not include a sandbox field |
+      | sandbox present on sync_creatives terminal-failure (errors) shape | the request targets a sandbox account | sync_creatives request that fails operation validation | the response should not include a sandbox field |
+
+  @T-UC-006-partition-creative-status-terminal @partition @creative-status @v3-1
+  Scenario Outline: Per-creative result omits advisory status on a terminal action — <partition>
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose sync resolves to per-creative action "<action>"
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "<action>"
+    And the per-creative result should omit the status field
+    # creative_status (v3.1): status is advisory review-lifecycle (not a spend gate)
+    # and MUST be omitted when per-creative action ∈ {failed, deleted}
+    # (schema allOf if/then). BR-RULE-037 governs status/approval routing.
+
+    Examples: Terminal actions
+      | partition                     | action  |
+      | omitted_on_failed_or_deleted  | failed  |
+      | omitted_on_failed_or_deleted  | deleted |
+
+  @T-UC-006-creative-item-multi-asset @v3-1 @creative-item
+  Scenario: Sync creative with multi-asset composition (carousel) succeeds
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative with a known format_id that requires a multi-asset composition
+    And the creative's assets include CreativeItems with asset_kind "media" and asset_kind "text"
+    And each CreativeItem carries asset_type, asset_id, and the discriminator-required content field
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And every CreativeItem should be persisted under the parent creative
+    # POST-S1: multi-asset composite sync succeeds
+    # POST-S2: action = created
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-creative-item-text-array @v3-1 @creative-item
+  Scenario: CreativeItem text content accepts array for A/B variants
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative with a known format_id
+    And a CreativeItem with asset_kind "text" whose content is an array of strings
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And all text variants should be retained on the CreativeItem
+    # POST-S2: array-shaped text content preserved (A/B variant support)
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-creative-item-missing-content @v3-1 @creative-item @ext-c
+  Scenario: CreativeItem missing discriminator-required field is rejected
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose assets contain a CreativeItem with asset_kind "media" but no content_uri
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error should be a schema validation error
+    And the error should identify the missing content_uri field on the CreativeItem
+    And the error should include a "suggestion" field
+    # POST-F2: discriminator violation surfaced
+    # POST-F3: field path points the buyer at the offending CreativeItem
+
+  @T-UC-006-creative-variable-declared @v3-1 @creative-variable @dco
+  Scenario: Sync creative that declares DCO variables persists every variable slot
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative with a known format_id
+    And the creative declares CreativeVariables with variable_id, name, and variable_type set
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And every declared CreativeVariable should be persisted on the creative
+    # POST-S1: DCO-aware creative sync succeeds
+    # POST-S2: variables retained for serve-time substitution
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-creative-variable-required-flag @v3-1 @creative-variable @dco
+  Scenario: CreativeVariable required flag is preserved on persisted creative
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative that declares a CreativeVariable with required true and a default_value
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And the persisted CreativeVariable should retain its required flag and default_value
+    # POST-S2: serve-time semantics (required, default_value) preserved
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-creative-variable-invalid-type @v3-1 @creative-variable @dco @ext-c
+  Scenario: CreativeVariable with unsupported variable_type is rejected
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative that declares a CreativeVariable whose variable_type is not in the v3.1 enum
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error should be a schema validation error
+    And the error should identify the offending variable_type value
+    And the error should include a "suggestion" field
+    # POST-F2: enum violation surfaced
+    # POST-F3: field path points at variable_type
+
+  @T-UC-006-vast-tracker-asset @v3-1 @vast-tracker
+  Scenario: Sync video creative with decomposed VAST trackers succeeds
+    Given the Buyer is authenticated with a valid principal_id
+    And a video creative with a known format_id
+    And the creative's assets include a VAST tracker with vast_event "start" and a tracker URL
+    And the creative's assets include a VAST tracker with vast_event "complete" and a tracker URL
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And every VAST tracker asset should be persisted with its vast_event and url
+    # POST-S1: decomposed VAST trackers accepted
+    # POST-S2: trackers retained for serve-time TrackingEvents assembly
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-vast-tracker-progress-requires-offset @v3-1 @vast-tracker @ext-c
+  Scenario: VAST tracker with vast_event "progress" without offset is rejected
+    Given the Buyer is authenticated with a valid principal_id
+    And a video creative with a known format_id
+    And a VAST tracker asset with vast_event "progress" but no offset field
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error should be a schema validation error
+    And the error should identify the missing offset field
+    And the error should include a "suggestion" field
+    # POST-F2: conditional-required violation surfaced
+    # POST-F3: field path points at offset
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-vast-tracker-forbidden-event @v3-1 @vast-tracker @ext-c
+  Scenario: VAST tracker with forbidden vast_event "impression" is rejected
+    Given the Buyer is authenticated with a valid principal_id
+    And a video creative with a known format_id
+    And a VAST tracker asset whose vast_event is "impression"
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error should be a schema validation error
+    And the error should explain that impression URLs belong on a url asset with url_type "tracker_pixel"
+    And the error should include a "suggestion" field
+    # POST-F2: VAST modeling rule enforced (impression -> url asset, not vast_tracker)
+    # POST-F3: suggestion points buyer at the correct asset type
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-daast-tracker-asset @v3-1 @daast-tracker
+  Scenario: Sync audio creative with decomposed DAAST trackers succeeds
+    Given the Buyer is authenticated with a valid principal_id
+    And an audio creative with a known format_id
+    And the creative's assets include a DAAST tracker with daast_event "start" and a tracker URL
+    And the creative's assets include a DAAST tracker with daast_event "complete" and a tracker URL
+    When the Buyer Agent syncs the creative
+    Then the response should include the creative with action "created"
+    And every DAAST tracker asset should be persisted with its daast_event and url
+    # POST-S1: decomposed DAAST trackers accepted
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-daast-tracker-no-non-linear-target @v3-1 @daast-tracker @ext-c
+  Scenario: DAAST tracker with target "non_linear" is rejected
+    Given the Buyer is authenticated with a valid principal_id
+    And an audio creative with a known format_id
+    And a DAAST tracker asset whose target is "non_linear"
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error should be a schema validation error
+    And the error should explain that DAAST has no non_linear element
+    And the error should include a "suggestion" field
+    # POST-F2: DAAST target enum (linear|companion) enforced
+    # POST-F3: suggestion points buyer at the valid DAAST target set
+
+  @T-UC-006-error-details-conflict @v3-1 @error-details @conflict
+  Scenario: CONFLICT error returns version details so buyer can re-read and retry
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose creative_id collides with a concurrently-updated server-side creative
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error code should be "CONFLICT"
+    And the error details should include resource_id, expected_version, and current_version
+    And the error should include a suggestion to re-read the resource and retry
+    # POST-F2: machine-readable version info returned
+    # POST-F3: recovery path is explicit (re-read + retry)
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-error-details-policy-violation @v3-1 @error-details @policy-violation
+  Scenario: POLICY_VIOLATION error returns policy reference and violated rules
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative whose content breaches a referenced governance policy
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error code should be "POLICY_VIOLATION"
+    And the error details should include policy_id and a non-empty violated_rules array
+    And the error details should include a policy_url where the full policy can be reviewed
+    # POST-F2: policy reference is structured, not free text
+    # POST-F3: buyer can fetch policy text and revise
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/creative/sync-creatives-request.json
+
+  @T-UC-006-error-details-creative-rejected @v3-1 @error-details @creative-rejected
+  Scenario: CREATIVE_REJECTED error returns policy reference and rejection reasons
+    Given the Buyer is authenticated with a valid principal_id
+    And a creative that is rejected by the Seller's review workflow
+    When the Buyer Agent syncs the creative
+    Then the per-creative result should report action "failed"
+    And the error code should be "CREATIVE_REJECTED"
+    And the error details should include policy_id and a non-empty reasons array
+    And the error details should include a policy_url where the full policy can be reviewed
+    # POST-F2: rejection rationale is structured
+    # POST-F3: buyer knows what to revise
+
+  @T-UC-006-storyboard-provenance-required-rejection @storyboard-v3.1 @v3-1 @provenance @rejection
+  Scenario: PROVENANCE_REQUIRED -- provenance object absent on creative under a policy that requires it
+    Given the tenant has a product with creative_policy.provenance_required = true
+    And the Buyer Agent submits a creative whose manifest carries no provenance object at all
+    When the Buyer Agent sends sync_creatives
+    Then the response envelope should be schema-valid against sync-creatives-response.json
+    And the per-creative result should report action "failed"
+    And the per-creative errors[0].code should be "PROVENANCE_REQUIRED"
+    # provenance_enforcement Phase 2: cheapest buyer mistake -- no provenance attached.
+    # Seller accepts envelope but per-creative action=failed with PROVENANCE_REQUIRED.
+    # provenance_enforcement: provenance entirely absent under provenance_required policy
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/media-buy/scenarios/provenance_enforcement.yaml
+
+  @T-UC-006-storyboard-provenance-digital-source-type-missing @storyboard-v3.1 @v3-1 @provenance @rejection
+  Scenario: PROVENANCE_DIGITAL_SOURCE_TYPE_MISSING -- provenance present but digital_source_type omitted
+    Given the tenant has a product with creative_policy.provenance_requirements.require_digital_source_type = true
+    And the Buyer Agent submits a creative whose provenance object omits digital_source_type
+    When the Buyer Agent sends sync_creatives
+    Then the per-creative result should report action "failed"
+    And the per-creative errors[0].code should be "PROVENANCE_DIGITAL_SOURCE_TYPE_MISSING"
+    # provenance_enforcement Phase 3: provenance attached but missing digital_source_type
+    # under a policy with require_digital_source_type=true. Distinct from
+    # PROVENANCE_REQUIRED because provenance IS present.
+    # provenance_enforcement: digital_source_type missing under require_digital_source_type policy
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/media-buy/scenarios/provenance_enforcement.yaml
+
+  @T-UC-006-storyboard-provenance-disclosure-missing @storyboard-v3.1 @v3-1 @provenance @rejection
+  Scenario: PROVENANCE_DISCLOSURE_MISSING -- provenance present but disclosure block omitted under require_disclosure_metadata
+    Given the tenant has a product with creative_policy.provenance_requirements.require_disclosure_metadata = true
+    And the Buyer Agent submits a creative whose provenance object lacks a disclosure block
+    When the Buyer Agent sends sync_creatives
+    Then the per-creative result should report action "failed"
+    And the per-creative errors[0].code should be "PROVENANCE_DISCLOSURE_MISSING"
+    # provenance_enforcement Phase 5: structural disclosure check. Seller inspects the
+    # submitted manifest against creative_policy.provenance_requirements.require_disclosure_metadata
+    # without calling any verifier. error.field points at the missing disclosure path.
+    # provenance_enforcement: disclosure block missing under require_disclosure_metadata policy
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/media-buy/scenarios/provenance_enforcement.yaml
+
+  @T-UC-006-storyboard-provenance-corrected-acceptance @storyboard-v3.1 @v3-1 @provenance @acceptance
+  Scenario: Corrected resubmission with disclosure block and on-list verifier is accepted
+    Given a creative submission that previously failed with provenance rejection codes
+    And the Buyer Agent resubmits with a complete disclosure block and an on-list verify_agent from the seller's accepted_verifiers
+    When the Buyer Agent sends sync_creatives with the corrected manifest
+    Then the per-creative result should report action "created" or "updated"
+    And the per-creative result should NOT report action "failed"
+    # provenance_enforcement Phase 6: the structural-rejection contract terminates in a
+    # corrected acceptance. Buyer reads the rejection error codes from prior phases,
+    # attaches a complete disclosure block, and represents an on-list verify_agent
+    # drawn from creative_policy.accepted_verifiers. Per-creative action transitions
+    # to created/updated (not failed); the creative enters the seller's review lifecycle.
+    # provenance_enforcement: corrected resubmission terminates the rejection cascade
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/media-buy/scenarios/provenance_truth_of_claim.yaml
+
+  @T-UC-006-storyboard-provenance-claim-contradicted @storyboard-v3.1 @v3-1 @provenance @rejection @truth-of-claim
+  Scenario: PROVENANCE_CLAIM_CONTRADICTED -- on-list verifier refutes buyer's digital_source_type claim
+    Given the Buyer Agent submits a creative claiming digital_source_type "digital_capture"
+    And the on-list verifier responds with ai_generated true at confidence at least 0.9
+    When the seller invokes the verifier against the creative manifest
+    Then the per-creative result should report action "failed"
+    And the per-creative errors[0].code should be "PROVENANCE_CLAIM_CONTRADICTED"
+    And the error details should include agent_url, feature_id, claimed_value, observed_value, and confidence
+    And the error details should NOT carry detail_url or verifier extension fields
+    # provenance_truth_of_claim: buyer claims digital_source_type=digital_capture (non-AI)
+    # but the asset URL drives the seller's on-list verifier to return ai_generated:true.
+    # Seller invokes the verifier (via get_creative_features on accepted_verifiers entry),
+    # observes the contradiction, and rejects with PROVENANCE_CLAIM_CONTRADICTED.
+    # error.details carries only the audit-safe allowlist (agent_url, feature_id,
+    # claimed_value, observed_value, confidence) -- no detail_url, no verifier extension
+    # fields. This is the cross-tenant trust boundary.
+    # provenance_truth_of_claim: verifier contradicts buyer claim; details bounded to audit-safe allowlist
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/creative/index.yaml
+
+  @T-UC-006-storyboard-multi-format-sync @storyboard-v3.1 @v3-1 @bulk-sync @multi-format
+  Scenario: Bulk sync of three creatives in three different formats returns per-creative action and status
+    Given the Buyer Agent submits three creatives in three different formats in a single sync_creatives call
+    When the Buyer Agent sends sync_creatives
+    Then the response envelope should be schema-valid against sync-creatives-response.json
+    And the creatives array should carry one result per submitted creative
+    And every per-creative result should expose action and status fields
+    And every action value should be "created", "updated", or "failed"
+    And every status value should be drawn from the creative-status enum
+    # creative/index.yaml sync_multiple: a single sync_creatives call carries three
+    # creatives (display 300x250, video 30s, native_content). The seller validates each
+    # against its format spec independently and returns per-creative action plus status.
+    # Per-creative status is from creative-status (approved, pending_review, rejected).
+    # sync_multiple: bulk multi-format validation returns per-creative action+status
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/creative/index.yaml
+
+  @T-UC-006-storyboard-format-id-roundtrip-on-sync @storyboard-v3.1 @v3-1 @format-id-roundtrip
+  Scenario: Sync creative with the same format_id object returned by get_products -- seller MUST accept its own format_id
+    Given the Buyer Agent captured a format_id {agent_url, id} from a prior get_products response
+    When the Buyer Agent sends sync_creatives carrying a creative whose format_id matches the captured object
+    Then the per-creative result should NOT report action "failed" due to format_id rejection
+    And the seller's own format_id object should roundtrip through sync_creatives without modification
+    # media-buy/index.yaml creative_sync (format_id roundtrip): the buyer submits a
+    # creative whose format_id is the EXACT object returned by get_products
+    # (products[0].format_ids[0]). If the seller's validation rejects a format_id
+    # that it returned in products, its catalog does not roundtrip and a buy
+    # would silently fail at sync_creatives after commit.
+    # format_id roundtrip: seller MUST accept its own format_ids on sync_creatives
+    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/compliance/source/protocols/media-buy/scenarios/creative_reception.yaml
+
+  @T-UC-006-storyboard-creative-reception-stateful-render @storyboard-v3.1 @v3-1 @stateful-push @creative-reception
+  Scenario: Stateful sales agent accepts pushed creatives and exposes them via per-creative status transitions
+    Given the Buyer Agent pushes creative assets to a stateful sales agent
+    When the Buyer Agent sends sync_creatives
+    Then the seller should validate the creatives against its format specifications
+    And the per-creative result should carry a status drawn from creative-status enum
+    And the per-creative status may be "approved", "pending_review", or "rejected"
+    And platform-assigned IDs should be returned when applicable
+    # creative_reception storyboard: a sales agent (publisher, retail media network)
+    # accepts pushed creative assets, validates them against format specs, stores them,
+    # and exposes per-creative status (approved, pending_review, rejected). Distinct
+    # from creative-platform (Innovid/Flashtalking) which carries a full lifecycle;
+    # the sales-agent reception is the minimum viable creative-handling contract.
+    # creative_reception: stateful sales agent minimum-viable creative reception contract

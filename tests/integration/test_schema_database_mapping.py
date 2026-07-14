@@ -64,6 +64,21 @@ class TestSchemaFieldMapping:
             "show_ids",  # Show/series identifiers from adcp 3.10 spec
             "exclusivity",  # Exclusivity constraints from adcp 3.10 spec
             "episodes",  # Episode-level targeting from adcp 3.10 spec
+            # AdCP 3.12+ fields - inherited from library Product, not yet stored in database
+            "collections",  # Collection grouping from adcp 3.12 spec
+            "collection_targeting_allowed",  # Collection targeting flag from adcp 3.12 spec
+            "installments",  # Installment payment config from adcp 3.12 spec
+            "material_submission",  # Material submission config from adcp 3.12 spec
+            "measurement_readiness",  # Measurement readiness from adcp 3.12 spec
+            "trusted_match",  # Trusted match config from adcp 3.12 spec
+            # AdCP 4.3+ fields - inherited from library Product, not yet stored in database
+            "measurement_terms",  # Measurement terms from adcp 4.3 spec
+            "cancellation_policy",  # Cancellation policy from adcp 4.3 spec
+            "performance_standards",  # Performance standards from adcp 4.3 spec
+            # AdCP 5.7+ fields - inherited from library Product, not yet stored in database
+            "format_options",  # Format option config from adcp 5.7 spec
+            "vendor_metric_optimization",  # Vendor metric optimization from adcp 5.7 spec
+            "allowed_actions",  # Allowed buyer actions from adcp 5.7 spec
         }
 
         # Fields that exist in database but should NOT be in external schema (internal only)
@@ -405,7 +420,7 @@ class TestSchemaFieldMapping:
                 assert validated_product.product_id == "validation_test_001"
                 # adcp 2.14.0+ uses RootModel wrapper - access via .root
                 pricing = validated_product.pricing_options[0]
-                pricing_inner = pricing.root if hasattr(pricing, "root") else pricing
+                pricing_inner = pricing.root
                 assert pricing_inner.rate == 7.25
                 assert pricing_inner.pricing_model == "cpm"
             except Exception as e:

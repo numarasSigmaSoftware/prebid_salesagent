@@ -11,13 +11,14 @@ import logging
 import time
 from typing import Any
 
-from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types import ContextObject
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 
 from src.core.audit_logger import get_audit_logger
+from src.core.auth import require_tenant
 from src.core.database.repositories.uow import TenantConfigUoW
-from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError
+from src.core.exceptions import AdCPAdapterError, AdCPError
 from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListAuthorizedPropertiesRequest, ListAuthorizedPropertiesResponse
@@ -49,16 +50,9 @@ def _list_authorized_properties_impl(
     if req is None:
         req = ListAuthorizedPropertiesRequest()
 
-    # Extract principal and tenant from resolved identity
+    # Extract principal and tenant from resolved identity (anonymous principal allowed; tenant required)
     principal_id = identity.principal_id if identity else None
-    tenant = identity.tenant if identity else None
-
-    if not tenant:
-        raise AdCPAuthenticationError(
-            "Could not resolve tenant from request context (no subdomain, virtual host, or x-adcp-tenant header found)",
-            details={"error_code": "TENANT_ERROR"},
-        )
-
+    tenant = require_tenant(identity, context=req.context)
     tenant_id = tenant["tenant_id"]
 
     # Apply testing hooks
@@ -176,6 +170,8 @@ def _list_authorized_properties_impl(
 
             return response
 
+    except AdCPError:
+        raise
     except Exception as e:
         logger.error(f"Error listing authorized properties: {str(e)}")
 
@@ -193,14 +189,12 @@ def _list_authorized_properties_impl(
 
         raise AdCPAdapterError(
             f"Failed to list authorized properties: {str(e)}",
-            details={"error_code": "PROPERTIES_ERROR"},
         )
 
 
 async def list_authorized_properties(
     publisher_domains: list[str] | None = None,
     property_tags: list[str] | None = None,
-    webhook_url: str | None = None,
     context: ContextObject | None = None,
     ctx: Context | ToolContext | None = None,
 ):
@@ -212,7 +206,6 @@ async def list_authorized_properties(
     Args:
         publisher_domains: Filter to specific publisher domains.
         property_tags: Filter by property tags (salesagent extension).
-        webhook_url: URL for async task completion notifications (AdCP spec, optional).
         context: Application-level context per AdCP spec.
         ctx: FastMCP context for authentication.
 

@@ -7,10 +7,10 @@ beads: salesagent-8n4
 """
 
 import pytest
-from adcp.types.generated_poc.core.account_ref import (
+from adcp.types import (
     AccountReference,
-    AccountReference1,
-    AccountReference2,
+    AccountReferenceById,
+    AccountReferenceByNaturalKey,
 )
 
 from src.core.exceptions import AdCPAccountNotFoundError, AdCPAuthorizationError
@@ -21,7 +21,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 
 class TestResolveAccountById:
-    """Resolve AccountReference1 (by explicit account_id)."""
+    """Resolve AccountReferenceById (by explicit account_id)."""
 
     def test_resolves_by_account_id(self, integration_db):
         """Valid account_id with agent access → returns account_id."""
@@ -35,7 +35,7 @@ class TestResolveAccountById:
             from src.core.database.repositories.account import AccountRepository
             from src.core.helpers.account_helpers import resolve_account
 
-            ref = AccountReference(AccountReference1(account_id="acc_001"))
+            ref = AccountReference(AccountReferenceById(account_id="acc_001"))
             with get_db_session() as session:
                 repo = AccountRepository(session, tenant.tenant_id)
                 result = resolve_account(ref, env.identity, repo)
@@ -52,7 +52,7 @@ class TestResolveAccountById:
             from src.core.database.repositories.account import AccountRepository
             from src.core.helpers.account_helpers import resolve_account
 
-            ref = AccountReference(AccountReference1(account_id="nonexistent"))
+            ref = AccountReference(AccountReferenceById(account_id="nonexistent"))
             with get_db_session() as session:
                 repo = AccountRepository(session, "resolve_t2")
                 with pytest.raises(AdCPAccountNotFoundError):
@@ -70,7 +70,7 @@ class TestResolveAccountById:
             from src.core.database.repositories.account import AccountRepository
             from src.core.helpers.account_helpers import resolve_account
 
-            ref = AccountReference(AccountReference1(account_id="acc_noaccess"))
+            ref = AccountReference(AccountReferenceById(account_id="acc_noaccess"))
             with get_db_session() as session:
                 repo = AccountRepository(session, tenant.tenant_id)
                 with pytest.raises(AdCPAuthorizationError):
@@ -78,7 +78,7 @@ class TestResolveAccountById:
 
 
 class TestResolveAccountByNaturalKey:
-    """Resolve AccountReference2 (by brand + operator)."""
+    """Resolve AccountReferenceByNaturalKey (by brand + operator)."""
 
     def test_resolves_by_natural_key(self, integration_db):
         """Valid brand+operator → returns account_id."""
@@ -97,12 +97,40 @@ class TestResolveAccountByNaturalKey:
             from src.core.database.repositories.account import AccountRepository
             from src.core.helpers.account_helpers import resolve_account
 
-            ref = AccountReference(AccountReference2(brand={"domain": "acme.com"}, operator="acme.com"))
+            ref = AccountReference(AccountReferenceByNaturalKey(brand={"domain": "acme.com"}, operator="acme.com"))
             with get_db_session() as session:
                 repo = AccountRepository(session, tenant.tenant_id)
                 result = resolve_account(ref, env.identity, repo)
 
             assert result == "acc_nat"
+
+    def test_natural_key_no_access_raises_not_found(self, integration_db):
+        """Account exists but agent has no access → AdCPAccountNotFoundError.
+
+        The natural-key lookup is scoped to the agent's accessible accounts
+        (#1417), so an inaccessible account is never disclosed — it
+        resolves as not-found, NOT as an authorization error. The explicit
+        _require_account_access afterwards is defense-in-depth for the by-id
+        parity path.
+        """
+        with AccountSyncEnv(tenant_id="resolve_t6", principal_id="agent_r6") as env:
+            tenant, principal = env.setup_default_data()
+            # Create account but DON'T grant access
+            AccountFactory(
+                tenant=tenant,
+                account_id="acc_nat_noaccess",
+                brand={"domain": "hidden.com"},
+                operator="hidden.com",
+            )
+            env._commit_factory_data()
+
+            from src.core.database.repositories.uow import AccountUoW
+            from src.core.helpers.account_helpers import resolve_account
+
+            ref = AccountReference(AccountReferenceByNaturalKey(brand={"domain": "hidden.com"}, operator="hidden.com"))
+            with AccountUoW(tenant.tenant_id) as uow:
+                with pytest.raises(AdCPAccountNotFoundError):
+                    resolve_account(ref, env.identity, uow.accounts)
 
     def test_natural_key_not_found_raises(self, integration_db):
         """Non-existent brand+operator → AdCPAccountNotFoundError."""
@@ -114,7 +142,9 @@ class TestResolveAccountByNaturalKey:
             from src.core.database.repositories.account import AccountRepository
             from src.core.helpers.account_helpers import resolve_account
 
-            ref = AccountReference(AccountReference2(brand={"domain": "unknown.com"}, operator="unknown.com"))
+            ref = AccountReference(
+                AccountReferenceByNaturalKey(brand={"domain": "unknown.com"}, operator="unknown.com")
+            )
             with get_db_session() as session:
                 repo = AccountRepository(session, "resolve_t5")
                 with pytest.raises(AdCPAccountNotFoundError):

@@ -93,9 +93,7 @@ def _standard_patches(mock_uow, principal=None, convert_fn=None):
         ),
         patch(
             "src.services.dynamic_pricing_service.DynamicPricingService",
-            **{
-                "return_value.enrich_products_with_pricing.side_effect": lambda products, **kw: products,
-            },
+            **{"return_value.enrich_products_with_pricing.side_effect": lambda products, **kw: products},
         ),
     ]
 
@@ -104,24 +102,21 @@ class TestIdentityValidation:
     """Test _get_products_impl identity validation error paths.
 
     Intent: _get_products_impl must refuse requests where tenant context
-    cannot be determined. Two cases:
-    1. Principal authenticated but tenant mapping failed → bug, not user error
-    2. No credentials at all → user needs to authenticate
+    cannot be determined. The require_tenant guard rejects any missing tenant
+    (None or empty dict) with AdCPAuthenticationError, regardless of whether a
+    principal is present.
     """
 
     @pytest.mark.asyncio
-    async def test_principal_without_tenant_raises_validation_error(self):
-        """Principal present but no tenant → AdCPValidationError with 'bug' indication."""
+    async def test_principal_without_tenant_raises_auth_error(self):
+        """Principal present but no tenant → AdCPAuthenticationError."""
         identity = _make_identity(principal_id="user-123", tenant=None)
         req = _make_request()
 
         from src.core.tools.products import _get_products_impl
 
-        with pytest.raises(AdCPValidationError, match="tenant context missing") as exc_info:
+        with pytest.raises(AdCPAuthenticationError, match="No tenant context available"):
             await _get_products_impl(req, identity)
-
-        assert "user-123" in str(exc_info.value)
-        assert "bug" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_no_principal_no_tenant_raises_authentication_error(self):
@@ -131,7 +126,7 @@ class TestIdentityValidation:
 
         from src.core.tools.products import _get_products_impl
 
-        with pytest.raises(AdCPAuthenticationError, match="Cannot determine tenant context"):
+        with pytest.raises(AdCPAuthenticationError, match="No tenant context available"):
             await _get_products_impl(req, identity)
 
     @pytest.mark.asyncio
@@ -142,7 +137,7 @@ class TestIdentityValidation:
 
         from src.core.tools.products import _get_products_impl
 
-        with pytest.raises(AdCPValidationError, match="tenant context missing"):
+        with pytest.raises(AdCPAuthenticationError, match="No tenant context available"):
             await _get_products_impl(req, identity)
 
 
@@ -155,8 +150,10 @@ class TestProductConversionError:
     """
 
     @pytest.mark.asyncio
-    async def test_convert_failure_raises_valueerror_with_product_id(self):
-        """convert_product_model_to_schema raises → ValueError with product_id."""
+    async def test_convert_failure_raises_adapter_error_with_product_id(self):
+        """convert_product_model_to_schema raises → AdCPAdapterError with product_id."""
+        from src.core.exceptions import AdCPAdapterError
+
         tenant = _make_tenant()
         identity = _make_identity(principal_id="user-1", tenant_id="test-tenant", tenant=tenant)
         req = _make_request()
@@ -176,7 +173,7 @@ class TestProductConversionError:
         ):
             from src.core.tools.products import _get_products_impl
 
-            with pytest.raises(ValueError, match="corrupt-product-42") as exc_info:
+            with pytest.raises(AdCPAdapterError, match="corrupt-product-42") as exc_info:
                 await _get_products_impl(req, identity)
 
             assert "missing required field" in str(exc_info.value)
@@ -184,6 +181,8 @@ class TestProductConversionError:
     @pytest.mark.asyncio
     async def test_convert_failure_is_not_silently_swallowed(self):
         """Unlike get_product_catalog, _get_products_impl must raise on conversion error."""
+        from src.core.exceptions import AdCPAdapterError
+
         tenant = _make_tenant()
         identity = _make_identity(principal_id="user-1", tenant_id="test-tenant", tenant=tenant)
         req = _make_request()
@@ -210,7 +209,7 @@ class TestProductConversionError:
         ):
             from src.core.tools.products import _get_products_impl
 
-            with pytest.raises(ValueError, match="bad-1"):
+            with pytest.raises(AdCPAdapterError, match="bad-1"):
                 await _get_products_impl(req, identity)
 
 
@@ -344,7 +343,7 @@ class TestFilterBranches:
         Product.format_ids are FormatId objects. The filter dispatches through
         isinstance(format_id, FormatId) and looks up the format type via
         get_format_by_id. The format type is added to product_format_types as
-        a string, but req.filters.format_types contains FormatCategory enum
+        a string, but req.filters.format_ids contains FormatCategory enum
         values. Since FormatCategory is not a str enum, the comparison always
         fails. This documents the current behavior.
         """
@@ -355,7 +354,7 @@ class TestFilterBranches:
 
         result = await self._run_with_products_and_filters(
             [product],
-            {"format_types": ["display"]},
+            {"format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_standard"}]},
             extra_patches=[
                 patch("src.core.schemas.get_format_by_id", return_value=format_obj),
             ],
@@ -373,7 +372,7 @@ class TestFilterBranches:
 
         result = await self._run_with_products_and_filters(
             [product],
-            {"format_types": ["display"]},
+            {"format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_standard"}]},
             extra_patches=[
                 patch("src.core.schemas.get_format_by_id", return_value=format_obj),
             ],

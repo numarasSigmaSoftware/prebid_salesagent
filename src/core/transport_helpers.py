@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from adcp.types.generated_poc.core.account_ref import AccountReference
+    from adcp.types import AccountReference
 
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_http_headers
@@ -70,7 +70,7 @@ def resolve_identity_from_context(
     try:
         headers = get_http_headers(include_all=True)
     except Exception:
-        pass
+        logger.debug("get_http_headers() unavailable, trying fallback", exc_info=True)
 
     # Fallback to context.meta if available
     if not headers and ctx is not None:
@@ -93,7 +93,7 @@ def resolve_identity_from_context(
         if ctx is not None:
             testing_context = TestContext.from_context(ctx)
     except Exception:
-        pass
+        logger.debug("Could not extract testing context", exc_info=True)
 
     return resolve_identity(
         headers=headers,
@@ -124,6 +124,16 @@ def enrich_identity_with_account(
     """
     if identity is None or account_ref is None:
         return identity
+
+    # Require an authenticated principal BEFORE resolving the account (#1417).
+    # Account resolution runs at the transport boundary ahead of the _impl auth gate;
+    # without this guard an unauthenticated caller (tenant resolved, principal_id=None)
+    # reaches natural-key resolution, which skips the access-scope join and discloses the
+    # tenant-wide match count via ACCOUNT_AMBIGUOUS. require_principal_id raises
+    # AUTH_REQUIRED first, uniformly across every transport that funnels through here.
+    from src.core.auth import require_principal_id
+
+    require_principal_id(identity)
 
     if identity.tenant_id is None:
         return identity

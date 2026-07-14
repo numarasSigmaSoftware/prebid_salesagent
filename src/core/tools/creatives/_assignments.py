@@ -4,14 +4,14 @@ import logging
 from typing import Any
 
 from src.core.database.repositories.uow import CreativeUoW
-from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
+from src.core.exceptions import AdCPCreativeRejectedError, AdCPPackageNotFoundError
 from src.core.schemas import SyncCreativeResult
 
 logger = logging.getLogger(__name__)
 
 
 def _process_assignments(
-    assignments: dict | None,
+    assignments: dict | list | None,
     results: list[SyncCreativeResult],
     tenant: dict[str, Any],
     validation_mode: str,
@@ -35,7 +35,21 @@ def _process_assignments(
     assignment_errors_by_creative: dict[str, dict[str, str]] = {}  # creative_id -> {package_id: error}
     media_buys_with_new_assignments: dict[str, Any] = {}  # media_buy_id -> MediaBuy object
 
-    # Note: assignments should be a dict, but handle both dict and None
+    # AdCP v3 spec defines assignments as list[{creative_id, package_id, ...}];
+    # normalise to dict form {creative_id: [package_ids]} for internal processing.
+    if assignments and isinstance(assignments, list):
+        coerced: dict[str, list[str]] = {}
+        for entry in assignments:
+            if isinstance(entry, dict) and "creative_id" in entry and "package_id" in entry:
+                coerced.setdefault(entry["creative_id"], []).append(entry["package_id"])
+        assignments = coerced if coerced else None
+
+    # Creatives whose sync failed were never persisted; we must not attempt to
+    # assign them (the creative_assignments FK would crash the request). Their
+    # failure is already recorded in ``results`` (action="failed"); the caller
+    # surfaces it. Collect those ids so the assignment loop skips them quietly.
+    failed_creative_ids = {r.creative_id for r in results if getattr(r, "action", None) == "failed"}
+
     if assignments and isinstance(assignments, dict):
         with CreativeUoW(tenant["tenant_id"]) as uow:
             assert uow.assignments is not None
@@ -66,10 +80,27 @@ def _process_assignments(
 
                         # Skip if in lenient mode, error if strict
                         if validation_mode == "strict":
-                            raise AdCPNotFoundError(error_msg, recovery="correctable")
+                            # Use the specific subclass so the wire code is PACKAGE_NOT_FOUND
+                            # (STANDARD); the base AdCPNotFoundError would emit INVALID_REQUEST
+                            # via the wire-safe translation and lose buyer-facing specificity.
+                            raise AdCPPackageNotFoundError(error_msg)
                         else:
                             logger.warning(f"Package not found during assignment: {package_id}, skipping")
                             continue
+
+                    # A creative whose sync failed was never persisted. Attempting to
+                    # create an assignment for it would violate the creative_assignments
+                    # FK and crash the whole request with a raw IntegrityError. Skip it
+                    # quietly — the sync failure is already recorded (action="failed")
+                    # and the caller (e.g. update_media_buy) raises the buyer-facing,
+                    # retryable AdCPAdapterError for it.
+                    if creative_id in failed_creative_ids:
+                        error_msg = (
+                            f"Creative {creative_id} was not synced; skipping assignment to package {package_id}"
+                        )
+                        assignment_errors_by_creative[creative_id][package_id] = error_msg
+                        logger.warning(error_msg)
+                        continue
 
                     # Validate creative format against package product formats
                     db_creative_result = assignment_repo.get_creative_by_id(creative_id)
@@ -135,7 +166,18 @@ def _process_assignments(
                                 assignment_errors_by_creative[creative_id][package_id] = error_msg
 
                                 if validation_mode == "strict":
-                                    raise AdCPValidationError(error_msg)
+                                    # Converge with the update path (media_buy_update.py:233):
+                                    # creative-format-incompatible-with-product is CREATIVE_REJECTED,
+                                    # the canonical code for a rejected creative (#1417).
+                                    raise AdCPCreativeRejectedError(
+                                        error_msg,
+                                        suggestion=(
+                                            "Assign a creative whose format matches one of the product's "
+                                            f"supported formats ({supported_formats_display}), or call "
+                                            "list_creative_formats to discover supported formats."
+                                        ),
+                                        details={"supported_formats": supported_formats_display},
+                                    )
                                 else:
                                     logger.warning(f"Creative format mismatch during assignment, skipping: {error_msg}")
                                     continue

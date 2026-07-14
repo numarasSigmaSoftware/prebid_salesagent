@@ -75,8 +75,9 @@ class TestA2ASpecCompliance:
         ctx = {"user_id": "1234567890"}
         response = GetProductsResponse(**response_data, context=ctx)
 
-        # Check no extra fields
-        spec_fields = {"products", "errors", "status", "context"}
+        # Check no extra fields.
+        # SDK 5.7 adds cache_scope, replayed as protocol envelope defaults.
+        spec_fields = {"products", "errors", "status", "context", "cache_scope", "replayed"}
         response_fields = set(response.model_dump().keys())
         extra_fields = response_fields - spec_fields
 
@@ -123,7 +124,8 @@ class TestA2ASpecCompliance:
         ctx = {"user_id": "1234567890"}
         response = ListCreativesResponse(**response_data, context=ctx)
 
-        # Check no extra fields
+        # Check no extra fields.
+        # SDK 5.7 adds status, replayed as protocol envelope defaults.
         spec_fields = {
             "query_summary",
             "pagination",
@@ -132,6 +134,8 @@ class TestA2ASpecCompliance:
             "format_summary",
             "status_summary",
             "context",
+            "status",
+            "replayed",
         }
         response_fields = set(response.model_dump().keys())
         extra_fields = response_fields - spec_fields
@@ -151,8 +155,9 @@ class TestA2ASpecCompliance:
         ctx = {"user_id": "1234567890"}
         response = ListCreativeFormatsResponse(**response_data, context=ctx)
 
-        # Check no extra fields
-        spec_fields = {"formats", "creative_agents", "errors", "status", "context"}
+        # Check no extra fields.
+        # SDK 5.7 adds replayed as a protocol envelope default.
+        spec_fields = {"formats", "creative_agents", "errors", "status", "context", "replayed"}
         response_fields = set(response.model_dump().keys())
         extra_fields = response_fields - spec_fields
 
@@ -164,7 +169,6 @@ class TestA2ASpecCompliance:
         """Test create_media_buy returns only spec-defined fields."""
         ctx = {"user_id": "1234567890"}
         response = CreateMediaBuySuccess(
-            buyer_ref="test-123",
             media_buy_id="mb-456",
             packages=[],  # Required field per AdCP spec
             context=ctx,
@@ -172,7 +176,6 @@ class TestA2ASpecCompliance:
 
         # Check response can be dumped (has all required fields)
         response_dict = response.model_dump()
-        assert "buyer_ref" in response_dict
         assert "media_buy_id" in response_dict
         assert "packages" in response_dict
 
@@ -187,13 +190,11 @@ class TestA2ASpecCompliance:
         """Test update_media_buy returns only spec-defined fields."""
         ctx = {"user_id": "1234567890"}
         response = UpdateMediaBuySuccess(
-            buyer_ref="test-123",
             media_buy_id="mb-456",
             context=ctx,
         )
 
         response_dict = response.model_dump()
-        assert "buyer_ref" in response_dict
         assert "media_buy_id" in response_dict
         assert str(response) == "Media buy mb-456 updated successfully."
 

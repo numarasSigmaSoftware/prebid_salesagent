@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 if TYPE_CHECKING:
     from src.core.schemas import Snapshot, Targeting
@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
 from src.core.audit_logger import get_audit_logger
+from src.core.enum_helpers import enum_value
+from src.core.exceptions import AdCPConfigurationError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     AssetStatus,
@@ -26,6 +28,9 @@ from src.core.schemas import (
     ReportingPeriod,
     UpdateMediaBuyResponse,
 )
+
+# Return type of AdServerAdapter._require_config — preserves the caller's value type.
+_ConfigT = TypeVar("_ConfigT")
 
 
 @dataclass
@@ -81,8 +86,6 @@ class TargetingCapabilities:
         Checks both include and exclude fields for geo_metros and geo_postal_areas.
         Returns list of errors naming the unsupported system and supported alternatives.
         """
-        from src.core.validation_helpers import resolve_enum_value
-
         errors: list[str] = []
 
         # Collect all metro items from include + exclude
@@ -95,7 +98,7 @@ class TargetingCapabilities:
         if metros:
             supported = [f for f in self._METRO_FIELDS if getattr(self, f)]
             for metro in metros:
-                system = resolve_enum_value(metro.system)
+                system = enum_value(metro.system)
                 if not getattr(self, system, False):
                     alt = ", ".join(supported) if supported else "none"
                     errors.append(f"Unsupported metro system '{system}'. This adapter supports: {alt}")
@@ -110,7 +113,7 @@ class TargetingCapabilities:
         if postals:
             supported = [f for f in self._POSTAL_FIELDS if getattr(self, f)]
             for area in postals:
-                system = resolve_enum_value(area.system)
+                system = enum_value(area.system)
                 if not getattr(self, system, False):
                     alt = ", ".join(supported) if supported else "none"
                     errors.append(f"Unsupported postal system '{system}'. This adapter supports: {alt}")
@@ -228,6 +231,23 @@ class AdServerAdapter(ABC):
             config.get("manual_approval_operations", ["create_media_buy", "update_media_buy", "add_creative_assets"])
         )
 
+    def _require_config(self, value: _ConfigT | None, *, field: str, message: str | None = None) -> _ConfigT:
+        """Return ``value`` when present; otherwise raise ``AdCPConfigurationError``.
+
+        Centralizes the adapter-``__init__`` "required config value is absent"
+        guard so every adapter raises the same exception type with the missing
+        ``field`` attached to the error. Pass ``message`` for the operator-facing
+        wording (adapters keep their own phrasing, standardized on "is missing");
+        ``field`` is always recorded on the error for structured consumers.
+
+        Returns the value with ``None`` stripped from its type, so callers can
+        rebind (``self.x = self._require_config(self.x, ...)``) to narrow the
+        attribute for downstream use.
+        """
+        if value:
+            return value
+        raise AdCPConfigurationError(message or f"Adapter config is missing required field '{field}'", field=field)
+
     def log(self, message: str, dry_run_prefix: bool = True):
         """Log a message, with optional dry-run prefix."""
         if self.dry_run and dry_run_prefix:
@@ -244,8 +264,8 @@ class AdServerAdapter(ABC):
     ) -> list[ResponsePackage]:
         """Build AdCP-compliant package responses from MediaPackage list.
 
-        Per AdCP spec, CreateMediaBuyResponse.Package requires package_id
-        and buyer_ref. This builds the list consistently across adapters.
+        Per AdCP spec, CreateMediaBuyResponse.Package requires package_id.
+        This builds the list consistently across adapters.
 
         Args:
             packages: List of MediaPackage objects from the request.
@@ -259,7 +279,6 @@ class AdServerAdapter(ABC):
         responses = []
         for package in packages:
             kwargs: dict[str, Any] = {
-                "buyer_ref": package.buyer_ref or "unknown",
                 "package_id": package.package_id,
                 "paused": paused,
             }
@@ -282,7 +301,7 @@ class AdServerAdapter(ABC):
     ) -> CreateMediaBuySuccess:
         """Build a CreateMediaBuySuccess response with standard fields.
 
-        Constructs the response with buyer_ref, media_buy_id, creative_deadline,
+        Constructs the response with media_buy_id, creative_deadline,
         and package responses. If package_responses is not provided, builds them
         from the packages list.
 
@@ -309,7 +328,6 @@ class AdServerAdapter(ABC):
             datetime.now(UTC) + timedelta(days=creative_deadline_days) if creative_deadline_days is not None else None
         )
         return CreateMediaBuySuccess(
-            buyer_ref=request.buyer_ref or "unknown",
             media_buy_id=media_buy_id,
             creative_deadline=creative_deadline,
             packages=package_responses,
@@ -460,7 +478,6 @@ class AdServerAdapter(ABC):
     def update_media_buy(
         self,
         media_buy_id: str,
-        buyer_ref: str,
         action: str,
         package_id: str | None,
         budget: int | None,

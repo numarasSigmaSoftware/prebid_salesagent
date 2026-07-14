@@ -442,9 +442,13 @@ class GAMReportingService:
                     # Use as-is
                     normalized_row[key] = value
 
-            # Skip rows with zero impressions to reduce data volume
+            # Skip rows where ALL metrics are zero to reduce data volume.
+            # Do NOT skip zero-impression rows that have clicks or revenue —
+            # FLAT_RATE/SPONSORSHIP line items accrue spend without impressions.
             impressions = int(normalized_row.get("AD_SERVER_IMPRESSIONS", 0) or 0)
-            if impressions == 0:
+            clicks = int(normalized_row.get("AD_SERVER_CLICKS", 0) or 0)
+            revenue = float(normalized_row.get("AD_SERVER_CPM_AND_CPC_REVENUE", 0) or 0)
+            if impressions == 0 and clicks == 0 and revenue == 0:
                 continue
 
             # Build aggregation key from dimensions
@@ -600,7 +604,6 @@ class GAMReportingService:
                 "total_spend": 0.0,
                 "average_ctr": 0.0,
                 "average_ecpm": 0.0,
-                "total_video_completions": 0,
                 "unique_advertisers": 0,
                 "unique_orders": 0,
                 "unique_line_items": 0,

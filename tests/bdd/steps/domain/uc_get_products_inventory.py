@@ -1,5 +1,7 @@
 """Domain step definitions for product discovery with inventory profiles (#1162).
 
+Also hosts brand-shorthand steps for #1324 (same get_products dispatch).
+
 Given steps: tenant setup, inventory profile creation, product linking
 When steps: get_products dispatch via call_via (all 4 transports)
 Then steps: publisher_properties assertions (selection_type, field presence)
@@ -7,6 +9,7 @@ Then steps: publisher_properties assertions (selection_type, field presence)
 Steps store results in ctx:
     ctx["response"] — GetProductsResponse on success
     ctx["error"] — Exception on failure
+    ctx["wire_error_envelope"] — transport wire envelope on tool error
 """
 
 from __future__ import annotations
@@ -15,35 +18,33 @@ from typing import Any
 
 from pytest_bdd import given, parsers, then, when
 
+from tests.bdd.steps._outcome_helpers import _require_response
+from tests.bdd.steps.generic._brand_param import parse_brand_gherkin_param
+from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.factories import (
     InventoryProfileFactory,
     PricingOptionFactory,
+    PrincipalFactory,
     ProductFactory,
     TenantFactory,
 )
+from tests.helpers import assert_envelope_shape
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
 def _call_get_products(ctx: dict, **kwargs: Any) -> None:
-    """Dispatch get_products through ctx['transport'] via call_via."""
-    transport = ctx.get("transport")
-    env = ctx["env"]
+    """Dispatch get_products through ctx['transport'] via the shared wire dispatcher.
+
+    Delegates to the universal ``dispatch_request`` helper (#1417): it
+    routes through ``env.call_via`` for the parametrized transport, stores the
+    normalized ``ctx['result']`` plus ``ctx['response']`` / ``ctx['error']`` /
+    ``ctx['wire_error_envelope']``, and fails loudly if no transport is set
+    (the IMPL ``call_impl`` fallback was removed — a missing transport is a
+    wiring bug, not an IMPL bypass).
+    """
     kwargs.setdefault("brief", "inventory profile test")
-    if transport is not None:
-        try:
-            result = env.call_via(transport, **kwargs)
-            if result.is_error:
-                ctx["error"] = result.error
-            else:
-                ctx["response"] = result.payload
-        except Exception as exc:
-            ctx["error"] = exc
-    else:
-        try:
-            ctx["response"] = env.call_impl(**kwargs)
-        except Exception as exc:
-            ctx["error"] = exc
+    dispatch_request(ctx, **kwargs)
 
 
 def _get_first_prop(ctx: dict) -> Any:
@@ -51,9 +52,9 @@ def _get_first_prop(ctx: dict) -> Any:
     product = ctx["first_product"]
     pp = product.publisher_properties
     assert pp is not None, "publisher_properties is None"
-    assert len(pp) >= 1, "publisher_properties is empty"
+    assert pp, "publisher_properties is empty"
     inner = pp[0]
-    return inner.root if hasattr(inner, "root") else inner
+    return inner.root
 
 
 # ── Given steps ─────────────────────────────────────────────────────
@@ -61,12 +62,34 @@ def _get_first_prop(ctx: dict) -> Any:
 
 @given("a tenant is configured for product discovery")
 def given_tenant(ctx: dict) -> None:
-    """Create a tenant with required config for get_products."""
+    """Create a tenant + principal with required config for get_products.
+
+    The principal is what makes the request authenticate over the wire: the
+    harness env resolves its per-transport identity's ``auth_token`` from the
+    DB Principal row whose (principal_id, tenant_id) matches the env defaults
+    ("test_principal"/"test_tenant"). In-process transports inject the identity
+    object directly (FastAPI dep override / handler mock), so they don't need a
+    real row — but the e2e_rest transport dispatches over real HTTP through the
+    live auth middleware (token -> get_principal_from_token DB lookup). Without
+    a seeded Principal, ``_resolve_auth_token`` returns None, no ``x-adcp-auth``
+    header is sent, and the server rejects with "no identity in request". Seed
+    it here so both in-process and e2e_rest dispatch carry a valid identity.
+
+    The tenant's ``subdomain`` MUST come from ``TenantFactory``'s default
+    (``subdomain_for(tenant_id)`` -> ``pub-test-tenant``), NOT a hand-set value:
+    the e2e_rest dispatcher sends ``identity.tenant["subdomain"]`` (also derived
+    via ``subdomain_for`` in ``make_tenant``) as the ``x-adcp-tenant`` header,
+    and the live server resolves the tenant by matching that header against the
+    persisted ``Tenant.subdomain`` column. Overriding it to ``"test_tenant"``
+    (with the underscore the DNS derivation strips) makes the row's subdomain
+    disagree with the wire header — the server can't resolve the tenant, so
+    identity is None and it rejects with "no identity in request".
+    """
     tenant = TenantFactory(
         tenant_id="test_tenant",
-        subdomain="test_tenant",
         ad_server="mock",
     )
+    PrincipalFactory(tenant=tenant, principal_id="test_principal")
     ctx["tenant"] = tenant
 
 
@@ -114,17 +137,20 @@ def given_profile_with_selection_type(ctx: dict, tags: str, domain: str, st: str
 
 @given(parsers.parse('an inventory profile with property_ids "{ids}" for domain "{domain}" and legacy fields'))
 def given_profile_legacy(ctx: dict, ids: str, domain: str) -> None:
-    """Create profile with property_ids plus legacy extra fields that should be stripped."""
+    """Create profile with property_ids plus legacy extra fields that are preserved."""
     tenant = ctx["tenant"]
+    legacy_fields = {
+        "property_name": "Legacy Name",
+        "property_type": "website",
+        "identifiers": ["old_id"],
+    }
     ctx["profile"] = InventoryProfileFactory(
         tenant=tenant,
         publisher_properties=[
             {
                 "publisher_domain": domain,
                 "property_ids": [ids],
-                "property_name": "Legacy Name",
-                "property_type": "website",
-                "identifiers": ["old_id"],
+                **legacy_fields,
             }
         ],
     )
@@ -149,17 +175,43 @@ def when_request_products(ctx: dict) -> None:
     _call_get_products(ctx)
 
 
+@when(parsers.parse("the buyer requests products with brand {brand}"))
+def when_request_products_with_brand(ctx: dict, brand: str) -> None:
+    """Dispatch get_products with a brand value (JSON dict or bare/quoted string)."""
+    _call_get_products(ctx, brand=parse_brand_gherkin_param(brand))
+
+
 # ── Then steps ──────────────────────────────────────────────────────
 
 
 @then("the response contains at least one product")
 def then_has_products(ctx: dict) -> None:
-    """Assert the response has at least one product."""
+    """Assert the response has exactly the product created in the Given step."""
     assert "error" not in ctx, f"Request failed: {ctx.get('error')}"
-    response = ctx["response"]
+    response = _require_response(ctx)
+    expected = ctx["product"]
     assert response.products is not None, "Response has no products"
-    assert len(response.products) >= 1, f"Expected >= 1 product, got {len(response.products)}"
-    ctx["first_product"] = response.products[0]
+    assert len(response.products) == 1, f"Expected 1 product, got {len(response.products)}"
+    actual = response.products[0]
+    assert actual.product_id == expected.product_id, (
+        f"Expected product_id={expected.product_id!r}, got {actual.product_id!r}"
+    )
+    assert actual.name == expected.name, f"Expected name={expected.name!r}, got {actual.name!r}"
+    ctx["first_product"] = actual
+
+
+@then(parsers.parse('the request is rejected with VALIDATION_ERROR naming field "{field}"'))
+def then_rejected_validation_field(ctx: dict, field: str) -> None:
+    """Assert the wire envelope is VALIDATION_ERROR and names the field structurally."""
+    envelope = ctx.get("wire_error_envelope")
+    assert envelope is not None, f"No wire error envelope (error={ctx.get('error')!r})"
+    assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+    assert envelope["errors"][0].get("field") == field, (
+        f"errors[0].field={envelope['errors'][0].get('field')!r}, expected {field!r}"
+    )
+    assert envelope["adcp_error"].get("field") == field, (
+        f"adcp_error.field={envelope['adcp_error'].get('field')!r}, expected {field!r}"
+    )
 
 
 @then(parsers.parse('the first product publisher_properties selection_type is "{expected}"'))
@@ -178,7 +230,7 @@ def then_has_property_ids(ctx: dict, expected: str) -> None:
     inner = _get_first_prop(ctx)
     ids = getattr(inner, "property_ids", None) or (inner.get("property_ids") if isinstance(inner, dict) else None)
     assert ids is not None, "property_ids is None"
-    id_strings = [str(pid.root) if hasattr(pid, "root") else str(pid) for pid in ids]
+    id_strings = [str(pid.root) if hasattr(pid, "root") else str(pid) for pid in ids]  # noqa: rootmodel
     assert expected in id_strings, f"Expected {expected!r} in property_ids, got {id_strings}"
 
 
@@ -188,7 +240,7 @@ def then_has_property_tags(ctx: dict, expected: str) -> None:
     inner = _get_first_prop(ctx)
     tags = getattr(inner, "property_tags", None) or (inner.get("property_tags") if isinstance(inner, dict) else None)
     assert tags is not None, "property_tags is None"
-    tag_strings = [str(t.root) if hasattr(t, "root") else str(t) for t in tags]
+    tag_strings = [str(t.root) if hasattr(t, "root") else str(t) for t in tags]  # noqa: rootmodel
     assert expected in tag_strings, f"Expected {expected!r} in property_tags, got {tag_strings}"
 
 

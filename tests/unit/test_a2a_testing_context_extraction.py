@@ -12,8 +12,8 @@ Beads: salesagent-2yt6
 from unittest.mock import patch
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-from src.core.resolved_identity import ResolvedIdentity
 from tests.a2a_helpers import make_a2a_context
+from tests.factories.principal import PrincipalFactory
 
 
 class TestA2ATestingContextExtraction:
@@ -34,7 +34,7 @@ class TestA2ATestingContextExtraction:
         }
         ctx = make_a2a_context(auth_token="test-token", headers=headers)
 
-        mock_identity = ResolvedIdentity(
+        mock_identity = PrincipalFactory.make_identity(
             principal_id="test_principal",
             tenant_id="test-tenant",
             tenant={"tenant_id": "test-tenant"},
@@ -63,7 +63,7 @@ class TestA2ATestingContextExtraction:
         }
         ctx = make_a2a_context(auth_token="test-token", headers=headers)
 
-        mock_identity = ResolvedIdentity(
+        mock_identity = PrincipalFactory.make_identity(
             principal_id="test_principal",
             tenant_id="test-tenant",
             tenant={"tenant_id": "test-tenant"},
@@ -90,7 +90,7 @@ class TestA2ATestingContextExtraction:
         }
         ctx = make_a2a_context(auth_token="test-token", headers=headers)
 
-        mock_identity = ResolvedIdentity(
+        mock_identity = PrincipalFactory.make_identity(
             principal_id="test_principal",
             tenant_id="test-tenant",
             tenant={"tenant_id": "test-tenant"},
@@ -150,3 +150,54 @@ class TestAdCPTestContextFromHeaders:
             "from_headers({}) should return None when no test headers present, "
             "to avoid creating a truthy AdCPTestContext that activates testing behavior."
         )
+
+
+class TestMockTimeIsAlwaysAware:
+    """mock_time is UTC-aware no matter how the context is constructed.
+
+    Regression (#1545 K1 follow-up review): X-Mock-Time was minted NAIVE by
+    from_headers (rstrip("Z") + fromisoformat, and local-time fromtimestamp for
+    the epoch form) while campaign flight datetimes are UTC-aware, so
+    NextEventCalculator.calculate_next_event_time raised
+    'TypeError: can't compare offset-naive and offset-aware datetimes' and
+    failed the whole get_media_buy_delivery request. The clock is now
+    normalized once at the AdCPTestContext construction boundary.
+    """
+
+    def test_from_headers_iso_z_is_utc_aware(self):
+        from datetime import UTC, datetime
+
+        from src.core.testing_hooks import AdCPTestContext
+
+        ctx = AdCPTestContext.from_headers({"x-mock-time": "2025-06-01T00:00:00Z"})
+        assert ctx.mock_time == datetime(2025, 6, 1, tzinfo=UTC)
+        assert ctx.mock_time.tzinfo is not None
+
+    def test_from_headers_iso_without_offset_is_utc_aware(self):
+        from datetime import UTC, datetime
+
+        from src.core.testing_hooks import AdCPTestContext
+
+        ctx = AdCPTestContext.from_headers({"x-mock-time": "2025-06-01T12:30:00"})
+        assert ctx.mock_time == datetime(2025, 6, 1, 12, 30, tzinfo=UTC)
+
+    def test_from_headers_epoch_is_utc_aware_and_utc_anchored(self):
+        """Epoch seconds are UTC-anchored — 1748736000 is 2025-06-01T00:00:00Z.
+
+        A naive fromtimestamp() would return *local* time; labeling that UTC
+        would shift the simulated clock by the host's UTC offset.
+        """
+        from datetime import UTC, datetime
+
+        from src.core.testing_hooks import AdCPTestContext
+
+        ctx = AdCPTestContext.from_headers({"x-mock-time": "1748736000"})
+        assert ctx.mock_time == datetime(2025, 6, 1, tzinfo=UTC)
+
+    def test_direct_construction_with_naive_datetime_is_coerced_to_utc(self):
+        from datetime import UTC, datetime
+
+        from src.core.testing_hooks import AdCPTestContext
+
+        ctx = AdCPTestContext(mock_time=datetime(2025, 6, 1))
+        assert ctx.mock_time == datetime(2025, 6, 1, tzinfo=UTC)

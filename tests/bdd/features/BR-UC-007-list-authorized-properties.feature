@@ -1,4 +1,4 @@
-# Generated from adcp-req @ 8a219ece2b54628c33f1075d386b73082a0f4832 on 2026-03-20T12:00:24Z
+# Generated from adcp-req @ c7db1f45d4bc00989d25b3d3c8e9b4a360f41e1b on 2026-05-20T22:25:32Z
 # DO NOT EDIT -- re-run: python scripts/compile_bdd.py
 
 Feature: BR-UC-007 Discover Publisher Properties
@@ -95,9 +95,8 @@ Feature: BR-UC-007 Discover Publisher Properties
     Given no tenant can be resolved from the request context
     When the Buyer Agent sends a list_authorized_properties task
     Then the operation should fail
-    And the error code should be "TENANT_ERROR"
+    And the error code should be "AUTH_REQUIRED"
     And the error message should contain "tenant"
-    And the error should include "suggestion" field
     # POST-F1: System state unchanged (read-only)
     # POST-F2: Error code TENANT_ERROR explains what failed
 
@@ -106,9 +105,8 @@ Feature: BR-UC-007 Discover Publisher Properties
     Given no tenant can be resolved from the request context
     When the Buyer Agent calls list_authorized_properties MCP tool
     Then the operation should fail
-    And the error code should be "TENANT_ERROR"
+    And the error code should be "AUTH_REQUIRED"
     And the error message should contain "tenant"
-    And the error should include "suggestion" field
     # POST-F1: System state unchanged (read-only)
     # POST-F2: Error code TENANT_ERROR explains what failed
 
@@ -118,9 +116,8 @@ Feature: BR-UC-007 Discover Publisher Properties
     But the publisher partnership database query fails
     When the Buyer Agent sends a list_authorized_properties task
     Then the operation should fail
-    And the error code should be "PROPERTIES_ERROR"
-    And the error message should contain "error"
-    And the error should include "suggestion" field
+    And the error code should be "SERVICE_UNAVAILABLE"
+    And the error message should contain "properties"
     # POST-F1: System state unchanged (read-only)
     # POST-F2: Error code PROPERTIES_ERROR explains what failed
 
@@ -130,9 +127,8 @@ Feature: BR-UC-007 Discover Publisher Properties
     But the publisher partnership database query fails
     When the Buyer Agent calls list_authorized_properties MCP tool
     Then the operation should fail
-    And the error code should be "PROPERTIES_ERROR"
-    And the error message should contain "error"
-    And the error should include "suggestion" field
+    And the error code should be "SERVICE_UNAVAILABLE"
+    And the error message should contain "properties"
     # POST-F1: System state unchanged (read-only)
     # POST-F2: Error code PROPERTIES_ERROR explains what failed
 
@@ -757,4 +753,3 @@ Feature: BR-UC-007 Discover Publisher Properties
       | website (first enum value)           | website         | accepted         |
       | streaming_audio (last enum value)    | streaming_audio | accepted         |
       | Unknown string not in enum           | hologram        | validation error |
-

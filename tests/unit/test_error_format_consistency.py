@@ -4,16 +4,16 @@ Tests for error format consistency across MCP and A2A transports.
 
 Verifies that:
 1. MCP tool errors have consistent structure (ToolError with message)
-2. A2A skill errors have consistent JSON-RPC error structure (ServerError)
+2. A2A skill errors have consistent JSON-RPC error structure (A2AError)
 3. The SAME error scenario produces consistent error types/messages across transports
 
 These are unit tests that mock database/adapter calls to isolate error formatting.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from a2a.utils.errors import ServerError
+from a2a.utils.errors import A2AError
 from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 
@@ -26,40 +26,62 @@ class TestMCPErrorShapes:
     """Test that MCP tool errors have consistent structure."""
 
     @pytest.mark.asyncio
-    async def test_missing_required_field_raises_error(self):
-        """MCP create_media_buy raises AdCPValidationError when context is missing."""
-        from src.core.tools.media_buy_create import create_media_buy
+    async def test_missing_identity_raises_adcp_auth_required_error(self):
+        """_create_media_buy_impl raises AdCPAuthRequiredError when identity is missing.
 
-        # Call with missing context triggers AdCPValidationError (transport-agnostic)
-        with pytest.raises((AdCPValidationError, ToolError)) as exc_info:
-            await create_media_buy(
-                buyer_ref="test_buyer",
-                brand={"domain": "test.com"},
-                packages=[],  # Empty but present; validation will catch the issue
-                start_time="2026-01-01T00:00:00Z",
-                end_time="2026-02-01T00:00:00Z",
-                ctx=None,  # Missing context triggers AdCPValidationError
-            )
+        Pins on the typed exception (not a transport-union): boundary translation
+        to ToolError is the transport wrapper's job, so calling ``_impl`` directly
+        bypasses it and we can assert the production code's actual contract —
+        typed exception + error_code + message — without the union dilution.
 
-        # Error should have a meaningful message string
+        Missing identity in ``_create_media_buy_impl`` raises
+        ``AdCPAuthRequiredError`` (``AUTH_REQUIRED``) rather than
+        ``AdCPValidationError`` — identity-required is auth, not validation.
+        """
+        from src.core.exceptions import AdCPAuthRequiredError
+        from src.core.schemas import CreateMediaBuyRequest
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = CreateMediaBuyRequest(
+            brand={"domain": "test.com"},
+            packages=[],
+            start_time="2026-01-01T00:00:00Z",
+            end_time="2026-02-01T00:00:00Z",
+            idempotency_key="unit-test-key-errfmt-001",
+        )
+
+        with pytest.raises(AdCPAuthRequiredError) as exc_info:
+            await _create_media_buy_impl(req=req, identity=None)
+
         error = exc_info.value
-        assert len(str(error)) > 0, "Error message must not be empty"
+        assert error.error_code == "AUTH_REQUIRED"
+        assert "Authentication required" in error.message
 
-    @pytest.mark.asyncio
-    async def test_validation_error_raises_error_with_details(self):
-        """MCP create_media_buy raises error for Pydantic validation failures."""
-        from src.core.tools.media_buy_create import create_media_buy
+    def test_pydantic_validation_error_for_invalid_request_shape(self):
+        """CreateMediaBuyRequest raises Pydantic ValidationError for malformed input.
 
-        # Provide invalid types that fail Pydantic validation
-        with pytest.raises((AdCPValidationError, ToolError, ValidationError)):
-            await create_media_buy(
-                buyer_ref="test_buyer",
-                brand={"invalid_key": "no_domain"},  # Wrong structure: missing required 'domain' field
-                packages="not_a_list",  # Wrong type: should be list
+        Pre-_impl Pydantic validation owns request-shape errors; ``_impl`` itself
+        never sees them. The test is most meaningful when run at the schema
+        layer it actually fires from, pinned to ``ValidationError`` rather
+        than a union with the runtime exceptions.
+        """
+        from src.core.schemas import CreateMediaBuyRequest
+
+        with pytest.raises(ValidationError) as exc_info:
+            CreateMediaBuyRequest(
+                brand={"invalid_key": "no_domain"},  # Wrong structure: missing required 'domain'
+                packages="not_a_list",  # type: ignore[arg-type]  # Wrong type: should be list
                 start_time="2026-01-01T00:00:00Z",
                 end_time="2026-02-01T00:00:00Z",
-                ctx=MagicMock(),
             )
+
+        # Pydantic's ValidationError surfaces every offending field — at least one
+        # of these errors should point at the malformed packages payload or the
+        # missing brand.domain field. We don't pin on a specific code because
+        # Pydantic v2's error codes vary by union/discriminator path.
+        error_msg = str(exc_info.value)
+        field_referenced = "packages" in error_msg or "domain" in error_msg
+        assert field_referenced, f"Pydantic error should reference the malformed field, got: {error_msg}"
 
     @pytest.mark.asyncio
     async def test_auth_error_raises_validation_error(self):
@@ -69,33 +91,34 @@ class TestMCPErrorShapes:
 
         # Build a minimal valid request
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-02-01T00:00:00Z",
+            idempotency_key="unit-test-key-errfmt-002",
         )
 
-        # _create_media_buy_impl requires identity; passing None triggers AdCPValidationError
-        with pytest.raises(AdCPValidationError) as exc_info:
+        # _create_media_buy_impl requires identity; passing None triggers AdCPAuthenticationError
+        with pytest.raises(AdCPAuthenticationError) as exc_info:
             await _create_media_buy_impl(req=req, identity=None)
 
-        assert "Identity is required" in str(exc_info.value)
+        assert "Authentication required" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_not_found_principal_returns_error_response(self):
-        """MCP _create_media_buy_impl returns error response for non-existent principal."""
+    async def test_not_found_principal_raises_auth_error(self):
+        """MCP _create_media_buy_impl raises AdCPAuthenticationError for non-existent principal."""
+        from src.core.exceptions import AdCPAuthenticationError
         from src.core.resolved_identity import ResolvedIdentity
         from src.core.schemas import CreateMediaBuyRequest
         from src.core.testing_hooks import AdCPTestContext
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-02-01T00:00:00Z",
+            idempotency_key="unit-test-key-errfmt-003",
         )
 
         identity = ResolvedIdentity(
@@ -108,17 +131,10 @@ class TestMCPErrorShapes:
         with (
             patch("src.core.helpers.context_helpers.ensure_tenant_context", return_value={"tenant_id": "test"}),
             patch("src.core.tools.media_buy_create.validate_setup_complete"),
-            patch("src.core.tools.media_buy_create.get_principal_object", return_value=None),
+            patch("src.core.auth.get_principal_object", return_value=None),
         ):
-            result = await _create_media_buy_impl(req=req, identity=identity)
-
-        # Should return a CreateMediaBuyResult with error response
-        assert hasattr(result, "response")
-        response = result.response
-        assert hasattr(response, "errors")
-        assert response.errors is not None
-        assert len(response.errors) > 0
-        assert response.errors[0].code == "authentication_error"
+            with pytest.raises(AdCPAuthenticationError, match="nonexistent"):
+                await _create_media_buy_impl(req=req, identity=identity)
 
 
 class TestA2AErrorShapes:
@@ -130,8 +146,8 @@ class TestA2AErrorShapes:
 
     @pytest.mark.asyncio
     async def test_auth_required_error_is_server_error(self):
-        """A2A non-discovery skills raise ServerError when identity is None."""
-        with pytest.raises(ServerError) as exc_info:
+        """A2A non-discovery skills raise A2AError when identity is None."""
+        with pytest.raises(A2AError) as exc_info:
             await self.handler._handle_explicit_skill(
                 skill_name="create_media_buy",
                 parameters={"brand": {"domain": "testbrand.com"}},
@@ -139,18 +155,18 @@ class TestA2AErrorShapes:
             )
 
         error = exc_info.value
-        assert isinstance(error, ServerError)
+        assert isinstance(error, A2AError)
         assert "Authentication required" in str(error)
 
     @pytest.mark.asyncio
     async def test_unknown_skill_raises_server_error(self):
-        """A2A raises ServerError for unknown skill names."""
+        """A2A raises A2AError for unknown skill names."""
         from src.core.resolved_identity import ResolvedIdentity
 
         mock_identity = ResolvedIdentity(
             principal_id="test_principal", tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
-        with pytest.raises(ServerError) as exc_info:
+        with pytest.raises(A2AError) as exc_info:
             await self.handler._handle_explicit_skill(
                 skill_name="nonexistent_skill",
                 parameters={},
@@ -158,18 +174,18 @@ class TestA2AErrorShapes:
             )
 
         error = exc_info.value
-        assert isinstance(error, ServerError)
+        assert isinstance(error, A2AError)
         assert "Unknown skill" in str(error)
 
     @pytest.mark.asyncio
     async def test_invalid_auth_identity_raises_server_error(self):
-        """A2A raises ServerError when identity has no principal (auth required skill)."""
+        """A2A raises A2AError when identity has no principal (auth required skill)."""
         # Identity with no principal_id simulates invalid auth
         invalid_identity = ResolvedIdentity(
             principal_id=None, tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
 
-        with pytest.raises(ServerError) as exc_info:
+        with pytest.raises(A2AError) as exc_info:
             await self.handler._handle_explicit_skill(
                 skill_name="create_media_buy",
                 parameters={"brand": {"domain": "testbrand.com"}},
@@ -179,55 +195,64 @@ class TestA2AErrorShapes:
         assert "Authentication required" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_missing_params_returns_error_dict(self):
-        """A2A create_media_buy returns error dict for missing required params."""
+    async def test_missing_params_raises_typed_validation_error(self):
+        """A2A create_media_buy raises typed AdCPValidationError for missing required params.
+
+        A prior behavior returned a custom error dict that bypassed the
+        envelope builder — buyers could not see the real wire code. Skill
+        handlers now raise typed AdCPError; the outer dispatcher routes
+        through ``_build_failed_skill_result``
+        which calls ``_build_error_envelope`` for the two-layer wire shape.
+        """
+
         mock_identity = ResolvedIdentity(
             principal_id="test_principal", tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
 
-        result = await self.handler._handle_create_media_buy_skill(
-            parameters={"brand": {"domain": "testbrand.com"}},
-            identity=mock_identity,
-        )
+        with pytest.raises(AdCPValidationError) as exc_info:
+            await self.handler._handle_create_media_buy_skill(
+                parameters={"brand": {"domain": "testbrand.com"}},
+                identity=mock_identity,
+            )
 
-        # A2A handler returns dict with consistent error structure
-        assert isinstance(result, dict)
-        assert result["success"] is False
-        assert "message" in result
-        assert "Missing required AdCP parameters" in result["message"]
-        assert "errors" in result
-        assert len(result["errors"]) > 0
-        assert result["errors"][0]["code"] == "validation_error"
+        assert "Missing required AdCP parameters" in str(exc_info.value)
+        assert exc_info.value.error_code == "VALIDATION_ERROR"
 
     @pytest.mark.asyncio
-    async def test_validation_error_returns_error_dict(self):
-        """A2A create_media_buy returns error dict for invalid parameter types."""
+    async def test_validation_error_raises_typed_validation_error(self):
+        """A2A create_media_buy raises typed AdCPValidationError for invalid parameter types.
+
+        Same envelope-builder contract as the missing-params case.
+        """
+
         mock_identity = ResolvedIdentity(
             principal_id="test_principal", tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
 
-        # Provide all required params but with invalid types
-        result = await self.handler._handle_create_media_buy_skill(
-            parameters={
-                "brand": {"domain": "testbrand.com"},
-                "packages": "not_a_list",  # Invalid type
-                "start_time": "2026-01-01T00:00:00Z",
-                "end_time": "2026-02-01T00:00:00Z",
-            },
-            identity=mock_identity,
-        )
+        with pytest.raises(AdCPValidationError) as exc_info:
+            # Provide all required params but with invalid types
+            await self.handler._handle_create_media_buy_skill(
+                parameters={
+                    "brand": {"domain": "testbrand.com"},
+                    "packages": "not_a_list",  # Invalid type
+                    "start_time": "2026-01-01T00:00:00Z",
+                    "end_time": "2026-02-01T00:00:00Z",
+                },
+                identity=mock_identity,
+            )
 
-        # Should return error dict (not raise)
-        assert isinstance(result, dict)
-        assert result["success"] is False
-        assert "errors" in result
-        assert result["errors"][0]["code"] == "validation_error"
+        assert exc_info.value.error_code == "VALIDATION_ERROR"
 
     @pytest.mark.asyncio
     async def test_discovery_skill_no_auth_does_not_raise_auth_error(self):
         """Discovery skills (get_products, etc.) do not require auth."""
+        from src.core.schemas import GetProductsResponse
+
         with patch("src.a2a_server.adcp_a2a_server.core_get_products_tool") as mock_tool:
-            mock_tool.return_value = {"products": []}
+            # core_get_products_tool returns a Pydantic GetProductsResponse;
+            # _serialize_for_a2a calls model_dump() so the mock must return a
+            # real model (not a raw dict) for the discovery path to complete.
+            mock_tool.return_value = GetProductsResponse(products=[])
 
             # Should NOT raise "Authentication required"
             anon_identity = ResolvedIdentity(
@@ -239,7 +264,7 @@ class TestA2AErrorShapes:
                     parameters={"brief": "test"},
                     identity=anon_identity,
                 )
-            except ServerError as e:
+            except A2AError as e:
                 assert "Authentication required" not in str(e), "Discovery skills should not require authentication"
 
 
@@ -256,17 +281,17 @@ class TestUpdateMediaBuyErrorShapes:
             media_buy_id="buy_001",
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(AdCPAuthenticationError) as exc_info:
             _update_media_buy_impl(req=req, identity=None)
 
-        assert "Identity is required" in str(exc_info.value)
+        assert "Authentication required" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_a2a_missing_auth_raises_server_error(self):
-        """A2A update_media_buy raises ServerError when auth is missing."""
+        """A2A update_media_buy raises A2AError when auth is missing."""
         handler = AdCPRequestHandler()
 
-        with pytest.raises(ServerError) as exc_info:
+        with pytest.raises(A2AError) as exc_info:
             await handler._handle_explicit_skill(
                 skill_name="update_media_buy",
                 parameters={"media_buy_id": "buy_001"},
@@ -274,7 +299,7 @@ class TestUpdateMediaBuyErrorShapes:
             )
 
         error = exc_info.value
-        assert isinstance(error, ServerError)
+        assert isinstance(error, A2AError)
         assert "Authentication required" in str(error)
 
 
@@ -284,19 +309,19 @@ class TestListCreativesErrorShapes:
     @pytest.mark.asyncio
     async def test_missing_auth_raises_authentication_error(self):
         """list_creatives _impl raises AdCPAuthenticationError when identity is None."""
-        from src.core.tools.creatives.listing import _list_creatives_impl
+        from src.core.tools.creatives.listing import _build_list_creatives_request, _list_creatives_impl
 
         with pytest.raises(AdCPAuthenticationError) as exc_info:
-            _list_creatives_impl(identity=None)
+            _list_creatives_impl(req=_build_list_creatives_request(), identity=None)
 
         assert "x-adcp-auth" in str(exc_info.value).lower() or "Missing" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_a2a_missing_auth_raises_server_error(self):
-        """A2A list_creatives raises ServerError when auth is missing."""
+        """A2A list_creatives raises A2AError when auth is missing."""
         handler = AdCPRequestHandler()
 
-        with pytest.raises(ServerError) as exc_info:
+        with pytest.raises(A2AError) as exc_info:
             await handler._handle_explicit_skill(
                 skill_name="list_creatives",
                 parameters={},
@@ -304,7 +329,7 @@ class TestListCreativesErrorShapes:
             )
 
         error = exc_info.value
-        assert isinstance(error, ServerError)
+        assert isinstance(error, A2AError)
         assert "Authentication required" in str(error)
 
 
@@ -324,8 +349,8 @@ class TestCrossTransportErrorConsistency:
     async def test_missing_context_error_consistent(self):
         """Both transports produce consistent errors when identity/auth is missing.
 
-        MCP path: _create_media_buy_impl(identity=None) -> AdCPValidationError("Identity is required")
-        A2A path: _handle_explicit_skill(identity=None) -> ServerError("Authentication required")
+        MCP path: _create_media_buy_impl(identity=None) -> AdCPAuthRequiredError("Authentication required...")
+        A2A path: _handle_explicit_skill(identity=None) -> A2AError("Authentication required")
 
         Both paths reject the request before reaching business logic.
         """
@@ -333,11 +358,11 @@ class TestCrossTransportErrorConsistency:
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-02-01T00:00:00Z",
+            idempotency_key="unit-test-key-errfmt-004",
         )
 
         # MCP path: missing identity — raises AdCPValidationError (transport-agnostic)
@@ -355,12 +380,12 @@ class TestCrossTransportErrorConsistency:
                 parameters={"brand": {"domain": "testbrand.com"}},
                 identity=None,
             )
-        except ServerError as e:
+        except A2AError as e:
             a2a_error = e
 
         # Both must reject the request
         assert mcp_error is not None, "MCP path must raise error for missing identity"
-        assert a2a_error is not None, "A2A path must raise ServerError for missing auth"
+        assert a2a_error is not None, "A2A path must raise A2AError for missing auth"
 
         # Both errors indicate authentication/authorization failure
         assert "Identity is required" in str(mcp_error) or "required" in str(mcp_error).lower()
@@ -371,9 +396,12 @@ class TestCrossTransportErrorConsistency:
         """Both transports report missing required parameters consistently.
 
         MCP path: CreateMediaBuyRequest validation -> ToolError with field details
-        A2A path: _handle_create_media_buy_skill -> dict with errors array
+        A2A path: _handle_create_media_buy_skill -> raises typed AdCPValidationError
 
-        Both should mention the missing fields.
+        Both should mention the missing fields. Skill handlers raise
+        typed AdCPError on validation failure; the outer dispatcher's
+        ``_build_failed_skill_result`` produces the two-layer envelope on
+        the wire.
         """
         from src.core.schemas import CreateMediaBuyRequest
 
@@ -381,7 +409,6 @@ class TestCrossTransportErrorConsistency:
         mcp_error_message = None
         try:
             CreateMediaBuyRequest(
-                buyer_ref="test_buyer",
                 brand={"invalid_key": "no_domain"},  # Missing required 'domain' field triggers ValidationError
                 packages=[],
                 start_time="2026-01-01T00:00:00Z",
@@ -395,16 +422,11 @@ class TestCrossTransportErrorConsistency:
             principal_id="test_principal", tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
 
-        a2a_result = await self.handler._handle_create_media_buy_skill(
-            parameters={"brand": {"domain": "testbrand.com"}},
-            identity=mock_identity,
-        )
-
-        # A2A should return error dict
-        assert isinstance(a2a_result, dict)
-        assert a2a_result["success"] is False
-        assert "errors" in a2a_result
-        assert len(a2a_result["errors"]) > 0
+        with pytest.raises(AdCPValidationError) as a2a_exc_info:
+            await self.handler._handle_create_media_buy_skill(
+                parameters={"brand": {"domain": "testbrand.com"}},
+                identity=mock_identity,
+            )
 
         # Both identify validation/parameter issues
         if mcp_error_message:
@@ -415,28 +437,32 @@ class TestCrossTransportErrorConsistency:
                 or "validation" in mcp_error_message.lower()
             )
 
-        # A2A error identifies missing params
-        a2a_error_msg = a2a_result["errors"][0]["message"]
+        # A2A error identifies missing params via the typed exception's message
+        a2a_error_msg = str(a2a_exc_info.value)
         assert "Missing required" in a2a_error_msg or "parameters" in a2a_error_msg.lower()
+        assert a2a_exc_info.value.error_code == "VALIDATION_ERROR"
 
     @pytest.mark.asyncio
     async def test_nonexistent_principal_error_consistent(self):
-        """Both transports handle non-existent principal the same way.
+        """Both transports handle non-existent principal via the same typed AdCPAuthenticationError.
 
-        The _create_media_buy_impl function returns a CreateMediaBuyError when
-        principal is not found. This result flows through both transports.
+        The _create_media_buy_impl function raises AdCPAuthenticationError when the
+        principal is not found; this verifies build_two_layer_error_envelope — the
+        helper every transport boundary delegates to — maps it to AUTH_REQUIRED.
+        The live A2A wire shape for this path is pinned by test_a2a_error_responses.
         """
+        from src.core.exceptions import AdCPAuthenticationError, build_two_layer_error_envelope
         from src.core.resolved_identity import ResolvedIdentity
         from src.core.schemas import CreateMediaBuyRequest
         from src.core.testing_hooks import AdCPTestContext
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-02-01T00:00:00Z",
+            idempotency_key="unit-test-key-errfmt-005",
         )
 
         identity = ResolvedIdentity(
@@ -449,27 +475,17 @@ class TestCrossTransportErrorConsistency:
         with (
             patch("src.core.helpers.context_helpers.ensure_tenant_context", return_value={"tenant_id": "test"}),
             patch("src.core.tools.media_buy_create.validate_setup_complete"),
-            patch("src.core.tools.media_buy_create.get_principal_object", return_value=None),
+            patch("src.core.auth.get_principal_object", return_value=None),
         ):
-            # Shared impl returns the same result regardless of transport
-            result = await _create_media_buy_impl(req=req, identity=identity)
+            with pytest.raises(AdCPAuthenticationError, match="ghost_principal") as exc_info:
+                await _create_media_buy_impl(req=req, identity=identity)
 
-        # The result contains an error response with authentication_error code
-        response = result.response
-        assert hasattr(response, "errors")
-        assert response.errors is not None
-        assert len(response.errors) > 0
-        error = response.errors[0]
-
-        assert error.code == "authentication_error"
-        assert "not found" in error.message.lower()
-
-        # When this flows through A2A's _serialize_for_a2a, it becomes:
-        serialized = AdCPRequestHandler._serialize_for_a2a(response)
-        assert serialized["success"] is False, "Serialized response must have success=False"
-        assert "errors" in serialized
-        assert len(serialized["errors"]) > 0
-        assert serialized["errors"][0]["code"] == "authentication_error"
+        # The boundary translator (called by every transport wrapper) produces
+        # the same two-layer envelope for this typed exception.
+        envelope = build_two_layer_error_envelope(exc_info.value)
+        assert envelope["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert envelope["errors"][0]["code"] == "AUTH_REQUIRED"
+        assert "not found" in envelope["adcp_error"]["message"].lower()
 
     @pytest.mark.asyncio
     async def test_unknown_skill_only_affects_a2a(self):
@@ -485,7 +501,7 @@ class TestCrossTransportErrorConsistency:
         mock_identity = ResolvedIdentity(
             principal_id="test_principal", tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
         )
-        with pytest.raises(ServerError) as exc_info:
+        with pytest.raises(A2AError) as exc_info:
             await handler._handle_explicit_skill(
                 skill_name="totally_fake_skill",
                 parameters={},
@@ -503,7 +519,7 @@ class TestCrossTransportErrorConsistency:
         # Create an error response like the impl would
         error_response = CreateMediaBuyError(
             errors=[
-                Error(code="validation_error", message="Missing required field: packages"),
+                Error(code="VALIDATION_ERROR", message="Missing required field: packages"),
             ],
             context=None,
         )
@@ -516,35 +532,8 @@ class TestCrossTransportErrorConsistency:
         assert serialized["success"] is False
         assert "errors" in serialized
         assert len(serialized["errors"]) > 0
-        assert serialized["errors"][0]["code"] == "validation_error"
+        assert serialized["errors"][0]["code"] == "VALIDATION_ERROR"
         assert "message" in serialized  # Protocol message field added by serializer
-
-    @pytest.mark.asyncio
-    async def test_serialize_for_a2a_passes_dict_through(self):
-        """Verify _serialize_for_a2a passes dict responses through unchanged.
-
-        A2A handlers may return early-exit error dicts directly (e.g., for
-        missing required parameters). These should pass through as-is.
-        """
-        error_dict = {
-            "success": False,
-            "message": "Missing required AdCP parameters: ['packages', 'start_time', 'end_time']",
-            "required_parameters": ["brand", "packages", "start_time", "end_time"],
-            "received_parameters": ["brand"],
-            "errors": [
-                {
-                    "code": "validation_error",
-                    "message": "Missing required AdCP parameters: ['packages', 'start_time', 'end_time']",
-                }
-            ],
-        }
-
-        serialized = AdCPRequestHandler._serialize_for_a2a(error_dict)
-
-        # Dict should pass through unchanged
-        assert serialized == error_dict
-        assert serialized["success"] is False
-        assert serialized["errors"][0]["code"] == "validation_error"
 
 
 # ---------------------------------------------------------------------------
@@ -562,16 +551,19 @@ class TestMCPRecoveryInErrorResponses:
     @pytest.mark.parametrize(
         "exc_class,msg,expected_code,expected_recovery",
         [
-            ("AdCPError", "internal error", "INTERNAL_ERROR", "terminal"),
+            # INTERNAL_ERROR and NOT_FOUND are INTERNAL_CODES; the boundary
+            # translator maps them to STANDARD_ERROR_CODES at wire emission.
+            ("AdCPError", "internal error", "SERVICE_UNAVAILABLE", "terminal"),
             ("AdCPValidationError", "bad field", "VALIDATION_ERROR", "correctable"),
-            ("AdCPAuthenticationError", "bad token", "AUTH_TOKEN_INVALID", "terminal"),
-            ("AdCPAuthorizationError", "no access", "AUTHORIZATION_ERROR", "terminal"),
-            ("AdCPNotFoundError", "gone", "NOT_FOUND", "terminal"),
-            ("AdCPConflictError", "duplicate", "CONFLICT", "correctable"),
-            ("AdCPGoneError", "expired", "GONE", "terminal"),
-            ("AdCPBudgetExhaustedError", "no budget", "BUDGET_EXHAUSTED", "correctable"),
-            ("AdCPRateLimitError", "slow down", "RATE_LIMIT_EXCEEDED", "transient"),
-            ("AdCPAdapterError", "GAM down", "ADAPTER_ERROR", "transient"),
+            ("AdCPNotFoundError", "gone", "INVALID_REQUEST", "terminal"),
+            # The recovery-conformance oracle grades the CLASS ATTRIBUTE
+            # (_default_recovery), not the MCP wire, so these two MUST stay here to pin
+            # the real MCP ToolError recovery — matching the A2A table below. (#1417)
+            ("AdCPConflictError", "duplicate", "CONFLICT", "transient"),
+            ("AdCPBudgetExhaustedError", "no budget", "BUDGET_EXHAUSTED", "terminal"),
+            ("AdCPGoneError", "expired", "INVALID_STATE", "correctable"),
+            ("AdCPRateLimitError", "slow down", "RATE_LIMITED", "transient"),
+            ("AdCPAdapterError", "GAM down", "SERVICE_UNAVAILABLE", "transient"),
             ("AdCPServiceUnavailableError", "offline", "SERVICE_UNAVAILABLE", "transient"),
         ],
         ids=lambda x: x if isinstance(x, str) and x.startswith("AdCP") else "",
@@ -593,11 +585,15 @@ class TestMCPRecoveryInErrorResponses:
         with pytest.raises(ToolError) as exc_info:
             wrapped()
 
-        tool_error = exc_info.value
-        assert tool_error.args[0] == expected_code
-        assert tool_error.args[1] == msg
-        assert len(tool_error.args) >= 3, f"ToolError for {exc_class} must have 3 args (code, msg, recovery)"
-        assert tool_error.args[2] == expected_recovery
+        from tests.helpers import assert_envelope_shape
+
+        assert_envelope_shape(
+            exc_info.value,
+            expected_code,
+            recovery=expected_recovery,
+            message_substr=msg,
+            check_mcp_tool_error=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -606,10 +602,13 @@ class TestMCPRecoveryInErrorResponses:
 
 
 class TestA2ARecoveryInErrorResponses:
-    """Verify that A2A ServerError carries recovery in data for every AdCPError subclass.
+    """Verify recovery semantics propagate from every AdCPError subclass.
 
-    The A2A boundary (_handle_explicit_skill) translates AdCPError -> ServerError
-    with data={"recovery": ...}. Buyer agents parse this to decide retry strategy.
+    ``_handle_explicit_skill`` does not translate AdCPError to A2AError — the
+    typed exception propagates so the explicit-skill dispatcher can wrap it
+    into a failed Task with a two-layer envelope
+    DataPart. The buyer agent parses ``recovery`` from the propagated exception
+    (or from the envelope's ``adcp_error.recovery`` once it reaches the wire).
     """
 
     def setup_method(self):
@@ -622,23 +621,20 @@ class TestA2ARecoveryInErrorResponses:
         [
             ("AdCPError", "internal", "terminal"),
             ("AdCPValidationError", "bad", "correctable"),
-            ("AdCPAuthenticationError", "unauth", "terminal"),
-            ("AdCPAuthorizationError", "forbidden", "terminal"),
             ("AdCPNotFoundError", "missing", "terminal"),
-            ("AdCPConflictError", "dup", "correctable"),
-            ("AdCPGoneError", "expired", "terminal"),
-            ("AdCPBudgetExhaustedError", "broke", "correctable"),
+            ("AdCPConflictError", "dup", "transient"),
+            ("AdCPGoneError", "expired", "correctable"),
+            ("AdCPBudgetExhaustedError", "broke", "terminal"),
             ("AdCPRateLimitError", "slow", "transient"),
             ("AdCPAdapterError", "down", "transient"),
             ("AdCPServiceUnavailableError", "offline", "transient"),
         ],
         ids=lambda x: x if isinstance(x, str) and x.startswith("AdCP") else "",
     )
-    async def test_a2a_server_error_carries_recovery(self, exc_class, msg, expected_recovery):
-        """ServerError from A2A boundary has data.recovery={expected_recovery} for {exc_class}."""
-        from a2a.utils.errors import ServerError
-
+    async def test_a2a_propagated_error_carries_recovery(self, exc_class, msg, expected_recovery):
+        """Typed AdCPError propagates from _handle_explicit_skill with recovery={expected_recovery}."""
         import src.core.exceptions as exc_mod
+        from src.core.exceptions import AdCPError, build_two_layer_error_envelope
 
         klass = getattr(exc_mod, exc_class)
 
@@ -646,13 +642,15 @@ class TestA2ARecoveryInErrorResponses:
             raise klass(msg)
 
         with patch.object(self.handler, "_handle_get_products_skill", mock_skill):
-            with pytest.raises(ServerError) as exc_info:
+            with pytest.raises(AdCPError) as exc_info:
                 await self.handler._handle_explicit_skill("get_products", {}, "token")
 
-            error = exc_info.value.error
-            assert error.data is not None, f"ServerError.data must not be None for {exc_class}"
-            assert "recovery" in error.data, f"ServerError.data must contain 'recovery' for {exc_class}"
-            assert error.data["recovery"] == expected_recovery
+            # Recovery is on the propagated exception itself (the dispatcher will
+            # build the envelope when wrapping into the failed Task's DataPart).
+            assert exc_info.value.recovery == expected_recovery
+            # And the two-layer envelope builder echoes it onto both layers.
+            envelope = build_two_layer_error_envelope(exc_info.value)
+            assert envelope["adcp_error"]["recovery"] == expected_recovery
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +668,7 @@ class TestRecoveryOverrideInSerialization:
         # Create error response with explicit recovery field
         error_response = CreateMediaBuyError(
             errors=[
-                Error(code="not_found", message="temporarily missing"),
+                Error(code="NOT_FOUND", message="temporarily missing"),
             ],
             context=None,
         )
@@ -678,15 +676,15 @@ class TestRecoveryOverrideInSerialization:
         serialized = AdCPRequestHandler._serialize_for_a2a(error_response)
 
         assert serialized["success"] is False
-        assert serialized["errors"][0]["code"] == "not_found"
+        assert serialized["errors"][0]["code"] == "NOT_FOUND"
 
     def test_custom_recovery_override_in_to_dict(self):
         """to_dict() reflects custom recovery, not class default."""
         from src.core.exceptions import AdCPConflictError
 
-        # Default recovery is "correctable"
+        # Default recovery is "transient" (CONFLICT per the pinned enum, #1417)
         default = AdCPConflictError("dup")
-        assert default.to_dict()["recovery"] == "correctable"
+        assert default.to_dict()["recovery"] == "transient"
 
         # Override to "terminal" (e.g., non-retryable conflict)
         overridden = AdCPConflictError("permanent conflict", recovery="terminal")
@@ -723,28 +721,58 @@ class TestErrorCodeVocabularyConsistency:
     /docs/requirements/ERROR_CODE_VOCABULARY.md (adcp-req repo)
 
     Our exception hierarchy must use canonical codes where the spec defines them.
-    Salesagent-specific codes (INTERNAL_ERROR, AUTH_TOKEN_INVALID, etc.) are
-    allowed as vocabulary extensions but must be explicitly declared.
+    After error-code compliance (#1248), all exception class codes must be
+    in SDK STANDARD_ERROR_CODES or in the justified INTERNAL_CODES set.
     """
 
-    # Canonical codes from adcp-req spec + salesagent extensions
+    # Canonical codes: SDK STANDARD_ERROR_CODES + justified internal codes.
+    # After error-code compliance (#1248), all class-level codes are either
+    # SDK-standard or explicitly internal (see INTERNAL_CODES in exceptions.py).
     CANONICAL_ERROR_CODES = {
-        "INTERNAL_ERROR",  # HTTP 500 catch-all (salesagent extension)
+        # SDK standard codes used by our exception classes
+        "INTERNAL_ERROR",  # Base-class default (internal only, never on wire)
         "VALIDATION_ERROR",  # adcp-req: Generic Errors
-        "AUTH_TOKEN_INVALID",  # HTTP 401 (salesagent extension)
-        "AUTHORIZATION_ERROR",  # HTTP 403 (salesagent extension)
-        "NOT_FOUND",  # Generic form of {ENTITY}_NOT_FOUND
+        "INVALID_REQUEST",  # SDK standard: AdCPInvalidRequestError (semantically-invalid value)
+        "AUTH_REQUIRED",  # SDK standard: auth failures (AdCPAuthenticationError + AdCPAuthorizationError)
+        "POLICY_VIOLATION",  # SDK standard: AdCPPolicyViolationError (content/advertising policy block)
+        "NOT_FOUND",  # Base class for entity-specific codes (internal only)
         "ACCOUNT_NOT_FOUND",  # adcp-req: Account resolution (BR-RULE-080)
         "ACCOUNT_AMBIGUOUS",  # adcp-req: Natural key matches multiple accounts (BR-RULE-080)
         "ACCOUNT_SETUP_REQUIRED",  # adcp-req: Account requires setup (BR-RULE-080)
         "ACCOUNT_SUSPENDED",  # adcp-req: Account is suspended (BR-RULE-080)
         "ACCOUNT_PAYMENT_REQUIRED",  # adcp-req: Account has outstanding payment (BR-RULE-080)
         "CONFLICT",  # Generic form of {ENTITY}_EXISTS
-        "GONE",  # HTTP 410 (salesagent extension)
-        "BUDGET_EXHAUSTED",  # HTTP 422 (salesagent extension)
-        "RATE_LIMIT_EXCEEDED",  # adcp-req: Rate Limiting / Quota Errors
-        "ADAPTER_ERROR",  # HTTP 502 (salesagent extension)
-        "SERVICE_UNAVAILABLE",  # adcp-req: Service/Infrastructure Errors
+        "INVALID_STATE",  # SDK standard: gone/expired resources
+        "BUDGET_EXHAUSTED",  # SDK standard: budget limit reached
+        "RATE_LIMITED",  # SDK standard: rate limiting
+        "SERVICE_UNAVAILABLE",  # SDK standard: adapter/service failures
+        "CONFIGURATION_ERROR",  # Internal only: server config broken
+        # SDK standard codes added by the error-emission-architecture substrate.
+        "MEDIA_BUY_NOT_FOUND",  # SDK standard: AdCPMediaBuyNotFoundError
+        "PACKAGE_NOT_FOUND",  # SDK standard: AdCPPackageNotFoundError
+        "PRODUCT_NOT_FOUND",  # SDK standard: AdCPProductNotFoundError
+        "SESSION_NOT_FOUND",  # SDK standard: AdCPContextNotFoundError (unresolvable context_id)
+        "CREATIVE_NOT_FOUND",  # Internal: AdCPCreativeNotFoundError (wire → INVALID_REQUEST)
+        "FORMAT_NOT_FOUND",  # Internal: AdCPFormatNotFoundError (wire → INVALID_REQUEST)
+        "TASK_NOT_FOUND",  # Internal: AdCPTaskNotFoundError (wire → INVALID_REQUEST)
+        "BUDGET_TOO_LOW",  # SDK standard: AdCPBudgetTooLowError
+        "UNSUPPORTED_FEATURE",  # SDK standard: AdCPCapabilityNotSupportedError
+        "IDEMPOTENCY_CONFLICT",  # SDK standard: AdCPIdempotencyConflictError
+        "IDEMPOTENCY_EXPIRED",  # SDK standard: AdCPIdempotencyExpiredError
+        # Adapter-taxonomy codes (internal; wire → SERVICE_UNAVAILABLE via ERROR_CODE_MAPPING)
+        "WORKFLOW_CREATION_FAILED",  # Internal: AdCPWorkflowError
+        "ACTIVATION_WORKFLOW_FAILED",  # Internal: AdCPActivationWorkflowError
+        "LINE_ITEM_CREATION_FAILED",  # Internal: AdCPLineItemError
+        "GAM_UPDATE_FAILED",  # Internal: AdCPGamUpdateError
+        "PARTIAL_FAILURE",  # Internal: AdCPBulkUpdateError
+        # Mock-adapter business-outcome codes (internal; wire → standard via ERROR_CODE_MAPPING)
+        "MEDIA_BUY_REJECTED",  # Internal: AdCPMediaBuyRejectedError (wire → POLICY_VIOLATION)
+        "INVENTORY_UNAVAILABLE",  # Internal: AdCPInventoryUnavailableError (wire → PRODUCT_UNAVAILABLE)
+        # Advisory-on-success Pattern A codes (no dedicated exception subclass —
+        # construction sites use Error(code=...) inside success envelopes).
+        "CREATIVE_REJECTED",
+        "BUDGET_EXCEEDED",
+        "PRODUCT_UNAVAILABLE",
     }
 
     def test_all_exception_error_codes_are_canonical(self):
@@ -760,7 +788,6 @@ class TestErrorCodeVocabularyConsistency:
             AdCPNotFoundError,
             AdCPRateLimitError,
             AdCPServiceUnavailableError,
-            AdCPValidationError,
         )
 
         exception_classes = [
@@ -778,35 +805,43 @@ class TestErrorCodeVocabularyConsistency:
         ]
 
         for exc_class in exception_classes:
-            code = exc_class.error_code
+            # _default_error_code is the class-level identity slot per
+            # salesagent-fnk9 option A. error_code is an instance attribute.
+            code = exc_class._default_error_code
             assert code in self.CANONICAL_ERROR_CODES, (
-                f"{exc_class.__name__}.error_code = {code!r} is not in the canonical vocabulary. "
+                f"{exc_class.__name__}._default_error_code = {code!r} is not in the canonical vocabulary. "
                 f"If this is a new code, add it to CANONICAL_ERROR_CODES with a comment. "
                 f"If this is a renamed code, update the exception class."
             )
 
     def test_rate_limit_uses_canonical_code(self):
-        """AdCPRateLimitError must use RATE_LIMIT_EXCEEDED (not RATE_LIMITED).
+        """AdCPRateLimitError must use RATE_LIMITED (SDK STANDARD_ERROR_CODES).
 
-        adcp-req ERROR_CODE_VOCABULARY.md defines RATE_LIMIT_EXCEEDED as canonical.
-        RATE_LIMITED and THROTTLED are anti-patterns.
+        The SDK defines RATE_LIMITED as the standard code.
         """
         from src.core.exceptions import AdCPRateLimitError
 
-        assert AdCPRateLimitError.error_code == "RATE_LIMIT_EXCEEDED", (
-            f"AdCPRateLimitError.error_code = {AdCPRateLimitError.error_code!r}, "
-            f"expected 'RATE_LIMIT_EXCEEDED' per adcp-req vocabulary"
+        # Class-level identity lives on _default_error_code (option A,
+        # salesagent-fnk9). The public error_code is an instance attribute set
+        # in __init__ from this default unless overridden via synthesize().
+        assert AdCPRateLimitError._default_error_code == "RATE_LIMITED", (
+            f"AdCPRateLimitError._default_error_code = {AdCPRateLimitError._default_error_code!r}, "
+            f"expected 'RATE_LIMITED' per SDK STANDARD_ERROR_CODES"
         )
+        # Also pin via instance — proves the class-level default propagates
+        # into the instance attribute on construction.
+        assert AdCPRateLimitError("test").error_code == "RATE_LIMITED"
 
     def test_canonical_vocabulary_covers_all_subclasses(self):
         """CANONICAL_ERROR_CODES must have exactly one entry per exception subclass."""
         from src.core.exceptions import AdCPError
 
-        # Discover all concrete subclasses (recursively)
+        # Discover all concrete subclasses (recursively). Reads
+        # _default_error_code per option-A refactor (salesagent-fnk9).
         subclass_codes = set()
 
         def _collect(cls: type) -> None:
-            subclass_codes.add(cls.error_code)
+            subclass_codes.add(cls._default_error_code)
             for sub in cls.__subclasses__():
                 _collect(sub)
 
@@ -819,9 +854,18 @@ class TestErrorCodeVocabularyConsistency:
             f"Add them to the canonical set or fix the error_code."
         )
 
-        # Every canonical code must correspond to a subclass
-        unused = self.CANONICAL_ERROR_CODES - subclass_codes
+        # Every canonical code must correspond to either a subclass OR an
+        # advisory-on-success Pattern A wire code (constructed via
+        # ``Error(code=...)`` inside success envelopes without an associated
+        # raise site, hence no dedicated exception class).
+        _ADVISORY_ONLY_CODES = {
+            "CREATIVE_REJECTED",
+            "BUDGET_EXCEEDED",
+            "PRODUCT_UNAVAILABLE",
+        }
+        unused = self.CANONICAL_ERROR_CODES - subclass_codes - _ADVISORY_ONLY_CODES
         assert not unused, (
             f"CANONICAL_ERROR_CODES entries without a matching exception: {unused}. "
-            f"Remove stale entries or create the missing exception class."
+            f"Remove stale entries, add to _ADVISORY_ONLY_CODES if Pattern A, "
+            f"or create the missing exception class."
         )

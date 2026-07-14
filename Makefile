@@ -1,15 +1,26 @@
-.PHONY: setup quality quality-full pre-pr lint-fix lint typecheck test-fast test-full
+.PHONY: setup quality quality-ci quality-full pre-pr lint-fix lint typecheck test-fast test-full
 .PHONY: test-stack-up test-stack-down test-all test-cov test-entity
 .PHONY: test-int test-bdd test-e2e
 
 setup:
 	uv run python scripts/setup-dev.py
 
-quality:
+quality-ci:
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy src/ --config-file=mypy.ini
 	uv run python .pre-commit-hooks/check_code_duplication.py
+	uv run python .pre-commit-hooks/check-gam-auth-support.py
+	uv run python scripts/hooks/check_response_attribute_access.py $$(find src -name '*.py')
+	uv run python .pre-commit-hooks/check_roundtrip_tests.py
+	uv run python scripts/verify_feature_error_codes.py --uc UC-002 UC-003
+	uv run python .pre-commit-hooks/check_route_conflicts.py
+	uv run python .pre-commit-hooks/check_type_ignore_count.py
+	uv run python .pre-commit-hooks/check_docs_links.py
+	uv run python .pre-commit-hooks/check_hardcoded_urls.py $$(find templates static -type f \( -name '*.html' -o -name '*.js' \) 2>/dev/null)
+
+quality:
+	$(MAKE) quality-ci
 	uv run pytest tests/unit/ -x
 
 quality-full:

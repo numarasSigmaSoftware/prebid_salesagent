@@ -18,16 +18,21 @@ def _future(days: int = 1) -> datetime:
 
 
 def _make_create_request(**overrides: Any) -> CreateMediaBuyRequest:
-    """Build a minimal valid CreateMediaBuyRequest."""
+    """Build a minimal valid CreateMediaBuyRequest.
+
+    idempotency_key is required by adcp 4.3 and drives real replay/conflict
+    behavior against the persistent integration DB, so a per-call-unique key is
+    injected by default. Callers may override it (e.g. to deliberately reuse a
+    key) via the ``idempotency_key`` kwarg.
+    """
     defaults: dict[str, Any] = {
-        "buyer_ref": f"test-buyer-{uuid.uuid4().hex[:8]}",
         "brand": {"domain": "testbrand.com"},
         "start_time": _future(1),
         "end_time": _future(8),
+        "idempotency_key": f"int-key-{uuid.uuid4().hex}",
         "packages": [
             {
                 "product_id": "guaranteed_display",
-                "buyer_ref": "pkg-1",
                 "budget": 5000.0,
                 "pricing_option_id": "cpm_usd_fixed",
             }

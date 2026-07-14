@@ -77,31 +77,65 @@ except (RuntimeError, Exception) as e:
 from contextlib import asynccontextmanager
 
 
+def _background_schedulers_enabled() -> bool:
+    """Whether to start the background schedulers on app startup.
+
+    ``ADCP_RUN_BACKGROUND_SCHEDULERS`` is a **test-only** knob that defaults to
+    ENABLED (schedulers run in production unless the value is exactly ``"false"``,
+    read at runtime). The test harness sets it to ``false`` because the schedulers
+    run a batch immediately on startup, on the *real* wall clock, and mutate
+    media-buy status rows — which silently rewrites the rows a test just seeded
+    (e.g. promoting a seeded ``pending_start`` buy to ``active`` before the
+    assertion runs). It is NOT an operator control: disabling it in production
+    stops automatic pending->active->completed status transitions and delivery
+    webhooks, so an accidental disable is logged at WARNING (below) to make it
+    visible in production logs.
+    """
+    import os
+
+    return os.getenv("ADCP_RUN_BACKGROUND_SCHEDULERS", "true").lower() != "false"
+
+
 # Lifespan context manager for FastMCP startup/shutdown
 @asynccontextmanager
 async def lifespan_context(app):
     """Handle application startup and shutdown."""
-    # Startup: Initialize delivery webhook scheduler
-    from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
+    schedulers_enabled = _background_schedulers_enabled()
+    if not schedulers_enabled:
+        # WARNING, not INFO: this is a test-only knob (see
+        # _background_schedulers_enabled). If it is ever set in production the
+        # status/webhook schedulers do not run — surface that loudly.
+        logger.warning(
+            "Background schedulers DISABLED via ADCP_RUN_BACKGROUND_SCHEDULERS=false — "
+            "media-buy status transitions and delivery webhooks will NOT run. "
+            "This is a test-only knob; unset it in production."
+        )
 
-    logger.info("Starting delivery webhook scheduler...")
-    try:
-        await start_delivery_webhook_scheduler()
-        logger.info("✅ Delivery webhook scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start delivery webhook scheduler: {e}", exc_info=True)
+    if schedulers_enabled:
+        # Startup: Initialize delivery webhook scheduler
+        from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
 
-    # Startup: Initialize media buy status scheduler
-    from src.services.media_buy_status_scheduler import start_media_buy_status_scheduler
+        logger.info("Starting delivery webhook scheduler...")
+        try:
+            await start_delivery_webhook_scheduler()
+            logger.info("✅ Delivery webhook scheduler started")
+        except Exception as e:
+            logger.error(f"Failed to start delivery webhook scheduler: {e}", exc_info=True)
 
-    logger.info("Starting media buy status scheduler...")
-    try:
-        await start_media_buy_status_scheduler()
-        logger.info("✅ Media buy status scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start media buy status scheduler: {e}", exc_info=True)
+        # Startup: Initialize media buy status scheduler
+        from src.services.media_buy_status_scheduler import start_media_buy_status_scheduler
+
+        logger.info("Starting media buy status scheduler...")
+        try:
+            await start_media_buy_status_scheduler()
+            logger.info("✅ Media buy status scheduler started")
+        except Exception as e:
+            logger.error(f"Failed to start media buy status scheduler: {e}", exc_info=True)
 
     yield
+
+    if not schedulers_enabled:
+        return
 
     # Shutdown: Stop media buy status scheduler
     from src.services.media_buy_status_scheduler import stop_media_buy_status_scheduler
@@ -277,9 +311,14 @@ def get_strategy_manager(context: Context | None) -> StrategyManager:
 # Task management tools extracted to src/core/tools/task_management.py.
 
 
-# Import MCP tools from separate modules at the end to avoid circular imports
-# Tools are imported and then registered with MCP manually (no decorators in tool modules)
-# Import error logging wrapper for centralized error visibility
+# Import MCP tools from separate modules and register with MCP manually.
+# Tool descriptions and ToolAnnotations are imported from the AdCP SDK at
+# registration time. Our tools are a subset of the SDK's 57 — matching tools
+# get agent-facing descriptions and annotations (readOnlyHint, destructiveHint,
+# idempotentHint). Non-matching tools keep their existing docstrings.
+from adcp.server.mcp_tools import ADCP_TOOL_DEFINITIONS
+from mcp.types import ToolAnnotations
+
 from src.core.tool_error_logging import with_error_logging
 from src.core.tools.accounts import list_accounts, sync_accounts
 from src.core.tools.capabilities import get_adcp_capabilities
@@ -294,22 +333,34 @@ from src.core.tools.products import get_products
 from src.core.tools.properties import list_authorized_properties
 from src.core.tools.task_management import complete_task, get_task, list_tasks
 
-# Register tools with MCP (must be done after imports to avoid circular dependency)
-# This breaks the circular import: tool modules no longer import mcp from main.py
-# Tools are wrapped with error logging to ensure errors appear in activity feed
-mcp.tool()(with_error_logging(list_accounts))
-mcp.tool()(with_error_logging(sync_accounts))
-mcp.tool()(with_error_logging(get_adcp_capabilities))
-mcp.tool()(with_error_logging(get_products))
-mcp.tool()(with_error_logging(list_creative_formats))
-mcp.tool()(with_error_logging(sync_creatives))
-mcp.tool()(with_error_logging(list_creatives))
-mcp.tool()(with_error_logging(list_authorized_properties))
-mcp.tool()(with_error_logging(create_media_buy))
-mcp.tool()(with_error_logging(update_media_buy))
-mcp.tool()(with_error_logging(get_media_buy_delivery))
-mcp.tool()(with_error_logging(get_media_buys))
-mcp.tool()(with_error_logging(update_performance_index))
-mcp.tool()(with_error_logging(list_tasks))
-mcp.tool()(with_error_logging(get_task))
-mcp.tool()(with_error_logging(complete_task))
+_sdk_tool_defs = {td["name"]: td for td in ADCP_TOOL_DEFINITIONS}
+
+
+def _register_tool(fn: Any) -> None:
+    """Register an MCP tool with SDK description and annotations when available."""
+    tool_name = fn.__name__
+    sdk_def = _sdk_tool_defs.get(tool_name)
+    kwargs: dict[str, Any] = {}
+    if sdk_def:
+        kwargs["description"] = sdk_def["description"]
+        if sdk_def.get("annotations"):
+            kwargs["annotations"] = ToolAnnotations(**sdk_def["annotations"])
+    mcp.tool(**kwargs)(with_error_logging(fn))
+
+
+_register_tool(list_accounts)
+_register_tool(sync_accounts)
+_register_tool(get_adcp_capabilities)
+_register_tool(get_products)
+_register_tool(list_creative_formats)
+_register_tool(sync_creatives)
+_register_tool(list_creatives)
+_register_tool(list_authorized_properties)
+_register_tool(create_media_buy)
+_register_tool(update_media_buy)
+_register_tool(get_media_buy_delivery)
+_register_tool(get_media_buys)
+_register_tool(update_performance_index)
+_register_tool(list_tasks)
+_register_tool(get_task)
+_register_tool(complete_task)

@@ -188,6 +188,8 @@ Four guards enforce the transport boundary (see `docs/development/structural-gua
 
 ## MCP Protocol Implementation
 
+See also: [A2A and MCP Agent Flows](./a2a-mcp-agent-flows.md) for buyer, governance, and creative protocol diagrams.
+
 ### FastMCP Framework
 
 ```python
@@ -322,7 +324,7 @@ Used for:
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17-alpine
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

@@ -525,7 +525,6 @@ class TestFormatCompatibility:
                 budget=5000.0,
                 start_date=datetime.now(UTC).date(),
                 end_date=(datetime.now(UTC) + timedelta(days=30)).date(),
-                buyer_ref="buyer_fmt",
                 raw_request={"packages": [{"package_id": "pkg_video", "paused": False}]},
             )
             session.add(mb)
@@ -546,7 +545,7 @@ class TestFormatCompatibility:
         Spec: UNSPECIFIED (implementation-defined format compatibility logic).
         Unit stub: TestFormatCompatibility::test_format_mismatch_strict_raises
         """
-        from src.core.exceptions import AdCPValidationError
+        from src.core.exceptions import AdCPCreativeRejectedError
         from src.core.tools.creatives import sync_creatives_raw
 
         identity = _make_identity(self.TENANT_ID, self.PRINCIPAL_ID)
@@ -558,7 +557,7 @@ class TestFormatCompatibility:
         )
 
         # Now try to assign it to the video-only package in strict mode
-        with pytest.raises(AdCPValidationError, match="not supported by product"):
+        with pytest.raises(AdCPCreativeRejectedError, match="not supported by product"):
             sync_creatives_raw(
                 creatives=[_make_creative_dict(creative_id="c_display")],
                 assignments={"c_display": ["pkg_video"]},
@@ -637,7 +636,6 @@ class TestMediaBuyStatusTransition:
                 budget=5000.0,
                 start_date=datetime.now(UTC).date(),
                 end_date=(datetime.now(UTC) + timedelta(days=30)).date(),
-                buyer_ref="buyer_mb_status",
                 approved_at=datetime.now(UTC),
                 raw_request={"packages": [{"package_id": "pkg_draft", "paused": False}]},
             )

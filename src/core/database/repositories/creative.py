@@ -87,7 +87,7 @@ class CreativeRepository:
         created_before: datetime | None = None,
         search: str | None = None,
         media_buy_ids: list[str] | None = None,
-        buyer_refs: list[str] | None = None,
+        concept_ids: list[str] | None = None,
         sort_by: str = "created_date",
         sort_order: str = "desc",
         offset: int = 0,
@@ -113,23 +113,17 @@ class CreativeRepository:
                 Creative.creative_id == CreativeAssignment.creative_id,
             ).where(CreativeAssignment.media_buy_id.in_(media_buy_ids))
 
-        # Apply buyer_refs filter via join
-        if buyer_refs:
-            if not media_buy_ids:
-                stmt = stmt.join(
-                    CreativeAssignment,
-                    Creative.creative_id == CreativeAssignment.creative_id,
-                )
-            stmt = stmt.join(
-                MediaBuy,
-                CreativeAssignment.media_buy_id == MediaBuy.media_buy_id,
-            ).where(MediaBuy.buyer_ref.in_(buyer_refs))
-
         if status:
             stmt = stmt.where(Creative.status == status)
 
         if format:
             stmt = stmt.where(Creative.format == format)
+
+        # v3.1 concept_ids filter: concepts group related creatives across sizes
+        # and formats (e.g. Flashtalking concepts, Celtra campaign folders). The
+        # concept identifier is stored on the creative's JSON data blob.
+        if concept_ids:
+            stmt = stmt.where(Creative.data["concept_id"].as_string().in_(concept_ids))
 
         if tags:
             for tag in tags:

@@ -22,15 +22,24 @@ Multi-transport support (subclasses may also override):
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# The MCP transport boots the real FastMCP app lifespan, which starts the
+# background schedulers. Those run a batch immediately on the *real* wall clock
+# and rewrite media-buy status rows — silently mutating data a test just seeded
+# (e.g. promoting a seeded pending_start buy to active). Suppress them for all
+# harness-driven tests; setdefault so an explicit override still wins.
+# (src.core.main._background_schedulers_enabled reads this at lifespan runtime.)
+os.environ.setdefault("ADCP_RUN_BACKGROUND_SCHEDULERS", "false")
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.orm import Session
 
     from src.core.resolved_identity import ResolvedIdentity
-    from tests.harness.transport import Transport, TransportResult
+    from tests.harness.transport import E2EConfig, Transport, TransportResult
 
 
 def _adcp_error_from_code(
@@ -38,6 +47,8 @@ def _adcp_error_from_code(
     message: str,
     recovery: str | None = None,
     details: dict | None = None,
+    suggestion: str | None = None,
+    field: str | None = None,
 ) -> Exception:
     """Reconstruct the exact AdCPError subclass from an error_code string.
 
@@ -53,22 +64,30 @@ def _adcp_error_from_code(
         AdCPAccountSuspendedError,
         AdCPAdapterError,
         AdCPAuthenticationError,
-        AdCPAuthorizationError,
         AdCPBudgetExhaustedError,
+        AdCPBudgetTooLowError,
+        AdCPCapabilityNotSupportedError,
         AdCPConflictError,
         AdCPError,
+        AdCPIdempotencyConflictError,
+        AdCPIdempotencyExpiredError,
+        AdCPMediaBuyNotFoundError,
         AdCPNotFoundError,
+        AdCPPackageNotFoundError,
         AdCPRateLimitError,
         AdCPServiceUnavailableError,
         AdCPValidationError,
     )
 
+    # Read class-level identity from the _default_error_code ClassVar slot
+    # (option-A refactor per salesagent-fnk9). error_code is an instance
+    # attribute set in __init__; reading it off the class would return the
+    # descriptor, not the wire code string.
     _CODE_TO_CLASS: dict[str, type[AdCPError]] = {
-        cls.error_code: cls
+        cls._default_error_code: cls
         for cls in (
             AdCPValidationError,
             AdCPAuthenticationError,
-            AdCPAuthorizationError,
             AdCPNotFoundError,
             AdCPAccountNotFoundError,
             AdCPAccountSetupRequiredError,
@@ -80,13 +99,38 @@ def _adcp_error_from_code(
             AdCPRateLimitError,
             AdCPAdapterError,
             AdCPServiceUnavailableError,
+            # Substrate subclasses with production raise sites — the harness
+            # reconstructs the specific subclass after a roundtrip (preserves
+            # type for isinstance() checks in tests). Codes with only
+            # advisory-on-success Pattern A construction (BUDGET_EXCEEDED,
+            # CREATIVE_REJECTED, PRODUCT_UNAVAILABLE) round-trip via the
+            # base AdCPError fallback below and don't need a dedicated class.
+            AdCPMediaBuyNotFoundError,
+            AdCPPackageNotFoundError,
+            AdCPBudgetTooLowError,
+            AdCPCapabilityNotSupportedError,
+            AdCPIdempotencyConflictError,
+            AdCPIdempotencyExpiredError,
         )
     }
+    # AdCPAuthenticationError and AdCPAuthorizationError share the AUTH_REQUIRED
+    # wire code — we can't disambiguate auth-missing from auth-insufficient at
+    # the wire, and Authentication (missing token/tenant) is the more common
+    # buyer-facing case. Pin Authentication explicitly here so the mapping
+    # doesn't depend on dict-comprehension insertion order.
+    _CODE_TO_CLASS[AdCPAuthenticationError._default_error_code] = AdCPAuthenticationError
+    from src.core.exceptions import INTERNAL_CODES
+
+    assert error_code not in INTERNAL_CODES, (
+        f"INTERNAL code {error_code!r} reached harness reconstruction — production wire leaked an internal-only code"
+    )
     exc_cls = _CODE_TO_CLASS.get(error_code, AdCPError)
     reconstructed = exc_cls(
         message=message,
         details=details,
         recovery=recovery or "terminal",
+        suggestion=suggestion,
+        field=field,
     )
     if exc_cls is AdCPError:
         reconstructed.error_code = error_code
@@ -96,27 +140,40 @@ def _adcp_error_from_code(
 def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     """Translate FastMCP ToolError back to the corresponding AdCPError.
 
-    The MCP tool wrappers (via with_error_logging) convert AdCPError to
-    ToolError(error_code, message, recovery). When the error travels through
-    the MCP Client, the structured args are serialized to a single string:
-    ``"('VALIDATION_ERROR', 'message', 'correctable')"``.
+    The MCP boundary translator raises ``AdCPToolError`` (single-arg JSON
+    envelope) so FastMCP serializes ``str(exc)`` as the JSON-encoded two-layer
+    error envelope. This unwrapper parses that JSON and reconstructs the
+    matching AdCPError subclass.
 
-    This parses the string back to a tuple via ast.literal_eval and
-    reconstructs the AdCPError subclass.
+    Falls back to legacy tuple-string parsing for any plain ``ToolError`` that
+    might be raised by code paths outside the MCP boundary translator (these
+    are rare and shrink over time per the architecture cleanup).
 
     If the exception is not a ToolError or can't be parsed, returns it unchanged.
     """
     import ast
+    import json
 
     from fastmcp.exceptions import ToolError
 
     if not isinstance(exc, ToolError):
         return exc
 
-    # ToolError from Client has a single string arg containing the repr'd tuple.
     error_str = str(exc)
 
-    # Try to parse as a Python tuple: ('CODE', 'message', 'recovery', '{"details": ...}')
+    # New shape: single-arg JSON envelope — delegate to shared helper.
+    try:
+        envelope = json.loads(error_str)
+        if isinstance(envelope, dict):
+            reconstructed = _envelope_to_adcp_error(envelope)
+            if reconstructed is not None:
+                return reconstructed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Legacy shape (test fixtures that mock ToolError directly):
+    # tuple-stringified `('CODE', 'message', 'recovery', '{"details": ...}')`.
+    # Deprecated: legacy ToolError tuple-string parsing — remove when no test fixtures depend on raw ToolError raises.
     try:
         parsed = ast.literal_eval(error_str)
         if isinstance(parsed, tuple) and len(parsed) >= 2:
@@ -124,21 +181,27 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
             message = str(parsed[1])
             recovery = str(parsed[2]) if len(parsed) > 2 else None
 
-            # 4th element is JSON-serialized details dict (if present)
+            # 4th element is a JSON-serialized extra blob that may contain
+            # "details", "suggestion", and "field" as separate top-level keys
+            # (packed by tool_error_logging._translate_to_tool_error).
             details = None
+            suggestion = None
+            field = None
             if len(parsed) > 3 and parsed[3] is not None:
-                import json
-
                 try:
-                    details = json.loads(str(parsed[3]))
+                    extra = json.loads(str(parsed[3]))
+                    if isinstance(extra, dict):
+                        details = extra.get("details")
+                        suggestion = extra.get("suggestion")
+                        field = extra.get("field")
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            return _adcp_error_from_code(error_code, message, recovery, details)
+            return _adcp_error_from_code(error_code, message, recovery, details, suggestion, field)
     except (ValueError, SyntaxError):
         pass
 
-    # Fallback: try extract_error_info (handles direct ToolError construction)
+    # Fallback: try extract_error_info (handles ToolError("message") single-arg form)
     from src.core.tool_error_logging import extract_error_info
 
     error_code, message, recovery = extract_error_info(exc)
@@ -148,42 +211,114 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     return exc
 
 
+def _envelope_to_adcp_error(envelope: dict, fallback_message: str = "") -> Exception | None:
+    """Reconstruct an AdCPError subclass from a two-layer envelope dict.
+
+    Accepts the envelope shape produced by ``build_two_layer_error_envelope``:
+    ``{"adcp_error": {code, message, recovery, details, ...}, "errors": [...], ...}``.
+    Also accepts the legacy flat shape ``{"error_code": ..., "recovery": ...}``
+    for tests that predate the envelope.
+
+    Single source of truth for envelope→exception reconstruction — called by
+    ``_unwrap_a2a_server_error`` (A2AError.data path) and
+    ``BaseTestEnv.parse_rest_error`` (REST response body path). Returns the
+    reconstructed ``AdCPError`` subclass, or ``None`` if no ``error_code`` can
+    be extracted (caller picks a fallback).
+    """
+    if not isinstance(envelope, dict):
+        return None
+    error_code: str | None = None
+    message = fallback_message
+    recovery: str | None = None
+    details: dict | None = None
+    suggestion: str | None = None
+    field: str | None = None
+    adcp_err = envelope.get("adcp_error")
+    if isinstance(adcp_err, dict):
+        error_code = adcp_err.get("code")
+        message = adcp_err.get("message", message) or message
+        recovery = adcp_err.get("recovery")
+        details = adcp_err.get("details")
+        suggestion = adcp_err.get("suggestion")
+        field = adcp_err.get("field")
+    errors = envelope.get("errors")
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        first = errors[0]
+        error_code = error_code or first.get("code")
+        message = first.get("message", message) or message
+        recovery = recovery or first.get("recovery")
+        details = details or first.get("details")
+        suggestion = suggestion or first.get("suggestion")
+        field = field or first.get("field")
+    if not error_code:
+        return None
+    reconstructed = _adcp_error_from_code(error_code, message, recovery, details, suggestion, field)
+    if reconstructed is not None:
+        # Stash the REAL wire envelope on the reconstructed exception so the
+        # A2A/REST dispatchers can capture the actual wire bytes (artifact
+        # DataPart for A2A, HTTP body for REST) rather than re-synthesizing
+        # via build_two_layer_error_envelope — re-synthesis would just
+        # regenerate from the lossy reconstructed exception. Read by
+        # ``A2ADispatcher.dispatch`` via ``getattr(exc, '_wire_error_envelope', None)``.
+        reconstructed._wire_error_envelope = envelope  # type: ignore[attr-defined]
+    return reconstructed
+
+
 def _unwrap_a2a_server_error(exc: Exception) -> Exception:
-    """Translate a2a ServerError back to the corresponding AdCPError.
+    """Translate a2a A2AError back to the corresponding AdCPError.
 
-    The A2A handler wraps AdCPError → ServerError (via _adcp_to_a2a_error).
-    This reverses that translation so callers can ``pytest.raises(AdCPAuthenticationError)``
-    instead of catching the transport-level wrapper.
+    The A2A dispatcher wraps AdCPError into a failed Task whose artifact
+    carries the two-layer envelope. If the exception is a JSON-RPC-level
+    A2AError (e.g., from the dispatcher's own catch-all), the ``data``
+    field carries the envelope.
 
-    If the exception is not a ServerError or lacks enough info, returns it unchanged.
+    If the exception is not an A2AError or lacks enough info, returns it unchanged.
     """
     from a2a.types import InternalError, InvalidParamsError, InvalidRequestError
-    from a2a.utils.errors import ServerError
+    from a2a.utils.errors import A2AError
 
-    if not isinstance(exc, ServerError):
+    if not isinstance(exc, A2AError):
         return exc
 
-    error = exc.error
-    message = getattr(error, "message", str(exc))
-    data = getattr(error, "data", None) or {}
+    # a2a-sdk 1.0: the exception itself carries message/data (no .error wrapper)
+    message = getattr(exc, "message", str(exc))
+    data = getattr(exc, "data", None) or {}
 
-    # If _adcp_to_a2a_error stored the error_code, reconstruct the exact subclass.
-    error_code = data.get("error_code")
-    if error_code:
-        return _adcp_error_from_code(error_code, message, data.get("recovery"))
+    reconstructed = _envelope_to_adcp_error(data, fallback_message=message) if isinstance(data, dict) else None
+    if reconstructed is not None:
+        return reconstructed
 
     from src.core.exceptions import (
         AdCPAuthenticationError,
         AdCPValidationError,
     )
 
-    if isinstance(error, InvalidRequestError):
+    if isinstance(exc, InvalidRequestError):
         return AdCPAuthenticationError(message)
-    if isinstance(error, InvalidParamsError):
+    if isinstance(exc, InvalidParamsError):
         return AdCPValidationError(message)
-    if isinstance(error, InternalError):
+    if isinstance(exc, InternalError):
         return RuntimeError(message)
     return exc
+
+
+class _TestClock:
+    """Simple clock for BDD date token resolution ({now}, {N days from now}, etc.)."""
+
+    def now_iso(self) -> str:
+        from datetime import UTC, datetime
+
+        return datetime.now(UTC).isoformat()
+
+    def future_iso(self, days: int) -> str:
+        from datetime import UTC, datetime, timedelta
+
+        return (datetime.now(UTC) + timedelta(days=days)).isoformat()
+
+    def past_iso(self, days: int) -> str:
+        from datetime import UTC, datetime, timedelta
+
+        return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
 class BaseTestEnv:
@@ -235,17 +370,31 @@ class BaseTestEnv:
         principal_id: str = "test_principal",
         tenant_id: str = "test_tenant",
         dry_run: bool = False,
+        database_url: str | None = None,
+        e2e_config: E2EConfig | None = None,
         **tenant_overrides: Any,
     ) -> None:
         self._principal_id = principal_id
         self._tenant_id = tenant_id
         self._dry_run = dry_run
+        # E2E mode: bind factories to the live server's DB so the HTTP-reached
+        # server sees Given-step data. Explicit database_url wins; else the
+        # e2e_config's postgres_url. None => normal cached/integration engine.
+        self._database_url = database_url or (e2e_config.postgres_url if e2e_config else None)
+        self.e2e_config: E2EConfig | None = e2e_config
+        self._e2e_engine: Any = None
         self._tenant_overrides = tenant_overrides
         self.mock: dict[str, MagicMock] = {}
         self._patchers: list[Any] = []
         self._session: Session | None = None
         self._identity_cache: dict[str, ResolvedIdentity] = {}
         self._rest_client: Any = None  # Lazy-created TestClient
+        self.clock = _TestClock()  # BDD steps may use env.clock for date tokens
+        # Real serialized success-path wire, stashed by _run_a2a_handler /
+        # _run_mcp_client (the only paths that capture it) and read by the
+        # A2A/MCP dispatchers. None unless such a path ran — REST builds its
+        # own from the HTTP body; legacy/_raw paths and IMPL leave it None.
+        self._last_wire_response: dict[str, Any] | None = None
 
     # -- Identity (one function, all transports) ----------------------------
 
@@ -305,6 +454,19 @@ class BaseTestEnv:
         ).first()
         return token
 
+    def switch_principal(self, principal_id: str) -> None:
+        """Re-point the env at *principal_id*, clearing cached identity.
+
+        Public accessor for the principal-switch mutation (mirrors
+        ``get_session()``): step functions must not reach into the private
+        ``_identity_cache`` / ``_principal_id``. Clearing the cache forces the
+        next ``identity`` / ``identity_for`` access to re-resolve from scratch —
+        picking up a principal row committed after the env was created (in
+        integration mode this re-runs the auth-token lookup).
+        """
+        self._identity_cache.clear()
+        self._principal_id = principal_id
+
     @property
     def identity(self) -> ResolvedIdentity:
         """Default identity (protocol='mcp'). Backward-compatible.
@@ -335,6 +497,9 @@ class BaseTestEnv:
         kwargs.setdefault("identity", self.identity_for(transport))
 
         dispatcher = DISPATCHERS[transport]
+        # Reset success-path wire capture; _run_a2a_handler / _run_mcp_client
+        # set it fresh on success so A2A/MCP dispatchers can surface real wire.
+        self._last_wire_response = None
         return dispatcher.dispatch(self, **kwargs)
 
     # -- Per-transport hooks (override in subclass) -------------------------
@@ -405,7 +570,8 @@ class BaseTestEnv:
         """
         import asyncio
 
-        from a2a.types import MessageSendParams, Task
+        from a2a.server.routes.common import ServerCallContext
+        from a2a.types import SendMessageRequest, Task
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
         from tests.harness.transport import Transport
@@ -434,14 +600,36 @@ class BaseTestEnv:
             parameters = dict(kwargs)
 
         handler = AdCPRequestHandler()
-        # Single mock point: identity resolution.
-        # _get_auth_token must return a non-None value when identity exists,
-        # otherwise the handler rejects the request before _resolve_a2a_identity
-        # is called. Use auth_token from identity, falling back to a sentinel.
-        handler._resolve_a2a_identity = lambda *args, **kw: a2a_identity  # type: ignore[assignment]
-        handler._get_auth_token = lambda *args, **kw: (  # type: ignore[assignment]
-            (a2a_identity.auth_token or "harness-test-token") if a2a_identity else None
-        )
+
+        # Auth strategy mirrors _run_mcp_client. When the identity carries a real
+        # auth_token (integration mode), populate the AuthContext that the SDK
+        # call-context builder would have built from the wire and run the REAL
+        # _get_auth_token + _resolve_a2a_identity (header → token → DB lookup →
+        # ResolvedIdentity). Only the transport's state injection is supplied here
+        # (the in-process equivalent of MCP's get_http_headers seam) — the auth
+        # chain itself is real. When no real token exists (unit mode), inject the
+        # identity directly via the single mock point (unchanged behavior).
+        auth_token = a2a_identity.auth_token if a2a_identity else None
+
+        if auth_token:
+            from src.core.auth_context import AUTH_CONTEXT_STATE_KEY, AuthContext
+
+            headers = {
+                "x-adcp-auth": auth_token,
+                "x-adcp-tenant": a2a_identity.tenant_id or "",
+            }
+            server_context = ServerCallContext(
+                state={AUTH_CONTEXT_STATE_KEY: AuthContext(auth_token=auth_token, headers=headers)}
+            )
+        else:
+            # _get_auth_token must return a non-None value when identity exists,
+            # otherwise the handler rejects the request before _resolve_a2a_identity
+            # is called. Use auth_token from identity, falling back to a sentinel.
+            handler._resolve_a2a_identity = lambda *args, **kw: a2a_identity  # type: ignore[assignment]
+            handler._get_auth_token = lambda *args, **kw: (  # type: ignore[assignment]
+                (a2a_identity.auth_token or "harness-test-token") if a2a_identity else None
+            )
+            server_context = ServerCallContext()
 
         # Set tenant ContextVar so production code can read it
         if a2a_identity and a2a_identity.tenant:
@@ -450,24 +638,46 @@ class BaseTestEnv:
             set_current_tenant(a2a_identity.tenant)
 
         message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
-        params = MessageSendParams(message=message)
+        params = SendMessageRequest(message=message)
 
         async def _call():
-            return await handler.on_message_send(params)
+            return await handler.on_message_send(params, server_context)
 
         try:
             task_result = asyncio.run(_call())
         except Exception as exc:
-            # Translate ServerError back to AdCPError for callers that catch
+            # Translate A2AError back to AdCPError for callers that catch
             # domain exceptions (e.g., pytest.raises(AdCPAuthenticationError)).
             raise _unwrap_a2a_server_error(exc) from exc
 
         # Parse Task.artifacts[0] into response_cls
         if not isinstance(task_result, Task):
             raise TypeError(f"Expected Task, got {type(task_result).__name__}: {task_result}")
+
+        # AdCP-domain errors now surface as a failed Task with the two-layer
+        # envelope in the artifact DataPart. Reconstruct the AdCPError so
+        # callers can catch domain exceptions instead of getting
+        # a pydantic ValidationError from trying to parse the envelope as a
+        # success response.
+        from a2a.types import TaskState
+
+        if task_result.status.state == TaskState.TASK_STATE_FAILED:
+            from src.core.exceptions import AdCPError
+
+            if task_result.artifacts:
+                envelope = extract_data_from_artifact(task_result.artifacts[0])
+                reconstructed = _envelope_to_adcp_error(envelope, fallback_message="A2A skill failed")
+                if reconstructed is not None:
+                    raise reconstructed
+            raise AdCPError(f"A2A task failed: {task_result.status}")
+
         if not task_result.artifacts:
             raise ValueError(f"Task has no artifacts. Status: {task_result.status}")
         artifact_data = extract_data_from_artifact(task_result.artifacts[0])
+        # Surface the full, unstripped artifact DataPart as the real A2A wire for
+        # success-path assertions. Captured BEFORE stripping so siblings that need
+        # the top-level envelope fields (message/success) still see them.
+        self._last_wire_response = dict(artifact_data)
         # Strip protocol fields added by _serialize_for_a2a (message, success).
         # These are A2A-envelope fields, not part of the Pydantic response model,
         # and cause ValidationError under extra="forbid" in non-production mode.
@@ -552,7 +762,9 @@ class BaseTestEnv:
                         assert patched_th.called or patched_mw.called, (
                             f"Auth chain not exercised for {tool_name} — get_http_headers patches were not called"
                         )
+                        self._last_wire_response = result.structured_content
                         return response_cls(**result.structured_content)
+
         else:
             # Unit mode: inject identity directly.
             async def _call():
@@ -562,6 +774,7 @@ class BaseTestEnv:
                 ):
                     async with Client(mcp) as client:
                         result = await client.call_tool(tool_name, arguments)
+                        self._last_wire_response = result.structured_content
                         return response_cls(**result.structured_content)
 
         try:
@@ -620,12 +833,24 @@ class BaseTestEnv:
         5. Return raw httpx.Response
 
         Identity handling (mirrors production auth middleware):
-        - identity is None → dep raises AdCPAuthenticationError (no token)
+        - identity is None → dep raises AUTH_REQUIRED (no token) with suggestion
         - identity is ResolvedIdentity → dep returns it (valid token)
         - identity absent → uses default self.identity_for(Transport.REST)
         """
-        from src.app import app
-        from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
+        client, identity = self._prepare_rest_request(kwargs)
+        body = self.build_rest_body(**kwargs)
+        return client.post(endpoint, json=body)
+
+    def _prepare_rest_request(self, kwargs: dict[str, Any]) -> tuple[Any, Any]:
+        """Resolve identity, commit factory data, get the client, and install auth.
+
+        Single source of truth for the REST request preamble every dispatcher
+        shares: pops ``identity`` from *kwargs* (defaulting to the REST identity),
+        commits pending factory rows, creates/returns the TestClient, and installs
+        the per-request auth-dep override (which must run AFTER ``get_rest_client``).
+        Returns ``(client, resolved_identity)``; the caller builds the body from the
+        now-identity-free *kwargs* and issues the HTTP verb.
+        """
         from tests.harness.transport import Transport
 
         _NO_OVERRIDE = object()
@@ -634,26 +859,31 @@ class BaseTestEnv:
             identity = self.identity_for(Transport.REST)
 
         self._commit_factory_data()
-
-        # Get client first (may set default dep overrides on first call),
-        # then override per-request auth AFTER.
         client = self.get_rest_client()
+        self._configure_rest_auth_override(identity)
+        return client, identity
 
-        # Configure per-request auth (must be after get_rest_client)
+    @staticmethod
+    def _configure_rest_auth_override(identity: Any) -> None:
+        """Install per-request FastAPI auth-dep overrides for the test app.
+
+        Single source of truth for the REST auth contract every dispatcher needs
+        (must run AFTER ``get_rest_client``). With ``identity=None`` the
+        ``_require_auth_dep`` override is REMOVED so the real production
+        dependency runs against the token-less request and raises the real
+        ``AUTH_REQUIRED`` error — the harness must not hand-copy the production
+        raise (a simulated raise drifted from production once already,
+        #1417/cx41); otherwise both deps return the identity.
+        """
+        from src.app import app
+        from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
+
         if identity is None:
-            from src.core.exceptions import AdCPAuthenticationError
-
-            def _no_auth() -> None:
-                raise AdCPAuthenticationError("Authentication required")
-
-            app.dependency_overrides[_require_auth_dep] = _no_auth
+            app.dependency_overrides.pop(_require_auth_dep, None)
             app.dependency_overrides[_resolve_auth_dep] = lambda: None
         else:
             app.dependency_overrides[_require_auth_dep] = lambda: identity
             app.dependency_overrides[_resolve_auth_dep] = lambda: identity
-
-        body = self.build_rest_body(**kwargs)
-        return client.post(endpoint, json=body)
 
     def call_rest(self, **kwargs: Any) -> Any:
         """Call the REST endpoint and parse the response.
@@ -709,17 +939,17 @@ class BaseTestEnv:
     def parse_rest_error(self, status_code: int, data: dict[str, Any]) -> Exception:
         """Reconstruct an AdCPError from REST error response.
 
-        Prefers the structured error_code in the response body (same precision
-        as MCP and A2A unwrappers). Falls back to HTTP status mapping.
+        Delegates envelope and legacy-flat parsing to the shared
+        ``_envelope_to_adcp_error`` helper (same path used by the A2A
+        unwrapper) so REST and A2A reconstruction stay byte-identical.
+        Falls back to HTTP status mapping only when no ``error_code`` is
+        recoverable from the body.
         """
         message = data.get("message", data.get("error", str(data)))
 
-        # Try structured error_code first (same as MCP/A2A unwrappers)
-        error_code = data.get("error_code")
-        if error_code:
-            recovery = data.get("recovery")
-            details = data.get("details")
-            return _adcp_error_from_code(error_code, message, recovery, details)
+        reconstructed = _envelope_to_adcp_error(data, fallback_message=message)
+        if reconstructed is not None:
+            return reconstructed
 
         # Fallback: map HTTP status to exception class
         from src.core.exceptions import (
@@ -802,7 +1032,20 @@ class BaseTestEnv:
                     "nested IntegrationEnv contexts are not supported"
                 )
 
-            engine = get_engine()
+            # E2E mode connects directly to the specified database (the live
+            # server's Postgres via e2e_config.postgres_url) instead of the cached
+            # engine, so factory writes land in the DB the HTTP server reads.
+            if self._database_url:
+                from sqlalchemy import create_engine
+
+                from src.core.database.database_session import _pydantic_json_serializer
+
+                self._e2e_engine = create_engine(
+                    self._database_url, echo=False, json_serializer=_pydantic_json_serializer
+                )
+                engine = self._e2e_engine
+            else:
+                engine = get_engine()
             self._session = SASession(bind=engine)
 
             for f in ALL_FACTORIES:
@@ -891,6 +1134,47 @@ class IntegrationEnv(BaseTestEnv):
         principal = PrincipalFactory(tenant=tenant, principal_id=self._principal_id)
         return tenant, principal
 
+    # -- Public query API (step functions must use these, not env._session) ----
+
+    def get_session(self) -> Session:
+        """Return the env-bound SQLAlchemy session for read-back assertions.
+
+        Public accessor so step functions never reach into the private
+        ``_session`` attribute. Only valid inside the ``with env:`` block.
+        """
+        if self._session is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.get_session() called without an active session — "
+                "use it inside a 'with env:' block (integration mode)."
+            )
+        return self._session
+
+    def query(self, model: type, **filters: Any) -> list:
+        """Return all rows of ``model`` matching ``filters`` via the bound session."""
+        from sqlalchemy import select
+
+        return list(self.get_session().scalars(select(model).filter_by(**filters)).all())
+
+    def get_one(self, model: type, **filters: Any) -> Any:
+        """Return the first row of ``model`` matching ``filters``, or ``None``."""
+        from sqlalchemy import select
+
+        return self.get_session().scalars(select(model).filter_by(**filters)).first()
+
+    def get_workflow_steps(self) -> list:
+        """Return WorkflowStep rows scoped to this env's tenant.
+
+        WorkflowStep has no tenant_id column; tenant scoping is via its Context
+        relationship, so this joins WorkflowStep -> Context and filters on
+        ``Context.tenant_id``.
+        """
+        from sqlalchemy import select
+
+        from src.core.database.models import Context, WorkflowStep
+
+        stmt = select(WorkflowStep).join(WorkflowStep.context).where(Context.tenant_id == self._tenant_id)
+        return list(self.get_session().scalars(stmt).all())
+
     def get_rest_client(self) -> Any:
         """Return FastAPI TestClient with default auth dep override.
 
@@ -912,3 +1196,20 @@ class IntegrationEnv(BaseTestEnv):
             self._rest_client = TestClient(app)
 
         return self._rest_client
+
+
+class BareIntegrationEnv(IntegrationEnv):
+    """Integration env with no external patches — for repository-level tests.
+
+    Repository tests exercise the data layer directly: they need the real
+    database session and factory binding ``IntegrationEnv`` provides, but none
+    of the adapter/notifier mocks. ``get_session()`` commits any pending
+    factory data and exposes the session for direct repository construction.
+    """
+
+    EXTERNAL_PATCHES: dict[str, str] = {}
+
+    def get_session(self) -> Any:
+        """Commit pending factory data and expose the session."""
+        self._commit_factory_data()
+        return self._session

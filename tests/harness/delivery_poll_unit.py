@@ -45,7 +45,7 @@ class DeliveryPollEnv(DeliveryPollMixin, BaseTestEnv):
     MODULE = "src.core.tools.media_buy_delivery"
     EXTERNAL_PATCHES = {
         "uow": f"{MODULE}.MediaBuyUoW",
-        "principal": f"{MODULE}.get_principal_object",
+        "principal": "src.core.auth.get_principal_object",
         "adapter": f"{MODULE}.get_adapter",
         "pricing": f"{MODULE}._get_pricing_options",
         "circuit_open": f"{MODULE}._is_circuit_breaker_open",
@@ -81,21 +81,25 @@ class DeliveryPollEnv(DeliveryPollMixin, BaseTestEnv):
     def add_buy(
         self,
         media_buy_id: str = "mb_001",
-        buyer_ref: str | None = "ref_001",
         start_date: date = date(2025, 1, 1),
         end_date: date = date(2027, 12, 31),
         budget: float = 10000.0,
         currency: str = "USD",
         raw_request: dict[str, Any] | None = None,
         is_paused: bool = False,
+        status: str = "active",
     ) -> MagicMock:
         """Add a mock MediaBuy to the repository.
+
+        ``status`` is the persisted lifecycle status. It defaults to the
+        generic "active" serving state, which ``_get_target_media_buys``
+        refines against the flight window so date-only callers still resolve
+        to ready/active/completed.
 
         Returns the mock buy for further customization if needed.
         """
         buy = MagicMock()
         buy.media_buy_id = media_buy_id
-        buy.buyer_ref = buyer_ref
         buy.start_date = start_date
         buy.end_date = end_date
         buy.start_time = None
@@ -103,8 +107,8 @@ class DeliveryPollEnv(DeliveryPollMixin, BaseTestEnv):
         buy.budget = budget
         buy.currency = currency
         buy.is_paused = is_paused
+        buy.status = status
         buy.raw_request = raw_request or {
-            "buyer_ref": buyer_ref,
             "packages": [{"package_id": "pkg_001", "product_id": "prod_001"}],
         }
         self._buys.append(buy)

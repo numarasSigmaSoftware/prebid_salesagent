@@ -5,8 +5,7 @@ These fixtures are only available to unit tests.
 """
 
 import sys
-from decimal import Decimal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -35,87 +34,6 @@ def mock_all_external_dependencies():
             mock_post.return_value.json.return_value = {}
 
             yield
-
-
-@pytest.fixture
-def standard_mocks():
-    """Context manager that patches all common dependencies for _update_media_buy_impl.
-
-    Patches MediaBuyUoW to provide a mock session and repository,
-    and patches all other common dependencies.
-
-    Yields a dict of mock objects keyed by short name.
-    """
-    mock_session = MagicMock()
-    mock_cm = MagicMock()
-    mock_cm.__enter__ = Mock(return_value=mock_session)
-    mock_cm.__exit__ = Mock(return_value=False)
-
-    mock_cl = MagicMock()
-    mock_cl.max_daily_package_spend = Decimal("100000")
-    mock_cl.min_package_budget = Decimal("0")
-
-    mock_uow = MagicMock()
-    mock_uow.session = mock_session
-    mock_uow.media_buys = MagicMock()
-    mock_currency_limits_repo = MagicMock()
-    mock_currency_limits_repo.get_for_currency.return_value = mock_cl
-    mock_uow.currency_limits = mock_currency_limits_repo
-    mock_uow.__enter__ = Mock(return_value=mock_uow)
-    mock_uow.__exit__ = Mock(return_value=False)
-
-    MODULE = "src.core.tools.media_buy_update"
-    DB_MODULE = "src.core.database.database_session"
-
-    with (
-        patch("src.core.helpers.context_helpers.ensure_tenant_context") as m_tenant,
-        patch(f"{MODULE}.get_principal_object") as m_principal_obj,
-        patch(f"{MODULE}._verify_principal") as m_verify,
-        patch(f"{MODULE}.get_context_manager") as m_ctx_mgr,
-        patch(f"{MODULE}.get_adapter") as m_adapter,
-        patch(f"{MODULE}.get_audit_logger") as m_audit,
-        patch(f"{MODULE}.MediaBuyUoW") as m_uow,
-        patch(f"{DB_MODULE}.get_db_session") as m_db,
-    ):
-        m_tenant.return_value = {"tenant_id": "tenant_test", "name": "Test"}
-        m_principal_obj.return_value = MagicMock(
-            principal_id="principal_test",
-            name="Test Principal",
-            platform_mappings={},
-        )
-
-        m_uow.return_value = mock_uow
-
-        mock_step = MagicMock()
-        mock_step.step_id = "step_001"
-        mock_ctx_mgr_instance = MagicMock()
-        mock_ctx_mgr_instance.get_or_create_context.return_value = MagicMock(context_id="ctx_001")
-        mock_ctx_mgr_instance.create_workflow_step.return_value = mock_step
-        m_ctx_mgr.return_value = mock_ctx_mgr_instance
-
-        mock_adapter_instance = MagicMock()
-        mock_adapter_instance.manual_approval_required = False
-        mock_adapter_instance.manual_approval_operations = []
-        m_adapter.return_value = mock_adapter_instance
-
-        m_audit.return_value = MagicMock()
-        m_db.return_value = mock_cm
-
-        yield {
-            "tenant": m_tenant,
-            "principal_obj": m_principal_obj,
-            "verify_principal": m_verify,
-            "ctx_mgr": m_ctx_mgr,
-            "ctx_mgr_instance": mock_ctx_mgr_instance,
-            "adapter": m_adapter,
-            "adapter_instance": mock_adapter_instance,
-            "audit": m_audit,
-            "uow": m_uow,
-            "uow_instance": mock_uow,
-            "db": m_db,
-            "db_session": mock_session,
-            "step": mock_step,
-        }
 
 
 @pytest.fixture
@@ -195,5 +113,59 @@ def make_auth_test_client():
             mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
             yield client, mock_session
+
+    return _factory
+
+
+@pytest.fixture
+def make_users_test_client():
+    """Factory fixture: context manager yielding (client, mock_session) for users blueprint.
+
+    Sets up ADCP_AUTH_TEST_MODE=true + a super-admin test session so
+    @require_tenant_access() passes without a DB call. tenant_id used in routes is "default".
+
+    Usage::
+
+        with make_users_test_client(auth_setup_mode=True) as (client, mock_session):
+            response = client.get("/tenant/default/users")
+    """
+    import os
+    from contextlib import contextmanager
+
+    from src.admin.app import create_app
+
+    @contextmanager
+    def _factory(
+        auth_setup_mode: bool = True,
+        oidc_enabled: bool = False,
+        auth_config_exists: bool = True,
+    ):
+        app = create_app({"TESTING": True, "SECRET_KEY": "test-secret", "WTF_CSRF_ENABLED": False})
+        client = app.test_client()
+
+        mock_tenant = MagicMock()
+        mock_tenant.auth_setup_mode = auth_setup_mode
+        mock_tenant.name = "Test Tenant"
+        mock_tenant.authorized_domains = []
+
+        mock_auth_config = MagicMock() if auth_config_exists else None
+        if auth_config_exists:
+            mock_auth_config.oidc_enabled = oidc_enabled
+
+        mock_session = MagicMock()
+        # list_users calls scalars().first() twice (tenant, then auth_config) and .all() once
+        # enable_setup_mode calls scalars().first() once (tenant)
+        mock_session.scalars.return_value.first.side_effect = [mock_tenant, mock_auth_config]
+        mock_session.scalars.return_value.all.return_value = []
+
+        with patch("src.admin.blueprints.users.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            with client.session_transaction() as sess:
+                sess["test_user"] = "admin@test.com"
+                sess["test_tenant_id"] = "default"
+                sess["test_user_role"] = "super_admin"
+            with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
+                yield client, mock_session
 
     return _factory

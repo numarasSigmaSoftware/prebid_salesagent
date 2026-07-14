@@ -5,16 +5,15 @@ in the MCP server, following the A2A protocol's Task-based approach.
 """
 
 from datetime import UTC, datetime
-from enum import Enum
-from typing import Any, Generic, TypeVar
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Generic type for the result of an async operation
-T = TypeVar("T", bound=BaseModel)
+# Generic type for the result of an async operation — PEP 695 type parameters on classes below.
 
 
-class TaskState(str, Enum):
+class TaskState(StrEnum):
     """Task lifecycle states following A2A specification."""
 
     SUBMITTED = "submitted"
@@ -39,7 +38,7 @@ class TaskStatus(BaseModel):
     progress: float | None = None  # 0.0 to 1.0
 
 
-class AsyncTask(BaseModel, Generic[T]):
+class AsyncTask[T: BaseModel](BaseModel):
     """Generic async task following A2A Task pattern.
 
     This represents an operation that doesn't complete immediately and
@@ -82,7 +81,7 @@ class AsyncOperationResponse(BaseModel):
     estimated_completion_seconds: int | None = None
 
 
-class SyncOperationResponse(BaseModel, Generic[T]):
+class SyncOperationResponse[T: BaseModel](BaseModel):
     """Standard response for synchronous operations.
 
     Synchronous operations complete immediately and return the result directly.
@@ -161,7 +160,6 @@ class CreateMediaBuyResult(BaseModel):
     """Result of a completed media buy creation."""
 
     media_buy_id: str
-    buyer_ref: str
     packages: list[dict[str, Any]]
     creative_deadline: datetime | None = None
     total_budget: float

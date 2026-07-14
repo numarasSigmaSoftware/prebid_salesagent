@@ -20,7 +20,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types import ContextObject
 from fastmcp.server.context import Context
 
 from src.core.schemas.account import (
@@ -213,8 +213,10 @@ class TestBDDTransportBypass:
             context_obj = ContextObject.model_validate({"channel": "dispatch-test"})
             req = ListAccountsRequest(context=context_obj)
 
-            # Simulate what the BDD step SHOULD do (but doesn't for list_accounts)
-            bdd_ctx = {"env": env, "transport": "IMPL"}
+            # Simulate what the BDD step SHOULD do (but doesn't for list_accounts):
+            # dispatch through a wire transport. IMPL was dropped from BDD dispatch
+            # (#1417), so this exercises the MCP wire path for context echo.
+            bdd_ctx = {"env": env, "transport": "mcp"}
             dispatch_request(bdd_ctx, req=req)
 
             response = bdd_ctx["response"]

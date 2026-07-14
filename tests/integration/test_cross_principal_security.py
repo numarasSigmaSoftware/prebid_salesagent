@@ -89,7 +89,6 @@ class TestCrossPrincipalSecurity:
                 tenant_id="security_test_tenant",
                 media_buy_id="media_buy_a",
                 principal_id="advertiser_a",
-                buyer_ref="buyer_ref_a",
                 order_name="Security Test Order A",
                 advertiser_name="Advertiser A",
                 start_date=date.today(),
@@ -98,7 +97,6 @@ class TestCrossPrincipalSecurity:
                 currency="USD",
                 status="active",
                 raw_request={
-                    "buyer_ref": "buyer_ref_a",
                     "packages": [],
                     "budget": {"total": 1000.0, "currency": "USD"},
                 },
@@ -128,7 +126,7 @@ class TestCrossPrincipalSecurity:
 
         SECURITY: Principal B should NOT see Principal A's creatives.
         """
-        from src.core.tools.creatives import _list_creatives_impl
+        from src.core.tools.creatives.listing import _build_list_creatives_request, _list_creatives_impl
 
         identity_b = ResolvedIdentity(
             principal_id="advertiser_b",
@@ -138,7 +136,7 @@ class TestCrossPrincipalSecurity:
             protocol="mcp",
         )
 
-        response = _list_creatives_impl(identity=identity_b)
+        response = _list_creatives_impl(req=_build_list_creatives_request(), identity=identity_b)
 
         assert isinstance(response, ListCreativesResponse)
 
@@ -178,7 +176,6 @@ class TestCrossPrincipalSecurity:
             media_buy = session.scalars(stmt).first()
 
             assert media_buy.principal_id == "advertiser_a", "Media buy ownership changed!"
-            assert media_buy.buyer_ref == "buyer_ref_a", "Media buy buyer_ref was modified!"
 
     def test_get_media_buy_delivery_cannot_see_other_principals_data(self):
         """Test that get_media_buy_delivery only returns data for owned media buys.
@@ -256,7 +253,7 @@ class TestCrossPrincipalSecurity:
         scoped.remove()
 
         # Principal A (from first tenant) tries to access creative from second tenant
-        from src.core.tools.creatives import _list_creatives_impl
+        from src.core.tools.creatives.listing import _build_list_creatives_request, _list_creatives_impl
 
         identity_a = ResolvedIdentity(
             principal_id="advertiser_a",
@@ -266,7 +263,7 @@ class TestCrossPrincipalSecurity:
             protocol="mcp",
         )
 
-        response = _list_creatives_impl(identity=identity_a)
+        response = _list_creatives_impl(req=_build_list_creatives_request(), identity=identity_a)
 
         # Should only see their own creative, not creative_c from other tenant
         creative_ids = [c.creative_id for c in response.creatives]

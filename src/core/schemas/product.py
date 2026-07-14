@@ -6,6 +6,7 @@ All classes are re-exported from src.core.schemas for backward compatibility.
 
 from typing import Any
 
+from adcp.types import Catalog as LibraryCatalog
 from adcp.types import GetProductsResponse as LibraryGetProductsResponse
 from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
 from adcp.types import Placement as LibraryPlacement
@@ -13,7 +14,7 @@ from adcp.types import Product as LibraryProduct
 from adcp.types import ProductCard as LibraryProductCard
 from adcp.types import ProductCardDetailed as LibraryProductCardDetailed
 from adcp.types import ProductFilters as LibraryFilters
-from adcp.types import PromotedProducts as LibraryPromotedProducts
+from adcp.types import PushNotificationConfig as LibraryPushNotificationConfig
 from pydantic import ConfigDict, Field, model_validator
 
 from src.core.config import get_pydantic_extra_mode
@@ -56,7 +57,7 @@ class Placement(LibraryPlacement):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     description: str = Field(..., description="Detailed description of the placement")
-    format_ids: list[FormatId] = Field(  # type: ignore[assignment]
+    format_ids: list[FormatId] = Field(
         ...,
         description="Supported creative formats for this placement",
         min_length=1,
@@ -76,6 +77,10 @@ class Product(LibraryProduct):
     - No conversion functions needed - inheritance handles it
     - Automatic updates when library Product changes
     """
+
+    # adcp 4.3 makes reporting_capabilities required.  Override as optional
+    # — our product builder sets it when available from the adapter.
+    reporting_capabilities: Any | None = None  # type: ignore[assignment]
 
     # Internal-only fields (not in AdCP spec)
     implementation_config: dict[str, Any] | None = Field(
@@ -144,6 +149,9 @@ class Product(LibraryProduct):
         if isinstance(kwargs["exclude"], set):
             kwargs["exclude"].update({"implementation_config", "expires_at"})
 
+        # Override exclude_none so we can handle core-field None values ourselves
+        # (AdCPBaseModel defaults exclude_none=True which would strip required fields)
+        kwargs["exclude_none"] = False
         data = super().model_dump(**kwargs)
 
         # Convert formats to format_ids per AdCP spec
@@ -159,6 +167,7 @@ class Product(LibraryProduct):
             "format_ids",
             "delivery_type",
             "delivery_measurement",
+            "reporting_capabilities",
             "is_custom",
         }
 
@@ -230,6 +239,7 @@ class GetProductsRequest(LibraryGetProductsRequest):
     Library provides: account, brand, brief, buyer_campaign_ref, catalog,
     context, ext, fields, filters, pagination, property_list, refine.
 
+    Spec field not yet in adcp library: push_notification_config (online schema).
     Internal-only: product_selectors (excluded from external serialization).
     """
 
@@ -241,8 +251,13 @@ class GetProductsRequest(LibraryGetProductsRequest):
         description="Buyer intent: 'brief' (publisher curates) or 'wholesale' (buyer applies own audiences)",
     )
 
+    push_notification_config: LibraryPushNotificationConfig | None = Field(
+        None,
+        description="Webhook configuration for async terminal notifications (brief/refine only per AdCP spec)",
+    )
+
     # Internal-only fields (not in AdCP spec)
-    product_selectors: LibraryPromotedProducts | None = Field(
+    product_selectors: LibraryCatalog | None = Field(
         None,
         description="Selectors to filter the brand manifest product catalog for product discovery",
         exclude=True,
@@ -257,13 +272,18 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
     protocol layer (MCP, A2A, REST) via ProtocolEnvelope wrapper.
     """
 
+    # Required (no default): pinned 3.1 get-products-response marks 'products'
+    # required. The SDK base declares it optional (list | None); redeclare it
+    # required so the model cannot construct an under-specified shape (#1399 Plan-B).
+    products: list[LibraryProduct]  # type: ignore[assignment]
+
     def __str__(self) -> str:
         """Return human-readable message for protocol layer.
 
         Used by both MCP (for display) and A2A (for task messages).
         Provides conversational text without adding non-spec fields to the schema.
         """
-        count = len(self.products)
+        count = len(self.products) if self.products else 0
 
         # Base message
         if count == 0:
@@ -277,8 +297,14 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
         # Import here to avoid circular import (schemas -> helpers -> auth -> schemas)
         from src.core.helpers.pricing_helpers import pricing_option_has_rate
 
-        if count > 0 and all(
-            all(not pricing_option_has_rate(po) for po in p.pricing_options) for p in self.products if p.pricing_options
+        if (
+            count > 0
+            and self.products
+            and all(
+                all(not pricing_option_has_rate(po) for po in p.pricing_options)
+                for p in self.products
+                if p.pricing_options
+            )
         ):
             return f"{base_msg} Please connect through an authorized buying agent for pricing data."
 

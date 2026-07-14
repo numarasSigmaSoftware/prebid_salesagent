@@ -27,7 +27,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 # V3: Consolidated pricing types - CpmAuctionPricingOption/CpmFixedRatePricingOption → CpmPricingOption
 # Use fixed_price for fixed-rate, floor_price for auction
 from adcp import CpmPricingOption
-from adcp.types.generated_poc.core.signal_pricing_option import SignalPricingOption
+from adcp.types.generated_poc.core.vendor_pricing_option import (
+    VendorPricingOption,
+)  # TODO: no stable alias in adcp.types
 
 from src.core.schemas import (
     Budget,
@@ -38,6 +40,7 @@ from src.core.schemas import (
     SignalDeployment,
     Targeting,
 )
+from tests.factories.creative_asset import build_assets, image_spec, video_spec
 
 
 class AdCPSchemaContractValidator:
@@ -374,13 +377,7 @@ class TestCreativeSchemaContract:
             "creative_id": "creative_contract_test",
             "name": "Creative Contract Test",
             "format_id": FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
-            "assets": {
-                "banner_image": {
-                    "url": "https://example.com/creative.jpg",
-                    "width": 300,
-                    "height": 250,
-                }
-            },
+            "assets": build_assets(image_spec("banner_image", url="https://example.com/creative.jpg")),
             "status": "approved",
             "principal_id": "test_principal",
             "created_date": datetime.now(),
@@ -403,14 +400,9 @@ class TestCreativeSchemaContract:
             "creative_id": "video_contract_test",
             "name": "Video Creative Contract Test",
             "format_id": FormatId(agent_url="https://creative.adcontextprotocol.org", id="video_640x480"),
-            "assets": {
-                "video_file": {
-                    "url": "https://example.com/video.mp4",
-                    "width": 1920,
-                    "height": 1080,
-                    "duration_ms": 30000,  # 30 seconds in milliseconds
-                }
-            },
+            "assets": build_assets(
+                video_spec("video_file", url="https://example.com/video.mp4", width=1920, height=1080)
+            ),
             "status": "approved",  # Use valid status per adcp 2.5.0 Creative enum
             "principal_id": "test_principal",
             "created_date": datetime.now(),
@@ -468,6 +460,11 @@ class TestSignalSchemaContract:
     def test_signal_adcp_contract_compliance(self, validator):
         """Test Signal schema AdCP spec compliance."""
         test_data = {
+            "signal_id": {
+                "source": "catalog",
+                "data_provider_domain": "testprovider.com",
+                "id": "signal_contract_test",
+            },
             "signal_agent_segment_id": "signal_contract_test",
             "name": "Signal Contract Test",
             "description": "Testing signal contract compliance",
@@ -478,7 +475,7 @@ class TestSignalSchemaContract:
                 SignalDeployment(platform="test_platform", is_live=True, type="platform", scope="platform-wide")
             ],
             "pricing_options": [
-                SignalPricingOption.model_validate(
+                VendorPricingOption.model_validate(
                     {"pricing_option_id": "cpm_usd", "cpm": 3.50, "currency": "USD", "model": "cpm"}
                 )
             ],
@@ -486,6 +483,7 @@ class TestSignalSchemaContract:
 
         # AdCP spec required fields for signals
         adcp_spec_fields = {
+            "signal_id",
             "signal_agent_segment_id",
             "name",
             "description",

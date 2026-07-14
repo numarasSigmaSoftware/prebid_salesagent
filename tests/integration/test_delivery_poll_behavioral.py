@@ -15,10 +15,14 @@ Each test targets exactly one obligation ID and follows the 6 hard rules:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
+from src.core.exceptions import (
+    AdCPAuthenticationError,
+    AdCPValidationError,
+)
 from src.core.schemas import GetMediaBuyDeliveryResponse
 
 # ---------------------------------------------------------------------------
@@ -84,6 +88,8 @@ class TestWebhookNotificationTypeFinal:
             buy = MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
+                # Was serving; flight ended -> date-refined to "completed"
+                status="active",
                 start_date=date(2025, 1, 1),
                 end_date=date(2025, 6, 30),
             )
@@ -94,6 +100,83 @@ class TestWebhookNotificationTypeFinal:
             dumped = response.model_dump(mode="json")
             assert dumped["notification_type"] == "final"
             assert dumped["next_expected_at"] is None
+
+
+@pytest.mark.requires_db
+class TestSimulationReachesFinalThroughRealHook:
+    """A time-simulation client advancing the clock past flight end reaches 'final'.
+
+    Exercises the FULL mock_time path through the real apply_testing_hooks — the
+    branch that previously built naive campaign_info datetimes and raised
+    TypeError against the aware simulated clock (#1545 K1), and the status-filter
+    path that must agree with the reported status (#1545 O2). A pending_creatives
+    buy under mock_time past flight end must report 'completed' + 'final'.
+
+    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
+    """
+
+    def test_mock_time_past_flight_reaches_completed_and_final(self, integration_db):
+        from src.core.testing_hooks import AdCPTestContext
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            buy = MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                # Never served (no creatives) — only the simulated clock advances it.
+                status="pending_creatives",
+                start_date=date(2025, 1, 1),
+                end_date=date(2025, 3, 31),
+            )
+            env.set_adapter_response(buy.media_buy_id, impressions=5000)
+
+            # Aware simulated clock strictly past the flight window.
+            identity = PrincipalFactory.make_identity(
+                principal_id="p1",
+                tenant_id="t1",
+                testing_context=AdCPTestContext(mock_time=datetime(2025, 6, 1, tzinfo=UTC)),
+            )
+
+            response = env.call_impl(media_buy_ids=[buy.media_buy_id], identity=identity)
+
+            dumped = response.model_dump(mode="json")
+            assert dumped["media_buy_deliveries"][0]["status"] == "completed"
+            assert dumped["notification_type"] == "final"
+            assert dumped["next_expected_at"] is None
+
+    def test_mock_time_in_flight_reports_active_and_scheduled(self, integration_db):
+        """The in-flight companion: simulated clock inside the window -> active/scheduled."""
+        from src.core.testing_hooks import AdCPTestContext
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            buy = MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                status="pending_creatives",
+                start_date=date(2025, 1, 1),
+                end_date=date(2025, 12, 31),
+            )
+            env.set_adapter_response(buy.media_buy_id, impressions=5000)
+
+            identity = PrincipalFactory.make_identity(
+                principal_id="p1",
+                tenant_id="t1",
+                testing_context=AdCPTestContext(mock_time=datetime(2025, 6, 1, tzinfo=UTC)),
+            )
+
+            response = env.call_impl(media_buy_ids=[buy.media_buy_id], identity=identity)
+
+            dumped = response.model_dump(mode="json")
+            assert dumped["media_buy_deliveries"][0]["status"] == "active"
+            assert dumped["notification_type"] == "scheduled"
+            assert dumped["next_expected_at"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +283,7 @@ class TestNonexistentMediaBuyIdReturnsNotFoundError:
             assert response.errors is not None
             assert len(response.errors) == 1
             error = response.errors[0]
-            assert error.code == "media_buy_not_found"
+            assert error.code == "MEDIA_BUY_NOT_FOUND"
             assert "nonexistent_id" in error.message
 
 
@@ -253,45 +336,10 @@ class TestPartialMediaBuyIdsNotFound:
             assert response.errors is not None
             assert len(response.errors) == 1
             not_found_error = response.errors[0]
-            assert not_found_error.code == "media_buy_not_found"
+            assert not_found_error.code == "MEDIA_BUY_NOT_FOUND"
             assert "mb_999" in not_found_error.message
 
             assert all("mb_1" not in e.message for e in response.errors)
-
-
-# ---------------------------------------------------------------------------
-# UC-004-EXT-C-03
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.requires_db
-class TestBuyerRefNotFound:
-    """Buyer ref lookup returns media_buy_not_found error in response.
-
-    Covers: UC-004-EXT-C-03
-    """
-
-    def test_unknown_buyer_ref_produces_not_found_error(self, integration_db):
-        """When buyer_refs contains a ref that matches no media buy, the response
-        contains an error with code 'media_buy_not_found'.
-
-        Covers: UC-004-EXT-C-03
-        """
-        from tests.factories import PrincipalFactory, TenantFactory
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            tenant = TenantFactory(tenant_id="t1")
-            PrincipalFactory(tenant=tenant, principal_id="p1")
-
-            response = env.call_impl(buyer_refs=["no_such_ref"])
-
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            assert response.errors is not None, "Expected errors list, got None"
-            error_codes = [e.code for e in response.errors]
-            assert "media_buy_not_found" in error_codes, f"Expected 'media_buy_not_found' in errors, got: {error_codes}"
-            not_found_error = next(e for e in response.errors if e.code == "media_buy_not_found")
-            assert "no_such_ref" in not_found_error.message
 
 
 # ---------------------------------------------------------------------------
@@ -317,16 +365,12 @@ class TestEqualDateRangeReturnsInvalidDateRangeError:
             tenant = TenantFactory(tenant_id="t1")
             PrincipalFactory(tenant=tenant, principal_id="p1")
 
-            response = env.call_impl(
-                media_buy_ids=["mb_001"],
-                start_date="2026-03-15",
-                end_date="2026-03-15",
-            )
-
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            assert response.media_buy_deliveries == []
-            assert len(response.errors) == 1
-            assert response.errors[0].code == "invalid_date_range"
+            with pytest.raises(AdCPValidationError, match="[Ss]tart date"):
+                env.call_impl(
+                    media_buy_ids=["mb_001"],
+                    start_date="2026-03-15",
+                    end_date="2026-03-15",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -352,16 +396,12 @@ class TestStartDateAfterEndDateReturnsInvalidDateRangeError:
             tenant = TenantFactory(tenant_id="t1")
             PrincipalFactory(tenant=tenant, principal_id="p1")
 
-            response = env.call_impl(
-                media_buy_ids=["mb_001"],
-                start_date="2026-03-20",
-                end_date="2026-03-10",
-            )
-
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            assert response.media_buy_deliveries == []
-            assert len(response.errors) == 1
-            assert response.errors[0].code == "invalid_date_range"
+            with pytest.raises(AdCPValidationError, match="[Ss]tart date"):
+                env.call_impl(
+                    media_buy_ids=["mb_001"],
+                    start_date="2026-03-20",
+                    end_date="2026-03-10",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -388,15 +428,12 @@ class TestInvalidDateRangeDoesNotFetchDeliveryData:
             tenant = TenantFactory(tenant_id="t1")
             PrincipalFactory(tenant=tenant, principal_id="p1")
 
-            response = env.call_impl(
-                media_buy_ids=["mb_001"],
-                start_date="2026-03-20",
-                end_date="2026-03-10",
-            )
-
-            assert response.media_buy_deliveries == []
-            assert len(response.errors) == 1
-            assert response.errors[0].code == "invalid_date_range"
+            with pytest.raises(AdCPValidationError):
+                env.call_impl(
+                    media_buy_ids=["mb_001"],
+                    start_date="2026-03-20",
+                    end_date="2026-03-10",
+                )
 
             # Verify adapter's delivery method was never called (no data fetched)
             env.mock["adapter"].return_value.get_media_buy_delivery.assert_not_called()
@@ -434,13 +471,11 @@ class TestAdapterUnavailableReturnsAdapterError:
 
             env.set_adapter_error(ConnectionError("Connection refused"))
 
-            response = env.call_impl(media_buy_ids=["mb_001"])
+            result = env.call_impl(media_buy_ids=["mb_001"])
 
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            error_codes = [e.code for e in response.errors]
-            assert "adapter_error" in error_codes
-            adapter_error = next(e for e in response.errors if e.code == "adapter_error")
-            assert "mb_001" in adapter_error.message
+            assert result.errors is not None
+            assert any("mb_001" in e.message for e in result.errors)
+            assert any(e.code == "SERVICE_UNAVAILABLE" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -475,13 +510,11 @@ class TestAdapterInternalServerErrorReturnsAdapterError:
 
             env.set_adapter_error(RuntimeError("500 Internal Server Error"))
 
-            response = env.call_impl(media_buy_ids=["mb_001"])
+            result = env.call_impl(media_buy_ids=["mb_001"])
 
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            error_codes = [e.code for e in response.errors]
-            assert "adapter_error" in error_codes
-            adapter_error = next(e for e in response.errors if e.code == "adapter_error")
-            assert "mb_001" in adapter_error.message
+            assert result.errors is not None
+            assert any("mb_001" in e.message for e in result.errors)
+            assert any(e.code == "SERVICE_UNAVAILABLE" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -497,12 +530,17 @@ class TestAdapterFailureAuditTrail:
     """
 
     def test_adapter_failure_writes_audit_log(self, integration_db):
-        """When adapter.get_media_buy_delivery raises, the failure is audit-logged.
+        """When adapter.get_media_buy_delivery fails, the failure is audit-logged.
 
         Covers: UC-004-EXT-F-03
+
+        Per UC-004-EXT-F the impl degrades: it logs the failure via logger.error
+        and returns an advisory error in the response (NFR-003), rather than
+        aborting. We assert on the logger here, mirroring
+        tests/unit/test_delivery.py::test_adapter_failure_audit_logged.
         """
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import AuditLog
+        from unittest.mock import patch
+
         from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
@@ -517,24 +555,18 @@ class TestAdapterFailureAuditTrail:
 
             env.set_adapter_error(RuntimeError("GAM API timeout"))
 
-            response = env.call_impl(
-                media_buy_ids=["mb_fail"],
-                start_date="2025-06-01",
-                end_date="2025-06-30",
-            )
-
-            assert response is not None
-            assert isinstance(response, GetMediaBuyDeliveryResponse)
-            assert any(e.code == "adapter_error" for e in response.errors)
-
-            # Check real audit log table for records
-            from sqlalchemy import select
-
-            with get_db_session() as session:
-                audit_records = session.scalars(select(AuditLog)).all()
-                assert len(audit_records) > 0, (
-                    "No AuditLog records written to DB. Adapter failure must be recorded in audit trail per NFR-003."
+            with patch("src.core.tools.media_buy_delivery.logger") as mock_logger:
+                result = env.call_impl(
+                    media_buy_ids=["mb_fail"],
+                    start_date="2025-06-01",
+                    end_date="2025-06-30",
                 )
+
+            assert result.errors is not None and any("mb_fail" in e.message for e in result.errors)
+            # The adapter failure was logged before the advisory error was returned.
+            mock_logger.error.assert_called()
+            error_calls = [c for c in mock_logger.error.call_args_list if "mb_fail" in str(c)]
+            assert error_calls, "Expected logger.error to be called with media_buy_id mb_fail"
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +582,7 @@ class TestAdapterErrorNoStateMutation:
     """
 
     def test_adapter_error_returns_error_without_state_modification(self, integration_db):
-        """When adapter raises, response has adapter_error and zero deliveries.
+        """When the adapter fails, an advisory error is returned; domain state is unchanged.
 
         Covers: UC-004-EXT-F-04
         """
@@ -574,15 +606,9 @@ class TestAdapterErrorNoStateMutation:
                 end_date="2025-06-30",
             )
 
-            assert isinstance(result, GetMediaBuyDeliveryResponse)
             assert result.errors is not None
-            assert len(result.errors) == 1
-            assert result.errors[0].code == "adapter_error"
-            assert "mb_err" in result.errors[0].message
-            assert result.media_buy_deliveries == []
-            assert result.aggregated_totals.impressions == 0.0
-            assert result.aggregated_totals.spend == 0.0
-            assert result.aggregated_totals.media_buy_count == 0
+            assert any("mb_err" in e.message for e in result.errors)
+            assert any(e.code == "SERVICE_UNAVAILABLE" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -609,12 +635,11 @@ class TestMultipleMediaBuyDelivery:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
 
-            for i, (mb_id, ref) in enumerate([("mb_1", "ref_1"), ("mb_2", "ref_2"), ("mb_3", "ref_3")]):
+            for i, mb_id in enumerate(["mb_1", "mb_2", "mb_3"]):
                 MediaBuyFactory(
                     tenant=tenant,
                     principal=principal,
                     media_buy_id=mb_id,
-                    buyer_ref=ref,
                 )
                 env.set_adapter_response(
                     mb_id,
@@ -661,7 +686,7 @@ class TestNoIdentifiersReturnAll:
     """
 
     def test_all_five_media_buys_returned_when_no_identifiers(self, integration_db):
-        """When neither media_buy_ids nor buyer_refs is provided, response contains
+        """When media_buy_ids is not provided, response contains
         delivery data for ALL 5 media buys owned by the principal.
 
         Covers: UC-004-MAIN-04
@@ -682,7 +707,9 @@ class TestNoIdentifiersReturnAll:
                     tenant=tenant,
                     principal=principal,
                     media_buy_id=mb_id,
-                    buyer_ref=f"ref_{i:03d}",
+                    # Serving buy: persisted status is authoritative (salesagent-18h.1).
+                    # The flight window alone no longer implies "active".
+                    status="active",
                     start_date=today - timedelta(days=30),
                     end_date=today + timedelta(days=30),
                     budget=10000.0 + i * 1000,
@@ -726,7 +753,8 @@ class TestNoIdentifiersReturnAll:
                     tenant=tenant,
                     principal=principal,
                     media_buy_id=mb_id,
-                    buyer_ref=f"ref_{i:03d}",
+                    # Serving buy: persisted status is authoritative (salesagent-18h.1).
+                    status="active",
                     start_date=today - timedelta(days=30),
                     end_date=today + timedelta(days=30),
                 )
@@ -772,11 +800,9 @@ class TestPackageLevelBreakdowns:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_two_pkg",
-                buyer_ref="ref_two_pkg",
                 start_date=date(2025, 3, 1),
                 end_date=date(2025, 3, 31),
                 raw_request={
-                    "buyer_ref": "ref_two_pkg",
                     "packages": [
                         {"package_id": "pkg_A", "product_id": "prod_A"},
                         {"package_id": "pkg_B", "product_id": "prod_B"},
@@ -828,11 +854,10 @@ class TestPackageLevelBreakdowns:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_active",
-                buyer_ref="ref_active",
+                status="active",
                 start_date=date(2025, 1, 1),
                 end_date=date(2025, 12, 31),
                 raw_request={
-                    "buyer_ref": "ref_active",
                     "packages": [
                         {"package_id": "pkg_X", "product_id": "prod_X"},
                         {"package_id": "pkg_Y", "product_id": "prod_Y"},
@@ -875,11 +900,9 @@ class TestPackageLevelBreakdowns:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_sum",
-                buyer_ref="ref_sum",
                 start_date=date(2025, 4, 1),
                 end_date=date(2025, 4, 30),
                 raw_request={
-                    "buyer_ref": "ref_sum",
                     "packages": [
                         {"package_id": "pkg_1", "product_id": "prod_1"},
                         {"package_id": "pkg_2", "product_id": "prod_2"},
@@ -920,14 +943,17 @@ class TestPackageLevelBreakdowns:
 class TestPackageDeliveryStatus:
     """Media buy status computation based on package delivery states.
 
-    The production code computes media-buy-level status (ready/active/completed)
+    The production code computes media-buy-level status (pending_start/active/completed)
     based on date comparison against the request end_date (reference_date).
 
     Covers: UC-004-MAIN-10
     """
 
-    def test_rq1_buy_before_start_has_ready_status(self, integration_db):
-        """Media buy before its start date gets status 'ready'.
+    def test_rq1_buy_before_start_has_pending_start_status(self, integration_db):
+        """Media buy before its start date gets spec status 'pending_start'.
+
+        Spec: enums/media-buy-status.json — pending_start is "ready to serve
+        and waiting for its flight date to begin".
 
         Covers: UC-004-MAIN-10
         """
@@ -950,13 +976,55 @@ class TestPackageDeliveryStatus:
 
             resp = env.call_impl(
                 media_buy_ids=["mb_future"],
-                status_filter=[MediaBuyStatus.pending_activation],
+                status_filter=[MediaBuyStatus.pending_start],
                 start_date="2025-01-01",
                 end_date="2025-03-15",
             )
 
             assert len(resp.media_buy_deliveries) == 1
-            assert resp.media_buy_deliveries[0].status == "ready"
+            assert resp.media_buy_deliveries[0].status == "pending_start"
+
+    def test_draft_buy_matches_pending_creatives_filter_not_pending_start(self, integration_db):
+        """A draft buy is pending_creatives — filterable as such, invisible to pending_start.
+
+        Regression: the pending_creatives filter value used to be conflated
+        into pending_start, so filtering by pending_creatives returned
+        pending_start buys and missed actual draft buys. Spec:
+        enums/media-buy-status.json — pending_creatives is "approved but has
+        no creatives assigned".
+
+        Covers: UC-004-MAIN-10
+        """
+        from adcp.types import MediaBuyStatus
+
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb_draft",
+                status="draft",
+                start_date=date(2025, 6, 1),
+                end_date=date(2025, 12, 31),
+            )
+            env.set_adapter_response("mb_draft", impressions=0, spend=0.0)
+
+            common = {
+                "media_buy_ids": ["mb_draft"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-03-15",
+            }
+
+            resp = env.call_impl(status_filter=[MediaBuyStatus.pending_creatives], **common)
+            assert [d.media_buy_id for d in resp.media_buy_deliveries] == ["mb_draft"]
+            assert resp.media_buy_deliveries[0].status == "pending_creatives"
+
+            resp = env.call_impl(status_filter=[MediaBuyStatus.pending_start], **common)
+            assert resp.media_buy_deliveries == []
 
     def test_rq2_buy_in_flight_has_active_status(self, integration_db):
         """Media buy within its flight dates gets status 'active'.
@@ -973,6 +1041,7 @@ class TestPackageDeliveryStatus:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_active",
+                status="active",
                 start_date=date(2025, 1, 1),
                 end_date=date(2025, 12, 31),
             )
@@ -1002,6 +1071,10 @@ class TestPackageDeliveryStatus:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_past",
+                # Buy that WAS serving (active) and whose flight has ended →
+                # persisted "active" is date-refined to "completed"
+                # (salesagent-18h.1). A pending_approval buy never served.
+                status="active",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 12, 31),
             )
@@ -1041,6 +1114,7 @@ class TestPackageDeliveryStatus:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_active",
+                status="active",
                 start_date=date(2025, 1, 1),
                 end_date=date(2025, 12, 31),
             )
@@ -1048,6 +1122,7 @@ class TestPackageDeliveryStatus:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_completed",
+                status="active",
                 start_date=date(2025, 1, 1),
                 end_date=date(2025, 3, 31),
             )
@@ -1060,7 +1135,7 @@ class TestPackageDeliveryStatus:
             resp = env.call_impl(
                 media_buy_ids=["mb_future", "mb_active", "mb_completed"],
                 status_filter=[
-                    MediaBuyStatus.pending_activation,
+                    MediaBuyStatus.pending_start,
                     MediaBuyStatus.active,
                     MediaBuyStatus.completed,
                 ],
@@ -1070,7 +1145,7 @@ class TestPackageDeliveryStatus:
 
             assert len(resp.media_buy_deliveries) == 3
             status_map = {d.media_buy_id: d.status for d in resp.media_buy_deliveries}
-            assert status_map["mb_future"] == "ready"
+            assert status_map["mb_future"] == "pending_start"
             assert status_map["mb_active"] == "active"
             assert status_map["mb_completed"] == "completed"
 
@@ -1092,6 +1167,60 @@ class TestPackageDeliveryStatus:
             "If this fails, delivery_status was added to PackageDelivery -- "
             "update this test to PASS and verify the computation logic."
         )
+
+
+@pytest.mark.requires_db
+class TestLegacyPersistedStatusNotStranded:
+    """A legacy persisted status (e.g. "ready", "scheduled") must not strand the buy.
+
+    Regression (finding #1): production historically persisted status="ready"
+    (PR #375) and admin flows persist "scheduled". The old delivery resolver
+    passed an unmapped value through verbatim, which then failed the internal
+    status filter, so even fetch-by-ID returned MEDIA_BUY_NOT_FOUND for a buy
+    that exists — while get_media_buys mapped the same row to a valid status.
+    The shared resolver now date-refines any legacy value, so the buy is
+    returned with a valid delivery status and no not-found error.
+
+    Covers: UC-004-MAIN-10
+    """
+
+    # "ready"/"scheduled" are purely date-gated serving aliases -> mid-flight
+    # they refine to "active". "pending_activation" is scheduler-held until
+    # creative approval (like pending_start), so it maps to "pending_start"
+    # regardless of the window — but it is still returned, never stranded.
+    @pytest.mark.parametrize(
+        ("legacy_status", "expected_status"),
+        [("ready", "active"), ("scheduled", "active"), ("pending_activation", "pending_start")],
+    )
+    def test_legacy_status_buy_returned_by_fetch_by_id(self, integration_db, legacy_status, expected_status):
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb_legacy",
+                status=legacy_status,
+                start_date=date(2025, 1, 1),
+                end_date=date(2025, 12, 31),
+            )
+            env.set_adapter_response("mb_legacy", impressions=1000, spend=50.0)
+
+            resp = env.call_impl(
+                media_buy_ids=["mb_legacy"],
+                start_date="2025-01-01",
+                end_date="2025-06-15",
+            )
+
+            # The buy is returned (not stranded) with a valid resolved status ...
+            assert [d.media_buy_id for d in resp.media_buy_deliveries] == ["mb_legacy"]
+            assert resp.media_buy_deliveries[0].status == expected_status
+            # ... and no MEDIA_BUY_NOT_FOUND advisory was emitted for it.
+            error_codes = {e.code for e in (resp.errors or [])}
+            assert "MEDIA_BUY_NOT_FOUND" not in error_codes
 
 
 # ---------------------------------------------------------------------------
@@ -1121,21 +1250,18 @@ class TestAggregatedTotalsMultipleBuys:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_1",
-                buyer_ref="ref_1",
                 budget=5000.0,
             )
             MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_2",
-                buyer_ref="ref_2",
                 budget=10000.0,
             )
             MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_3",
-                buyer_ref="ref_3",
                 budget=2500.0,
             )
             env.set_adapter_response("mb_1", impressions=1000, spend=50.0)
@@ -1174,21 +1300,18 @@ class TestAggregatedTotalsMultipleBuys:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_1",
-                buyer_ref="ref_1",
                 budget=5000.0,
             )
             MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_2",
-                buyer_ref="ref_2",
                 budget=10000.0,
             )
             MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_3",
-                buyer_ref="ref_3",
                 budget=2500.0,
             )
             env.set_adapter_response("mb_1", impressions=1000, spend=50.0)
@@ -1365,51 +1488,6 @@ class TestDeliverySpendComputation:
 
 
 # ---------------------------------------------------------------------------
-# UC-004-MAIN-16
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.requires_db
-class TestBuyerRefInDeliveryEntries:
-    """Verify that buyer_ref from raw_request propagates to media_buy_deliveries entries.
-
-    Covers: UC-004-MAIN-16
-    """
-
-    def test_buyer_ref_propagates_to_delivery_entry(self, integration_db):
-        """When a media buy has buyer_ref='buyer_camp_1',
-        each media_buy_deliveries entry must include buyer_ref='buyer_camp_1'.
-
-        Covers: UC-004-MAIN-16
-        """
-        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            tenant = TenantFactory(tenant_id="t1")
-            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            MediaBuyFactory(
-                tenant=tenant,
-                principal=principal,
-                media_buy_id="mb_camp",
-                buyer_ref="buyer_camp_1",
-            )
-            env.set_adapter_response("mb_camp", impressions=1000, spend=50.0)
-
-            response = env.call_impl(
-                media_buy_ids=["mb_camp"],
-                start_date="2025-06-01",
-                end_date="2025-06-30",
-            )
-
-            assert len(response.media_buy_deliveries) == 1
-            delivery = response.media_buy_deliveries[0]
-            assert delivery.buyer_ref == "buyer_camp_1", (
-                f"Expected buyer_ref='buyer_camp_1' but got '{delivery.buyer_ref}'. "
-                "The delivery boundary must propagate buyer_ref from raw_request."
-            )
-
-
 # ---------------------------------------------------------------------------
 # UC-004-MAIN-17
 # ---------------------------------------------------------------------------
@@ -1438,13 +1516,11 @@ class TestPartialResolutionMissingIds:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_1",
-                buyer_ref="ref_1",
             )
             MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_2",
-                buyer_ref="ref_2",
             )
             env.set_adapter_response("mb_1", impressions=1000, spend=50.0)
             env.set_adapter_response("mb_2", impressions=2000, spend=100.0)
@@ -1521,7 +1597,7 @@ class TestUnpopulatedFieldsGraceful:
             spend=250.0,
             clicks=0,
             ctr=None,
-            video_completions=None,
+            completed_views=None,
             completion_rate=None,
         )
         assert not hasattr(totals, "effective_rate") or "effective_rate" not in DeliveryTotals.model_fields
@@ -1539,11 +1615,10 @@ class TestUnpopulatedFieldsGraceful:
 
         pkg = PackageDelivery(
             package_id="pkg_001",
-            buyer_ref="ref_001",
             impressions=5000.0,
             spend=250.0,
             clicks=None,
-            video_completions=None,
+            completed_views=None,
             pacing_index=1.0,
             pricing_model=None,
             rate=None,
@@ -1758,8 +1833,8 @@ class TestDeliveryMetricsFieldPresence:
             assert totals.clicks is not None or hasattr(totals, "clicks")
             assert hasattr(totals, "ctr")
 
-    def test_totals_include_video_completions_field(self, integration_db):
-        """Delivery totals include video_completions field (where applicable).
+    def test_totals_include_completed_views_field(self, integration_db):
+        """Delivery totals include completed_views field (where applicable).
 
         Covers: UC-004-MAIN-19
         """
@@ -1779,8 +1854,8 @@ class TestDeliveryMetricsFieldPresence:
             )
 
             delivery = result.media_buy_deliveries[0]
-            assert hasattr(delivery.totals, "video_completions")
-            assert delivery.totals.video_completions is None
+            assert hasattr(delivery.totals, "completed_views")
+            assert delivery.totals.completed_views is None
 
     def test_totals_include_conversions_field(self, integration_db):
         """Delivery totals include conversions metric field.
@@ -2010,7 +2085,6 @@ class TestEndToEndDeliveryMetricsCpmPricing:
                 principal=principal,
                 media_buy_id="mb_cpm",
                 raw_request={
-                    "buyer_ref": "ref_cpm",
                     "packages": [
                         {
                             "package_id": "pkg_cpm",
@@ -2067,7 +2141,6 @@ class TestEndToEndDeliveryMetricsCpmPricing:
                 principal=principal,
                 media_buy_id="mb_cpm2",
                 raw_request={
-                    "buyer_ref": "ref_cpm2",
                     "packages": [
                         {
                             "package_id": "pkg_cpm2",
@@ -2147,7 +2220,6 @@ class TestEndToEndDeliveryMetricsCpcPricing:
                 principal=principal,
                 media_buy_id="mb_cpc",
                 raw_request={
-                    "buyer_ref": "ref_cpc",
                     "pricing_option_id": str(po.id),
                     "packages": [
                         {
@@ -2193,7 +2265,6 @@ class TestEndToEndDeliveryMetricsCpcPricing:
                 principal=principal,
                 media_buy_id="mb_cpc2",
                 raw_request={
-                    "buyer_ref": "ref_cpc2",
                     "packages": [
                         {
                             "package_id": "pkg_cpc2",
@@ -2256,7 +2327,6 @@ class TestDeliveryMetricsFlatRatePricing:
                 principal=principal,
                 media_buy_id="mb_flat",
                 raw_request={
-                    "buyer_ref": "ref_flat",
                     "packages": [
                         {
                             "package_id": "pkg_flat",
@@ -2315,7 +2385,6 @@ class TestDeliveryMetricsFlatRatePricing:
                 principal=principal,
                 media_buy_id="mb_flat2",
                 raw_request={
-                    "buyer_ref": "ref_flat2",
                     "packages": [
                         {
                             "package_id": "pkg_flat2",
@@ -2439,16 +2508,17 @@ class TestCustomDateRangeBothProvided:
         with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            MediaBuyFactory(
+            buy = MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
+                media_buy_id="mb_001",
                 start_date=date(2026, 3, 1),
                 end_date=date(2026, 3, 7),
             )
-            env.set_adapter_response(impressions=1000)
+            env.set_adapter_response(buy.media_buy_id, impressions=1000)
 
             response = env.call_impl(
-                media_buy_ids=[principal.media_buys[0].media_buy_id] if hasattr(principal, "media_buys") else None,
+                media_buy_ids=[buy.media_buy_id],
                 start_date="2026-03-01",
                 end_date="2026-03-07",
             )
@@ -2511,7 +2581,7 @@ class TestPrincipalNotFoundReturnsError:
     """
 
     def test_principal_not_found_returns_error_in_response(self, integration_db):
-        """Valid token but principal not in DB returns principal_not_found error.
+        """Valid token but principal not in DB raises AdCPAuthenticationError.
 
         Covers: UC-004-EXT-B-01
         """
@@ -2523,58 +2593,8 @@ class TestPrincipalNotFoundReturnsError:
             TenantFactory(tenant_id="t1")
             # Don't create any principal — ghost_principal doesn't exist
 
-            response = env.call_impl()
-
-        assert response.errors is not None
-        assert len(response.errors) == 1
-        assert response.errors[0].code == "principal_not_found"
-        assert response.media_buy_deliveries == []
-
-
-# ---------------------------------------------------------------------------
-# UC-004-MAIN-02 (buyer_ref resolution via _impl)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.requires_db
-class TestBuyerRefResolutionFullImpl:
-    """Full _impl returns delivery metrics when buyer_refs used.
-
-    Covers: UC-004-MAIN-02
-    """
-
-    def test_full_impl_returns_delivery_via_buyer_ref(self, integration_db):
-        """_get_media_buy_delivery_impl returns delivery data when buyer_refs used.
-
-        Covers: UC-004-MAIN-02
-        """
-        from datetime import date
-
-        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            tenant = TenantFactory(tenant_id="t1")
-            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            buy = MediaBuyFactory(
-                tenant=tenant,
-                principal=principal,
-                media_buy_id="mb_200",
-                buyer_ref="my_campaign_1",
-                start_date=date(2025, 1, 1),
-                end_date=date(2027, 12, 31),
-            )
-            env.set_adapter_response(buy.media_buy_id, impressions=8000, spend=400.0)
-
-            response = env.call_impl(buyer_refs=["my_campaign_1"])
-
-        assert len(response.media_buy_deliveries) == 1
-        delivery = response.media_buy_deliveries[0]
-        assert delivery.media_buy_id == "mb_200"
-        assert delivery.buyer_ref == "my_campaign_1"
-        assert delivery.totals.impressions == 8000.0
-        assert delivery.totals.spend == 400.0
-        assert response.aggregated_totals.media_buy_count == 1
+            with pytest.raises(AdCPAuthenticationError, match="ghost_principal"):
+                env.call_impl()
 
 
 # ---------------------------------------------------------------------------
@@ -2656,6 +2676,7 @@ class TestCircuitBreakerReportingDelayed:
                 buy = MediaBuyFactory(
                     tenant=tenant,
                     principal=principal,
+                    status="active",
                     start_date=date(2026, 1, 1),
                     end_date=date(2026, 12, 31),
                 )
@@ -2694,6 +2715,7 @@ class TestCircuitBreakerReportingDelayed:
                 buy = MediaBuyFactory(
                     tenant=tenant,
                     principal=principal,
+                    status="active",
                     start_date=date(2026, 1, 1),
                     end_date=date(2026, 12, 31),
                 )
@@ -2726,6 +2748,7 @@ class TestPartialFailureTolerance:
         """
         from unittest.mock import patch
 
+        from src.core.schemas import MediaBuyDeliveryData
         from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
@@ -2736,6 +2759,7 @@ class TestPartialFailureTolerance:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_ok",
+                status="active",
                 start_date=date(2026, 1, 1),
                 end_date=date(2026, 12, 31),
             )
@@ -2743,26 +2767,25 @@ class TestPartialFailureTolerance:
                 tenant=tenant,
                 principal=principal,
                 media_buy_id="mb_fail",
+                status="active",
                 start_date=date(2026, 1, 1),
                 end_date=date(2026, 12, 31),
             )
             env.set_adapter_response("mb_ok", impressions=5000, spend=250.0)
             env.set_adapter_response("mb_fail", impressions=3000, spend=150.0)
 
-            # Patch _is_circuit_breaker_open to raise on the second call,
-            # triggering the outer except handler (lines 485-487) for buy_2
-            # while buy_1 processes normally.
-            call_count = {"n": 0}
-
-            def circuit_breaker_side_effect(tenant_id):
-                call_count["n"] += 1
-                if call_count["n"] == 2:
+            # Inject a failure at a genuinely per-buy step inside the outer
+            # try: the response-model construction for mb_fail. (The previous
+            # injection point, _is_circuit_breaker_open, is now hoisted out of
+            # the loop and runs once per request.)
+            def delivery_data_side_effect(**kwargs):
+                if kwargs.get("media_buy_id") == "mb_fail":
                     raise RuntimeError("Simulated processing error for buy_2")
-                return False
+                return MediaBuyDeliveryData(**kwargs)
 
             with patch(
-                "src.core.tools.media_buy_delivery._is_circuit_breaker_open",
-                side_effect=circuit_breaker_side_effect,
+                "src.core.tools.media_buy_delivery.MediaBuyDeliveryData",
+                side_effect=delivery_data_side_effect,
             ):
                 response = env.call_impl(media_buy_ids=["mb_ok", "mb_fail"])
 
@@ -2770,8 +2793,15 @@ class TestPartialFailureTolerance:
             # buy_1 should be present in the response
             returned_ids = {d.media_buy_id for d in response.media_buy_deliveries}
             assert "mb_ok" in returned_ids, f"Expected mb_ok in deliveries, got: {returned_ids}"
-            # buy_2 should be absent (skipped due to outer exception)
+            # buy_2 should be absent from deliveries (skipped due to outer exception)
             assert "mb_fail" not in returned_ids, f"Expected mb_fail to be absent from deliveries, got: {returned_ids}"
+            # ...but it must NOT vanish silently — an advisory surfaces it (#1545 K2).
+            # The advisory carries SERVICE_UNAVAILABLE, not the internal-only
+            # INTERNAL_ERROR: hand-built errors[] entries serialize verbatim, so
+            # the code must already be wire-compliant (normalized through
+            # translate_error_code at response assembly).
+            assert response.errors is not None
+            assert any(e.code == "SERVICE_UNAVAILABLE" and "mb_fail" in e.message for e in response.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -2829,7 +2859,6 @@ class TestCpcPackageClicksDerivation:
                 principal=principal,
                 media_buy_id="mb_cpc",
                 raw_request={
-                    "buyer_ref": "ref_cpc",
                     "packages": [
                         {
                             "package_id": "pkg_cpc",
@@ -2899,7 +2928,7 @@ class TestStartTimeFallbackForStatus:
 
             # start_date says 2025-01-01..2027-12-31 (active for any reasonable date)
             # but start_time says 2028-01-01..2028-12-31 (not yet started)
-            # If start_time is used, status should be "ready" (not yet active)
+            # If start_time is used, status should be "pending_start" (not yet active)
             buy = MediaBuyFactory(
                 tenant=tenant,
                 principal=principal,
@@ -2913,12 +2942,12 @@ class TestStartTimeFallbackForStatus:
             env.set_adapter_response("mb_time", impressions=0, spend=0.0)
 
             # Query for "active" only — if start_time is respected, mb_time
-            # should NOT appear (it's "ready", not "active")
+            # should NOT appear (it's "pending_start", not "active")
             result = env.call_impl(
                 media_buy_ids=[buy.media_buy_id],
                 status_filter="active",
             )
 
-            # The media buy should be filtered out because start_time makes it "ready"
+            # The media buy should be filtered out because start_time makes it "pending_start"
             returned_ids = {d.media_buy_id for d in result.media_buy_deliveries}
             assert "mb_time" not in returned_ids

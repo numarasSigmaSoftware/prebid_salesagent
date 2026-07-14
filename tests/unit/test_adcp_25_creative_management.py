@@ -2,7 +2,7 @@
 
 These tests verify the AdCP 2.5 creative management changes:
 1. sync_creatives with creative_ids filter (scoped sync)
-2. list_creatives with media_buy_ids/buyer_refs (plural filters)
+2. list_creatives with media_buy_ids (plural filters)
 3. update_media_buy with package-level creatives (inline upload)
 4. update_media_buy with creative_assignments (weight updates)
 """
@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.schemas import Creative, FormatId, SyncCreativesRequest
+from tests.factories.creative_asset import build_assets, image_spec
 
 
 class TestSyncCreativesCreativeIdsFilter:
@@ -25,7 +26,7 @@ class TestSyncCreativesCreativeIdsFilter:
             variants=[],
             name="Test Creative",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display_300x250"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # Should accept creative_ids parameter
@@ -45,7 +46,7 @@ class TestSyncCreativesCreativeIdsFilter:
             variants=[],
             name="Test Creative",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display_300x250"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # Should reject patch parameter (removed in AdCP 2.5)
@@ -116,7 +117,7 @@ class TestSyncCreativesCreativeIdsFilter:
 
 
 class TestListCreativesPluralFilters:
-    """Test list_creatives media_buy_ids/buyer_refs (AdCP 2.5)."""
+    """Test list_creatives media_buy_ids (AdCP 2.5)."""
 
     def test_creative_filters_accepts_plural_media_buy_ids(self):
         """Test CreativeFilters accepts plural media_buy_ids parameter."""
@@ -135,37 +136,6 @@ class TestListCreativesPluralFilters:
         assert hasattr(request.filters, "media_buy_ids")
         assert request.filters.media_buy_ids == ["mb_1", "mb_2", "mb_3"]
 
-    def test_creative_filters_accepts_plural_buyer_refs(self):
-        """Test CreativeFilters accepts buyer_refs plural filter."""
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
-
-        from src.core.schemas import ListCreativesRequest
-
-        filters = LibraryCreativeFilters(
-            buyer_refs=["ref_1", "ref_2", "ref_3"],
-        )
-        request = ListCreativesRequest(filters=filters)
-
-        assert request.filters is not None
-        assert hasattr(request.filters, "buyer_refs")
-        assert request.filters.buyer_refs == ["ref_1", "ref_2", "ref_3"]
-
-    def test_creative_filters_accepts_both_media_buy_ids_and_buyer_refs(self):
-        """Test CreativeFilters accepts both filter types together."""
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
-
-        from src.core.schemas import ListCreativesRequest
-
-        filters = LibraryCreativeFilters(
-            media_buy_ids=["mb_1", "mb_2"],
-            buyer_refs=["ref_1", "ref_2"],
-        )
-        request = ListCreativesRequest(filters=filters)
-
-        assert request.filters is not None
-        assert request.filters.media_buy_ids == ["mb_1", "mb_2"]
-        assert request.filters.buyer_refs == ["ref_1", "ref_2"]
-
 
 class TestUpdateMediaBuyInlineCreatives:
     """Test update_media_buy package-level creatives (AdCP 2.5)."""
@@ -173,7 +143,7 @@ class TestUpdateMediaBuyInlineCreatives:
     def test_update_media_buy_package_creatives_field_exists(self):
         """Verify update_media_buy accepts package.creatives field."""
         # adcp 3.9: PackageUpdate1/PackageUpdate2 union variants merged into single PackageUpdate
-        from adcp.types.generated_poc.media_buy.package_update import PackageUpdate
+        from adcp.types import PackageUpdate
 
         # Check PackageUpdate structure has creatives field
         fields = PackageUpdate.model_fields
@@ -252,13 +222,7 @@ class TestUpdateMediaBuyCreativeAssignments:
                     "creative_id": "new_c1",
                     "name": "New Creative",
                     "format_id": {"agent_url": "https://example.com/", "id": "display_300x250"},
-                    "assets": {
-                        "banner": {
-                            "url": "https://example.com/banner.png",
-                            "width": 300,
-                            "height": 250,
-                        }
-                    },
+                    "assets": build_assets(image_spec("banner")),
                     "weight": 75,
                     "placement_ids": ["pl_1"],
                 },
@@ -306,7 +270,6 @@ class TestAdCP25SchemaCompliance:
 
         # Should have plural fields
         assert "media_buy_ids" in fields, "CreativeFilters should have media_buy_ids (plural)"
-        assert "buyer_refs" in fields, "CreativeFilters should have buyer_refs (plural)"
 
 
 # ============================================================================
@@ -337,7 +300,7 @@ class TestSyncCreativesErrorCases:
             variants=[],
             name="Test Creative",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # Filter requests IDs that don't exist in payload
@@ -365,14 +328,14 @@ class TestSyncCreativesErrorCases:
                 variants=[],
                 name="Creative 1",
                 format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-                assets={"banner": {"url": "https://example.com/1.png", "asset_type": "image"}},
+                assets=build_assets(image_spec("banner", url="https://example.com/1.png")),
             ),
             Creative(
                 creative_id="creative_2",
                 variants=[],
                 name="Creative 2",
                 format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-                assets={"banner": {"url": "https://example.com/2.png", "asset_type": "image"}},
+                assets=build_assets(image_spec("banner", url="https://example.com/2.png")),
             ),
         ]
 
@@ -403,7 +366,7 @@ class TestSyncCreativesErrorCases:
             variants=[],
             name="Test",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # None = no filter, process all
@@ -440,7 +403,7 @@ class TestSyncCreativesErrorCases:
             Creative(
                 creative_id="test",
                 name="Test",
-                assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+                assets=build_assets(image_spec("banner")),
                 # format_id missing
             )
         assert "format" in str(exc_info.value).lower()
@@ -644,7 +607,7 @@ class TestDeleteMissingWithCreativeIdsFilter:
             variants=[],
             name="Test",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # Both parameters together should be valid schema
@@ -677,7 +640,7 @@ class TestDeleteMissingWithCreativeIdsFilter:
             variants=[],
             name="Creative 1",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner")),
         )
 
         # Scoped delete: creative_ids filter with delete_missing
@@ -734,14 +697,14 @@ class TestUpsertSemantics:
             variants=[],
             name="Creative 1 Updated",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/new.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner", url="https://example.com/new.png")),
         )
         c2 = Creative(
             creative_id="c2",
             variants=[],
             name="Creative 2 Updated",
             format_id=FormatId(agent_url="https://creatives.example.com/", id="display"),
-            assets={"banner": {"url": "https://example.com/new2.png", "asset_type": "image"}},
+            assets=build_assets(image_spec("banner", url="https://example.com/new2.png")),
         )
 
         # Only c1 should be processed due to filter

@@ -9,9 +9,17 @@ The guard scans:
 - Integration tests: tests/integration/test_*_v3.py + behavioral files
 - Unit entity tests: tests/unit/test_media_buy.py, test_creative.py, test_delivery.py
 
-The allowlist can only SHRINK — adding new uncovered obligations fails CI.
-When tests are written, remove the covered ID from the allowlist
-(the stale-entry test enforces this).
+Allowlist policy (#1228 G2 / #1609; ADR-009 on #1579):
+- May **grow** when a new behavioral obligation is documented without a test yet
+  (intentional backlog; reviewable in that PR).
+- Must **shrink** when a ``Covers:`` test lands — the stale-entry test fails CI
+  until the ID is removed from ``obligation_coverage_allowlist.json``.
+- Size must equal ``behavioral - covered`` (exact match).
+- There is no hard numeric ceiling; do not re-frame this as unratcheted amnesty.
+- Reconcile with the general structural-guard rule "allowlists can only shrink":
+  that rule applies to *violation* allowlists (new rows = new invariant debt).
+  This file is a *coverage backlog* — growth means we documented an untested
+  obligation (reviewable); covered IDs must still leave the list.
 
 See: scripts/tag_obligation_ids.py (assigns IDs to obligation docs)
 """
@@ -21,6 +29,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+
+import pytest
 
 OBLIGATIONS_DIR = Path(__file__).resolve().parents[2] / "docs" / "test-obligations"
 INTEGRATION_DIR = Path(__file__).resolve().parents[2] / "tests" / "integration"
@@ -43,6 +53,7 @@ _UNIT_ENTITY_FILES = [
     "test_quiet_failure_propagation.py",
     "test_get_products_impl_coverage.py",
     "test_creative_formats_behavioral.py",
+    "test_get_media_buys.py",
 ]
 
 # Integration behavioral test files (non-v3) that carry canonical Covers: tags
@@ -160,6 +171,7 @@ def _load_allowlist() -> set[str]:
 class TestObligationCoverage:
     """Structural guard: behavioral obligations must have test coverage."""
 
+    @pytest.mark.arch_guard
     def test_no_new_uncovered_behavioral_obligations(self):
         """Every behavioral obligation has a test or is in the allowlist.
 
@@ -180,6 +192,7 @@ class TestObligationCoverage:
             + "\n".join(f"  {oid}" for oid in sorted(uncovered_and_not_allowed))
         )
 
+    @pytest.mark.arch_guard
     def test_known_uncovered_are_still_obligations(self):
         """Every allowlist entry must reference a real obligation ID.
 
@@ -195,6 +208,7 @@ class TestObligationCoverage:
             + "\n".join(f"  {oid}" for oid in sorted(phantom))
         )
 
+    @pytest.mark.arch_guard
     def test_known_uncovered_not_already_covered(self):
         """If an obligation is covered by a test, remove it from the allowlist.
 
@@ -210,6 +224,7 @@ class TestObligationCoverage:
             f"Remove these from obligation_coverage_allowlist.json:\n" + "\n".join(f"  {oid}" for oid in sorted(stale))
         )
 
+    @pytest.mark.arch_guard
     def test_all_scenarios_have_obligation_ids(self):
         """Every ``#### Scenario:`` in UC/BR-UC docs must have an ``**Obligation ID**`` tag.
 
@@ -232,6 +247,7 @@ class TestObligationCoverage:
             f"Run: python scripts/tag_obligation_ids.py\n" + "\n".join(untagged)
         )
 
+    @pytest.mark.arch_guard
     def test_no_duplicate_obligation_ids(self):
         """Obligation IDs must be unique across all docs."""
         seen: dict[str, list[str]] = {}
@@ -246,6 +262,7 @@ class TestObligationCoverage:
             f"  {oid}: {', '.join(files)}" for oid, files in sorted(duplicates.items())
         )
 
+    @pytest.mark.arch_guard
     def test_tests_reference_valid_obligations(self):
         """``Covers:`` tags in tests must reference real obligation IDs."""
         all_ids = _get_all_obligation_ids()
@@ -257,6 +274,7 @@ class TestObligationCoverage:
             + "\n".join(f"  {oid}" for oid in sorted(invalid))
         )
 
+    @pytest.mark.arch_guard
     def test_obligation_count_documented(self):
         """Track the total obligation and coverage counts for monitoring."""
         all_ids = _get_all_obligation_ids()

@@ -13,10 +13,12 @@ before they reach production.
 from unittest.mock import patch
 
 import pytest
+from adcp.types import AccountReference as LibraryAccountReference
 
-from src.core.resolved_identity import ResolvedIdentity
+from tests.factories.principal import PrincipalFactory
+from tests.utils.a2a_helpers import assert_delivery_forwarded_account
 
-_MOCK_IDENTITY = ResolvedIdentity(
+_MOCK_IDENTITY = PrincipalFactory.make_identity(
     principal_id="principal_123",
     tenant_id="tenant_123",
     tenant={"tenant_id": "tenant_123"},
@@ -69,9 +71,8 @@ class TestA2AParameterMapping:
 
             # Verify packages data is passed through (may have additional fields from Pydantic serialization)
             assert len(call_kwargs["packages"]) == len(parameters["packages"]), "Package count should match"
-            assert call_kwargs["packages"][0]["package_id"] == parameters["packages"][0]["package_id"], (
-                "Package ID should match"
-            )
+            msg = "Package ID should match"
+            assert call_kwargs["packages"][0]["package_id"] == parameters["packages"][0]["package_id"], msg
 
             # Should NOT use legacy 'updates' parameter
             assert "updates" not in call_kwargs, "Should not pass legacy 'updates' parameter to core function"
@@ -123,31 +124,31 @@ class TestA2AParameterMapping:
         """
         Test that update_media_buy validates required parameters per AdCP spec.
 
-        Per AdCP oneOf constraint: requires either 'media_buy_id' OR 'buyer_ref'
+        Per AdCP spec: requires 'media_buy_id'
         """
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         handler = AdCPRequestHandler()
 
         with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY):
-            # Request with neither media_buy_id nor buyer_ref
+            # Request with no media_buy_id
             invalid_parameters = {"active": True, "packages": []}
 
             import asyncio
 
-            from a2a.utils.errors import ServerError
+            # Skill handlers raise typed AdCPValidationError on missing params so the
+            # dispatcher routes through the two-layer envelope (not a JSON-RPC error).
+            from src.core.exceptions import AdCPValidationError
 
-            # Should raise ServerError for missing required parameter
-            with pytest.raises(ServerError) as exc_info:
+            with pytest.raises(AdCPValidationError) as exc_info:
                 asyncio.run(
                     handler._handle_update_media_buy_skill(parameters=invalid_parameters, identity=_MOCK_IDENTITY)
                 )
 
             # Error message should mention required parameter
             error_message = str(exc_info.value).lower()
-            assert "media_buy_id" in error_message or "buyer_ref" in error_message, (
-                "Error message should mention required parameter"
-            )
+            msg = "Error message should mention required parameter"
+            assert "media_buy_id" in error_message, msg
 
     def test_get_media_buy_delivery_uses_plural_media_buy_ids(self):
         """
@@ -223,6 +224,72 @@ class TestA2AParameterMapping:
             assert call_kwargs["start_date"] == "2025-01-01", "Should pass start_date"
             assert call_kwargs["end_date"] == "2025-01-31", "Should pass end_date"
 
+    def test_get_media_buy_delivery_forwards_typed_account_reference(self):
+        """A2A get_media_buy_delivery must pass the validated account model."""
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        handler = AdCPRequestHandler()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_get_media_buy_delivery_tool") as mock_delivery:
+            mock_delivery.return_value = {"media_buys": []}
+
+            parameters = {"account": {"account_id": "acct-1"}}
+
+            import asyncio
+
+            asyncio.run(handler._handle_get_media_buy_delivery_skill(parameters=parameters, identity=_MOCK_IDENTITY))
+
+            expected = LibraryAccountReference.model_validate({"account_id": "acct-1"})
+
+            assert_delivery_forwarded_account(mock_delivery, expected)
+
+    def test_get_media_buy_delivery_forwards_natural_key_account_reference(self):
+        """A2A get_media_buy_delivery forwards the validated {brand, operator} account form.
+
+        Complements the {account_id} case above by pinning the natural-key
+        AccountReference variant — the form the delivery conformance storyboard
+        sends — whose nested brand exercises its own coercion path.
+        """
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        handler = AdCPRequestHandler()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_get_media_buy_delivery_tool") as mock_delivery:
+            mock_delivery.return_value = {"media_buys": []}
+
+            account = {"brand": {"domain": "acmeoutdoor.example"}, "operator": "pinnacle-agency.example"}
+            parameters = {"account": account}
+
+            import asyncio
+
+            asyncio.run(handler._handle_get_media_buy_delivery_skill(parameters=parameters, identity=_MOCK_IDENTITY))
+
+            expected = LibraryAccountReference.model_validate(account)
+
+            assert_delivery_forwarded_account(mock_delivery, expected)
+
+    def test_get_media_buy_delivery_rejects_malformed_account(self):
+        """Malformed account should fail validation and not call the core tool."""
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from src.core.exceptions import AdCPValidationError
+
+        handler = AdCPRequestHandler()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_get_media_buy_delivery_tool") as mock_delivery:
+            parameters = {"account": {}}
+
+            import asyncio
+
+            with pytest.raises(AdCPValidationError):
+                asyncio.run(
+                    handler._handle_get_media_buy_delivery_skill(
+                        parameters=parameters,
+                        identity=_MOCK_IDENTITY,
+                    )
+                )
+
+            mock_delivery.assert_not_called()
+
     def test_create_media_buy_validates_required_adcp_parameters(self):
         """
         Test that create_media_buy validates required AdCP parameters.
@@ -236,20 +303,25 @@ class TestA2AParameterMapping:
         with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY):
             # Request missing required AdCP parameters
             incomplete_parameters = {
-                "buyer_ref": "campaign_123",
+                "po_number": "campaign_123",
                 # Missing: brand, packages, start_time, end_time
             }
 
             import asyncio
 
-            result = asyncio.run(
-                handler._handle_create_media_buy_skill(parameters=incomplete_parameters, identity=_MOCK_IDENTITY)
-            )
+            # Skill handlers raise typed AdCPValidationError on missing-params; the
+            # outer dispatcher catches AdCPError and routes through
+            # _build_failed_skill_result to produce the two-layer envelope.
+            # Asserting on the raised exception (not a returned dict) verifies the
+            # flat-dict bypass path is closed — handlers must raise, never return
+            # {"success": False, ...} that bypasses envelope construction.
+            from src.core.exceptions import AdCPValidationError
 
-            # Should reject and list missing required parameters
-            assert result["success"] is False, "Should reject request missing required AdCP parameters"
+            with pytest.raises(AdCPValidationError) as exc_info:
+                asyncio.run(
+                    handler._handle_create_media_buy_skill(parameters=incomplete_parameters, identity=_MOCK_IDENTITY)
+                )
 
-            # ValidationError message includes missing field names
-            error_message = str(result.get("message", "")).lower()
+            error_message = str(exc_info.value).lower()
             assert "brand" in error_message, "Error message should mention missing 'brand'"
             assert "packages" in error_message, "Error message should mention missing 'packages'"

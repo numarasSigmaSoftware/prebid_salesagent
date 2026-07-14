@@ -20,6 +20,7 @@ from src.core.schemas import (
     UpdateMediaBuySuccess,
     UpdatePerformanceIndexResponse,
 )
+from tests.factories.creative_asset import build_assets, image_spec
 from tests.helpers.adcp_factories import (
     create_test_cpm_pricing_option,
     create_test_publisher_properties_by_tag,
@@ -161,14 +162,9 @@ class TestResponseStrMethods:
             variants=[],
             name="Test Creative",
             format_id=FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
-            assets={
-                "banner_image": {
-                    "url": "https://example.com/creative.jpg",
-                    "width": 300,
-                    "height": 250,
-                    "asset_type": "image",
-                }
-            },
+            assets=build_assets(
+                image_spec("banner_image", url="https://example.com/creative.jpg", width=300, height=250)
+            ),
             principal_id="prin_123",
             created_date=datetime.now(UTC),
             updated_date=datetime.now(UTC),
@@ -190,7 +186,7 @@ class TestResponseStrMethods:
         from adcp import Error
 
         resp = ActivateSignalResponse(
-            signal_id="sig_123", errors=[Error(code="ACTIVATION_FAILED", message="Could not activate signal")]
+            signal_id="sig_123", errors=[Error(code="SERVICE_UNAVAILABLE", message="Could not activate signal")]
         )
         assert str(resp) == "Signal sig_123 activation encountered 1 error(s)."
 
@@ -214,18 +210,18 @@ class TestResponseStrMethods:
 
     def test_create_media_buy_response_with_id(self):
         """CreateMediaBuySuccess shows created media buy ID."""
-        resp = CreateMediaBuySuccess(buyer_ref="ref_123", media_buy_id="mb_456", packages=[])
+        resp = CreateMediaBuySuccess(media_buy_id="mb_456", packages=[])
         assert str(resp) == "Media buy mb_456 created successfully."
 
     def test_create_media_buy_response_without_id(self):
         """CreateMediaBuySuccess shows buyer ref (manual approval case)."""
         # Note: In success branch, media_buy_id is always required
-        resp = CreateMediaBuySuccess(buyer_ref="ref_123", media_buy_id="pending", packages=[])
+        resp = CreateMediaBuySuccess(media_buy_id="pending", packages=[])
         assert str(resp) == "Media buy pending created successfully."
 
     def test_update_media_buy_response(self):
         """UpdateMediaBuySuccess shows updated media buy ID."""
-        resp = UpdateMediaBuySuccess(media_buy_id="mb_123", buyer_ref="ref_456", affected_packages=[])
+        resp = UpdateMediaBuySuccess(media_buy_id="mb_123", affected_packages=[])
         assert str(resp) == "Media buy mb_123 updated successfully."
 
     # Note: GetMediaBuyDeliveryResponse, CreateCreativeResponse, GetSignalsResponse
@@ -252,7 +248,7 @@ class TestResponseStrMethods:
                 creatives=[],
                 dry_run=False,
             ),
-            CreateMediaBuySuccess(buyer_ref="ref", media_buy_id="mb_123", packages=[]),
+            CreateMediaBuySuccess(media_buy_id="mb_123", packages=[]),
         ]
 
         for resp in responses:

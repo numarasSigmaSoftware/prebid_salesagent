@@ -20,6 +20,7 @@ from sqlalchemy import select
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyRepository
+from src.core.utils import utc_flight_end, utc_flight_start
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +83,10 @@ class MediaBuyStatusScheduler:
         try:
             with get_db_session() as session:
                 # Find media buys that need status updates (cross-tenant scheduler query)
-                # 1. pending_activation or scheduled -> should become active if start_time passed
+                # 1. pending_start (or legacy pending_activation/scheduled) -> active if start_time passed
                 # 2. active -> should become completed if end_time passed
                 media_buys = MediaBuyRepository.get_all_by_statuses(
-                    session, ["pending_activation", "scheduled", "active"]
+                    session, ["pending_start", "pending_activation", "scheduled", "active"]
                 )
 
                 for media_buy in media_buys:
@@ -119,9 +120,7 @@ class MediaBuyStatusScheduler:
             else:
                 start_time = raw_start
         elif media_buy.start_date:
-            start_time = datetime.combine(media_buy.start_date, datetime.min.time()).replace(  # type: ignore[arg-type]
-                tzinfo=UTC
-            )
+            start_time = utc_flight_start(media_buy.start_date)  # type: ignore[arg-type]
 
         if start_time is None:
             return None  # No start time defined
@@ -134,9 +133,7 @@ class MediaBuyStatusScheduler:
             else:
                 end_time = raw_end
         elif media_buy.end_date:
-            end_time = datetime.combine(media_buy.end_date, datetime.max.time()).replace(  # type: ignore[arg-type]
-                tzinfo=UTC
-            )
+            end_time = utc_flight_end(media_buy.end_date)  # type: ignore[arg-type]
 
         if end_time is None:
             return None  # No end time defined
@@ -151,9 +148,9 @@ class MediaBuyStatusScheduler:
 
         # Check if campaign should be active
         if now >= start_time:
-            if current_status in ["pending_activation", "scheduled"]:
-                # Before activating, verify creatives are approved (for pending_activation)
-                if current_status == "pending_activation":
+            if current_status in ["pending_start", "pending_activation", "scheduled"]:
+                # Before activating, verify creatives are approved (for pending_start/pending_activation)
+                if current_status in ["pending_start", "pending_activation"]:
                     if self._are_creatives_approved(media_buy, session):
                         return "active"
                     # Creatives not approved yet - stay pending

@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database.models import MediaBuy, MediaPackage
+
+if TYPE_CHECKING:
+    from adcp.types import ContextObject
 
 
 class MediaBuyRepository:
@@ -60,20 +63,61 @@ class MediaBuyRepository:
             )
         ).first()
 
-    def get_by_buyer_ref(self, buyer_ref: str) -> MediaBuy | None:
-        """Get a media buy by buyer reference within the tenant."""
+    def get_by_id_or_raise(
+        self, media_buy_id: str, *, context: ContextObject | dict[str, Any] | None = None
+    ) -> MediaBuy:
+        """Get a media buy by ID or raise ``AdCPMediaBuyNotFoundError``.
+
+        Collapses the "look up the media buy, raise the typed not-found if it
+        does not exist" guard duplicated across the update tool into one place.
+        ``context`` is echoed into the error envelope so buyer agents can
+        correlate the failure. Coexists with ``get_by_id`` — callers that
+        deliberately tolerate ``None`` keep using that.
+        """
+        media_buy = self.get_by_id(media_buy_id)
+        if media_buy is None:
+            from src.core.exceptions import AdCPMediaBuyNotFoundError
+
+            raise AdCPMediaBuyNotFoundError(
+                f"Media buy '{media_buy_id}' not found",
+                suggestion="Verify the media_buy_id is correct and belongs to your account.",
+                context=context,
+            )
+        return media_buy
+
+    def find_by_idempotency_key(
+        self, idempotency_key: str, principal_id: str, account_id: str | None = None
+    ) -> MediaBuy | None:
+        """Find an existing media buy by idempotency_key within (tenant, principal, account).
+
+        The AdCP idempotency scope is (agent, account, key): the same key under a
+        different account is an independent request, never a hit. ``account_id is
+        None`` matches rows stored with no account (``IS NULL``), mirroring the
+        NULLS NOT DISTINCT unique backstop index.
+        """
         return self._session.scalars(
             select(MediaBuy).where(
                 MediaBuy.tenant_id == self._tenant_id,
-                MediaBuy.buyer_ref == buyer_ref,
+                MediaBuy.principal_id == principal_id,
+                # SQLAlchemy renders ``== None`` as ``IS NULL`` — matches no-account rows.
+                MediaBuy.account_id == account_id,
+                MediaBuy.idempotency_key == idempotency_key,
             )
         ).first()
 
-    def get_by_id_or_buyer_ref(self, identifier: str) -> MediaBuy | None:
-        """Get a media buy by ID first, then fall back to buyer_ref."""
+    def get_by_id_or_idempotency_key(
+        self, identifier: str, principal_id: str, account_id: str | None = None
+    ) -> MediaBuy | None:
+        """Get a media buy by ID first, then fall back to idempotency_key.
+
+        ``account_id`` scopes the idempotency-key fallback to the spec's
+        (agent, account, key) tuple. It is threaded through to
+        ``find_by_idempotency_key`` rather than dropped — otherwise the
+        fallback would silently match only no-account (``IS NULL``) rows.
+        """
         result = self.get_by_id(identifier)
         if result is None:
-            result = self.get_by_buyer_ref(identifier)
+            result = self.find_by_idempotency_key(identifier, principal_id, account_id=account_id)
         return result
 
     # ------------------------------------------------------------------
@@ -85,7 +129,6 @@ class MediaBuyRepository:
         principal_id: str,
         *,
         media_buy_ids: list[str] | None = None,
-        buyer_refs: list[str] | None = None,
         statuses: list[str] | None = None,
     ) -> list[MediaBuy]:
         """Get media buys for a principal within the tenant.
@@ -98,8 +141,6 @@ class MediaBuyRepository:
         )
         if media_buy_ids is not None:
             stmt = stmt.where(MediaBuy.media_buy_id.in_(media_buy_ids))
-        if buyer_refs is not None:
-            stmt = stmt.where(MediaBuy.buyer_ref.in_(buyer_refs))
         if statuses is not None:
             stmt = stmt.where(MediaBuy.status.in_(statuses))
         return list(self._session.scalars(stmt).all())
@@ -147,6 +188,26 @@ class MediaBuyRepository:
                 MediaPackage.package_id == package_id,
             )
         ).first()
+
+    def get_package_or_raise(
+        self, media_buy_id: str, package_id: str, *, context: ContextObject | dict[str, Any] | None = None
+    ) -> MediaPackage:
+        """Get a package or raise ``AdCPPackageNotFoundError``.
+
+        Collapses the package fetch-and-raise guard duplicated across the update
+        tool. ``context`` is echoed into the error envelope. Coexists with
+        ``get_package`` for callers that tolerate ``None``.
+        """
+        package = self.get_package(media_buy_id, package_id)
+        if package is None:
+            from src.core.exceptions import AdCPPackageNotFoundError
+
+            raise AdCPPackageNotFoundError(
+                f"Package '{package_id}' not found for media buy '{media_buy_id}'",
+                suggestion="Verify the package_id exists in this media buy; list the media buy's packages to find valid ids.",
+                context=context,
+            )
+        return package
 
     def get_packages_for_ids(self, media_buy_ids: list[str]) -> dict[str, list[MediaPackage]]:
         """Get packages for multiple media buys, grouped by media_buy_id.
@@ -279,6 +340,7 @@ class MediaBuyRepository:
         by_alias: bool = False,
         created_at: datetime.datetime | None = None,
         account_id: str | None = None,
+        payload_hash: str | None = None,
     ) -> MediaBuy:
         """Create a MediaBuy from a request model, serializing raw_request at the DB boundary.
 
@@ -302,6 +364,9 @@ class MediaBuyRepository:
             package_id_map: Map of package index → package_id to inject into serialized packages.
             by_alias: Whether to serialize with field aliases (e.g., content_uri).
             created_at: Optional explicit created_at timestamp.
+            account_id: Resolved account scope (AdCP idempotency scope is agent+account+key).
+            payload_hash: Canonical request hash from the idempotency probe; the
+                degraded fallback's IDEMPOTENCY_CONFLICT signal.
 
         Returns:
             The created MediaBuy ORM object (added to session, not committed).
@@ -317,7 +382,7 @@ class MediaBuyRepository:
             "media_buy_id": media_buy_id,
             "tenant_id": self._tenant_id,
             "principal_id": principal_id,
-            "buyer_ref": getattr(req, "buyer_ref", None),
+            "idempotency_key": getattr(req, "idempotency_key", None),
             "order_name": order_name or getattr(req, "po_number", None) or f"Order-{media_buy_id}",
             "advertiser_name": advertiser_name,
             "budget": budget,
@@ -328,6 +393,11 @@ class MediaBuyRepository:
             "end_time": end_time,
             "status": status,
             "raw_request": raw,
+            # Canonical request hash as computed by the idempotency probe —
+            # raw_request is not canonicalizable (injected package_ids,
+            # alias-dependent names), so the degraded idempotency fallback
+            # conflict-checks against this stored hash.
+            "payload_hash": payload_hash,
         }
         if campaign_objective is not None:
             kwargs["campaign_objective"] = campaign_objective

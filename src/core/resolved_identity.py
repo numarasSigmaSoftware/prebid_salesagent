@@ -35,8 +35,8 @@ class ResolvedIdentity(BaseModel, frozen=True):
     protocol: Literal["mcp", "a2a", "rest"] = "mcp"
     testing_context: AdCPTestContext | None = None
     account_id: str | None = None  # Resolved account ID (from AccountReference at transport boundary)
-    supported_billing: list[str] | None = None  # BR-RULE-059: seller billing policy
-    account_approval_mode: str | None = None  # BR-RULE-060: auto | credit_review | legal_review
+    # Tenant-level billing policy (BR-RULE-059) and account approval mode (BR-RULE-060)
+    # are NOT fields on ResolvedIdentity — they live on identity.tenant (TenantContext).
 
     @property
     def is_authenticated(self) -> bool:
@@ -176,7 +176,6 @@ def resolve_identity(
                 raise AdCPAuthenticationError(
                     f"Authentication token is invalid for tenant '{tenant_id or 'any'}'. "
                     f"The token may be expired, revoked, or associated with a different tenant.",
-                    details={"error_code": "INVALID_AUTH_TOKEN"},
                 )
             # For discovery endpoints, continue without auth
         elif not tenant_context and token_tenant:

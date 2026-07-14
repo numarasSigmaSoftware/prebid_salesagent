@@ -11,16 +11,30 @@ import uuid
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPError,
+    AdCPServiceUnavailableError,
+    AdCPValidationError,
+)
 from src.core.tool_context import ToolContext
+from src.core.validation_helpers import adcp_validation_boundary
 
 logger = logging.getLogger(__name__)
 
-from adcp.types import SignalPricingOption
+from adcp.types import ContextObject
+from adcp.types.generated_poc.core.signal_id import (
+    SignalId,
+    SignalId5,
+)  # SDK 5.7: SignalId18 → SignalId5 (same fields: agent_url, id, source)
+from adcp.types.generated_poc.core.vendor_pricing_option import (
+    VendorPricingOption,
+)  # TODO: no stable alias in adcp.types
 
-from src.core.auth import get_principal_object
+from src.core.auth import get_principal_object, require_identity, require_principal_id, require_tenant
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
+    ActivateSignalRequest,
     ActivateSignalResponse,
     GetSignalsRequest,
     GetSignalsResponse,
@@ -28,12 +42,18 @@ from src.core.schemas import (
     SignalDeployment,
 )
 from src.core.testing_hooks import AdCPTestContext
+from src.core.transport_helpers import resolve_identity_from_context
 
 
-def _cpm_pricing_option(cpm: float, currency: str = "USD") -> list[SignalPricingOption]:
+def _agent_signal_id(segment_id: str) -> SignalId:
+    """Build a SignalId for an agent-native signal."""
+    return SignalId(SignalId5(id=segment_id, source="agent", agent_url="https://salesagent.adcontextprotocol.org"))
+
+
+def _cpm_pricing_option(cpm: float, currency: str = "USD") -> list[VendorPricingOption]:
     """Build a single-element pricing_options list for a CPM signal."""
     return [
-        SignalPricingOption.model_validate(
+        VendorPricingOption.model_validate(
             {"pricing_option_id": f"cpm_{currency.lower()}", "model": "cpm", "cpm": cpm, "currency": currency}
         )
     ]
@@ -53,10 +73,8 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
     _ = identity.principal_id if identity else None
 
     # Tenant is resolved at the transport boundary (resolve_identity_from_context)
-    assert identity is not None, "identity is required for signals"
-    tenant = identity.tenant
-    if not tenant:
-        raise AdCPAuthenticationError("No tenant context available")
+    identity = require_identity(identity, context=req.context)
+    tenant = require_tenant(identity, context=req.context)
 
     # Mock implementation - in production, this would query from a signal provider
     # or the ad server's available audience segments
@@ -65,6 +83,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
     # Sample signals for demonstration using local types (extend AdCP library types)
     sample_signals = [
         Signal(
+            signal_id=_agent_signal_id("auto_intenders_q1_2025"),
             signal_agent_segment_id="auto_intenders_q1_2025",
             name="Auto Intenders Q1 2025",
             description="Users actively researching new vehicles in Q1 2025",
@@ -75,6 +94,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(3.0),
         ),
         Signal(
+            signal_id=_agent_signal_id("luxury_travel_enthusiasts"),
             signal_agent_segment_id="luxury_travel_enthusiasts",
             name="Luxury Travel Enthusiasts",
             description="High-income individuals interested in premium travel experiences",
@@ -85,6 +105,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(5.0),
         ),
         Signal(
+            signal_id=_agent_signal_id("sports_content"),
             signal_agent_segment_id="sports_content",
             name="Sports Content Pages",
             description="Target ads on sports-related content",
@@ -95,6 +116,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.5),
         ),
         Signal(
+            signal_id=_agent_signal_id("finance_content"),
             signal_agent_segment_id="finance_content",
             name="Finance & Business Content",
             description="Target ads on finance and business content",
@@ -105,6 +127,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(2.0),
         ),
         Signal(
+            signal_id=_agent_signal_id("urban_millennials"),
             signal_agent_segment_id="urban_millennials",
             name="Urban Millennials",
             description="Millennials living in major metropolitan areas",
@@ -115,6 +138,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.8),
         ),
         Signal(
+            signal_id=_agent_signal_id("pet_owners"),
             signal_agent_segment_id="pet_owners",
             name="Pet Owners",
             description="Households with dogs or cats",
@@ -183,27 +207,48 @@ async def get_signals(req: GetSignalsRequest, context: Context | ToolContext | N
     Returns:
         ToolResult with GetSignalsResponse data
     """
-    from src.core.transport_helpers import resolve_identity_from_context
-
     identity = resolve_identity_from_context(context, require_valid_token=False)
     response = await _get_signals_impl(req, identity)
     return ToolResult(content=str(response), structured_content=response)
 
 
-async def _activate_signal_impl(
+def _build_activate_signal_request(
     signal_agent_segment_id: str,
-    campaign_id: str = None,
-    media_buy_id: str = None,
-    context: dict | None = None,  # payload-level context
+    campaign_id: str | None = None,
+    media_buy_id: str | None = None,
+    context: ContextObject | dict | None = None,
+) -> ActivateSignalRequest:
+    """Build an ActivateSignalRequest from individual wire params.
+
+    Translates Pydantic ValidationError into AdCPValidationError. Shared by both
+    transport wrappers so construction lives in one place.
+
+    NOTE: The wrapper layer does not yet surface ``destinations`` / ``idempotency_key``
+    (both REQUIRED on the spec request). The current implementation is a mock that
+    consumes only signal_agent_segment_id / campaign_id / media_buy_id / context, so
+    placeholder values satisfy model construction without affecting observable
+    behavior. Wiring real destinations/idempotency_key from the wire is tracked
+    separately (mock-activation gap), not in this boundary-shape refactor.
+    """
+    with adcp_validation_boundary(context="activate_signal request"):
+        return ActivateSignalRequest(
+            signal_agent_segment_id=signal_agent_segment_id,
+            destinations=[{"type": "platform", "platform": "mock"}],
+            idempotency_key=f"activate-{signal_agent_segment_id}".ljust(16, "0")[:255],
+            campaign_id=campaign_id,
+            media_buy_id=media_buy_id,
+            context=context,
+        )
+
+
+async def _activate_signal_impl(
+    req: ActivateSignalRequest,
     identity: ResolvedIdentity | None = None,
 ) -> ActivateSignalResponse:
     """Shared implementation for activate_signal (used by both MCP and A2A).
 
     Args:
-        signal_agent_segment_id: Universal signal identifier to activate
-        campaign_id: Optional campaign ID to activate signal for
-        media_buy_id: Optional media buy ID to activate signal for
-        context: Application level context per adcp spec
+        req: Typed activate-signal request
         identity: Resolved identity from transport boundary
 
     Returns:
@@ -211,22 +256,17 @@ async def _activate_signal_impl(
     """
     start_time = time.time()
 
-    # Authentication required for signal activation
-    principal_id = identity.principal_id if identity else None
+    signal_agent_segment_id = req.signal_agent_segment_id
+    context = req.context
 
-    # Tenant is resolved at the transport boundary (resolve_identity_from_context)
-    if not identity or not identity.tenant:
-        raise AdCPAuthenticationError("No tenant context available")
+    identity = require_identity(identity, context=context)
+    principal_id = require_principal_id(identity, context=context)
+    require_tenant(identity, context=context)
 
     # Get the Principal object with ad server mappings
-    if not principal_id:
-        raise AdCPAuthenticationError("Authentication required for signal activation")
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
 
-    # Apply testing hooks
-    if not identity:
-        raise AdCPValidationError("Context required for signal activation", recovery="terminal")
-    testing_ctx = identity.testing_context if identity else AdCPTestContext()
+    testing_ctx = identity.testing_context or AdCPTestContext()
     campaign_info = {"endpoint": "activate_signal", "signal_id": signal_agent_segment_id}
     # Note: apply_testing_hooks modifies response data dict, not called here as no response yet
 
@@ -241,55 +281,31 @@ async def _activate_signal_impl(
         activation_success = True
         requires_approval = signal_agent_segment_id.startswith("premium_")
 
-        from src.core.schemas import Error
-
         if requires_approval:
-            # Create a human task for approval - return error response
-            errors = [
-                Error(
-                    code="APPROVAL_REQUIRED",
-                    message=f"Signal {signal_agent_segment_id} requires manual approval before activation",
-                )
-            ]
-            return ActivateSignalResponse(
-                signal_id=signal_agent_segment_id,
-                activation_details=None,
-                errors=errors,
+            raise AdCPValidationError(
+                f"Signal {signal_agent_segment_id} requires manual approval before activation",
                 context=context,
             )
-        elif activation_success:
-            # Success - return activation details
-            decisioning_platform_segment_id = f"seg_{signal_agent_segment_id}_{uuid.uuid4().hex[:8]}"
-            return ActivateSignalResponse(
-                signal_id=signal_agent_segment_id,
-                activation_details={
-                    "decisioning_platform_segment_id": decisioning_platform_segment_id,
-                    "estimated_activation_duration_minutes": 15.0,
-                    "status": "processing",
-                },
-                errors=None,
-                context=context,
-            )
-        else:
-            # Failure
-            errors = [Error(code="ACTIVATION_FAILED", message="Signal provider unavailable")]
-            return ActivateSignalResponse(
-                signal_id=signal_agent_segment_id,
-                activation_details=None,
-                errors=errors,
-                context=context,
-            )
+        if not activation_success:
+            raise AdCPServiceUnavailableError("Signal provider unavailable", context=context)
 
-    except Exception as e:
-        logger.error(f"Error activating signal {signal_agent_segment_id}: {e}")
-        from src.core.schemas import Error
-
+        decisioning_platform_segment_id = f"seg_{signal_agent_segment_id}_{uuid.uuid4().hex[:8]}"
         return ActivateSignalResponse(
             signal_id=signal_agent_segment_id,
-            activation_details=None,
-            errors=[Error(code="ACTIVATION_ERROR", message=str(e))],
+            activation_details={
+                "decisioning_platform_segment_id": decisioning_platform_segment_id,
+                "estimated_activation_duration_minutes": 15.0,
+                "status": "processing",
+            },
+            errors=None,
             context=context,
         )
+
+    except AdCPError:
+        raise
+    except Exception as e:
+        logger.error("Error activating signal %s: %s", signal_agent_segment_id, e)
+        raise AdCPAdapterError(str(e), context=context) from e
 
 
 async def activate_signal(
@@ -313,10 +329,9 @@ async def activate_signal(
     Returns:
         ToolResult with ActivateSignalResponse data
     """
-    from src.core.transport_helpers import resolve_identity_from_context
-
     identity = resolve_identity_from_context(ctx)
-    response = await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, identity)
+    req = _build_activate_signal_request(signal_agent_segment_id, campaign_id, media_buy_id, context)
+    response = await _activate_signal_impl(req=req, identity=identity)
     return ToolResult(content=str(response), structured_content=response)
 
 
@@ -338,8 +353,6 @@ async def get_signals_raw(
         GetSignalsResponse containing matching signals
     """
     if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
     return await _get_signals_impl(req, identity)
 
@@ -348,7 +361,7 @@ async def activate_signal_raw(
     signal_agent_segment_id: str,
     campaign_id: str = None,
     media_buy_id: str = None,
-    context: dict | None = None,  # payload-level context
+    context: ContextObject | None = None,  # payload-level context
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
 ) -> ActivateSignalResponse:
@@ -368,7 +381,6 @@ async def activate_signal_raw(
         ActivateSignalResponse with activation status
     """
     if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
         identity = resolve_identity_from_context(ctx)
-    return await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, identity)
+    req = _build_activate_signal_request(signal_agent_segment_id, campaign_id, media_buy_id, context)
+    return await _activate_signal_impl(req=req, identity=identity)

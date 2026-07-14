@@ -48,14 +48,16 @@ class TestDeliveryLoopErrorHandling:
 
         # Create two mock media buys: one good, one that will error
         good_buy = MagicMock()
+        good_buy.status = "active"
+        good_buy.is_paused = False
+        good_buy.start_time = None
+        good_buy.end_time = None
         good_buy.start_date = date.today() - timedelta(days=5)
         good_buy.end_date = date.today() + timedelta(days=5)
         good_buy.budget = "1000.00"
         good_buy.raw_request = {
-            "buyer_ref": "buyer1",
             "packages": [{"package_id": "pkg1", "product_id": "prod1"}],
         }
-        good_buy.buyer_ref = "buyer1"
 
         bad_buy = MagicMock()
         # This will raise when accessed in the loop (e.g., start_date raises)
@@ -73,7 +75,7 @@ class TestDeliveryLoopErrorHandling:
         mock_uow.media_buys = mock_repo
 
         with (
-            patch("src.core.tools.media_buy_delivery.get_principal_object", return_value=MagicMock()),
+            patch("src.core.auth.get_principal_object", return_value=MagicMock()),
             patch("src.core.tools.media_buy_delivery.get_adapter", return_value=MagicMock()),
             patch("src.core.tools.media_buy_delivery.MediaBuyUoW", return_value=mock_uow),
             patch("src.core.tools.media_buy_delivery._get_target_media_buys", return_value=target_buys),
@@ -82,9 +84,8 @@ class TestDeliveryLoopErrorHandling:
             response = _get_media_buy_delivery_impl(req, identity)
 
         # The good media buy should still be in the response
-        assert len(response.media_buy_deliveries) >= 1, (
-            "A single media buy error killed the entire response — the loop must catch exceptions and continue"
-        )
+        msg = "A single media buy error killed the entire response — the loop must catch exceptions and continue"
+        assert len(response.media_buy_deliveries) >= 1, msg
         assert response.media_buy_deliveries[0].media_buy_id == "mb_good"
 
 

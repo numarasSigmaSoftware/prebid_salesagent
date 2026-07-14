@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
+from dateutil import parser as dateutil_parser
 
 from src.adapters.base import AdServerAdapter
 from src.core.retry_utils import api_retry
@@ -332,11 +333,12 @@ class XandrAdapter(AdServerAdapter):
         """Get available products (placement groups in Xandr)."""
         try:
             # Use V3 consolidated pricing types
+            # FIXME(#1388): SDK types have local subclasses; import from src.core.schemas (Pattern #7/#4).
             from adcp.types import CpmPricingOption, DeliveryMeasurement, DeliveryType
-            from adcp.types.generated_poc.core.publisher_property_selector import PublisherPropertySelector1
-            from adcp.types.generated_poc.pricing_options.price_guidance import (
-                PriceGuidance as AdCPPriceGuidance,
-            )
+            from adcp.types import PriceGuidance as AdCPPriceGuidance
+            from adcp.types.generated_poc.core.publisher_property_selector import (
+                PublisherPropertySelector1,
+            )  # TODO: no stable alias in adcp.types
 
             from src.core.schemas import FormatId
 
@@ -503,7 +505,7 @@ class XandrAdapter(AdServerAdapter):
                 raise ValueError("Advertiser ID is required for Xandr operations")
 
             # campaign_name is no longer on CreateMediaBuyRequest per AdCP spec
-            # Use brand domain or buyer_ref as fallback
+            # Use brand domain as fallback
             campaign_name = None
             if hasattr(request, "brand") and request.brand:
                 brand = request.brand
@@ -511,7 +513,7 @@ class XandrAdapter(AdServerAdapter):
                     campaign_name = brand.domain
                 elif isinstance(brand, dict):
                     campaign_name = brand.get("domain")
-            campaign_name = campaign_name or f"AdCP Campaign {request.buyer_ref}"
+            campaign_name = campaign_name or "AdCP Campaign"
 
             io_data = {
                 "insertion-order": {
@@ -617,7 +619,6 @@ class XandrAdapter(AdServerAdapter):
     def update_media_buy(
         self,
         media_buy_id: str,
-        buyer_ref: str,
         action: str,
         package_id: str | None,
         budget: int | None,
@@ -664,8 +665,8 @@ class XandrAdapter(AdServerAdapter):
                 package_statuses=package_statuses,
                 total_budget=total_budget,
                 total_spent=spent,
-                start_date=datetime.fromisoformat(io["start_date"]),
-                end_date=datetime.fromisoformat(io["end_date"]),
+                start_date=dateutil_parser.parse(io["start_date"]),
+                end_date=dateutil_parser.parse(io["end_date"]),
                 approval_status="approved" if io["state"] == "active" else "pending",
             )
 
@@ -808,7 +809,7 @@ class XandrAdapter(AdServerAdapter):
                 if "budget" in package_update:
                     li["lifetime_budget"] = float(package_update["budget"])
                     # Recalculate daily budget
-                    days = (datetime.fromisoformat(li["end_date"]) - datetime.fromisoformat(li["start_date"])).days
+                    days = (dateutil_parser.parse(li["end_date"]) - dateutil_parser.parse(li["start_date"])).days
                     li["daily_budget"] = float(package_update["budget"]) / days if days > 0 else 0
 
                 if "impressions" in package_update:
@@ -932,7 +933,7 @@ class XandrAdapter(AdServerAdapter):
                 "total_spend": 0.0,
                 "total_revenue": 0.0,
                 "video_starts": 0,
-                "video_completions": 0,
+                "completed_views": 0,
                 "by_insertion_order": {},
                 "by_day": {},
             }
@@ -947,7 +948,9 @@ class XandrAdapter(AdServerAdapter):
                 summary["total_spend"] += row.get("media_cost", 0)
                 summary["total_revenue"] += row.get("booked_revenue", 0)
                 summary["video_starts"] += row.get("video_starts", 0)
-                summary["video_completions"] += row.get("video_completions", 0)
+                # External Xandr report column is named "video_completions"; the
+                # spec-aligned internal metric name is "completed_views".
+                summary["completed_views"] += row.get("video_completions", 0)
 
                 # Group by IO
                 io_id = str(row.get("insertion_order_id"))
@@ -984,7 +987,7 @@ class XandrAdapter(AdServerAdapter):
                 else 0
             )
             summary["completion_rate"] = (
-                (summary["video_completions"] / summary["video_starts"]) if summary["video_starts"] > 0 else 0
+                (summary["completed_views"] / summary["video_starts"]) if summary["video_starts"] > 0 else 0
             )
 
             return summary
@@ -1047,7 +1050,9 @@ class XandrAdapter(AdServerAdapter):
                 clicks = row.get("clicks", 0)
                 spend = row.get("media_cost", 0)
                 video_starts = row.get("video_starts", 0)
-                video_completions = row.get("video_completions", 0)
+                # External Xandr report column is named "video_completions"; the
+                # spec-aligned internal metric name is "completed_views".
+                completed_views = row.get("video_completions", 0)
                 viewable_imps = row.get("viewability_viewed_impressions", 0)
                 measured_imps = row.get("viewability_measurement_impressions", 0)
 
@@ -1063,8 +1068,8 @@ class XandrAdapter(AdServerAdapter):
                         "cpm": (spend / impressions * 1000) if impressions > 0 else 0,
                         "ctr": (clicks / impressions) if impressions > 0 else 0,
                         "video_starts": video_starts,
-                        "video_completions": video_completions,
-                        "completion_rate": (video_completions / video_starts) if video_starts > 0 else 0,
+                        "completed_views": completed_views,
+                        "completion_rate": (completed_views / video_starts) if video_starts > 0 else 0,
                         "viewability_rate": (viewable_imps / measured_imps) if measured_imps > 0 else 0,
                     }
                 )

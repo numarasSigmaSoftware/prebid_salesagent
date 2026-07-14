@@ -1,34 +1,56 @@
 """Unit tests for validation error handling in create_media_buy."""
 
-from pydantic import ValidationError
+import pytest
+from pydantic import BaseModel, ValidationError
 
 from src.core.schemas import CreateMediaBuyRequest
-from src.core.validation_helpers import format_validation_error
+from src.core.validation_helpers import first_validation_error_field, format_validation_error
 
 
-def test_brand_manifest_target_audience_must_be_string():
-    """Test BrandManifest (adcp 3.6.0: extra=allow, no fixed fields - any kwargs accepted)."""
-    # adcp 3.6.0: BrandManifest uses extra="allow" - any kwargs accepted
-    from adcp import BrandManifest
+def test_first_validation_error_field_uses_bracket_notation():
+    """first_validation_error_field renders list indices as [i] (bracket form).
 
-    manifest = BrandManifest(
-        name="Test Brand",
-        target_audience={"demographics": ["spiritual seekers"], "interests": ["unexplained phenomena"]},
-    )
-    # In adcp 3.6.0, BrandManifest accepts arbitrary extra fields
-    assert manifest is not None
+    The boundary-derived field path must match the hand-rolled field= strings
+    raised inside the _impl layer (e.g. packages[].budget), so the wire
+    envelope's `field` attribute has one consistent shape regardless of where
+    the validation error originated.
+    """
+
+    class _Pkg(BaseModel):
+        budget: float
+
+    class _Req(BaseModel):
+        packages: list[_Pkg]
+
+    with pytest.raises(ValidationError) as exc_info:
+        _Req(packages=[{"budget": "not-a-number"}])
+
+    assert first_validation_error_field(exc_info.value) == "packages[0].budget"
 
 
-def test_brand_manifest_target_audience_string_works():
-    """Test that BrandManifest accepts arbitrary extra fields."""
-    from adcp import BrandManifest
+def test_brand_target_audience_must_be_string():
+    """Test Brand target_audience field accepts strings (adcp 3.12: Brand replaced BrandManifest)."""
+    from adcp.types.generated_poc.brand import Brand, LocalizedName  # TODO: no stable alias in adcp.types
 
-    manifest = BrandManifest(
-        name="Test Brand",
+    brand = Brand(
+        id="test_brand",
+        names=[LocalizedName(name="Test Brand", language="en")],
         target_audience="spiritual seekers interested in unexplained phenomena",
     )
-    # BrandManifest accepts extra fields with extra="allow"
-    assert manifest is not None
+    assert brand.target_audience == "spiritual seekers interested in unexplained phenomena"
+
+
+def test_brand_accepts_extra_fields():
+    """Test that Brand accepts arbitrary extra fields (extra=allow)."""
+    from adcp.types.generated_poc.brand import Brand, LocalizedName  # TODO: no stable alias in adcp.types
+
+    brand = Brand(
+        id="test_brand",
+        names=[LocalizedName(name="Test Brand", language="en")],
+        custom_field="custom_value",
+    )
+    # Brand accepts extra fields with extra="allow"
+    assert brand is not None
 
 
 def test_create_media_buy_request_invalid_brand_manifest():
@@ -36,10 +58,10 @@ def test_create_media_buy_request_invalid_brand_manifest():
     # In adcp 3.6.0, brand is a BrandReference with optional domain field
     # Missing domain does not raise an error since domain is optional
     req = CreateMediaBuyRequest(
-        buyer_ref="test_ref",
         brand={"domain": "testbrand.com"},
         end_time="2026-02-01T00:00:00Z",
         start_time="2026-01-01T00:00:00Z",
+        idempotency_key="unit-test-key-invalid-brand-mfst",
     )
     assert req.brand is not None
 
@@ -76,19 +98,12 @@ def test_validation_error_formatting_missing_field():
     try:
         raise ValidationError.from_exception_data(
             "CreateMediaBuyRequest",
-            [
-                {
-                    "type": "missing",
-                    "loc": ("buyer_ref",),
-                    "msg": "Field required",
-                    "input": {},
-                }
-            ],
+            [{"type": "missing", "loc": ("brand",), "msg": "Field required", "input": {}}],
         )
     except ValidationError as e:
         error_msg = format_validation_error(e)
 
-        assert "buyer_ref: Required field is missing" in error_msg
+        assert "brand: Required field is missing" in error_msg
         assert "Invalid request:" in error_msg
 
 

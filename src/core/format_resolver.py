@@ -11,7 +11,7 @@ creative agent-based format discovery per AdCP v2.4.
 import json
 
 from src.core.database.database_session import get_db_session
-from src.core.exceptions import AdCPNotFoundError
+from src.core.exceptions import AdCPFormatNotFoundError, AdCPNotFoundError
 from src.core.schemas import Format
 from src.core.validation_helpers import run_async_in_sync_context
 
@@ -31,7 +31,7 @@ def get_format(
         Format object with all configuration
 
     Raises:
-        AdCPNotFoundError: If format_id not found in any source
+        AdCPFormatNotFoundError: If format_id not found in any source
     """
     # Check product override first
     if product_id and tenant_id:
@@ -63,7 +63,7 @@ def get_format(
         error_msg += f" from agent {agent_url}"
     if tenant_id:
         error_msg += f" for tenant {tenant_id}"
-    raise AdCPNotFoundError(error_msg)
+    raise AdCPFormatNotFoundError(error_msg)
 
 
 def _get_product_format_override(
@@ -166,7 +166,6 @@ def list_available_formats(
     is_responsive: bool | None = None,
     asset_types: list[str] | None = None,
     name_search: str | None = None,
-    type_filter: str | None = None,
 ) -> list[Format]:
     """List all formats available to a tenant from all registered creative agents.
 
@@ -179,7 +178,6 @@ def list_available_formats(
         is_responsive: Filter for responsive formats
         asset_types: Filter by asset types
         name_search: Search by name
-        type_filter: Filter by format type (display, video, audio)
 
     Returns:
         List of all available Format objects from all registered agents
@@ -210,7 +208,6 @@ def list_available_formats(
                 is_responsive=is_responsive,
                 asset_types=asset_types,
                 name_search=name_search,
-                type_filter=type_filter,
             )
         )
     except Exception as e:

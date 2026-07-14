@@ -813,7 +813,7 @@ Then activation proceeds and deployments are returned
 ### BR-RULE-049: Per-Filter Format Discovery Semantics
 **Obligation ID** BR-RULE-049-01
 **Layer** behavioral
-**Invariant:** type=exact match, format_ids=id match with silent exclusion, asset_types=OR, dimensions=ANY render, is_responsive=bidirectional, name_search=case-insensitive substring.
+**Invariant:** type=exact match, format_ids=(agent_url, id) pair match with silent exclusion, asset_types=OR, dimensions=ANY render, is_responsive=bidirectional, name_search=case-insensitive substring.
 **Scenario:**
 ```gherkin
 Given type_filter="video"
@@ -936,7 +936,7 @@ Then an empty accounts array is returned (not an error)
 ```gherkin
 Given no valid authentication
 When sync_accounts is called
-Then AUTH_TOKEN_INVALID error is returned
+Then AUTH_REQUIRED error is returned
 
 Given no authentication
 When list_accounts is called

@@ -17,27 +17,25 @@ import base64
 import logging
 import uuid
 from datetime import UTC
-from typing import Any
+from typing import Annotated, Any
 
+from adcp.types import ContextObject, PaginationRequest, PaginationResponse
 from adcp.types.generated_poc.account.list_accounts_request import (
     Status as AccountStatus,
 )
 from adcp.types.generated_poc.account.sync_accounts_request import (
-    Account as SyncAccountInput,
+    Accounts as SyncAccountInput,  # SDK 5.7: Account → Accounts
 )
-from adcp.types.generated_poc.account.sync_accounts_response import (
-    Account as SyncResponseAccount,
-)
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.core.pagination_request import PaginationRequest
-from adcp.types.generated_poc.core.pagination_response import PaginationResponse
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
+from pydantic import Field
 
 from src.core.audit_logger import get_audit_logger
+from src.core.auth import require_identity, require_principal_id, require_tenant
 from src.core.database.models import Account as DBAccount
 from src.core.database.repositories.uow import AccountUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPValidationError
+from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas.account import (
     Account,
@@ -45,8 +43,10 @@ from src.core.schemas.account import (
     ListAccountsResponse,
     SyncAccountsRequest,
     SyncAccountsResponse,
+    SyncResponseAccount,
 )
 from src.core.tool_context import ToolContext
+from src.core.transport_helpers import resolve_identity_from_context
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def _list_accounts_impl(
 ) -> ListAccountsResponse:
     """List accounts accessible to the authenticated agent.
 
-    Per BR-RULE-055: requires authentication, raises AUTH_TOKEN_INVALID if missing.
+    Per BR-RULE-055: requires authentication, raises AUTH_REQUIRED if missing.
     Per BR-RULE-054: returns only accounts accessible to the agent.
 
     Args:
@@ -130,13 +130,9 @@ def _list_accounts_impl(
         req = ListAccountsRequest()
 
     # BR-RULE-055 INV-3: unauthenticated → auth error (consistent with sync_accounts)
-    if identity is None or identity.principal_id is None or identity.tenant_id is None:
-        from src.core.exceptions import AdCPAuthenticationError
-
-        raise AdCPAuthenticationError("Authentication required for list_accounts")
-
-    tenant_id = identity.tenant_id
-    principal_id = identity.principal_id
+    principal_id = require_principal_id(identity, context=req.context)
+    tenant = require_tenant(identity, context=req.context)
+    tenant_id = tenant["tenant_id"]
 
     with AccountUoW(tenant_id) as uow:
         assert uow.accounts is not None
@@ -146,7 +142,7 @@ def _list_accounts_impl(
         # Apply status filter if requested
         status_filter = getattr(req, "status", None)
         if status_filter is not None:
-            status_str = status_filter.value if hasattr(status_filter, "value") else str(status_filter)
+            status_str = enum_value(status_filter)
             db_accounts = [a for a in db_accounts if a.status == status_str]
 
         # Apply sandbox filter if requested
@@ -178,7 +174,7 @@ def _list_accounts_impl(
 async def list_accounts(
     status: AccountStatus | None = None,
     pagination: PaginationRequest | None = None,
-    sandbox: bool | None = None,
+    sandbox: Annotated[bool | None, Field(description="When true, return only sandbox/test accounts")] = None,
     context: ContextObject | None = None,
     ctx: Context | ToolContext | None = None,
 ) -> Any:
@@ -231,8 +227,6 @@ def list_accounts_raw(
         ListAccountsResponse with accessible accounts.
     """
     if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
     return _list_accounts_impl(req, identity)
 
@@ -255,19 +249,24 @@ def _generate_account_name(brand_domain: str, operator: str, brand_id: str | Non
 
 def _enum_to_str(val: Any) -> str | None:
     """Extract string value from an enum or return as-is. Returns None for None."""
-    if val is None:
-        return None
-    return val.value if hasattr(val, "value") else str(val)
+    return enum_value(val)
 
 
 def _serialize_governance_agents(agents: Any) -> list[dict[str, Any]] | None:
-    """Convert GovernanceAgent models to JSON-serializable dicts for DB storage."""
+    """Convert GovernanceAgent models to JSON-serializable dicts for DB storage.
+
+    Both dict and model inputs are normalized through model_dump(mode="json")
+    to ensure consistent comparison (e.g., AnyUrl → str).
+    """
+    from adcp.types.generated_poc.core.account import GovernanceAgent  # TODO: no stable alias in adcp.types
+
     if agents is None:
         return None
     result: list[dict[str, Any]] = []
     for g in agents:
         if isinstance(g, dict):
-            result.append(g)
+            # Validate through model to normalize types (AnyUrl → str, etc.)
+            result.append(GovernanceAgent.model_validate(g).model_dump(mode="json"))
         elif hasattr(g, "model_dump"):
             result.append(g.model_dump(mode="json"))
         else:
@@ -300,7 +299,7 @@ def _account_fields_changed(db_account: DBAccount, entry: Any) -> dict[str, Any]
     # Compare governance_agents (JSON field)
     # Both sides must be serialized to dicts for comparison — db_account.governance_agents
     # is hydrated to list[GovernanceAgent] by JSONType, while incoming is already serialized.
-    incoming_gov = _serialize_governance_agents(entry.governance_agents)
+    incoming_gov = _serialize_governance_agents(getattr(entry, "governance_agents", None))
     db_gov = _serialize_governance_agents(db_account.governance_agents)
     if db_gov != incoming_gov:
         changes["governance_agents"] = incoming_gov
@@ -314,18 +313,26 @@ def _build_sync_result(
     operator: str,
     action: str,
     status: str,
+    account_id: str | None = None,
     name: str | None = None,
     billing: str | None = None,
     sandbox: bool | None = None,
     errors: list[Any] | None = None,
     setup: Any | None = None,
 ) -> SyncResponseAccount:
-    """Build an AdCP sync response Account object."""
+    """Build an AdCP sync response Account object.
+
+    The seller-assigned ``account_id`` MUST be echoed back for any non-failure
+    action (created/updated/unchanged) so the buyer can reference the account
+    in subsequent calls (BR-UC-011 POST-S5). Only ``failed`` results legitimately
+    omit it because no account was provisioned.
+    """
     return SyncResponseAccount(
         brand=brand,
         operator=operator,
         action=action,
         status=status,
+        account_id=account_id,
         name=name,
         billing=billing,
         sandbox=sandbox,
@@ -341,7 +348,7 @@ def _build_setup_for_approval(mode: str, tenant_id: str) -> Any:
     """
     from datetime import datetime, timedelta
 
-    from adcp.types.generated_poc.account.sync_accounts_response import Setup
+    from adcp.types import Setup  # SDK 5.7: moved from sync_accounts_response to adcp.types
 
     if mode == "credit_review":
         return Setup(
@@ -362,14 +369,14 @@ def _check_domain_validity(brand_domain: str) -> list[Any] | None:
     Returns a list of Error objects if invalid, None if valid.
     Reserved TLDs (.test, .invalid, .example, .localhost) are rejected.
     """
-    from adcp.types.generated_poc.core.error import Error
+    from adcp.types import Error
 
     reserved_tlds = {".test", ".invalid", ".example", ".localhost"}
     for tld in reserved_tlds:
         if brand_domain.endswith(tld):
             return [
-                Error(
-                    code="INVALID_DOMAIN",
+                Error(  # structural-guard: advisory per-account result in SyncAccountsResponse.errors[]
+                    code="VALIDATION_ERROR",
                     message=f"Domain '{brand_domain}' uses reserved TLD '{tld}' "
                     f"and cannot be used for account provisioning.",
                     suggestion="Use a real domain name for production accounts.",
@@ -388,15 +395,18 @@ def _check_billing_policy(
     Returns a list of Error objects if rejected, None if accepted.
     Per BR-RULE-059: unsupported billing → BILLING_NOT_SUPPORTED.
     """
-    from adcp.types.generated_poc.core.error import Error
+    from adcp.types import Error
 
-    supported = getattr(identity, "supported_billing", None)
+    # Read billing policy from tenant configuration (not identity).
+    # Both dict and TenantContext expose .get() identically, so no branching needed.
+    tenant = identity.tenant if identity else None
+    supported = tenant.get("supported_billing") if tenant else None
     if supported is None:
         return None  # No policy configured → accept all
 
     if billing_val not in supported:
         return [
-            Error(
+            Error(  # structural-guard: advisory per-account result in SyncAccountsResponse.errors[]
                 code="BILLING_NOT_SUPPORTED",
                 message=f"Billing model '{billing_val}' is not supported by this seller. "
                 f"Supported models: {', '.join(supported)}.",
@@ -410,8 +420,24 @@ def _extract_natural_key(entry: Any) -> tuple[str, str | None, str, bool | None]
     """Extract natural key components from a sync request account entry.
 
     Returns (brand_domain, brand_id, operator, sandbox).
+
+    Raises:
+        AdCPValidationError: if the entry omits ``brand``. SDK 5.7's
+            ``SyncAccountsRequest.accounts`` is ``list[Accounts | Accounts3]``;
+            the ``Accounts3`` (account-reference / settings-update) arm makes
+            ``brand`` optional, so a brandless entry parses with ``brand=None``.
+            The pinned 3.1 spec (sync-accounts-request.json) marks each entry
+            ``required: ["brand", "operator", "billing"]``, so a brandless
+            entry must be a clean buyer-correctable 400 — not an unguarded
+            ``None.domain`` AttributeError (which fell through to a 500).
     """
     brand = entry.brand
+    if brand is None:
+        raise AdCPValidationError(
+            "Each account entry must include 'brand', 'operator', and 'billing'; "
+            "the account-reference (settings-update) form is not supported by this seller.",
+            recovery="correctable",
+        )
     brand_domain = brand.domain
     brand_id = None
     if hasattr(brand, "brand_id") and brand.brand_id is not None:
@@ -444,18 +470,19 @@ async def _sync_accounts_impl(
         SyncAccountsResponse with per-account action results.
     """
     if req is None:
-        req = SyncAccountsRequest(accounts=[])
+        req = SyncAccountsRequest(accounts=[], idempotency_key=str(uuid.uuid4()))
 
-    # BR-RULE-055: sync requires auth
-    if identity is None or identity.principal_id is None or identity.tenant_id is None:
-        raise AdCPAuthenticationError("Authentication required: sync_accounts requires a valid auth token.")
+    # BR-RULE-055: sync requires auth (consistent with list_accounts). require_principal_id
+    # first so the canonical auth message surfaces for a missing/anonymous token; require_identity
+    # then narrows the type for _check_billing_policy below.
+    principal_id = require_principal_id(identity, context=req.context)
+    identity = require_identity(identity, context=req.context)
+    tenant = require_tenant(identity, context=req.context)
+    tenant_id = tenant["tenant_id"]
 
     # Validate non-empty accounts array
     if not req.accounts:
         raise AdCPValidationError("accounts array must not be empty — at least one account is required.")
-
-    tenant_id = identity.tenant_id
-    principal_id = identity.principal_id
     dry_run = bool(req.dry_run)
     delete_missing = bool(req.delete_missing)
 
@@ -524,6 +551,7 @@ async def _sync_accounts_impl(
                             operator=operator,
                             action=action,
                             status=existing.status,
+                            account_id=existing.account_id,
                             name=existing.name,
                             billing=existing.billing,
                             sandbox=existing.sandbox,
@@ -545,6 +573,7 @@ async def _sync_accounts_impl(
                         operator=operator,
                         action=action,
                         status=existing.status,
+                        account_id=existing.account_id,
                         name=existing.name,
                         billing=existing.billing,
                         sandbox=existing.sandbox,
@@ -554,29 +583,38 @@ async def _sync_accounts_impl(
                 # Create new account
                 billing_val = _enum_to_str(entry.billing)
                 payment_terms_val = _enum_to_str(entry.payment_terms)
-                governance_agents_val = _serialize_governance_agents(entry.governance_agents)
+                governance_agents_val = _serialize_governance_agents(getattr(entry, "governance_agents", None))
 
                 account_id = _generate_account_id()
                 account_name = _generate_account_name(brand_domain, operator, brand_id)
 
+                # BR-RULE-060: determine approval status from tenant config.
+                # account_approval_mode is a distinct field from creative approval_mode
+                # (BR-RULE-037) — do NOT fall back to approval_mode.
+                # Resolved BEFORE the dry_run branch so previews reflect what a real
+                # create would return (BR-RULE-062).
+                approval_mode = tenant.get("account_approval_mode")
+                setup = _build_setup_for_approval(approval_mode or "auto", tenant_id)
+                initial_status = "pending_approval" if setup else "active"
+
                 if dry_run:
+                    # account_id was generated above (BR-RULE-062 — preview reflects
+                    # what a real create would return). It is a preview value, not a
+                    # commitment to that specific id.
                     results.append(
                         _build_sync_result(
                             brand=entry.brand,
                             operator=operator,
                             action="created",
-                            status="active",
+                            status=initial_status,
+                            account_id=account_id,
                             name=account_name,
                             billing=billing_val,
                             sandbox=sandbox,
+                            setup=setup,
                         )
                     )
                     continue
-
-                # BR-RULE-060: determine approval status
-                approval_mode = getattr(identity, "account_approval_mode", None)
-                setup = _build_setup_for_approval(approval_mode or "auto", tenant_id)
-                initial_status = "pending_approval" if setup else "active"
 
                 new_account = DBAccount(
                     tenant_id=tenant_id,
@@ -603,6 +641,7 @@ async def _sync_accounts_impl(
                         operator=operator,
                         action="created",
                         status=initial_status,
+                        account_id=account_id,
                         name=account_name,
                         billing=billing_val,
                         sandbox=sandbox,
@@ -622,6 +661,7 @@ async def _sync_accounts_impl(
                             operator=db_acct.operator or "",
                             action="updated",
                             status="closed",
+                            account_id=db_acct.account_id,
                             name=db_acct.name,
                             billing=db_acct.billing,
                             sandbox=db_acct.sandbox,
@@ -650,8 +690,10 @@ async def _sync_accounts_impl(
 
 async def sync_accounts(
     accounts: list[SyncAccountInput] | None = None,
-    delete_missing: bool | None = None,
-    dry_run: bool | None = None,
+    delete_missing: Annotated[
+        bool | None, Field(description="Deactivate accounts not present in the sync list")
+    ] = None,
+    dry_run: Annotated[bool | None, Field(description="Preview sync results without making changes")] = None,
     context: ContextObject | None = None,
     ctx: Context | ToolContext | None = None,
 ) -> Any:
@@ -675,6 +717,7 @@ async def sync_accounts(
         delete_missing=delete_missing,
         dry_run=dry_run,
         context=context,
+        idempotency_key=str(uuid.uuid4()),
     )
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = await _sync_accounts_impl(req, identity)
@@ -703,7 +746,5 @@ async def sync_accounts_raw(
         SyncAccountsResponse with per-account action results.
     """
     if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
         identity = resolve_identity_from_context(ctx, require_valid_token=True)
     return await _sync_accounts_impl(req, identity)

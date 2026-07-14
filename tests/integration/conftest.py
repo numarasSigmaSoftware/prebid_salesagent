@@ -572,8 +572,14 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
         bufsize=1,  # Line buffered
     )
 
-    # Wait for server to be ready
-    max_wait = 20  # seconds (increased for server initialization)
+    # Wait for server to be ready.
+    # Server startup is dominated by Python imports (fastmcp + adcp SDK + project)
+    # plus FastAPI lifespan + DB pool warm-up. Under CI load this routinely takes
+    # 20-40s; the prior 20s deadline produced flaky 'failed to start' errors even
+    # though Uvicorn's own log showed it had started just past the threshold. Same
+    # rationale as bf5fe3a66 (test-stack readiness deadline 120s -> 360s for
+    # cold-boot).
+    max_wait = 60  # seconds
     start_time = time.time()
     server_ready = False
 
@@ -1158,3 +1164,78 @@ def add_required_setup_data(session, tenant_id: str):
         ]
         for item in inventory_items:
             session.add(item)
+
+
+def seed_error_test_tenant(
+    *,
+    tenant_id: str,
+    principal_id: str,
+    access_token: str,
+    product_id: str,
+    subdomain: str,
+    tenant_name: str = "Error Test Tenant",
+    advertiser_id: str = "mock_adv",
+    protocol: str = "mcp",
+) -> dict:
+    """Seed a fully-configured tenant/principal/product for error-emission tests via factories.
+
+    MUST be called inside an open ``IntegrationEnv`` (factory sessions are bound there).
+    Composes factory-boy factories for the core entities and reuses
+    ``add_required_setup_data`` for the setup-checklist scaffolding (SSO, authorized
+    properties, etc.) so production's ``validate_setup_complete`` gate passes.
+    ``PricingOptionFactory`` defaults (cpm/USD/fixed) derive the synthetic
+    ``cpm_usd_fixed`` pricing option id the budget pins reference.
+
+    Returns a dict with ``tenant_dict`` (ready for ``set_current_tenant``), the seeded
+    ``identity`` (``ResolvedIdentity`` bound to the principal), and ``principal_id`` /
+    ``access_token`` for callers that need them separately.
+    """
+    from src.core.config_loader import set_current_tenant
+    from tests.factories import (
+        PricingOptionFactory,
+        PrincipalFactory,
+        ProductFactory,
+        TenantFactory,
+    )
+
+    tenant_dict = {
+        "tenant_id": tenant_id,
+        "name": tenant_name,
+        "subdomain": subdomain,
+        "ad_server": "mock",
+        "human_review_required": False,
+    }
+    tenant = TenantFactory(**tenant_dict, is_active=True)
+    product = ProductFactory(tenant=tenant, product_id=product_id, property_tags=["all_inventory"])
+    PricingOptionFactory(product=product)
+    principal = PrincipalFactory(
+        tenant=tenant,
+        principal_id=principal_id,
+        access_token=access_token,
+        platform_mappings={"mock": {"advertiser_id": advertiser_id}},
+    )
+
+    # Setup-checklist scaffolding (SSO, authorized properties, etc.) on the env-bound
+    # session, so the production validate_setup_complete gate passes for create flows.
+    session = TenantFactory._meta.sqlalchemy_session
+    add_required_setup_data(session, tenant_id)
+    session.commit()
+
+    set_current_tenant(tenant_dict)
+
+    identity = PrincipalFactory.make_identity(
+        principal_id=principal_id,
+        tenant_id=tenant_id,
+        tenant=tenant_dict,
+        auth_token=access_token,
+        protocol=protocol,
+    )
+    return {
+        "tenant": tenant,
+        "principal": principal,
+        "product": product,
+        "tenant_dict": tenant_dict,
+        "identity": identity,
+        "principal_id": principal_id,
+        "access_token": access_token,
+    }

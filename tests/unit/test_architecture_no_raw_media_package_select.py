@@ -12,6 +12,10 @@ beads: salesagent-rva2 (structural guard — no raw MediaPackage select)
 import ast
 from pathlib import Path
 
+import pytest
+
+from tests.unit._architecture_helpers import assert_violations_match_allowlist, iter_call_expressions
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # The repository module is the ONLY allowed location for raw select(MediaPackage)
@@ -24,9 +28,8 @@ MEDIA_PACKAGE_MODELS = {"MediaPackage", "DBMediaPackage", "MediaPackageModel"}
 # These existed before the guard was created. Allowlist shrinks as they're fixed.
 # FIXME(salesagent-rva2): these should be migrated to repository calls
 ALLOWLIST = {
-    # media_buy_create.py — 2 raw selects missed by UoW migration (salesagent-0w1w)
+    # media_buy_create.py — raw select missed by UoW migration (salesagent-0w1w)
     ("src/core/tools/media_buy_create.py", "execute_approved_media_buy"),
-    ("src/core/tools/media_buy_create.py", "_create_media_buy_impl"),
 }
 
 EXPECTED_VIOLATION_COUNT = len(ALLOWLIST)
@@ -57,10 +60,7 @@ def _find_raw_media_package_selects() -> list[tuple[str, str, int]]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            for child in ast.walk(node):
-                if not isinstance(child, ast.Call):
-                    continue
-
+            for child in iter_call_expressions(node):
                 func = child.func
                 if not (isinstance(func, ast.Name) and func.id == "select"):
                     continue
@@ -85,6 +85,7 @@ def _find_raw_media_package_selects() -> list[tuple[str, str, int]]:
 class TestNoRawMediaPackageSelect:
     """No raw select(MediaPackage) outside the repository module."""
 
+    @pytest.mark.arch_guard
     def test_no_new_raw_media_package_select(self):
         """New raw select(MediaPackage) calls fail immediately."""
         all_violations = _find_raw_media_package_selects()
@@ -105,20 +106,17 @@ class TestNoRawMediaPackageSelect:
             )
             raise AssertionError("\n".join(msg_lines))
 
+    @pytest.mark.arch_guard
     def test_allowlist_entries_still_exist(self):
         """Every allowlisted violation must still exist (stale entry detection)."""
         all_violations = {(f, fn) for f, fn, _line in _find_raw_media_package_selects()}
+        assert_violations_match_allowlist(
+            all_violations,
+            ALLOWLIST,
+            fix_hint="Remove fixed entries from ALLOWLIST.",
+        )
 
-        stale = ALLOWLIST - all_violations
-        if stale:
-            msg_lines = [
-                "Stale allowlist entries (violation was fixed — remove from allowlist):",
-                "",
-            ]
-            for f, fn in sorted(stale):
-                msg_lines.append(f"  ({f!r}, {fn!r}),")
-            raise AssertionError("\n".join(msg_lines))
-
+    @pytest.mark.arch_guard
     def test_violation_count_matches(self):
         """Total violations match expected count (catches undocumented additions)."""
         all_violations = _find_raw_media_package_selects()

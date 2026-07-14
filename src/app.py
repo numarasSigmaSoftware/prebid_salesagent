@@ -12,12 +12,46 @@ import os
 import re
 from contextlib import asynccontextmanager
 
+from a2a.server.request_handlers.response_helpers import agent_card_to_dict
+from a2a.server.routes import create_jsonrpc_routes
+from a2a.server.routes.agent_card_routes import create_agent_card_routes
+from a2a.types import AgentCard as A2AAgentCard
+from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastmcp.exceptions import ToolError
 from fastmcp.utilities.lifespan import combine_lifespans
+from starlette.routing import Route
 
+from src.a2a_server.adcp_a2a_server import (
+    AdCPRequestHandler,
+    create_agent_card,
+)
+from src.a2a_server.context_builder import AdCPCallContextBuilder
+from src.admin.app import create_app
+from src.core.auth_middleware import UnifiedAuthMiddleware
+from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain
+from src.core.domain_routing import route_landing_page
+from src.core.exceptions import (
+    AdCPError,
+    AdCPInvalidRequestError,
+    AdCPValidationError,
+    build_two_layer_error_envelope,
+    normalize_to_adcp_error,
+)
+from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
+from src.core.lifecycle import run_all_shutdown_callbacks
 from src.core.main import mcp
+from src.core.resolved_identity import resolve_identity
+from src.core.tool_error_logging import handle_tool_error, record_boundary_error
+from src.landing import generate_tenant_landing_page
+from src.landing.landing_page import generate_fallback_landing_page
+from src.routes.api_v1 import router as api_v1_router
+from src.routes.health import debug_router as health_debug_router
+from src.routes.health import router as health_router
+from src.routes.rest_compat_middleware import RestCompatMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +75,14 @@ def _install_admin_mounts() -> None:
         filtered_routes.append(route)
 
     app.router.routes = filtered_routes
-    app.mount("/admin", admin_wsgi)  # type: ignore[arg-type]
-    app.mount("/", admin_wsgi)  # type: ignore[arg-type]
+    # WSGIMiddleware is an ASGI-compatible adapter that Starlette accepts at runtime,
+    # but mypy sees a protocol mismatch with Starlette.mount's ASGIApp expectation.
+    # ``unused-ignore`` keeps both environments happy: CI's mypy (full project venv
+    # with starlette stubs) flags the arg-type error so we suppress it; pre-commit's
+    # isolated mypy hook env lacks starlette and reports the type:ignore as unused,
+    # which the ``unused-ignore`` category suppresses too.
+    app.mount("/admin", admin_wsgi)  # type: ignore[arg-type, unused-ignore]
+    app.mount("/", admin_wsgi)  # type: ignore[arg-type, unused-ignore]
 
 
 @asynccontextmanager
@@ -52,6 +92,16 @@ async def app_lifespan(app: FastAPI):
     logger.info("FastAPI application starting up")
     yield
     logger.info("FastAPI application shutting down")
+    # Service-agnostic shutdown: every service that needs teardown
+    # self-registers an async close callback via
+    # ``src.core.lifecycle.register_shutdown`` at first construction. This
+    # lifespan only drains the registry — it never references a concrete
+    # service. Releases long-lived HTTP sessions / connection pools (e.g.
+    # the webhook service's ``requests.Session``) before process exit; that
+    # is leak triage item #3 from the production OOM-cycle investigation
+    # (GH #1264). Per-callback errors are logged and swallowed inside
+    # ``run_all_shutdown_callbacks`` so they cannot mask the yielded exit.
+    await run_all_shutdown_callbacks()
 
 
 # Build the MCP sub-application.
@@ -76,16 +126,162 @@ app.mount("/mcp", mcp_app)
 # AdCP exception handlers — translate typed exceptions to HTTP responses.
 # ---------------------------------------------------------------------------
 
-from src.core.exceptions import AdCPError  # noqa: E402
+
+def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
+    """Build a JSONResponse carrying the two-layer envelope for ``exc``.
+
+    Single source of truth for the REST envelope-response shape — used by
+    every exception handler so HTTP status, body envelope, wire codes,
+    and observability (logger + activity feed + audit log) are constructed
+    identically regardless of which exception type fired the handler.
+
+    Symmetric with the MCP and A2A boundaries: all three transports delegate
+    to ``record_boundary_error`` so log severity, activity-feed publishing,
+    and audit logging stay in lockstep. Identity is not resolved on
+    ``request.state`` at the exception-handler boundary, so we resolve it
+    best-effort here (auth token + tenant headers) to populate the
+    tenant-scoped sinks (activity feed, audit log) for REST errors the same
+    way MCP and A2A do. Identity resolution never raises into the error path —
+    a lookup miss degrades to anonymous and ``record_boundary_error`` falls
+    back to the WARNING log line carrying the error code, message, and path.
+    """
+    tenant_id, principal_id = _best_effort_rest_identity(request)
+    record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=build_two_layer_error_envelope(exc),
+    )
+
+
+def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None]:
+    """Resolve ``(tenant_id, principal_id)`` for boundary observability only.
+
+    Used solely to scope the activity-feed and audit-log sinks in
+    ``record_boundary_error`` — never to make an authorization decision.
+    ``require_valid_token=False`` so an invalid/expired token (which may be
+    the very error being handled) still yields a tenant from the host headers
+    instead of raising. Any failure degrades to ``(None, None)``; observability
+    must not shadow the buyer's original error.
+    """
+    try:
+        identity = resolve_identity(dict(request.headers), protocol="rest", require_valid_token=False)
+        return identity.tenant_id, identity.principal_id
+    except Exception:
+        logger.debug("REST boundary: best-effort identity resolution failed", exc_info=True)
+        return None, None
 
 
 @app.exception_handler(AdCPError)
 async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
-    """Convert AdCP exceptions to structured JSON error responses."""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=exc.to_dict(),
+    """Convert AdCP exceptions to the spec-compliant two-layer envelope.
+
+    Body shape::
+
+        {
+            "adcp_error": {"code": "...", "message": "...", ...},
+            "errors": [{"code": "...", "message": "...", ...}],
+            "context": {...},     # echoed when present
+        }
+
+    HTTP status comes from ``exc.status_code``; the matching MCP/A2A
+    transport markers (``isError: true`` / ``failed``) are set by their
+    own boundary translators. Wire codes are translated through
+    ``ERROR_CODE_MAPPING`` inside the envelope builder. Logging happens
+    in ``_envelope_response`` so all three handlers leave a uniform
+    breadcrumb.
+    """
+    return _envelope_response(request, exc)
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """Cross-transport symmetry: REST wraps raw ``ValueError`` as VALIDATION_ERROR.
+
+    MCP's ``_translate_to_tool_error`` and A2A's dispatcher both catch raw
+    ``ValueError`` and wrap it in a synthetic ``AdCPValidationError`` envelope.
+    REST mirrors that here so a buyer-facing ``ValueError`` raised by
+    application code surfaces with the same wire shape and HTTP 400 status
+    on every transport, not the 500 default FastAPI gives unhandled errors.
+
+    Does NOT catch FastAPI's ``RequestValidationError`` (separate class, not a
+    ValueError subclass) — that has its own handler below.
+    """
+    return _envelope_response(request, normalize_to_adcp_error(exc))
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Translate FastAPI request-body schema failures into the AdCP envelope.
+
+    A payload that is malformed or violates a schema constraint (a missing,
+    mistyped, out-of-enum, or out-of-range field — exactly what FastAPI's
+    ``RequestValidationError`` represents) maps to the standard ``INVALID_REQUEST``
+    code per the AdCP error-code vocabulary ("Request is malformed, missing
+    required fields, or violates schema constraints").
+
+    Without this handler FastAPI emits its default raw ``422 {"detail": [...]}``,
+    which is NOT the two-layer envelope buyers parse — so the REST boundary
+    silently diverged from MCP/A2A (which wrap schema rejections in the AdCP
+    envelope). Surfacing the first failure's pointer as ``field`` keeps the
+    response actionable; the full list is preserved under ``details``.
+    """
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    # Drop ONLY the leading "body"/"query"/"path" location segment (the FastAPI
+    # location prefix); join the rest into the JSONPath-lite ``field`` the envelope
+    # already uses (e.g. attribution_window.post_click.interval). Stripping at any
+    # position would erase a body field literally named "query"/"body"/"path".
+    raw_loc = [str(p) for p in first.get("loc", ())]
+    loc = raw_loc[1:] if raw_loc and raw_loc[0] in ("body", "query", "path") else raw_loc
+    field = ".".join(loc) or None
+    message = first.get("msg") or "Request failed schema validation"
+    # Code selection by failure semantics, grounded in the AdCP graded
+    # error-compliance storyboard: a VALUE/enum/range violation on a
+    # structurally-valid field is canonically VALIDATION_ERROR; a missing/
+    # malformed/unknown field (structural) is INVALID_REQUEST. The full
+    # value-vs-structural reclassification across all fields is a repo-wide
+    # follow-up; for now the attribution_window family — reconciled to
+    # VALIDATION_ERROR upstream in adcp-req — is mapped explicitly. (salesagent-meho)
+    exc_cls = AdCPValidationError if (field and field.startswith("attribution_window")) else AdCPInvalidRequestError
+    adcp_exc = exc_cls(
+        message,
+        field=field,
+        suggestion="check request parameters and fix",
+        details={
+            "validation_errors": [{"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")} for e in errors]
+        },
     )
+    return _envelope_response(request, adcp_exc)
+
+
+@app.exception_handler(PermissionError)
+async def permission_error_handler(request: Request, exc: PermissionError) -> JSONResponse:
+    """Cross-transport symmetry: REST wraps raw ``PermissionError`` as AUTH_REQUIRED.
+
+    Mirror of the MCP / A2A boundaries which translate ``PermissionError`` to
+    a synthetic ``AdCPAuthorizationError`` envelope. Without this handler a
+    raw ``PermissionError`` on the REST path would render as a 500 server
+    error instead of the 403 authorization envelope every transport should
+    emit for the same condition.
+    """
+    return _envelope_response(request, normalize_to_adcp_error(exc))
+
+
+@app.exception_handler(ToolError)
+async def tool_error_handler(request: Request, exc: ToolError) -> JSONResponse:
+    """Global ToolError handler — catches MCP boundary errors that reach REST.
+
+    The MCP boundary translator (``with_error_logging``) converts typed
+    AdCPErrors into ``AdCPToolError`` carrying a two-layer envelope and
+    ``status_code``. When MCP-wrapped tools are invoked from REST paths and
+    that envelope bubbles up, this handler forwards it unchanged — removing
+    the need for every REST route to duplicate a ``try/except ToolError``
+    block. Plain ``ToolError`` (no typed source) falls through
+    ``handle_tool_error``'s ``_ERROR_CODE_TO_STATUS`` lookup.
+
+    Matches subclasses, so ``AdCPToolError`` is caught here too.
+    """
+    return handle_tool_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -93,35 +289,27 @@ async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
 # so middleware and scope["state"] propagate correctly within the same ASGI app.
 # ---------------------------------------------------------------------------
 
-from a2a.server.apps.jsonrpc.starlette_app import A2AStarletteApplication  # noqa: E402
-from starlette.routing import Route  # noqa: E402
-
-from src.a2a_server.adcp_a2a_server import (  # noqa: E402
-    AdCPRequestHandler,
-    create_agent_card,
-)
-from src.a2a_server.context_builder import AdCPCallContextBuilder  # noqa: E402
-from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain  # noqa: E402
 
 # Create the A2A application and add routes
 _agent_card = create_agent_card()
 _request_handler = AdCPRequestHandler()
 
-a2a_app = A2AStarletteApplication(
-    agent_card=_agent_card,
-    http_handler=_request_handler,
+# Build A2A routes using a2a-sdk 1.0 route factories
+_a2a_rpc_routes = create_jsonrpc_routes(
+    request_handler=_request_handler,
+    rpc_url="/a2a",
     context_builder=AdCPCallContextBuilder(),
+    enable_v0_3_compat=True,
+)
+_a2a_card_routes = create_agent_card_routes(
+    agent_card=_agent_card,
+    card_url="/.well-known/agent-card.json",
 )
 
-# Add A2A SDK routes directly to the FastAPI app.
-# This gives us /a2a (JSON-RPC), /.well-known/agent-card.json, /agent.json
-a2a_app.add_routes_to_app(
-    app,
-    agent_card_url="/.well-known/agent-card.json",
-    rpc_url="/a2a",
-    extended_agent_card_url="/agent.json",
-)
-logger.info("A2A routes added: /a2a, /.well-known/agent-card.json, /agent.json")
+# Add routes directly to the FastAPI app
+for route in _a2a_rpc_routes + _a2a_card_routes:
+    app.routes.append(route)
+logger.info("A2A routes added: /a2a, /.well-known/agent-card.json")
 
 
 @app.api_route("/a2a/", methods=["GET", "POST", "OPTIONS"])
@@ -141,8 +329,6 @@ async def a2a_trailing_slash_redirect():
 # ---------------------------------------------------------------------------
 
 
-from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
-
 _VALID_HOSTNAME_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*(\:\d{1,5})?$"
 )
@@ -157,6 +343,18 @@ def _create_dynamic_agent_card(request: Request):
     """Create agent card with tenant-specific URL from request headers."""
 
     def get_protocol(hostname: str) -> str:
+        # Prefer the scheme the edge proxy terminated and forwarded
+        # (X-Forwarded-Proto, set by our nginx) — the authoritative signal for the
+        # client-facing scheme. Fall back to a hostname heuristic only when the
+        # header is absent (e.g. direct, non-proxied access). This matches how the
+        # admin app already trusts X-Forwarded-Proto, and fixes the agent card
+        # advertising https for an http-only reverse proxy.
+        forwarded_proto = _get_header_case_insensitive(request.headers, "X-Forwarded-Proto")
+        if forwarded_proto:
+            # May be a comma-separated proxy chain; the first hop is client-facing.
+            proto = forwarded_proto.split(",")[0].strip().lower()
+            if proto in ("http", "https"):
+                return proto
         return "http" if hostname.startswith("localhost") or hostname.startswith("127.0.0.1") else "https"
 
     apx_incoming_host = _get_header_case_insensitive(request.headers, "Apx-Incoming-Host")
@@ -178,8 +376,11 @@ def _create_dynamic_agent_card(request: Request):
         else:
             server_url = get_a2a_server_url() or "http://localhost:8080/a2a"
 
-    dynamic_card = _agent_card.model_copy()
-    dynamic_card.url = server_url
+    dynamic_card = A2AAgentCard()
+    dynamic_card.CopyFrom(_agent_card)
+    # Update the URL in supported_interfaces
+    if dynamic_card.supported_interfaces:
+        dynamic_card.supported_interfaces[0].url = server_url
     return dynamic_card
 
 
@@ -194,7 +395,7 @@ def _replace_routes():
 
     async def dynamic_agent_card(request: Request):
         card = _create_dynamic_agent_card(request)
-        return JSONResponse(card.model_dump(mode="json"))
+        return JSONResponse(agent_card_to_dict(card))
 
     replaced_paths: set[str] = set()
     new_routes = []
@@ -262,10 +463,6 @@ async def a2a_messageid_compatibility_middleware(request: Request, call_next):
 # Health and debug routes
 # ---------------------------------------------------------------------------
 
-from src.routes.api_v1 import router as api_v1_router  # noqa: E402
-from src.routes.health import debug_router as health_debug_router  # noqa: E402
-from src.routes.health import router as health_router  # noqa: E402
-
 app.include_router(api_v1_router)
 app.include_router(health_router)
 app.include_router(health_debug_router)
@@ -275,9 +472,6 @@ app.include_router(health_debug_router)
 #   1. CORSMiddleware (outermost — adds CORS headers to all responses)
 #   2. UnifiedAuthMiddleware (extracts auth token, sets scope["state"]["auth_context"])
 # ---------------------------------------------------------------------------
-
-from src.core.auth_middleware import UnifiedAuthMiddleware  # noqa: E402
-from src.routes.rest_compat_middleware import RestCompatMiddleware  # noqa: E402
 
 app.add_middleware(UnifiedAuthMiddleware)
 app.add_middleware(RestCompatMiddleware)
@@ -296,10 +490,6 @@ app.add_middleware(
 # Admin UI — mount Flask admin via WSGIMiddleware
 # ---------------------------------------------------------------------------
 
-from a2wsgi import WSGIMiddleware  # noqa: E402
-
-from src.admin.app import create_app  # noqa: E402
-
 flask_admin_app = create_app()
 admin_wsgi = WSGIMiddleware(flask_admin_app)
 
@@ -307,12 +497,6 @@ admin_wsgi = WSGIMiddleware(flask_admin_app)
 # ---------------------------------------------------------------------------
 # Landing page routes
 # ---------------------------------------------------------------------------
-
-from fastapi.responses import HTMLResponse  # noqa: E402
-
-from src.core.domain_routing import route_landing_page  # noqa: E402
-from src.landing import generate_tenant_landing_page  # noqa: E402
-from src.landing.landing_page import generate_fallback_landing_page  # noqa: E402
 
 
 async def _handle_landing_page(request: Request):

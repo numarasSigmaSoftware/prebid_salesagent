@@ -34,8 +34,8 @@ class TestCreateMediaBuyDryRunResponseStructure:
         simulated_packages: list[dict[str, Any]] = []
         for idx, pkg_data in enumerate(
             [
-                {"buyer_ref": "pkg-1", "product_id": "prod_123", "budget": 1000.0},
-                {"buyer_ref": "pkg-2", "product_id": "prod_456", "bid_price": 5.0},
+                {"product_id": "prod_123", "budget": 1000.0},
+                {"product_id": "prod_456", "bid_price": 5.0},
             ],
             1,
         ):
@@ -43,7 +43,6 @@ class TestCreateMediaBuyDryRunResponseStructure:
             simulated_pkg: dict[str, Any] = {
                 "package_id": simulated_package_id,
                 "paused": False,
-                "buyer_ref": pkg_data["buyer_ref"],
                 "product_id": pkg_data["product_id"],
             }
             if pkg_data.get("budget") is not None:
@@ -54,14 +53,12 @@ class TestCreateMediaBuyDryRunResponseStructure:
 
         # Build response (matching impl's structure)
         response = CreateMediaBuySuccess(
-            buyer_ref="test-buyer-ref",
             media_buy_id=simulated_media_buy_id,
             packages=cast(list[Any], simulated_packages),
             context=None,
         )
 
         # Verify response structure
-        assert response.buyer_ref == "test-buyer-ref"
         assert response.media_buy_id.startswith("dry_run_mb_")
         assert len(response.packages) == 2
         # Access as Package objects (Pydantic validates/converts dict to Package)
@@ -90,7 +87,7 @@ class TestUpdateMediaBuyDryRunNoPersistence:
 
         with (
             patch("src.core.helpers.context_helpers.ensure_tenant_context") as mock_tenant,
-            patch("src.core.tools.media_buy_update.get_principal_object") as mock_principal,
+            patch("src.core.auth.get_principal_object") as mock_principal,
             patch("src.core.tools.media_buy_update._verify_principal"),
             patch("src.core.tools.media_buy_update.get_context_manager") as mock_ctx_manager,
             patch("src.core.tools.media_buy_update.get_adapter") as mock_adapter,
@@ -119,6 +116,10 @@ class TestUpdateMediaBuyDryRunNoPersistence:
             mock_session = MagicMock()
             mock_uow.session = mock_session
             mock_uow.media_buys = MagicMock()
+            # State-machine precondition guard needs a non-terminal status
+            _stub_mb = MagicMock()
+            _stub_mb.status = "active"
+            mock_uow.media_buys.get_by_id.return_value = _stub_mb
             mock_uow.__enter__ = Mock(return_value=mock_uow)
             mock_uow.__exit__ = Mock(return_value=False)
             mock_uow_cls.return_value = mock_uow
@@ -132,9 +133,9 @@ class TestUpdateMediaBuyDryRunNoPersistence:
             response = _update_media_buy_impl(req=req, identity=mock_identity)
 
             # Verify response
-            assert response.media_buy_id == "mb_existing_123"
-            assert len(response.affected_packages) == 1
-            assert response.affected_packages[0].changes_applied.get("dry_run") is True
+            assert response.response.media_buy_id == "mb_existing_123"
+            assert len(response.response.affected_packages) == 1
+            assert response.response.affected_packages[0].changes_applied.get("dry_run") is True
 
             # Verify NO workflow step was created
             mock_ctx_manager.return_value.create_workflow_step.assert_not_called()

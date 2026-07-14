@@ -6,6 +6,11 @@ import requests
 
 from src.adapters.base import AdServerAdapter, CreativeEngineAdapter
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPCapabilityNotSupportedError,
+    AdCPPackageNotFoundError,
+)
 from src.core.schemas import *
 
 
@@ -31,9 +36,11 @@ class TritonDigital(AdServerAdapter):
         super().__init__(config, principal, dry_run, creative_engine, tenant_id)
 
         # Get Triton-specific principal ID
-        self.advertiser_id = self.principal.get_adapter_id("triton")
-        if not self.advertiser_id:
-            raise ValueError(f"Principal {principal.principal_id} does not have a Triton advertiser ID")
+        self.advertiser_id = self._require_config(
+            self.principal.get_adapter_id("triton"),
+            field="advertiser_id",
+            message=f"Principal {principal.principal_id} does not have a Triton advertiser ID",
+        )
 
         # Get Triton configuration
         self.base_url = self.config.get("base_url", "https://tap-api.tritondigital.com/v1")
@@ -41,9 +48,12 @@ class TritonDigital(AdServerAdapter):
 
         if self.dry_run:
             self.log("Running in dry-run mode - Triton API calls will be simulated", dry_run_prefix=False)
-        elif not self.auth_token:
-            raise ValueError("Triton Digital config is missing 'auth_token'")
         else:
+            self.auth_token = self._require_config(
+                self.auth_token,
+                field="auth_token",
+                message="Triton Digital config is missing 'auth_token'",
+            )
             self.headers = {"Authorization": f"Bearer {self.auth_token}", "Content-Type": "application/json"}
 
     # Only audio device types supported
@@ -149,13 +159,9 @@ class TritonDigital(AdServerAdapter):
                     unsupported_features.extend(features)
 
         if unsupported_features:
-            from src.core.schemas import Error
-
             error_msg = f"Unsupported targeting features for Triton Digital: {'; '.join(unsupported_features)}"
             self.log(f"[red]Error: {error_msg}[/red]")
-            return CreateMediaBuyError(
-                errors=[Error(code="unsupported_targeting", message=error_msg, details=None)],
-            )
+            raise AdCPCapabilityNotSupportedError(error_msg, details={"features": unsupported_features})
 
         # Generate a media buy ID
         media_buy_id = (
@@ -374,7 +380,7 @@ class TritonDigital(AdServerAdapter):
         if self.dry_run:
             self.log(f"Would call: GET {self.base_url}/campaigns/{media_buy_id}")
             self.log("Would check campaign active status and dates")
-            return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, buyer_ref="", status="active")
+            return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="active")
         else:
             try:
                 # Extract campaign ID from media_buy_id
@@ -392,11 +398,11 @@ class TritonDigital(AdServerAdapter):
                 if end_date < today:
                     status = "completed"
 
-                return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, buyer_ref="", status=status)
+                return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
 
             except requests.exceptions.RequestException as e:
                 self.log(f"Error checking Triton Campaign status: {e}")
-                return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, buyer_ref="", status="unknown")
+                return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="unknown")
 
     def get_media_buy_delivery(
         self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
@@ -433,7 +439,7 @@ class TritonDigital(AdServerAdapter):
                 media_buy_id=media_buy_id,
                 reporting_period=date_range,
                 totals=DeliveryTotals(
-                    impressions=impressions, spend=spend, clicks=0, ctr=0.0, video_completions=0, completion_rate=0.0
+                    impressions=impressions, spend=spend, clicks=0, ctr=0.0, completed_views=0, completion_rate=0.0
                 ),
                 by_package=[],
                 currency="USD",
@@ -500,7 +506,7 @@ class TritonDigital(AdServerAdapter):
                         spend=total_spend,
                         clicks=0,
                         ctr=0.0,
-                        video_completions=0,
+                        completed_views=0,
                         completion_rate=0.0,
                     ),
                     by_package=by_package,
@@ -535,26 +541,17 @@ class TritonDigital(AdServerAdapter):
     def update_media_buy(
         self,
         media_buy_id: str,
-        buyer_ref: str,
         action: str,
         package_id: str | None,
         budget: int | None,
         today: datetime,
     ) -> UpdateMediaBuyResponse:
         """Updates a media buy in Triton Digital using standardized actions."""
-        from src.core.schemas import Error
-
         self.log(f"TritonDigital.update_media_buy for {media_buy_id} with action {action}", dry_run_prefix=False)
 
         if action not in REQUIRED_UPDATE_ACTIONS:
-            return UpdateMediaBuyError(
-                errors=[
-                    Error(
-                        code="unsupported_action",
-                        message=f"Action '{action}' not supported. Supported actions: {REQUIRED_UPDATE_ACTIONS}",
-                        details=None,
-                    )
-                ],
+            raise AdCPCapabilityNotSupportedError(
+                f"Action '{action}' not supported. Supported actions: {REQUIRED_UPDATE_ACTIONS}",
             )
 
         if self.dry_run:
@@ -574,11 +571,9 @@ class TritonDigital(AdServerAdapter):
                 self.log("  Payload: {'active': false}")
                 return UpdateMediaBuySuccess(
                     media_buy_id=media_buy_id,
-                    buyer_ref=buyer_ref,
                     affected_packages=[
                         AffectedPackage(
                             package_id=package_id,
-                            buyer_ref=buyer_ref or package_id,
                             paused=True,
                             changes_applied=None,
                             buyer_package_ref=None,
@@ -592,11 +587,9 @@ class TritonDigital(AdServerAdapter):
                 self.log("  Payload: {'active': true}")
                 return UpdateMediaBuySuccess(
                     media_buy_id=media_buy_id,
-                    buyer_ref=buyer_ref,
                     affected_packages=[
                         AffectedPackage(
                             package_id=package_id,
-                            buyer_ref=buyer_ref or package_id,
                             paused=False,
                             changes_applied=None,
                             buyer_package_ref=None,
@@ -618,7 +611,6 @@ class TritonDigital(AdServerAdapter):
 
             return UpdateMediaBuySuccess(
                 media_buy_id=media_buy_id,
-                buyer_ref=buyer_ref,
                 affected_packages=[],  # List of package_ids affected by update
                 implementation_date=today,
             )
@@ -644,11 +636,7 @@ class TritonDigital(AdServerAdapter):
 
                     flight = next((f for f in flights if f["name"] == package_id), None)
                     if not flight:
-                        return UpdateMediaBuyError(
-                            errors=[
-                                Error(code="flight_not_found", message=f"Flight '{package_id}' not found", details=None)
-                            ],
-                        )
+                        raise AdCPPackageNotFoundError(f"Flight '{package_id}' not found")
 
                     # Update flight status
                     is_resume = action == "resume_package"
@@ -661,11 +649,9 @@ class TritonDigital(AdServerAdapter):
                     # Return affected package with paused state
                     return UpdateMediaBuySuccess(
                         media_buy_id=media_buy_id,
-                        buyer_ref=buyer_ref,
                         affected_packages=[
                             AffectedPackage(
                                 package_id=package_id,
-                                buyer_ref=buyer_ref or package_id,
                                 paused=not is_resume,
                                 changes_applied=None,
                                 buyer_package_ref=None,
@@ -688,11 +674,7 @@ class TritonDigital(AdServerAdapter):
 
                     flight = next((f for f in flights if f["name"] == package_id), None)
                     if not flight:
-                        return UpdateMediaBuyError(
-                            errors=[
-                                Error(code="flight_not_found", message=f"Flight '{package_id}' not found", details=None)
-                            ],
-                        )
+                        raise AdCPPackageNotFoundError(f"Flight '{package_id}' not found")
 
                     # Calculate impressions based on action
                     if action == "update_package_budget":
@@ -710,13 +692,10 @@ class TritonDigital(AdServerAdapter):
 
                 return UpdateMediaBuySuccess(
                     media_buy_id=media_buy_id,
-                    buyer_ref=buyer_ref,
                     affected_packages=[],  # List of package_ids affected by update
                     implementation_date=today,
                 )
 
             except requests.exceptions.RequestException as e:
                 self.log(f"Error updating Triton campaign/flight: {e}")
-                return UpdateMediaBuyError(
-                    errors=[Error(code="api_error", message=str(e), details=None)],
-                )
+                raise AdCPAdapterError(str(e)) from e

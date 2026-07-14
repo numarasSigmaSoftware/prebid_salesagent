@@ -1,0 +1,131 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 13 * * 1'  # Monday 06:00 PT
+
+permissions: {}
+
+jobs:
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/_install-uv
+      - run: uv export --no-hashes --format requirements-txt > /tmp/requirements.txt
+      - run: |
+          set -euo pipefail
+          source scripts/security-ignored-vulns.sh
+          IFS=',' read -r -a pip_ignores <<< "$PIP_AUDIT_IGNORED_VULNS"
+          ignore_args=()
+          for vuln in "${pip_ignores[@]}"; do
+            ignore_args+=(--ignore-vuln "$vuln")
+          done
+          uvx pip-audit "${ignore_args[@]}" -r /tmp/requirements.txt
+
+  zizmor:
+    name: zizmor (workflow security lint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/_install-uv
+      - run: uvx zizmor --format sarif --config .github/zizmor.yml .github/workflows/ > zizmor.sarif
+        continue-on-error: true  # SARIF still uploads even on findings
+      - uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f  # v3.28.18
+        with:
+          sarif_file: zizmor.sarif
+      - run: uvx zizmor --min-severity medium --persona=auditor --config .github/zizmor.yml .github/workflows/
+
+  dependency-review:
+    name: Security / Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@ce3cf9537a52e8119d91fd484ab5b8a807627bf8 # v4.6.0
+        continue-on-error: true  # until dependency graph enabled on prebid/salesagent (post-merge admin)
+        with:
+          config-file: ./.github/dependency-review-config.yml
+
+  pinact:
+    name: pinact (action SHA-pin enforcement)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          PINACT_VERSION=3.10.1
+          PINACT_TARBALL="pinact_linux_amd64.tar.gz"
+          curl -sSfL "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/${PINACT_TARBALL}" -o "${PINACT_TARBALL}"
+          # Residual risk: checksums file is fetched from the same release tag as the binary.
+          # A tag-rewrite attack would defeat both simultaneously. Cosign signature verification
+          # (planned for #1234-pr6) will close this gap. Until then, this is industry-standard
+          # practice and far better than curl | tar without any verification.
+          curl -sSfL "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_${PINACT_VERSION}_checksums.txt" -o pinact_checksums.txt
+          grep "  ${PINACT_TARBALL}$" pinact_checksums.txt | sha256sum -c -
+          tar -xzf "${PINACT_TARBALL}" -C /usr/local/bin/ pinact
+          pinact run --check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  actionlint:
+    name: actionlint (workflow expression lint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          ACTIONLINT_VERSION=1.7.7
+          ACTIONLINT_TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ACTIONLINT_TARBALL}" -o "${ACTIONLINT_TARBALL}"
+          # Residual risk: same as pinact above — checksums from same release tag. Cosign (#1234-pr6).
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o actionlint_checksums.txt
+          grep "  ${ACTIONLINT_TARBALL}$" actionlint_checksums.txt | sha256sum -c -
+          tar -xzf "${ACTIONLINT_TARBALL}" actionlint
+          ./actionlint -color

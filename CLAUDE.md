@@ -19,9 +19,9 @@ This guide helps you work effectively with the Prebid Sales Agent codebase maint
 - **Database changes**: Use SQLAlchemy 2.0 `select()` → Use `JSONType` for JSON → Create migration with `alembic revision`
 
 ### Key Files to Know
-- `src/core/main.py` - MCP tools and `_impl()` functions
-- `src/core/tools.py` - A2A raw functions
-- `src/core/schemas.py` - Pydantic models (AdCP-compliant)
+- `src/core/main.py` - MCP server and tool registration
+- `src/core/tools/` - tool `_impl()` business logic, MCP wrappers, and A2A raw functions (package)
+- `src/core/schemas/` - Pydantic models, AdCP-compliant (package)
 - `src/adapters/base.py` - Adapter interface
 - `src/adapters/gam/` - GAM implementation
 - `tests/unit/test_adcp_contract.py` - Schema compliance tests
@@ -80,7 +80,9 @@ PR titles should use one of these prefixes:
 **Without a prefix, commits won't appear in release notes!** The code will still be released, but the change won't be documented in the changelog.
 
 ### Structural Guards (Automated Architecture Enforcement)
-AST-scanning tests enforce architecture invariants on every `make quality` run. New violations fail the build immediately. See [docs/development/structural-guards.md](docs/development/structural-guards.md) for full details.
+AST-scanning tests enforce architecture invariants on every `make quality` run. New violations fail the build immediately.
+
+**The table below is a representative subset, not the full set.** There are over 70 guard tests (73 `tests/unit/test_architecture_*.py`, plus a handful of boundary guards like `test_transport_agnostic_impl.py` and `test_impl_resolved_identity.py`); the always-current list is `ls tests/unit/test_architecture_*.py`. See [docs/development/structural-guards.md](docs/development/structural-guards.md) for design rationale (its written inventory covers only a subset).
 
 | Guard | Enforces | Test File |
 |-------|----------|-----------|
@@ -106,11 +108,35 @@ AST-scanning tests enforce architecture invariants on every `make quality` run. 
 | Workflow tenant isolation | WorkflowRepository queries join DBContext for tenant scoping | `test_architecture_workflow_tenant_isolation.py` |
 | No split mock assertions | Tests use `assert_called_once_with()`, not `assert_called_once()` + `call_args` | `test_architecture_weak_mock_assertions.py` |
 | Single migration head | Alembic migration graph has exactly one head | `test_architecture_single_migration_head.py` |
+| Pre-commit no additional_deps | No `additional_dependencies` in `.pre-commit-config.yaml` (ADR-001) | `test_architecture_pre_commit_no_additional_deps.py` |
+| Pre-commit hook count | Commit-stage hooks stay within D27 ceiling (≤12) | `test_architecture_pre_commit_hook_count.py` |
+| No tenant.config access | Per-field tenant columns, not legacy `tenant.config` | `test_architecture_no_tenant_config.py` |
+| JSONType columns | JSON DB columns use `JSONType`, not plain `JSON` | `test_architecture_jsontype_columns.py` |
+| No defensive RootModel | No `hasattr(x, "root")` without `# noqa: rootmodel` | `test_architecture_no_defensive_rootmodel.py` |
+| Import usage in src/ | Classes/functions used in `src/` must be imported | `test_architecture_import_usage.py` |
 
 **Rules for guards:**
 - Allowlists can only shrink — never add new violations, fix them instead
-- Every allowlisted violation has a `# FIXME(salesagent-xxxx)` comment at the source location
+- Every allowlisted violation has a `# FIXME(#<gh-issue>)` comment at the source location — reference a GitHub issue/PR number, never a local beads id (beads ids don't resolve for outside contributors)
 - When you fix a violation, remove it from the allowlist (the stale-entry test will remind you)
+
+---
+
+## AdCP Spec Version
+
+This project targets AdCP spec **3.1.0-beta.3** via the `adcp==5.7.0` Python SDK. See
+[docs/adcp-spec-version.md](docs/adcp-spec-version.md) for the version mapping
+and bump procedure. The CI guard at `tests/unit/test_adcp_spec_version.py`
+fails on pin drift.
+
+### Spec-Grounding Gate (MANDATORY before implementing protocol behavior)
+
+**Any change to AdCP/protocol BEHAVIOR** — a tool's request/response contract, error emission, idempotency, governance, or capabilities — **must cite, before code is written, the authoritative spec section + version that mandates it, plus the conformance storyboard step that grades it** (or note "ungraded"). Record the citation in the PR description and/or the planning note.
+
+- **Which version is authoritative:** the version the repo currently PINS — *unless* there is active work to comply with a different target version (a bump/migration in flight), in which case that TARGET version is the pin. Confirm which applies first.
+- **Where the spec lives** (`github.com/adcontextprotocol/adcp`): prose at `dist/docs/<version>/building/implementation/*.mdx`; the graded, executable contract at `dist/compliance/<version>/*.yaml`. The installed `adcp` SDK — codes, types, even reference implementations such as `adcp.server.idempotency` — is a CROSS-CHECK, **not** the authority; it can diverge from the spec.
+- **Why:** grounding protocol behavior in downstream artifacts (an internal contract item, or the mere existence of an SDK error code) instead of the spec prose + storyboard has produced an entire feature built inverse to the spec. The spec is the contract; everything else is derived.
+- **Enforcement:** reviewers reject protocol-behavior changes that don't cite the spec; this complements the pin-drift guard above. Background: [docs/adcp-spec-version.md](docs/adcp-spec-version.md).
 
 ---
 
@@ -403,7 +429,7 @@ Install: `uv tool install tox --with tox-uv`
 make quality              # Format + lint + typecheck + unit tests (before every commit)
 tox -e unit               # Unit tests only (fast, no Docker)
 
-# ─── Full suite (Docker + all 5 suites in parallel via tox) ───
+# ─── Full suite (Docker + all 6 suites in parallel via tox) ───
 ./run_all_tests.sh        # One command: starts Docker, runs tox -p, tears down
 ./run_all_tests.sh quick  # No Docker: unit + integration
 
@@ -451,6 +477,13 @@ Tenant → CurrencyLimit (USD required for budget validation)
 - **tests/e2e/**: Full system tests
 - **tests/admin/**: Admin UI tests
 - **tests/bdd/**: BDD behavioral tests (pytest-bdd)
+- **tests/ui/**: UI smoke tests (Playwright/chromium; needs full Docker stack)
+
+### Error Verification
+**New error-path tests must assert on the wire envelope, not reconstructed exceptions.**
+The test harness reconstructs `AdCPError` from wire responses, but this reconstruction is lossy.
+Use `assert_envelope_shape(result.wire_error_envelope, code, recovery=...)` as the primary authority.
+See `tests/CLAUDE.md` § "Error Verification Policy" for the full policy, helpers, and migration path.
 
 ### Entity Markers
 Tests are auto-tagged with entity markers by filename pattern. Use `-m` to run entity-scoped slices:
@@ -522,7 +555,7 @@ uv run python -c "from src.core.tools import your_import"  # Verify imports
 tox -e integration                     # Real PostgreSQL integration tests
 
 # Critical changes (protocol, schema updates)
-./run_all_tests.sh                     # Full suite: Docker + all 5 suites via tox
+./run_all_tests.sh                     # Full suite: Docker + all 6 suites via tox
 ```
 
 **Pre-commit hooks can't catch import errors** - You must run tests for refactorings!
@@ -565,12 +598,17 @@ APPROXIMATED_API_KEY=your-approximated-api-key
 
 ### Database Schema
 - **Core**: tenants, principals, products, media_buys, creatives, audit_logs
-- **Workflow**: workflow_steps, object_workflow_mappings
-- **Deprecated**: tasks, human_tasks (DO NOT USE)
+- **Workflow**: workflow_steps, object_workflow_mapping (human-in-the-loop approvals)
+- **Note**: the legacy `tasks` and `human_tasks` tables no longer exist in the schema — don't reference them
 
 ---
 
 ## Adapter Support
+
+Adapters are registered in `src/adapters/__init__.py` and selected per tenant.
+Registry keys: `gam`/`google_ad_manager`, `broadstreet`, `kevel`, `triton`/`triton_digital`, `mock`.
+Maturity varies — GAM is by far the most complete. (`creative_engine` in the
+registry is a creative-processing base class, not an ad-server adapter.)
 
 ### GAM Adapter
 **Supported Pricing**: CPM, VCPM, CPC, FLAT_RATE
@@ -579,6 +617,9 @@ APPROXIMATED_API_KEY=your-approximated-api-key
 - FLAT_RATE → SPONSORSHIP with CPD translation
 - VCPM → STANDARD only (GAM requirement)
 - See `docs/adapters/` for compatibility matrix
+
+### Broadstreet Adapter
+Broadstreet ad server integration (`src/adapters/broadstreet/`). Registered in the adapter factory (`src/adapters/__init__.py`).
 
 ### Mock Adapter
 **Supported**: All AdCP pricing models (CPM, VCPM, CPCV, CPP, CPC, CPV, FLAT_RATE)

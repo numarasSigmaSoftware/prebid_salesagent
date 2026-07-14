@@ -27,10 +27,10 @@ class TestCreateMediaBuyRequestBrandMigration:
         with pytest.raises(ValidationError) as exc_info:
             CreateMediaBuyRequest(
                 brand_manifest={"name": "Test Brand"},
-                buyer_ref="test_buyer",
                 packages=[],
                 start_time="asap",
                 end_time="2026-12-31T23:59:59Z",
+                idempotency_key="unit-test-key-brand-manifest-rej",
             )
 
         errors = exc_info.value.errors()
@@ -57,10 +57,10 @@ class TestCreateMediaBuyRequestBrandMigration:
         # like packages, but brand itself should be accepted)
         request = CreateMediaBuyRequest(
             brand={"domain": "testbrand.com"},
-            buyer_ref="test_buyer",
             packages=[],
             start_time="asap",
             end_time="2026-12-31T23:59:59Z",
+            idempotency_key="unit-test-key-brand-ref-accepted",
         )
         assert request.brand is not None
         assert request.brand.domain == "testbrand.com"
@@ -71,10 +71,10 @@ class TestCreateMediaBuyRequestBrandMigration:
 
         with pytest.raises(ValidationError) as exc_info:
             CreateMediaBuyRequest(
-                buyer_ref="test_buyer",
                 packages=[],
                 start_time="asap",
                 end_time="2026-12-31T23:59:59Z",
+                idempotency_key="unit-test-key-brand-required",
             )
 
         errors = exc_info.value.errors()
@@ -122,14 +122,14 @@ class TestBrandReferenceValidation:
 
     def test_brand_reference_requires_domain(self):
         """BrandReference without 'domain' field is invalid."""
-        from adcp.types.generated_poc.core.brand_ref import BrandReference
+        from adcp.types import BrandReference
 
         with pytest.raises(ValidationError):
             BrandReference()  # type: ignore[call-arg]
 
     def test_brand_reference_domain_pattern(self):
         """BrandReference domain must match lowercase domain pattern."""
-        from adcp.types.generated_poc.core.brand_ref import BrandReference
+        from adcp.types import BrandReference
 
         # Valid domain
         br = BrandReference(domain="nike.com")
@@ -145,7 +145,7 @@ class TestBrandReferenceValidation:
         This is the core incompatibility: tests used brand_manifest={'name': 'Nike'}
         but BrandReference requires {'domain': 'nike.com'}.
         """
-        from adcp.types.generated_poc.core.brand_ref import BrandReference
+        from adcp.types import BrandReference
 
         with pytest.raises(ValidationError):
             # Old format: {"name": "Nike"} - missing required 'domain' field

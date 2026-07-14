@@ -7,6 +7,7 @@ support inventory profiles) to verify the pipeline doesn't break.
 Requires PostgreSQL (integration_db).
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -108,11 +109,9 @@ async def test_create_media_buy_with_profile_based_product(sample_tenant):
         ctx = _make_context(sample_tenant["tenant_id"], principal.principal_id)
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer_profile",
             brand={"domain": "testbrand.com"},
             packages=[
                 create_test_package_request(
-                    buyer_ref="pkg_profile",
                     product_id=product.product_id,
                     pricing_option_id="cpm_usd_fixed",
                     budget=150.0,
@@ -120,6 +119,7 @@ async def test_create_media_buy_with_profile_based_product(sample_tenant):
             ],
             start_time=start_time,
             end_time=end_time,
+            idempotency_key=f"int-key-{uuid.uuid4().hex}",
         )
         response, task_status = await _create_media_buy_impl(req=req, identity=ctx)
 
@@ -199,11 +199,9 @@ async def test_create_media_buy_with_profile_formats(sample_tenant):
         # Create media buy - should succeed or return structured error, not crash
         try:
             req = CreateMediaBuyRequest(
-                buyer_ref="test_buyer_format",
                 brand={"domain": "testbrand.com"},
                 packages=[
                     create_test_package_request(
-                        buyer_ref="pkg_format",
                         product_id=product.product_id,
                         pricing_option_id="cpm_usd_fixed",
                         budget=150.0,
@@ -211,6 +209,7 @@ async def test_create_media_buy_with_profile_formats(sample_tenant):
                 ],
                 start_time=start_time,
                 end_time=end_time,
+                idempotency_key=f"int-key-{uuid.uuid4().hex}",
             )
             response, _ = await _create_media_buy_impl(req=req, identity=ctx)
             # Either succeeds or returns structured error - both are valid
@@ -288,11 +287,9 @@ async def test_multiple_products_same_profile_in_media_buy(sample_tenant):
 
         # Use only the first product (AdCP spec: package has singular product_id)
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer_shared",
             brand={"domain": "testbrand.com"},
             packages=[
                 create_test_package_request(
-                    buyer_ref=f"pkg_shared_{i}",
                     product_id=products[i].product_id,
                     pricing_option_id="cpm_usd_fixed",
                     budget=150.0,
@@ -301,6 +298,7 @@ async def test_multiple_products_same_profile_in_media_buy(sample_tenant):
             ],
             start_time=start_time,
             end_time=end_time,
+            idempotency_key=f"int-key-{uuid.uuid4().hex}",
         )
         response, _ = await _create_media_buy_impl(req=req, identity=ctx)
 
@@ -396,11 +394,9 @@ async def test_media_buy_reflects_profile_updates(sample_tenant):
         ctx = _make_context(sample_tenant["tenant_id"], principal.principal_id)
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer_updates",
             brand={"domain": "testbrand.com"},
             packages=[
                 create_test_package_request(
-                    buyer_ref="pkg_updates",
                     product_id=product.product_id,
                     pricing_option_id="cpm_usd_fixed",
                     budget=150.0,
@@ -408,6 +404,7 @@ async def test_media_buy_reflects_profile_updates(sample_tenant):
             ],
             start_time=start_time,
             end_time=end_time,
+            idempotency_key=f"int-key-{uuid.uuid4().hex}",
         )
         response, _ = await _create_media_buy_impl(req=req, identity=ctx)
 

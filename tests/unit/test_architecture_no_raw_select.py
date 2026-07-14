@@ -17,6 +17,10 @@ beads: beads-xw7 (universal no-raw-select guard)
 import ast
 from pathlib import Path
 
+import pytest
+
+from tests.unit._architecture_helpers import assert_violations_match_allowlist, iter_call_expressions
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # ── Exempt directories and files ────────────────────────────────────
@@ -146,6 +150,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/inventory.py", "check_inventory_sync"),
     ("src/admin/blueprints/inventory.py", "get_inventory_list"),
     ("src/admin/blueprints/inventory.py", "get_inventory_sizes"),
+    ("src/admin/blueprints/inventory.py", "_batch_fetch_ancestors"),  # FIXME(salesagent-y6n3): extract to repository
     ("src/admin/blueprints/inventory.py", "get_inventory_tree"),
     ("src/admin/blueprints/inventory.py", "get_order_details"),
     ("src/admin/blueprints/inventory.py", "get_orders"),
@@ -299,7 +304,6 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/core/tools/media_buy_create.py", "_create_media_buy_impl"),
     ("src/core/tools/media_buy_create.py", "execute_approved_media_buy"),
     ("src/core/tools/media_buy_list.py", "_fetch_creative_approvals"),
-    ("src/core/tools/media_buy_update.py", "_update_media_buy_impl"),
     # ── Routes ──
     ("src/routes/health.py", "debug_db_state"),
     ("src/routes/health.py", "debug_root_logic"),
@@ -359,9 +363,8 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/services/policy_service.py", "_update_currencies"),
     ("src/services/policy_service.py", "get_policies"),
     ("src/services/policy_service.py", "update_policies"),
-    ("src/services/property_discovery_service.py", "_create_or_update_property"),
-    ("src/services/property_discovery_service.py", "_create_or_update_tag"),
-    ("src/services/property_discovery_service.py", "sync_properties_from_adagents"),
+    ("src/services/property_discovery_service.py", "_batch_sync_properties"),
+    ("src/services/property_discovery_service.py", "_batch_sync_tags"),
     ("src/services/property_verification_service.py", "_verify_property_async"),
     ("src/services/property_verification_service.py", "verify_all_properties"),
     ("src/services/setup_checklist_service.py", "_check_critical_tasks"),
@@ -405,10 +408,7 @@ def _find_raw_selects() -> list[tuple[str, str, str, int]]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            for child in ast.walk(node):
-                if not isinstance(child, ast.Call):
-                    continue
-
+            for child in iter_call_expressions(node):
                 func = child.func
                 if not (isinstance(func, ast.Name) and func.id == "select"):
                     continue
@@ -436,6 +436,7 @@ def _find_raw_selects() -> list[tuple[str, str, str, int]]:
 class TestNoRawSelectOutsideRepositories:
     """No raw select(OrmModel) outside repository/infrastructure files."""
 
+    @pytest.mark.arch_guard
     def test_no_new_raw_selects(self):
         """New raw select(OrmModel) calls fail immediately.
 
@@ -466,6 +467,7 @@ class TestNoRawSelectOutsideRepositories:
             )
             raise AssertionError("\n".join(msg_lines))
 
+    @pytest.mark.arch_guard
     def test_allowlist_entries_still_exist(self):
         """Every allowlisted violation must still exist (stale entry detection).
 
@@ -473,17 +475,13 @@ class TestNoRawSelectOutsideRepositories:
         This test catches stale entries so the allowlist stays honest.
         """
         all_violations = {(f, fn) for f, fn, _model, _line in _find_raw_selects()}
+        assert_violations_match_allowlist(
+            all_violations,
+            ALLOWLIST,
+            fix_hint="Remove fixed entries from ALLOWLIST.",
+        )
 
-        stale = ALLOWLIST - all_violations
-        if stale:
-            msg_lines = [
-                "Stale allowlist entries (violation was fixed — remove from ALLOWLIST):",
-                "",
-            ]
-            for f, fn in sorted(stale):
-                msg_lines.append(f"  ({f!r}, {fn!r}),")
-            raise AssertionError("\n".join(msg_lines))
-
+    @pytest.mark.arch_guard
     def test_violation_count_matches(self):
         """Total violations match expected count.
 

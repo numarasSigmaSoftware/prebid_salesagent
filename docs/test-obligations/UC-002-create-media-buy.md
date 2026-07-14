@@ -213,6 +213,26 @@ Source: UC-002-main-mcp.md
 **Business Rule:** BR-RULE-014
 **Priority:** P1
 
+#### Scenario: Step 12a -- Inventory List Targeting Round-Trip
+**Obligation ID** UC-002-MAIN-14a
+**Layer** behavioral
+**Given** a package with `targeting_overlay.property_list` and/or `targeting_overlay.collection_list` references
+**When** the system creates the media buy and the buyer reads it back via `get_media_buys`
+**Then** the response includes `media_buys[i].packages[j].targeting_overlay.property_list.list_id` and `.collection_list.list_id` matching the values sent
+**Spec:** AdCP 3.0.0 `core/targeting.json` (`property_list`, `collection_list`); storyboard `inventory_list_targeting`
+**Business Rule:** BR-RULE-014
+**Priority:** P1
+
+#### Scenario: Step 12b -- property_targeting_allowed Enforcement
+**Obligation ID** UC-002-MAIN-14b
+**Layer** behavioral
+**Given** a package with `targeting_overlay.property_list` set against a product whose `property_targeting_allowed` is false
+**When** the system validates targeting
+**Then** it returns a validation error identifying the product and the constraint
+**Spec:** AdCP 3.0.0 `core/product.json` `property_targeting_allowed` ("Sellers SHOULD return a validation error if the product has property_targeting_allowed: false")
+**Business Rule:** BR-RULE-014
+**Priority:** P1
+
 #### Scenario: Step 13 -- Auto-Approval Determination
 **Obligation ID** UC-002-MAIN-15
 **Layer** behavioral
@@ -275,6 +295,16 @@ Source: UC-002-main-mcp.md
 **Then** it wraps the `CreateMediaBuySuccess` in a protocol envelope with status `completed`
 **And** the response is atomic (success data only, no error fields)
 **Business Rule:** BR-RULE-018 INV-1
+**Priority:** P0
+
+#### Scenario: Auto-Approve -- ObjectWorkflowMapping Persisted Before Push Notification
+**Obligation ID** UC-002-MAIN-22
+**Layer** behavioral
+**Given** auto-approval path
+**When** the system completes the media buy and calls `update_workflow_step(status="completed")`
+**Then** an `ObjectWorkflowMapping` row linking the workflow step to the media buy is persisted in the database BEFORE `update_workflow_step` is called
+**And** `link_workflow_to_object` is invoked with `object_type="media_buy"` and the correct `object_id`
+**Business Rule:** BR-RULE-020 (regression: issue #1378 — silent webhook drop on auto-approve path)
 **Priority:** P0
 
 ---
@@ -1501,6 +1531,30 @@ Source: BR-RULE-026
 **Then** both paths call the same `_create_media_buy_impl()` function
 **And** produce identical validation and responses
 **Priority:** P1
+
+---
+
+### Transport Boundary: push_notification_config Serialization
+
+#### Scenario: MCP Wrapper Serializes AnyUrl to Plain String
+**Obligation ID** UC-002-TRANSPORT-PNC-SERIALIZATION-01
+**Layer** behavioral
+**Given** a `create_media_buy` MCP request with `push_notification_config.url` set to a Pydantic `AnyUrl` value
+**When** the MCP wrapper serializes the `PushNotificationConfig` model to a dict before calling `_impl`
+**Then** the `url` field in the resulting dict is a plain `str`, not a Pydantic `AnyUrl` object
+**And** enum fields such as `authentication.schemes` are serialized to their string values
+**And** `_impl` receives a dict whose values are all plain Python types compatible with SQLAlchemy `String` columns
+**Priority:** P0 (regression: gh-#1377)
+
+#### Scenario: A2A Wrapper Serializes AnyUrl to Plain String
+**Obligation ID** UC-002-TRANSPORT-PNC-SERIALIZATION-02
+**Layer** behavioral
+**Given** a `create_media_buy` A2A request with `push_notification_config` as a `PushNotificationConfig` model instance
+**When** the A2A wrapper (`create_media_buy_raw`) serializes the model to a dict before calling `_impl`
+**Then** the `url` field in the resulting dict is a plain `str`, not a Pydantic `AnyUrl` object
+**And** enum fields such as `authentication.schemes` are serialized to their string values
+**And** `_impl` receives a dict whose values are all plain Python types compatible with SQLAlchemy `String` columns
+**Priority:** P0 (regression: gh-#1377)
 
 ---
 

@@ -26,6 +26,7 @@ from tests.factories import (
     PrincipalFactory,
     TenantFactory,
 )
+from tests.factories.creative_asset import build_assets, image_spec
 from tests.harness import CreativeListEnv, make_identity
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
@@ -251,7 +252,7 @@ class TestListPrincipalIsolation:
 # ---------------------------------------------------------------------------
 # Advanced Filtering Tests — Covers: salesagent-39ic
 # adcp spec: list_creatives filters (tags, created_after, created_before,
-#            name_contains, media_buy_ids, buyer_refs)
+#            name_contains, media_buy_ids)
 # ---------------------------------------------------------------------------
 
 
@@ -408,27 +409,6 @@ class TestListMediaBuyFilter:
         assert ids == {"c_buy1", "c_buy2"}
 
 
-class TestListBuyerRefFilter:
-    """Buyer ref filter exercises lines 145, 147."""
-
-    def test_buyer_ref_returns_matching(self, integration_db):
-        """Spec: list_creatives buyer_ref filters via assignment→media_buy join."""
-        with CreativeListEnv() as env:
-            tenant = TenantFactory(tenant_id="test_tenant")
-            principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
-
-            c1 = CreativeFactory(tenant=tenant, principal=principal, creative_id="c_ref_match")
-            CreativeFactory(tenant=tenant, principal=principal, creative_id="c_no_ref")
-
-            mb = MediaBuyFactory(tenant=tenant, buyer_ref="buyer-abc")
-            CreativeAssignmentFactory(creative=c1, media_buy=mb)
-
-            response = env.call_impl(buyer_ref="buyer-abc")
-
-        assert len(response.creatives) == 1
-        assert response.creatives[0].creative_id == "c_ref_match"
-
-
 class TestListStructuredFilters:
     """Structured CreativeFilters merge exercises line 151."""
 
@@ -504,7 +484,7 @@ class TestListSorting:
 
             response = env.call_impl(sort_by="status", sort_order="asc")
 
-        statuses = [c.status.value for c in response.creatives]
+        statuses = [str(c.status) for c in response.creatives]
         assert statuses == sorted(statuses)
 
     def test_sort_applied_in_response(self, integration_db):
@@ -581,19 +561,6 @@ class TestListQuerySummary:
 
         assert any("tags=" in f for f in response.query_summary.filters_applied)
 
-    def test_filters_applied_includes_buyer_refs(self, integration_db):
-        """Spec: list_creatives query_summary.filters_applied lists buyer_refs."""
-        with CreativeListEnv() as env:
-            tenant = TenantFactory(tenant_id="test_tenant")
-            principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
-            c1 = CreativeFactory(tenant=tenant, principal=principal, creative_id="c_1")
-            mb = MediaBuyFactory(tenant=tenant, buyer_ref="buyer-qs")
-            CreativeAssignmentFactory(creative=c1, media_buy=mb)
-
-            response = env.call_impl(buyer_refs=["buyer-qs"])
-
-        assert any("buyer_refs" in f for f in response.query_summary.filters_applied)
-
 
 # ---------------------------------------------------------------------------
 # Response Shape Tests — Covers: salesagent-39ic
@@ -635,7 +602,7 @@ class TestListResponseShape:
                 principal=principal,
                 creative_id="c_snippet",
                 data={
-                    "assets": {"banner": {"url": "https://example.com/banner.png"}},
+                    "assets": build_assets(image_spec("banner")),
                     "snippet": "<script>/* ad tag */</script>",
                 },
             )
@@ -780,7 +747,7 @@ class TestListCreativeObjectConstruction:
                 principal=principal,
                 creative_id="c_snippet",
                 data={
-                    "assets": {"banner": {"url": "https://example.com/banner.png"}},
+                    "assets": build_assets(image_spec("banner")),
                     "snippet": "<script>var ad = 1;</script>",
                     "url": "https://cdn.example.com/ad.html",
                 },
@@ -801,7 +768,7 @@ class TestListCreativeObjectConstruction:
                 principal=principal,
                 creative_id="c_snippet_no_url",
                 data={
-                    "assets": {"banner": {"url": "https://example.com/banner.png"}},
+                    "assets": build_assets(image_spec("banner")),
                     "snippet": "<script>var ad = 1;</script>",
                 },
             )
@@ -820,7 +787,7 @@ class TestListCreativeObjectConstruction:
                 principal=principal,
                 creative_id="c_normal",
                 data={
-                    "assets": {"banner": {"url": "https://example.com/banner.png"}},
+                    "assets": build_assets(image_spec("banner")),
                     "url": "https://cdn.example.com/creative.jpg",
                 },
             )
@@ -880,7 +847,10 @@ class TestListCreativeObjectConstruction:
             response = env.call_impl()
 
         assert len(response.creatives) == 1
-        assert response.creatives[0].status.value == "pending_review"
+        # SDK 5.7: CreativeStatus is plain Enum, not StrEnum; compare via .value
+        status = response.creatives[0].status
+        status_str = status.value if hasattr(status, "value") else str(status)
+        assert status_str == "pending_review"
 
     def test_creative_with_tags(self, integration_db):
         """Spec: creative tags from data dict are included in response."""
@@ -892,7 +862,7 @@ class TestListCreativeObjectConstruction:
                 principal=principal,
                 creative_id="c_with_tags",
                 data={
-                    "assets": {"banner": {"url": "https://example.com/b.png"}},
+                    "assets": build_assets(image_spec("banner")),
                     "tags": ["brand_safe", "premium"],
                 },
             )
@@ -910,7 +880,7 @@ class TestListCreativeObjectConstruction:
                 tenant=tenant,
                 principal=principal,
                 creative_id="c_no_tags",
-                data={"assets": {"banner": {"url": "https://example.com/b.png"}}},
+                data={"assets": build_assets(image_spec("banner"))},
             )
             response = env.call_impl()
 

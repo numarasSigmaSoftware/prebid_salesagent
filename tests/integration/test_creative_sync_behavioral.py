@@ -12,17 +12,24 @@ from __future__ import annotations
 from datetime import UTC
 
 import pytest
-from adcp.types import CreativeAction
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-from adcp.types.generated_poc.core.format_id import FormatId as AdcpFormatId
+from adcp.types import CreativeAction, CreativeAsset
+from adcp.types import FormatId as AdcpFormatId
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError, AdCPCreativeRejectedError, AdCPNotFoundError
 from tests.factories import MediaBuyFactory, MediaPackageFactory, PrincipalFactory, ProductFactory, TenantFactory
+from tests.factories.creative_asset import build_assets, image_spec, make_creative_asset_minimal
 from tests.harness import CreativeSyncEnv, make_identity
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
+
+
+def _error_messages(errors: list | None) -> list[str]:
+    """Extract message strings from Error objects or plain strings."""
+    if not errors:
+        return []
+    return [e.message if hasattr(e, "message") else str(e) for e in errors]
 
 
 def _make_creative_asset(**overrides) -> CreativeAsset:
@@ -31,10 +38,10 @@ def _make_creative_asset(**overrides) -> CreativeAsset:
         "creative_id": "c_test_1",
         "name": "Test Banner",
         "format_id": AdcpFormatId(agent_url=DEFAULT_AGENT_URL, id="display_300x250"),
-        "assets": {"banner": {"url": "https://example.com/banner.png"}},
+        "assets": build_assets(image_spec("banner")),
     }
     defaults.update(overrides)
-    return CreativeAsset(**defaults)
+    return make_creative_asset_minimal(**defaults)
 
 
 _make_identity = make_identity  # Canonical version from tests.harness
@@ -229,7 +236,7 @@ class TestCreativeValidation:
             response = env.call_impl(creatives=[_make_creative_asset(name="")])
             assert len(response.creatives) == 1
             result = response.creatives[0]
-            assert result.action == CreativeAction.failed or (result.errors and len(result.errors) > 0)
+            assert result.action == "failed" or (result.errors and len(result.errors) > 0)
 
     def test_whitespace_only_name_rejected(self, integration_db):
         """Covers: UC-006-EXT-D-01 — whitespace-only name → failed result."""
@@ -240,7 +247,7 @@ class TestCreativeValidation:
             response = env.call_impl(creatives=[_make_creative_asset(name="   ")])
             assert len(response.creatives) == 1
             result = response.creatives[0]
-            assert result.action == CreativeAction.failed or (result.errors and len(result.errors) > 0)
+            assert result.action == "failed" or (result.errors and len(result.errors) > 0)
 
     def test_valid_creative_accepted(self, integration_db):
         """Covers: UC-006-MAIN-MCP-01 — valid creative → created action."""
@@ -253,7 +260,7 @@ class TestCreativeValidation:
             result = response.creatives[0]
             assert result.creative_id == "c_valid"
             # Should be created (not failed)
-            assert result.action != CreativeAction.failed
+            assert result.action != "failed"
 
     def test_adapter_format_skips_registry_validation(self, integration_db):
         """Covers: UC-006-CREATIVE-FORMAT-VALIDATION-02 — adapter:// agent_url skips external format lookup."""
@@ -271,7 +278,7 @@ class TestCreativeValidation:
             )
             assert len(response.creatives) == 1
             # Should succeed without registry lookup (non-HTTP agent_url)
-            assert response.creatives[0].action != CreativeAction.failed
+            assert response.creatives[0].action != "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -300,11 +307,11 @@ class TestValidationModeSemantics:
             assert len(response.creatives) == 3
             # c_bad should be failed
             bad_result = next(r for r in response.creatives if r.creative_id == "c_bad")
-            assert bad_result.action == CreativeAction.failed
+            assert bad_result.action == "failed"
             # c_good_1 and c_good_2 should NOT be failed
             good_results = [r for r in response.creatives if r.creative_id != "c_bad"]
             for r in good_results:
-                assert r.action != CreativeAction.failed, f"Creative {r.creative_id} should succeed in lenient mode"
+                assert r.action != "failed", f"Creative {r.creative_id} should succeed in lenient mode"
 
     def test_strict_mode_also_processes_all_creatives(self, integration_db):
         """Covers: UC-006-EXT-C-02 — strict: validation errors still per-creative in strict mode."""
@@ -375,7 +382,7 @@ class TestCreateUpdateWorkflow:
             response = env.call_impl(creatives=[_make_creative_asset(creative_id="c_new", name="New Creative")])
 
         assert len(response.creatives) == 1
-        assert response.creatives[0].action == CreativeAction.created
+        assert response.creatives[0].action == "created"
 
         with get_db_session() as session:
             db_creative = session.scalars(
@@ -403,7 +410,7 @@ class TestCreateUpdateWorkflow:
             response = env.call_impl(creatives=[_make_creative_asset(creative_id="c_upsert", name="Updated")])
 
         assert len(response.creatives) == 1
-        assert response.creatives[0].action == CreativeAction.updated
+        assert response.creatives[0].action == "updated"
 
         with get_db_session() as session:
             db_creative = session.scalars(
@@ -456,7 +463,7 @@ class TestDeleteMissing:
 
         # Check response includes a deleted action for orphan
         actions = {r.creative_id: r.action for r in response.creatives}
-        assert CreativeAction.deleted in actions.values()
+        assert "deleted" in actions.values()
 
         with get_db_session() as session:
             orphan = session.scalars(
@@ -761,9 +768,9 @@ class TestSchemaCompleteness:
 
         result = response.creatives[0]
         assert result.creative_id == "c_fields"
-        assert result.action in list(CreativeAction)
+        assert result.action in [a.value for a in CreativeAction]
         assert isinstance(result.changes, list)
-        assert isinstance(result.errors, list)
+        assert result.errors is None or isinstance(result.errors, list)
 
 
 # ---------------------------------------------------------------------------
@@ -797,8 +804,8 @@ class TestSyncExtensions:
 
         assert len(response.creatives) == 2
         result_by_id = {r.creative_id: r for r in response.creatives}
-        assert result_by_id["c_bad"].action == CreativeAction.failed
-        assert result_by_id["c_good"].action != CreativeAction.failed
+        assert result_by_id["c_bad"].action == "failed"
+        assert result_by_id["c_good"].action != "failed"
 
     def test_lenient_validation_bad_creative_fails_good_continues(self, integration_db):
         """Covers: UC-006-EXT-C-03 — lenient: invalid creative failed, valid ones proceed."""
@@ -816,7 +823,7 @@ class TestSyncExtensions:
 
         assert len(response.creatives) == 2
         result_by_id = {r.creative_id: r for r in response.creatives}
-        assert result_by_id["c_bad"].action == CreativeAction.failed
+        assert result_by_id["c_bad"].action == "failed"
 
     def test_missing_name_field_fails_validation(self, integration_db):
         """Covers: UC-006-EXT-D-02 — dict without name → action=failed with errors."""
@@ -829,13 +836,13 @@ class TestSyncExtensions:
                     {
                         "creative_id": "c_no_name",
                         "format_id": {"agent_url": DEFAULT_AGENT_URL, "id": "display_300x250"},
-                        "assets": {"banner": {"url": "https://example.com/b.png"}},
+                        "assets": build_assets(image_spec("banner")),
                     }
                 ],
             )
 
         assert len(response.creatives) == 1
-        assert response.creatives[0].action == CreativeAction.failed
+        assert response.creatives[0].action == "failed"
         assert len(response.creatives[0].errors) > 0
 
     def test_unknown_format_fails_with_hint(self, integration_db):
@@ -856,8 +863,8 @@ class TestSyncExtensions:
 
         assert len(response.creatives) == 1
         result = response.creatives[0]
-        assert result.action == CreativeAction.failed
-        assert any("list_creative_formats" in e for e in (result.errors or []))
+        assert result.action == "failed"
+        assert any("list_creative_formats" in e for e in _error_messages(result.errors))
 
     def test_unreachable_agent_fails_with_retry(self, integration_db):
         """Covers: UC-006-EXT-G-01 — agent unreachable → failed with retry suggestion."""
@@ -877,8 +884,8 @@ class TestSyncExtensions:
 
         assert len(response.creatives) == 1
         result = response.creatives[0]
-        assert result.action == CreativeAction.failed
-        assert any("unreachable" in e.lower() for e in (result.errors or []))
+        assert result.action == "failed"
+        assert any("unreachable" in e.lower() for e in _error_messages(result.errors))
 
     def test_package_not_found_lenient_logs_error(self, integration_db):
         """Covers: UC-006-EXT-J-02 — lenient: missing package → assignment_errors."""
@@ -911,7 +918,7 @@ class TestSyncExtensions:
                 )
 
     def test_format_mismatch_strict_raises(self, integration_db):
-        """Covers: UC-006-EXT-K-01 — strict: format mismatch → AdCPValidationError."""
+        """Covers: UC-006-EXT-K-01 — strict: format mismatch → CREATIVE_REJECTED (#1417)."""
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
@@ -929,7 +936,7 @@ class TestSyncExtensions:
             pkg_id = pkg.package_id
 
             # Creative uses video_30s format (different from product's display)
-            with pytest.raises(AdCPValidationError, match="not supported"):
+            with pytest.raises(AdCPCreativeRejectedError, match="not supported"):
                 env.call_impl(
                     creatives=[
                         _make_creative_asset(
@@ -991,7 +998,7 @@ class TestSyncExtensions:
             )
 
         assert len(response.creatives) == 1
-        assert response.creatives[0].action != CreativeAction.failed
+        assert response.creatives[0].action != "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -1019,7 +1026,7 @@ class TestProvenanceEnforcement:
 
         assert len(response.creatives) == 1
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed
+        assert result.action != "failed"
         assert any("provenance" in w.lower() for w in (result.warnings or []))
 
     def test_provenance_present_no_warning(self, integration_db):
@@ -1044,7 +1051,7 @@ class TestProvenanceEnforcement:
 
         assert len(response.creatives) == 1
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed
+        assert result.action != "failed"
         provenance_warnings = [w for w in (result.warnings or []) if "provenance" in w.lower()]
         assert len(provenance_warnings) == 0
 
@@ -1275,7 +1282,7 @@ class TestFormatCompatibilityExtended:
 
         # Should succeed — URL normalization strips /mcp/ before comparison
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed, f"Expected success but got: {result.errors}"
+        assert result.action != "failed", f"Expected success but got: {result.errors}"
 
     def test_empty_format_ids_allows_all(self, integration_db):
         """Covers: UC-006-ASSIGNMENT-FORMAT-COMPATIBILITY-04 — empty format_ids = no restriction."""
@@ -1306,7 +1313,7 @@ class TestFormatCompatibilityExtended:
             )
 
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed, f"Expected success but got: {result.errors}"
+        assert result.action != "failed", f"Expected success but got: {result.errors}"
 
     def test_format_id_dual_key_support(self, integration_db):
         """Covers: UC-006-ASSIGNMENT-FORMAT-COMPATIBILITY-05 — 'format_id' key accepted alongside 'id'."""
@@ -1339,7 +1346,7 @@ class TestFormatCompatibilityExtended:
             )
 
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed, f"Expected success but got: {result.errors}"
+        assert result.action != "failed", f"Expected success but got: {result.errors}"
 
     def test_no_product_on_package_skips_format_check(self, integration_db):
         """Covers: UC-006-ASSIGNMENT-FORMAT-COMPATIBILITY-06 — no product_id = no format validation."""
@@ -1365,7 +1372,7 @@ class TestFormatCompatibilityExtended:
             )
 
         result = response.creatives[0]
-        assert result.action != CreativeAction.failed, f"Expected success but got: {result.errors}"
+        assert result.action != "failed", f"Expected success but got: {result.errors}"
 
 
 # ---------------------------------------------------------------------------
