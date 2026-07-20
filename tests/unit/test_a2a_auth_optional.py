@@ -176,6 +176,26 @@ class TestAuthOptionalSkills:
             self.handler._validate_push_callback(config, self.mock_identity)
         assert "SSRF" in str(exc.value)
 
+    def test_validate_push_callback_rejects_anonymous_caller_even_for_safe_url(self):
+        """The auth gate refuses an anonymous caller's callback INDEPENDENT of the SSRF check.
+
+        Uses a benign public URL and forces the SSRF validator to pass, so the ONLY
+        thing that can reject is the authentication gate — isolating it from the SSRF
+        branch (the metadata-URL test would pass even if the auth gate regressed).
+        """
+        from a2a.types import TaskPushNotificationConfig
+
+        config = TaskPushNotificationConfig(url="https://buyer.example.com/webhook")
+        with (
+            patch(
+                "src.a2a_server.adcp_a2a_server.WebhookURLValidator.validate_callback_url",
+                return_value=(True, ""),
+            ),
+            pytest.raises(AdCPValidationError) as exc,
+        ):
+            self.handler._validate_push_callback(config, self.anon_identity)
+        assert "authentication" in str(exc.value).lower()
+
     def test_validate_push_callback_allows_safe_url_for_authenticated_caller(self):
         """A safe callback URL from an authenticated caller is accepted (no over-rejection)."""
         from a2a.types import TaskPushNotificationConfig

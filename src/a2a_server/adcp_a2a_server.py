@@ -210,6 +210,26 @@ class AdCPRequestHandler(RequestHandler):
         return build_two_layer_error_envelope(normalize_to_adcp_error(exc))
 
     @staticmethod
+    def _fail_task_with_error_envelope(task: Task, exc: Exception) -> None:
+        """Mark ``task`` FAILED and attach ``exc`` as the sole two-layer-envelope artifact.
+
+        Single source of truth for the failed-Task shape (``status=FAILED`` +
+        a lone ``error_1``/``processing_error`` DataPart carrying
+        ``_build_error_envelope(exc)``) shared by the callback-rejection path and
+        the top-level ``on_message_send`` error handler, so both emit the identical
+        wire shape a storyboard runner can ``JSON.parse`` uniformly.
+        """
+        task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
+        del task.artifacts[:]
+        task.artifacts.append(
+            Artifact(
+                artifact_id="error_1",
+                name="processing_error",
+                parts=[Part(data=_dict_to_value(AdCPRequestHandler._build_error_envelope(exc)))],
+            )
+        )
+
+    @staticmethod
     def _build_failed_skill_result(skill_name: str, exc: Exception) -> dict[str, Any]:
         """Build the dispatcher result dict for a failed skill invocation.
 
@@ -362,7 +382,9 @@ class AdCPRequestHandler(RequestHandler):
         except Exception as e:
             logger.warning("Failed to log A2A operation: %s", e)
 
-    def _validate_push_callback(self, push_notification_config: Any, identity: ResolvedIdentity | None) -> None:
+    def _validate_push_callback(
+        self, push_notification_config: TaskPushNotificationConfig | None, identity: ResolvedIdentity | None
+    ) -> None:
         """Guard a client-supplied push callback before it is persisted (#1512 SSRF).
 
         Two controls, both required:
@@ -680,18 +702,12 @@ class AdCPRequestHandler(RequestHandler):
                     # instead of letting it fall through to the outer handler, which
                     # would emit a JSON-RPC -32603 InternalError whose data the A2A v0.3
                     # adapter drops (data: null). The callback is never stored, so no
-                    # webhook can be driven (#1512). Like the per-skill AdCPError path,
-                    # this does not drive the audit/activity sinks for a buyer input error.
+                    # webhook can be driven (#1512). A rejected callback is a buyer input
+                    # error, not a seller fault, so — like a failed skill's AdCPError —
+                    # it does not drive the audit/activity sinks that record_boundary_error
+                    # reserves for seller-side failures.
                     logger.warning("Rejected push_notification_config callback: %s", callback_exc)
-                    task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-                    del task.artifacts[:]
-                    task.artifacts.append(
-                        Artifact(
-                            artifact_id="error_1",
-                            name="processing_error",
-                            parts=[Part(data=_dict_to_value(self._build_error_envelope(callback_exc)))],
-                        )
-                    )
+                    self._fail_task_with_error_envelope(task, callback_exc)
                     self.tasks[task_id] = task
                     return task
                 self._task_push_configs[task_id] = push_notification_config
@@ -1048,21 +1064,13 @@ class AdCPRequestHandler(RequestHandler):
                 principal_id=err_principal_id,
             )
 
-            # Send protocol-level webhook notification for failure if configured
-            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-            # Attach error to task artifacts as a spec-compliant two-layer
-            # envelope (same shape as failed-skill DataParts) so storyboard
-            # runners can ``JSON.parse`` the artifact uniformly regardless of
-            # which failure path produced it.
-            del task.artifacts[:]
-            task.artifacts.append(
-                Artifact(
-                    artifact_id="error_1",
-                    name="processing_error",
-                    parts=[Part(data=_dict_to_value(self._build_error_envelope(e)))],
-                )
-            )
+            # Mark FAILED and attach the error as a spec-compliant two-layer
+            # envelope (same shape as failed-skill DataParts) so storyboard runners
+            # can ``JSON.parse`` the artifact uniformly regardless of which failure
+            # path produced it.
+            self._fail_task_with_error_envelope(task, e)
 
+            # Send protocol-level webhook notification for failure if configured
             await self._send_protocol_webhook(task, status="failed")
 
             # Raise A2A error instead of creating failed task

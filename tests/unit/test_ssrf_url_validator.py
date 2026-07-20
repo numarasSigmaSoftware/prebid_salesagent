@@ -109,6 +109,42 @@ class TestCheckUrlSsrf:
         assert "resolve" in error.lower() or "cannot" in error.lower()
 
 
+class TestAllowPrivateWebhookGate:
+    """The env parsing of ADCP_ALLOW_PRIVATE_WEBHOOKS — the flag that relaxes the
+    default-strict callback gate. Tested directly (not patched out) so an inversion
+    of the parse reddens; every other callback test patches this function, so without
+    this the default-secure posture has no oracle (#1512)."""
+
+    def test_defaults_to_false_when_unset(self, monkeypatch):
+        from src.core.webhook_validator import _allow_private_webhook_targets
+
+        monkeypatch.delenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", raising=False)
+        assert _allow_private_webhook_targets() is False
+
+    def test_truthy_values_enable(self, monkeypatch):
+        from src.core.webhook_validator import _allow_private_webhook_targets
+
+        for val in ("1", "true", "True", "YES", " yes "):
+            monkeypatch.setenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", val)
+            assert _allow_private_webhook_targets() is True, val
+
+    def test_falsy_values_keep_disabled(self, monkeypatch):
+        from src.core.webhook_validator import _allow_private_webhook_targets
+
+        for val in ("", "0", "false", "no", "off"):
+            monkeypatch.setenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", val)
+            assert _allow_private_webhook_targets() is False, val
+
+    def test_default_env_rejects_private_target_end_to_end(self, monkeypatch):
+        """With the flag genuinely unset (not patched), a private target is rejected."""
+        from src.core.webhook_validator import WebhookURLValidator
+
+        monkeypatch.delenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", raising=False)
+        with patch("src.core.security.url_validator._resolve_ips", return_value=["10.0.0.5"]):
+            is_valid, _ = WebhookURLValidator.validate_callback_url("https://internal.example.com/webhook")
+        assert is_valid is False
+
+
 class TestValidateCallbackUrl:
     """The callback gate: strict by default (prod/staging/dev); private only via the
     dedicated ADCP_ALLOW_PRIVATE_WEBHOOKS opt-in (E2E harness) (#1512)."""
@@ -202,6 +238,56 @@ class TestValidateCallbackUrl:
         ):
             is_valid, _ = WebhookURLValidator.validate_callback_url("https://rebind.example.com/webhook")
         assert is_valid is False
+
+
+class TestReservedRangeCoverage:
+    """Every reserved range in AdCP security.mdx §SSRF rule 2 is rejected.
+
+    Enumerates the spec's block list verbatim so a future omission (a hand-copied
+    subset drifting from the spec) reddens. Each probe uses a literal-IP host, which
+    pins to itself, so no DNS patching is needed. ``always`` ranges must also be
+    rejected under ``allow_private=True``; ``private`` ranges are permitted only then.
+    """
+
+    # (representative literal, spec range, always-blocked?)
+    _RULE_2_RANGES = [
+        ("10.1.2.3", "10.0.0.0/8", False),
+        ("172.16.5.5", "172.16.0.0/12", False),
+        ("192.168.1.1", "192.168.0.0/16", False),
+        ("127.0.0.1", "127.0.0.0/8", False),
+        ("100.64.1.1", "100.64.0.0/10 (CGNAT)", False),
+        ("169.254.169.254", "169.254.0.0/16 (link-local)", True),
+        ("224.0.0.5", "224.0.0.0/4 (multicast)", True),
+        ("[::1]", "::1/128", False),
+        ("[fc00::1]", "fc00::/7", False),
+        ("[fe80::1]", "fe80::/10 (link-local)", True),
+        ("[fd00:ec2::254]", "fd00:ec2::/32 (AWS IMDSv6)", True),
+        ("[ff02::1]", "ff00::/8 (multicast)", True),
+        ("[64:ff9b::a9fe:a9fe]", "64:ff9b::/96 (NAT64→169.254.169.254)", True),
+        ("[::ffff:169.254.169.254]", "IPv4-mapped metadata", True),
+    ]
+
+    def test_all_reserved_ranges_blocked_by_default(self):
+        for literal, spec_range, _always in self._RULE_2_RANGES:
+            is_safe, error = check_url_ssrf(f"http://{literal}/hook", allow_private=False)
+            assert is_safe is False, f"{spec_range} ({literal}) must be blocked by default"
+            assert error, f"{spec_range} rejection must carry a reason"
+
+    def test_always_blocked_ranges_reject_even_under_opt_in(self):
+        for literal, spec_range, always in self._RULE_2_RANGES:
+            if not always:
+                continue
+            is_safe, _ = check_url_ssrf(f"http://{literal}/hook", allow_private=True)
+            assert is_safe is False, f"{spec_range} ({literal}) must stay blocked even with allow_private=True"
+
+    def test_private_ranges_permitted_under_opt_in(self):
+        for literal, spec_range, always in self._RULE_2_RANGES:
+            if always:
+                continue
+            is_safe, error = check_url_ssrf(f"http://{literal}/hook", allow_private=True)
+            assert is_safe is True, (
+                f"{spec_range} ({literal}) must be permitted under allow_private=True, got {error!r}"
+            )
 
 
 class TestBlockedHostnames:

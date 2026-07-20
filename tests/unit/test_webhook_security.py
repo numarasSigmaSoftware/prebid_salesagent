@@ -374,6 +374,21 @@ class TestPinnedOutboundClient:
         assert captured["kwargs"]["allow_redirects"] is False
         assert captured["kwargs"]["headers"]["Host"] == "buyer.example.com"
 
+    def test_service_session_mounts_pinning_adapter_on_both_schemes(self):
+        """The pinning adapter is actually mounted on the service's pooled session.
+
+        Without this, every other test in this class still passes — they patch
+        ``Session.post`` (bypassing adapters) or call the adapter directly — so the
+        one line that WIRES the adapter to real traffic (``session.mount(...)``) has
+        no oracle. This pins it: a revert of the mount reddens here.
+        """
+        from src.services import protocol_webhook_service as pws
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        session = ProtocolWebhookService()._session
+        assert isinstance(session.get_adapter("https://buyer.example.com"), pws._PinningHTTPAdapter)
+        assert isinstance(session.get_adapter("http://buyer.example.com"), pws._PinningHTTPAdapter)
+
     def test_send_notification_treats_3xx_as_failed_delivery(self):
         """A 3xx (refused redirect) must NOT be recorded as a successful delivery."""
         import asyncio

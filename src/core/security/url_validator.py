@@ -8,26 +8,41 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-# Link-local / cloud-metadata ranges. ALWAYS blocked — never a legitimate webhook
-# target, in any environment (this is the cloud-credential-exfiltration surface).
+# Link-local / cloud-metadata / multicast ranges. ALWAYS blocked — never a
+# legitimate webhook target, in ANY environment (the cloud-credential-exfiltration
+# and internal-multicast surface). Mirrors AdCP security.mdx §SSRF rule 2's
+# always-block list; the membership-pin test enumerates rule 2 verbatim so a future
+# omission reddens.
 METADATA_NETWORKS = [
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("169.254.0.0/16"),  # IPv4 link-local (AWS/GCP IMDS 169.254.169.254)
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
+    ipaddress.ip_network("fd00:ec2::/32"),  # AWS IMDSv2 over IPv6
+    ipaddress.ip_network("224.0.0.0/4"),  # IPv4 multicast
+    ipaddress.ip_network("ff00::/8"),  # IPv6 multicast
 ]
 
-# RFC-1918 private + loopback + unique-local ranges. Blocked by default, but a
-# LEGITIMATE target for a trusted test/dev deployment (local receiver, Docker
+# RFC 6052 NAT64 well-known prefix: an embedded IPv4 that, on a NAT64/DNS64
+# network, is translated to the IPv4 in its low 32 bits — so ``64:ff9b::a9fe:a9fe``
+# reaches 169.254.169.254. Checked specially (the embedded v4 is re-run through the
+# block lists), because ``ipaddress`` classifies these as ordinary global IPv6.
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+# RFC-1918 private + loopback + CGNAT + unique-local ranges. Blocked by default, but
+# a LEGITIMATE target for a trusted test/dev deployment (local receiver, Docker
 # compose network), so allowed when the caller passes ``allow_private=True``.
 PRIVATE_NETWORKS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),  # RFC 6598 CGNAT (cloud VPC / k8s pod CIDRs)
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
 ]
 
-# Backward-compatible union (importers depend on this name).
+# Union of every reserved range (metadata + private); no external importer, kept as
+# the flat "is this IP reserved at all" set for callers that don't distinguish the
+# always-blocked subset from the opt-in-allowed one.
 BLOCKED_NETWORKS = METADATA_NETWORKS + PRIVATE_NETWORKS
 
 # Cloud-metadata hostnames — ALWAYS blocked (see METADATA_NETWORKS).
@@ -117,20 +132,52 @@ def resolve_and_validate_target(
             except ValueError:
                 return None, f"Invalid IP address from hostname resolution: {ip_str}"
 
-            # Metadata / link-local is ALWAYS blocked (checked before the private
-            # ranges because Python classifies link-local as private too).
-            if any(ip in network for network in METADATA_NETWORKS) or ip.is_link_local:
-                return None, f"URL resolves to a link-local/metadata IP address: {ip}"
-
-            if not allow_private:
-                if any(ip in network for network in PRIVATE_NETWORKS) or ip.is_loopback or ip.is_private:
-                    return None, f"URL resolves to private/internal IP address: {ip}"
+            reason = _ip_block_reason(ip, allow_private=allow_private)
+            if reason:
+                # Report the class, not the resolved IP itself — a per-record IP echo
+                # to the buyer is a mild resolver oracle; the IP stays in server logs.
+                return None, f"URL resolves to a blocked {reason} address"
 
         # Every record validated — pin to the first (a literal-IP host pins to itself).
         return resolved[0], ""
 
     except Exception as e:
         return None, f"Invalid URL: {e}"
+
+
+def _canonicalize_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address):
+    """Collapse an IPv6 address to the IPv4 it actually reaches, if any.
+
+    IPv4-mapped (``::ffff:a.b.c.d``) and RFC 6052 NAT64 (``64:ff9b::a.b.c.d``)
+    addresses are ordinary global IPv6 to :mod:`ipaddress`, but on the wire they
+    route to the embedded IPv4 — so a metadata/private v4 could slip through the
+    v6 classification. Return the embedded IPv4 so the block lists see the real
+    destination; otherwise return the address unchanged.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        if ip in _NAT64_PREFIX:
+            return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
+    return ip
+
+
+def _ip_block_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool) -> str:
+    """Return a non-empty reason string if ``ip`` must be blocked, else ``""``.
+
+    Always-blocked (every environment): link-local, cloud-metadata, and multicast
+    ranges — plus the IPv4 embedded in an IPv4-mapped/NAT64 v6 address. Blocked
+    unless ``allow_private``: loopback, RFC-1918 private, CGNAT, unique-local.
+    """
+    ip = _canonicalize_ip(ip)
+
+    if any(ip in network for network in METADATA_NETWORKS) or ip.is_link_local or ip.is_multicast:
+        return "link-local/metadata/multicast"
+
+    if not allow_private and (any(ip in network for network in PRIVATE_NETWORKS) or ip.is_loopback or ip.is_private):
+        return "private/internal"
+
+    return ""
 
 
 def _resolve_ips(hostname: str) -> list[str]:

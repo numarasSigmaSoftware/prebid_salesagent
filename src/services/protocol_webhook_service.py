@@ -354,12 +354,15 @@ class ProtocolWebhookService:
                     # (#1512 SSRF) resolves + validates every A/AAAA record and pins the
                     # connection to the validated IP — so a validated URL cannot be
                     # re-resolved (DNS rebinding) or 302-redirected to a private/metadata
-                    # target after validation. Host is set explicitly so vhost routing stays
-                    # correct even though the socket connects by IP.
+                    # target after validation. Host is set explicitly (from the hostname
+                    # + port, never netloc — netloc would embed user:pass@ userinfo) so
+                    # vhost routing stays correct even though the socket connects by IP.
+                    parsed = urlparse(url)
+                    host_header = f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or "")
                     return self._session.post(
                         url,
                         json=payload,
-                        headers={**headers, "Host": urlparse(url).netloc},
+                        headers={**headers, "Host": host_header},
                         timeout=10.0,
                         allow_redirects=False,
                     )
@@ -416,9 +419,11 @@ class ProtocolWebhookService:
                 response_time_ms = int((time.time() - start_time) * 1000)
                 error_message = f"HTTP {status_code}: {str(e)}"
 
-                # Don't retry on 4xx errors (client errors - permanent failures)
-                if status_code and 400 <= status_code < 500:
-                    logger.error(f"Webhook failed for task {task_id} with client error {status_code} - not retrying")
+                # Don't retry on a deterministic non-transient status: a 4xx client
+                # error OR a 3xx refused redirect (redirects are disabled, so a 3xx is
+                # a permanent "won't follow", not a transient fault). Only 5xx retries.
+                if status_code and 300 <= status_code < 500:
+                    logger.error(f"Webhook failed for task {task_id} with non-retryable status {status_code}")
 
                     # Write to webhook_delivery_log (failed)
                     if (
