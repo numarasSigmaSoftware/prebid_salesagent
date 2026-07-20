@@ -58,6 +58,11 @@ services:
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       ADCP_TESTING: ${ADCP_TESTING:-true}
       ADCP_AUTH_TEST_MODE: ${ADCP_AUTH_TEST_MODE:-true}
+      # Dedicated opt-in (NOT tied to ENVIRONMENT) that lets the callback SSRF gate
+      # accept the E2E webhook receiver, which is reached via the private-IP compose
+      # alias `tests` (ADCP_WEBHOOK_HOST). No real deployment sets this, so staging/dev
+      # still block private/internal callback targets (#1512).
+      ADCP_ALLOW_PRIVATE_WEBHOOKS: "true"
       CREATE_DEMO_TENANT: "true"
       DELIVERY_WEBHOOK_INTERVAL: ${DELIVERY_WEBHOOK_INTERVAL:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-PEg0SNGQyvzi4Nft-ForSzK8AGXyhRtql1MgoUsfUHk=}  # TEST ONLY — never use in production

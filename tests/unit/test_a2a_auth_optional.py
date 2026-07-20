@@ -15,6 +15,7 @@ import pytest
 from a2a.types import InvalidRequestError
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+from src.core.exceptions import AdCPValidationError
 from tests.factories.principal import PrincipalFactory
 
 
@@ -125,6 +126,83 @@ class TestAuthOptionalSkills:
             )
 
         assert "Authentication required" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_anonymous_discovery_callback_is_refused_and_never_persisted(self):
+        """Auth-optional discovery carrying a push callback must not register it (SSRF, #1512).
+
+        An auth-optional discovery request that resolves an anonymous identity
+        SUCCESSFULLY and carries a callback: the callback must be refused before
+        storage, so the later status/failure webhook has no attacker-chosen
+        target (e.g. http://169.254.169.254/latest/meta-data) to POST to.
+
+        The rejection surfaces as a buyer-CORRECTABLE FAILED Task (not a JSON-RPC
+        InternalError) — the wire-envelope shape is pinned by the raw-wire test in
+        tests/integration/test_a2a_error_responses.py (#1512).
+        """
+        from a2a.server.routes.common import ServerCallContext
+        from a2a.types import (
+            SendMessageConfiguration,
+            SendMessageRequest,
+            Task,
+            TaskPushNotificationConfig,
+            TaskState,
+        )
+
+        from tests.utils.a2a_helpers import create_a2a_message_with_skill
+
+        params = SendMessageRequest(
+            message=create_a2a_message_with_skill("get_adcp_capabilities", {}),
+            configuration=SendMessageConfiguration(
+                task_push_notification_config=TaskPushNotificationConfig(url="http://169.254.169.254/latest/meta-data")
+            ),
+        )
+
+        with patch.object(self.handler, "_resolve_a2a_identity", return_value=self.anon_identity):
+            result = await self.handler.on_message_send(params, ServerCallContext())
+
+        # Buyer-correctable FAILED task, NOT an InternalError; callback never stored so
+        # the status/failure webhook has nothing to deliver.
+        assert isinstance(result, Task)
+        assert result.status.state == TaskState.TASK_STATE_FAILED
+        assert self.handler._task_push_configs == {}
+
+    def test_validate_push_callback_rejects_ssrf_url_for_authenticated_caller(self):
+        """Even an authenticated caller cannot register an internal/metadata callback URL (#1512)."""
+        from a2a.types import TaskPushNotificationConfig
+
+        config = TaskPushNotificationConfig(url="http://169.254.169.254/latest/meta-data")
+        with pytest.raises(AdCPValidationError) as exc:
+            self.handler._validate_push_callback(config, self.mock_identity)
+        assert "SSRF" in str(exc.value)
+
+    def test_validate_push_callback_allows_safe_url_for_authenticated_caller(self):
+        """A safe callback URL from an authenticated caller is accepted (no over-rejection)."""
+        from a2a.types import TaskPushNotificationConfig
+
+        config = TaskPushNotificationConfig(url="https://buyer.example.com/webhook")
+        with patch(
+            "src.a2a_server.adcp_a2a_server.WebhookURLValidator.validate_callback_url",
+            return_value=(True, ""),
+        ):
+            self.handler._validate_push_callback(config, self.mock_identity)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_send_protocol_webhook_skips_ssrf_url_at_delivery(self):
+        """Delivery re-validates the callback URL and skips an SSRF target (DNS-rebinding/TOCTOU, #1512)."""
+        from a2a.types import Task, TaskPushNotificationConfig, TaskState, TaskStatus
+
+        task = Task(id="task_ssrf", context_id="ctx", status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED))
+        # Simulate a callback that reached storage (e.g. via a non-on_message_send path,
+        # or a hostname that only now resolves to a link-local address).
+        self.handler._task_push_configs["task_ssrf"] = TaskPushNotificationConfig(
+            url="http://169.254.169.254/latest/meta-data"
+        )
+
+        with patch("src.a2a_server.adcp_a2a_server.get_protocol_webhook_service") as mock_service:
+            mock_service.return_value.send_notification = AsyncMock()
+            await self.handler._send_protocol_webhook(task, status="completed")
+            mock_service.return_value.send_notification.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_discovery_skills_accept_anonymous_identity(self):
