@@ -8,24 +8,32 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-# Link-local / cloud-metadata / multicast ranges. ALWAYS blocked — never a
-# legitimate webhook target, in ANY environment (the cloud-credential-exfiltration
-# and internal-multicast surface). Mirrors AdCP security.mdx §SSRF rule 2's
-# always-block list; the membership-pin test enumerates rule 2 verbatim so a future
-# omission reddens.
+# Link-local / cloud-metadata / multicast / broadcast / unspecified ranges. ALWAYS
+# blocked — never a legitimate webhook target, in ANY environment (the cloud-
+# credential-exfiltration, internal-multicast, and "this host" surface). Mirrors AdCP
+# security.mdx §SSRF rule 2's always-block list. NOTE: several entries are ALSO caught
+# by an ``ipaddress`` builtin (multicast/link-local), so removing only those does not
+# redden the membership-pin test; the list is the sole oracle for the ranges Python
+# does NOT classify (fd00:ec2::/32, 0.0.0.0/8, broadcast) — see TestReservedRangeCoverage.
 METADATA_NETWORKS = [
     ipaddress.ip_network("169.254.0.0/16"),  # IPv4 link-local (AWS/GCP IMDS 169.254.169.254)
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
     ipaddress.ip_network("fd00:ec2::/32"),  # AWS IMDSv2 over IPv6
     ipaddress.ip_network("224.0.0.0/4"),  # IPv4 multicast
     ipaddress.ip_network("ff00::/8"),  # IPv6 multicast
+    ipaddress.ip_network("0.0.0.0/8"),  # "this host on this network" (RFC 1122; 0.0.0.0 → localhost on connect)
+    ipaddress.ip_network("255.255.255.255/32"),  # limited broadcast
 ]
 
-# RFC 6052 NAT64 well-known prefix: an embedded IPv4 that, on a NAT64/DNS64
-# network, is translated to the IPv4 in its low 32 bits — so ``64:ff9b::a9fe:a9fe``
-# reaches 169.254.169.254. Checked specially (the embedded v4 is re-run through the
-# block lists), because ``ipaddress`` classifies these as ordinary global IPv6.
+# RFC 6052 NAT64 (``64:ff9b::a.b.c.d``) and the deprecated RFC 4291 IPv4-compatible
+# (``::a.b.c.d``) prefixes both embed an IPv4 in their low 32 bits that the address
+# actually routes to — so ``64:ff9b::a9fe:a9fe`` / ``::a9fe:a9fe`` reach
+# 169.254.169.254. Checked specially (the embedded v4 is re-run through the block
+# lists), because ``ipaddress`` classifies these as ordinary global IPv6.
 _NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPAT_PREFIX = ipaddress.ip_network("::/96")
+_IPV6_UNSPECIFIED = ipaddress.ip_address("::")
+_IPV6_LOOPBACK = ipaddress.ip_address("::1")
 
 # RFC-1918 private + loopback + CGNAT + unique-local ranges. Blocked by default, but
 # a LEGITIMATE target for a trusted test/dev deployment (local receiver, Docker
@@ -148,16 +156,21 @@ def resolve_and_validate_target(
 def _canonicalize_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address):
     """Collapse an IPv6 address to the IPv4 it actually reaches, if any.
 
-    IPv4-mapped (``::ffff:a.b.c.d``) and RFC 6052 NAT64 (``64:ff9b::a.b.c.d``)
-    addresses are ordinary global IPv6 to :mod:`ipaddress`, but on the wire they
-    route to the embedded IPv4 — so a metadata/private v4 could slip through the
-    v6 classification. Return the embedded IPv4 so the block lists see the real
-    destination; otherwise return the address unchanged.
+    IPv4-mapped (``::ffff:a.b.c.d``), RFC 6052 NAT64 (``64:ff9b::a.b.c.d``), and the
+    deprecated RFC 4291 IPv4-compatible (``::a.b.c.d``) forms are ordinary global IPv6
+    to :mod:`ipaddress`, but on the wire they route to the embedded IPv4 — so a
+    metadata/private v4 could slip through the v6 classification. Return the embedded
+    IPv4 so the block lists see the real destination; otherwise return the address
+    unchanged.
     """
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             return ip.ipv4_mapped
-        if ip in _NAT64_PREFIX:
+        # NAT64 and IPv4-compatible both tunnel a routable v4 in the low 32 bits.
+        # ``::`` (unspecified) and ``::1`` (loopback) are NOT tunnels — they are
+        # already handled by the loopback/private clauses, so leave them as-is to
+        # preserve their opt-in semantics rather than collapse to 0.0.0.x.
+        if ip in _NAT64_PREFIX or (ip in _IPV4_COMPAT_PREFIX and ip not in (_IPV6_UNSPECIFIED, _IPV6_LOOPBACK)):
             return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     return ip
 

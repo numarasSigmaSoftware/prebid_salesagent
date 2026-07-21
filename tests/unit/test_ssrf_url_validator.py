@@ -243,10 +243,15 @@ class TestValidateCallbackUrl:
 class TestReservedRangeCoverage:
     """Every reserved range in AdCP security.mdx §SSRF rule 2 is rejected.
 
-    Enumerates the spec's block list verbatim so a future omission (a hand-copied
-    subset drifting from the spec) reddens. Each probe uses a literal-IP host, which
+    Enumerates the spec's rule-2 block list. Each probe uses a literal-IP host, which
     pins to itself, so no DNS patching is needed. ``always`` ranges must also be
     rejected under ``allow_private=True``; ``private`` ranges are permitted only then.
+
+    Oracle strength note: for the ranges Python's ``ipaddress`` classifies on its own
+    (RFC-1918 → is_private, multicast → is_multicast, link-local → is_link_local),
+    removing the list entry alone does NOT redden — the builtin backstops it. The list
+    IS the sole oracle for the ranges Python does NOT classify: CGNAT, fd00:ec2::/32,
+    NAT64, IPv4-mapped/compatible, 0.0.0.0/8, and broadcast — a drift there reddens.
     """
 
     # (representative literal, spec range, always-blocked?)
@@ -256,6 +261,8 @@ class TestReservedRangeCoverage:
         ("192.168.1.1", "192.168.0.0/16", False),
         ("127.0.0.1", "127.0.0.0/8", False),
         ("100.64.1.1", "100.64.0.0/10 (CGNAT)", False),
+        ("0.0.0.0", "0.0.0.0/8 (this-host → localhost on connect)", True),
+        ("255.255.255.255", "255.255.255.255 (broadcast)", True),
         ("169.254.169.254", "169.254.0.0/16 (link-local)", True),
         ("224.0.0.5", "224.0.0.0/4 (multicast)", True),
         ("[::1]", "::1/128", False),
@@ -265,6 +272,7 @@ class TestReservedRangeCoverage:
         ("[ff02::1]", "ff00::/8 (multicast)", True),
         ("[64:ff9b::a9fe:a9fe]", "64:ff9b::/96 (NAT64→169.254.169.254)", True),
         ("[::ffff:169.254.169.254]", "IPv4-mapped metadata", True),
+        ("[::169.254.169.254]", "IPv4-compatible metadata (RFC 4291 deprecated)", True),
     ]
 
     def test_all_reserved_ranges_blocked_by_default(self):

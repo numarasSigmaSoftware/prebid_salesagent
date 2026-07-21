@@ -408,7 +408,7 @@ class TestPinnedOutboundClient:
         redirect_resp = MagicMock()
         redirect_resp.status_code = 302
 
-        with patch("requests.sessions.Session.post", return_value=redirect_resp):
+        with patch("requests.sessions.Session.post", return_value=redirect_resp) as mock_post:
             delivered = asyncio.run(
                 ProtocolWebhookService().send_notification(
                     config, {"status": "completed"}, metadata={"task_type": "create_media_buy"}
@@ -416,3 +416,40 @@ class TestPinnedOutboundClient:
             )
 
         assert delivered is False, "a 3xx response must be treated as a failed delivery"
+        # A refused redirect is deterministic, not transient: it must NOT be retried
+        # (only 5xx retries). Without this, widening the no-retry branch to 3xx has no oracle.
+        assert mock_post.call_count == 1, "a 3xx must not be retried"
+
+    def test_post_host_header_strips_userinfo(self):
+        """The explicit Host header is built from the hostname, never netloc (which
+        would leak user:pass@ userinfo into the header)."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        from src.core.database.models import PushNotificationConfig
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        config = PushNotificationConfig(
+            id="pnc-userinfo",
+            tenant_id="t",
+            principal_id="p",
+            url="https://user:pass@buyer.example.com:8443/webhook",
+            authentication_type=None,
+            authentication_token=None,
+        )
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        captured: dict = {}
+
+        def _fake_post(self, url, **kwargs):  # noqa: ANN001 - test stub
+            captured["kwargs"] = kwargs
+            return ok_resp
+
+        with patch("requests.sessions.Session.post", _fake_post):
+            asyncio.run(
+                ProtocolWebhookService().send_notification(
+                    config, {"status": "completed"}, metadata={"task_type": "create_media_buy"}
+                )
+            )
+
+        assert captured["kwargs"]["headers"]["Host"] == "buyer.example.com:8443"
