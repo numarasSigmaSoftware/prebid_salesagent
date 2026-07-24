@@ -9,7 +9,9 @@ Per AdCP A2A spec (https://docs.adcontextprotocol.org/docs/protocols/a2a-guide#p
 This test validates that our A2A server sends the correct payload type based on status.
 """
 
+import asyncio
 import uuid
+from threading import Event
 from time import sleep
 from typing import Any
 
@@ -118,11 +120,41 @@ def assert_no_classification_errors(received: list[dict[str, Any]]) -> None:
 class WebhookPayloadCapture(WebhookCaptureHandler):
     """Webhook receiver that captures each payload with its A2A classification.
 
-    Extends the shared capture handler via the ``record`` hook — only the
-    classification logic lives here, never a copied ``do_POST``.
+    Extends the shared capture handler via the ``record`` hook. The ``do_POST``
+    override adds only the test ordering barrier, then delegates all HTTP
+    framing and capture behavior to the shared implementation.
     """
 
     received_webhooks: list[dict[str, Any]] = []
+    block_requests = False
+    request_started = Event()
+    release_requests = Event()
+    request_completed = Event()
+
+    @classmethod
+    def arm_request_barrier(cls) -> None:
+        """Block webhook responses until the E2E request reaches its ordering checkpoint."""
+        cls.request_started.clear()
+        cls.release_requests.clear()
+        cls.request_completed.clear()
+        cls.block_requests = True
+
+    @classmethod
+    def disarm_request_barrier(cls) -> None:
+        """Release blocked webhooks and restore normal capture behavior."""
+        cls.block_requests = False
+        cls.release_requests.set()
+
+    def do_POST(self):
+        """Optionally hold webhook responses so ordering assertions are deterministic."""
+        if self.block_requests:
+            self.request_started.set()
+            if not self.release_requests.wait(timeout=30.0):
+                raise TimeoutError("Webhook request barrier was not released")
+        try:
+            super().do_POST()
+        finally:
+            self.request_completed.set()
 
     def record(self, payload):
         # Extract status
@@ -159,8 +191,14 @@ class WebhookPayloadCapture(WebhookCaptureHandler):
 @pytest.fixture
 def webhook_capture_server():
     """Start a local HTTP server to capture webhook payloads."""
-    with run_webhook_capture_server(WebhookPayloadCapture, WebhookPayloadCapture.received_webhooks) as info:
-        yield info
+    WebhookPayloadCapture.disarm_request_barrier()
+    WebhookPayloadCapture.request_started.clear()
+    WebhookPayloadCapture.request_completed.clear()
+    try:
+        with run_webhook_capture_server(WebhookPayloadCapture, WebhookPayloadCapture.received_webhooks) as info:
+            yield info
+    finally:
+        WebhookPayloadCapture.disarm_request_barrier()
 
 
 class TestA2AWebhookPayloadTypes:
@@ -217,13 +255,28 @@ class TestA2AWebhookPayloadTypes:
             "x-adcp-tenant": "ci-test",
         }
 
+        # Hold the legitimate workflow webhook at the capture boundary while the
+        # A2A request is in flight. Once released, a regression that re-adds the
+        # immediate-terminal webhook must finish that awaited send before the A2A
+        # response can return. The response is therefore a deterministic producer
+        # completion signal: after it arrives, every forbidden immediate send is
+        # already present in the capture list.
+        WebhookPayloadCapture.arm_request_barrier()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(a2a_url, json=message, headers=headers)
+            response_task = asyncio.create_task(client.post(a2a_url, json=message, headers=headers))
+            try:
+                webhook_started = await asyncio.to_thread(WebhookPayloadCapture.request_started.wait, 15.0)
+            finally:
+                WebhookPayloadCapture.disarm_request_barrier()
+            assert webhook_started, "Workflow completion webhook did not reach the capture barrier"
+            response = await response_task
 
             # Request should succeed
             assert response.status_code == 200, f"A2A request failed: {response.text}"
             result = response.json()
             assert "error" not in result, f"A2A error: {result.get('error')}"
+        webhook_completed = await asyncio.to_thread(WebhookPayloadCapture.request_completed.wait, 15.0)
+        assert webhook_completed, "Released workflow webhook did not complete"
 
         # The A2A message Task completes SYNCHRONOUSLY (auto-approval) and is returned
         # in this response; per a2a-guide.mdx `on_message_send` sends NO webhook for
@@ -236,36 +289,6 @@ class TestA2AWebhookPayloadTypes:
         sync_task = sync_task.get("task", sync_task)
         assert sync_task.get("id"), "Sync response must be a Task with an 'id'"
 
-        # Wait for the async workflow completion webhook.
-        elapsed = 0.0
-        while elapsed < 15.0 and not webhook_capture_server["received"]:
-            sleep(0.5)
-            elapsed += 0.5
-        # Quiescence poll, NOT a fixed grace window: a regression re-adding
-        # on_message_send's immediate-terminal webhook would deliver a SECOND
-        # completed webhook — but a single hard-coded sleep only catches it if it
-        # happens to arrive inside that window; under load (or a slower duplicate
-        # path) it could arrive later and slip past a fixed-window check. Instead,
-        # keep polling until the received count is STABLE across several consecutive
-        # checks: any new arrival — including a late duplicate — resets the stability
-        # counter, so the "no second delivery" signal holds independent of delivery
-        # latency (bounded by max_wait as a safety net against a genuinely stuck test,
-        # not as the correctness mechanism).
-        stable_polls_required = 4  # 4 * 0.5s = 2s of observed stability
-        poll_interval = 0.5
-        max_wait = 30.0
-        stable_polls = 0
-        waited = 0.0
-        last_count = len(webhook_capture_server["received"])
-        while stable_polls < stable_polls_required and waited < max_wait:
-            sleep(poll_interval)
-            waited += poll_interval
-            current_count = len(webhook_capture_server["received"])
-            if current_count == last_count:
-                stable_polls += 1
-            else:
-                stable_polls = 0
-                last_count = current_count
         received = webhook_capture_server["received"]
         assert received, "Expected an async workflow completion webhook"
         assert_no_classification_errors(received)
