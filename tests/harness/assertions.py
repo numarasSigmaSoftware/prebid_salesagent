@@ -13,7 +13,6 @@ Usage::
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from tests.harness.transport import Transport, TransportResult
@@ -49,6 +48,8 @@ def assert_error_result(
         f"Expected {expected_type.__name__}, got {type(result.error).__name__}: {result.error}"
     )
     if match is not None:
+        import re
+
         assert re.search(match, str(result.error)), (
             f"Error message {str(result.error)!r} does not match pattern {match!r}"
         )
@@ -62,10 +63,11 @@ def assert_rejected(
     reason: str | None = None,
     message_contains: str | None = None,
 ) -> None:
-    """Assert the request was rejected, checking WHAT field and WHY.
+    """Assert the buyer-visible wire envelope rejected the request.
 
-    Checks observable behavior — what the buyer sees — not which internal
-    layer caught the error. Works across all transports and environments.
+    The reconstructed ``result.error`` is deliberately not authoritative:
+    reconstruction is lossy and may retain privileged internal validation
+    details that the sanitized wire correctly omits.
 
     Args:
         result: TransportResult from env.call_via()
@@ -78,28 +80,35 @@ def assert_rejected(
     """
     assert result.is_error, f"Expected rejection but got success: {result.payload}"
 
-    error = result.error
-    error_str = str(error)
+    envelope = result.wire_error_envelope or result.synthesized_error_envelope
+    assert isinstance(envelope, dict), f"Expected a wire error envelope, got: {envelope!r}"
+    errors = envelope.get("errors") or []
+    assert errors and all(isinstance(error, dict) for error in errors), (
+        f"Expected buyer-visible errors[] objects, got: {envelope!r}"
+    )
+    adcp_error = envelope.get("adcp_error") or {}
 
     if code is not None:
-        error_code = getattr(error, "error_code", None)
-        assert error_code == code or code in error_str, (
-            f"Expected error code '{code}', got {error_code!r}. Full error: {error_str[:200]}"
-        )
+        assert adcp_error.get("code") == code
+        assert errors[0].get("code") == code
 
     if field is not None:
-        details = getattr(error, "details", None) or {}
-        details_str = str(details)
-        assert field in error_str or field in details_str, (
-            f"Expected field '{field}' in error. Error: {error_str[:200]}"
+        wire_fields = [str(error.get("field") or "") for error in errors]
+        assert any(actual == field or actual.endswith(f".{field}") for actual in wire_fields), (
+            f"Expected field '{field}' in buyer-visible errors[], got: {wire_fields}"
         )
 
     if reason is not None:
-        assert reason in error_str, f"Expected reason '{reason}' in error. Got: {error_str[:200]}"
+        wire_messages = [str(error.get("message") or "") for error in errors]
+        assert any(reason in message for message in wire_messages), (
+            f"Expected reason '{reason}' in buyer-visible errors[], got: {wire_messages}"
+        )
 
     if message_contains is not None:
-        message = getattr(error, "message", error_str)
-        assert message_contains in str(message), f"Expected '{message_contains}' in message. Got: {str(message)[:200]}"
+        wire_messages = [str(error.get("message") or "") for error in errors]
+        assert any(message_contains in message for message in wire_messages), (
+            f"Expected '{message_contains}' in buyer-visible errors[], got: {wire_messages}"
+        )
 
 
 def assert_payload_field(

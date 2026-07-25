@@ -1304,8 +1304,8 @@ class TestSyncExtensions:
                 result.wire_error_envelope,
                 "SERVICE_UNAVAILABLE",
                 recovery="transient",
-                message_substr="unreachable",
             )
+            assert "unreachable" not in str(result.wire_error_envelope).lower()
 
     def test_package_not_found_lenient_logs_error(self, integration_db):
         """Covers: UC-006-EXT-J-02 — lenient: missing package → assignment_errors."""

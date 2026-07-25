@@ -96,6 +96,8 @@ PERSISTED_STATUS_TO_CANONICAL: dict[str, str] = {
     "approved": "active",
     "ready": "active",
     "scheduled": "active",
+    "activating": "pending_start",
+    "activation_unknown": "pending_start",
     "pending_activation": "pending_start",
     "paused": "paused",
     "completed": "completed",

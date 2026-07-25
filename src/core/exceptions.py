@@ -11,8 +11,10 @@ to help buyer agents decide whether to retry, fix, or abandon a request.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from types import UnionType
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Union, cast, get_args, get_origin
 
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import BaseModel, ValidationError
@@ -261,6 +263,7 @@ class AdCPError(Exception):
         suggestion: str | None = None,
         retry_after: int | None = None,
         context: ContextObject | dict[str, Any] | None = None,
+        _wire_safe_message: bool = False,
     ) -> None:
         # ``error_code`` and ``status_code`` kwargs are only used by the
         # sanctioned ``synthesize()`` classmethod for boundary fallback paths
@@ -273,6 +276,7 @@ class AdCPError(Exception):
         self.suggestion = suggestion if suggestion is not None else type(self)._default_suggestion
         self.retry_after = retry_after
         self.context = context
+        self._wire_safe_message = _wire_safe_message
         self.error_code = error_code if error_code is not None else type(self)._default_error_code
         self.status_code = status_code if status_code is not None else type(self)._default_status_code
         self.recovery = recovery if recovery is not None else type(self)._default_recovery
@@ -1077,24 +1081,200 @@ def first_validation_error_field(validation_error: ValidationError) -> str | Non
     errors = validation_error.errors()
     if not errors:
         return None
+    return validation_error_field(errors[0])
+
+
+def _loaded_pydantic_models() -> list[type[BaseModel]]:
+    """Return every currently loaded Pydantic model exactly once."""
+    models: list[type[BaseModel]] = []
+    pending = list(BaseModel.__subclasses__())
+    seen: set[type[BaseModel]] = set()
+    while pending:
+        model = pending.pop()
+        if model in seen:
+            continue
+        seen.add(model)
+        models.append(model)
+        pending.extend(model.__subclasses__())
+    return models
+
+
+def _expanded_validation_annotations(annotations: Sequence[Any]) -> list[Any]:
+    """Flatten Annotated and union wrappers used while walking a schema path."""
+    result: list[Any] = []
+    pending = list(annotations)
+    while pending:
+        annotation = pending.pop()
+        origin = get_origin(annotation)
+        if origin is Annotated:
+            args = get_args(annotation)
+            if args:
+                pending.append(args[0])
+        elif origin in (Union, UnionType):
+            pending.extend(get_args(annotation))
+        else:
+            result.append(annotation)
+    return result
+
+
+def _sequence_item_annotations(annotations: Sequence[Any]) -> list[Any]:
+    """Return element annotations for sequence branches at an integer path segment."""
+    items: list[Any] = []
+    for annotation in _expanded_validation_annotations(annotations):
+        if get_origin(annotation) in (list, tuple, set, frozenset):
+            args = get_args(annotation)
+            if args:
+                items.append(args[0])
+    return items
+
+
+def _validation_annotation_branches(
+    annotations: Sequence[Any],
+) -> tuple[list[Any], list[type[BaseModel]]]:
+    """Split schema candidates into mapping-value and model branches."""
+    mapping_values: list[Any] = []
+    models: list[type[BaseModel]] = []
+    for annotation in _expanded_validation_annotations(annotations):
+        origin = get_origin(annotation)
+        if origin in (dict, Mapping):
+            args = get_args(annotation)
+            mapping_values.append(args[1] if len(args) > 1 else Any)
+        elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            models.append(annotation)
+    return mapping_values, models
+
+
+def _safe_validation_location_segment(
+    segment: object,
+    annotations: Sequence[Any],
+) -> tuple[str, list[Any]]:
+    """Project one string path segment and advance its trusted schema branches."""
+    mapping_values, models = _validation_annotation_branches(annotations)
+    if not isinstance(segment, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment):
+        return ("nested_field" if mapping_values else "unrecognized_key"), mapping_values
+
+    declared = [model.model_fields[segment].annotation for model in models if segment in model.model_fields]
+    if declared:
+        return segment, declared
+
+    matching_models = [model for model in models if model.__name__ == segment]
+    if matching_models:
+        return segment, matching_models
+    if mapping_values:
+        return "nested_field", mapping_values
+    return "nested_field", []
+
+
+def safe_validation_error_location(error: Mapping[str, Any]) -> list[str | int]:
+    """Return a field location with client-controlled unknown keys redacted.
+
+    Walk the loaded Pydantic schema graph so declared nested fields remain
+    actionable while arbitrary mapping keys are replaced. Pydantic represents
+    both with plain strings in ``loc``; character-shape checks alone are not a
+    trust boundary because credentials are often identifier-shaped.
+    """
+
+    annotations: list[Any] = _loaded_pydantic_models()
+    location: list[str | int] = []
+    for segment in error.get("loc", ()):
+        if isinstance(segment, int):
+            location.append(segment)
+            item_annotations = _sequence_item_annotations(annotations)
+            if item_annotations:
+                annotations = item_annotations
+            continue
+
+        safe_segment, annotations = _safe_validation_location_segment(segment, annotations)
+        location.append(safe_segment)
+
+    if "extra_forbidden" in str(error.get("type", "")) and location:
+        location[-1] = "unrecognized_field"
+    return location
+
+
+def validation_error_field(error: Mapping[str, Any]) -> str | None:
+    """Render one buyer-safe validation location in bracket notation."""
     parts: list[str] = []
-    for loc in errors[0]["loc"]:
+    for loc in safe_validation_error_location(error):
         if isinstance(loc, int):
             parts.append(f"[{loc}]")
         elif parts:
             parts.append(f".{loc}")
         else:
             parts.append(str(loc))
-    return "".join(parts)
+    return "".join(parts) or None
+
+
+_STATIC_VALIDATION_MESSAGES = {
+    "enum": "Value is not one of the permitted options.",
+    "finite_number": "Expected a numeric value.",
+    "float_type": "Expected a numeric value.",
+    "integer_type": "Expected an integer value.",
+    "literal_error": "Value is not one of the permitted options.",
+}
+
+
+def _safe_length_error_message(error_type: str, context: object) -> str:
+    """Render trusted numeric length constraints without copying rejected input."""
+    if not isinstance(context, Mapping):
+        return "Value does not satisfy the permitted length constraints."
+
+    is_string = error_type.startswith("string_")
+    if "too_short" in error_type:
+        minimum = context.get("min_length")
+        if isinstance(minimum, int):
+            unit = "characters" if is_string else "items"
+            return f"Value must contain at least {minimum} {unit}."
+
+    maximum = context.get("max_length")
+    if isinstance(maximum, int):
+        unit = "characters" if is_string else "items"
+        return f"Value must contain at most {maximum} {unit}."
+    return "Value does not satisfy the permitted length constraints."
+
+
+def safe_validation_error_message(error: Mapping[str, Any]) -> str:
+    """Return static, actionable text for one Pydantic error.
+
+    Pydantic's raw ``msg`` and ``input`` fields are untrusted request-derived
+    data: custom validators and extra-field failures can embed credentials,
+    connection strings, or other buyer secrets.  Wire diagnostics retain the
+    structured field path and error category while using only static text.
+    """
+    error_type = str(error.get("type", ""))
+    if "missing" in error_type:
+        return "Required field is missing."
+    if "extra_forbidden" in error_type:
+        return "Extra field is not allowed by the AdCP request schema."
+    if "string_type" in error_type:
+        return "Expected a string value."
+    if "int_" in error_type or error_type == "integer_type":
+        return "Expected an integer value."
+    if "float_" in error_type:
+        return "Expected a numeric value."
+    if "bool_" in error_type:
+        return "Expected a boolean value."
+    if "pattern" in error_type:
+        return "Value does not match the required format."
+    if "too_short" in error_type or "too_long" in error_type:
+        return _safe_length_error_message(error_type, error.get("ctx"))
+    if error_type.startswith(("greater_than", "less_than")):
+        return "Value is outside the permitted range."
+    return _STATIC_VALIDATION_MESSAGES.get(error_type, "Value does not satisfy the field constraints.")
 
 
 def build_validation_error_details(errors: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Project Pydantic errors into the buyer-safe structured detail shape."""
+    """Project Pydantic errors into the buyer-safe structured detail shape.
+
+    Never copy Pydantic's raw ``msg``, ``input``, or ``ctx`` values.  They can
+    contain rejected request data even when the exception has already been
+    translated to a typed ``AdCPValidationError``.
+    """
     return {
         "validation_errors": [
             {
-                "loc": list(error.get("loc", ())),
-                "msg": error.get("msg"),
+                "loc": safe_validation_error_location(error),
+                "msg": safe_validation_error_message(error),
                 "type": error.get("type"),
             }
             for error in errors
@@ -1110,7 +1290,7 @@ def _pydantic_validation_error_kwargs(exc: ValidationError) -> dict[str, Any]:
     """
     errors = exc.errors()
     return {
-        "message": errors[0].get("msg") if errors else "Request failed schema validation",
+        "message": safe_validation_error_message(errors[0]) if errors else "Request failed schema validation",
         "field": first_validation_error_field(exc),
         "suggestion": VALIDATION_ERROR_SUGGESTION,
         "details": build_validation_error_details(errors),
@@ -1280,6 +1460,10 @@ def _canonical_recovery_for(wire_code: str) -> RecoveryHint:
 # here (SERVICE_UNAVAILABLE, CONFIGURATION_ERROR) fall back to the generic internal message + a
 # recovery-matched suggestion, which is correct for the internal/infra bucket.
 _SANITIZED_BY_WIRE_CODE: dict[str, tuple[str, str]] = {
+    "INVALID_REQUEST": (
+        "The request is malformed or contains unsupported fields; review it and resubmit.",
+        INVALID_REQUEST_SUGGESTION,
+    ),
     "VALIDATION_ERROR": (
         "The request could not be validated; review the submitted fields and resubmit.",
         VALIDATION_ERROR_SUGGESTION,
@@ -1350,10 +1534,14 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
       wire code's canonical value; suggestion derived from that recovery.
     - A wire code not in ``WIRE_STANDARD_CODES`` (internal-only): coerced to SERVICE_UNAVAILABLE and
       scrubbed.
-    - A CLIENT-CORRECTABLE standard code (VALIDATION_ERROR, ``*_NOT_FOUND``, AUTH_*, …): the
-      message is kept ONLY when the ORIGINAL exception is a typed ``AdCPError`` (trusted
-      provenance); a RAW built-in that merely *normalized* to such a code keeps the semantic
-      code/recovery but has its untrusted message scrubbed.
+    - A raw Pydantic ``ValidationError`` uses the dedicated safe projector:
+      static messages plus structured field paths/error types, never raw
+      ``msg``/``input``/``ctx`` values.
+    - Any other CLIENT-CORRECTABLE standard code (VALIDATION_ERROR,
+      ``*_NOT_FOUND``, AUTH_*, …): the message is kept ONLY when the ORIGINAL
+      exception is a typed ``AdCPError`` (trusted provenance); a RAW built-in
+      that merely *normalized* to such a code keeps the semantic code/recovery
+      but has its untrusted message scrubbed.
     """
     # (1) SEMANTIC code/recovery — the mapping the synchronous boundaries also apply.
     normalized = normalize_to_adcp_error(exc)
@@ -1377,6 +1565,30 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
             context=normalized.context,
         )
     # (2) MESSAGE trust — client-correctable standard code.
+    if isinstance(exc, ValidationError):
+        # The normalization registry's Pydantic projector is intentionally
+        # buyer-safe and preserves all invalid field paths.  Returning that
+        # projection retains actionable multi-field diagnostics without
+        # allowing raw validator messages or rejected values onto the wire.
+        return normalized
+    if isinstance(exc, AdCPValidationError) and not exc._wire_safe_message:
+        # A typed validation exception is not automatically safe: business
+        # validators historically interpolated rejected request values into
+        # their messages. Only the shared Pydantic/FastAPI projectors opt in
+        # after replacing raw msg/input/ctx data with static diagnostics.
+        safe_message, safe_suggestion = _SANITIZED_BY_WIRE_CODE.get(
+            wire_code,
+            (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(normalized.recovery)),
+        )
+        return type(exc)(
+            safe_message,
+            suggestion=safe_suggestion,
+            retry_after=normalized.retry_after,
+            recovery=normalized.recovery,
+            context=normalized.context,
+            field=normalized.field,
+            _wire_safe_message=True,
+        )
     if isinstance(exc, AdCPError):
         # Explicitly-raised typed error → controlled buyer-facing message, pass through unchanged.
         return exc

@@ -37,6 +37,97 @@ INVALID_ASSET_TYPES = ["not_an_asset_type"]  # rejected by ListCreativeFormatsRe
 
 
 @pytest.mark.requires_db
+class TestValidationSecretScrubTransportParity:
+    """Boundary-wrapped Pydantic errors are safe on every buyer wire."""
+
+    @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
+    def test_extra_field_value_is_never_echoed(self, integration_db, transport):
+        from tests.factories import TenantFactory
+        from tests.harness import CreativeFormatsEnv
+        from tests.harness.transport import Transport
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+
+        wire_transport = Transport(transport)
+        tenant_id = f"validation_scrub_{transport}"
+        with CreativeFormatsEnv(tenant_id=tenant_id, principal_id=f"principal_{transport}") as env:
+            TenantFactory(tenant_id=tenant_id)
+            result = env.call_via(
+                wire_transport,
+                **{SECRET_BEARING_MESSAGE: SECRET_BEARING_MESSAGE},
+            )
+
+        assert result.is_error, f"Expected {transport} to reject the extra field"
+        result.assert_wire_error(
+            "VALIDATION_ERROR",
+            recovery="correctable",
+            require_suggestion=True,
+        )
+        assert_no_secret_leak(result.wire_error_envelope)
+        error = result.wire_error_envelope["errors"][0]
+        assert error["field"] == "unrecognized_field"
+        validation_errors = error["details"]["validation_errors"]
+        assert validation_errors == [
+            {
+                "loc": ["unrecognized_field"],
+                "msg": "Extra field is not allowed by the AdCP request schema.",
+                "type": "extra_forbidden",
+            }
+        ]
+
+    @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
+    def test_mapping_key_is_never_echoed(self, integration_db, transport):
+        from tests.harness.media_buy_create import MediaBuyCreateEnv
+        from tests.harness.transport import Transport
+        from tests.helpers.secret_scrub import assert_no_secret_leak
+
+        identifier_secret = "hunter2"
+        with MediaBuyCreateEnv() as env:
+            _tenant, _principal, product, pricing = env.setup_media_buy_data()
+            result = env.call_via(
+                Transport(transport),
+                brand={"domain": "acme.example"},
+                packages=[
+                    {
+                        "product_id": product.product_id,
+                        "budget": 5000.0,
+                        "pricing_option_id": pricing.pricing_option_id,
+                        "targeting_overlay": {
+                            "key_value_pairs": {
+                                identifier_secret: {"invalid": "value"},
+                            }
+                        },
+                    }
+                ],
+                start_time="asap",
+                end_time="2099-12-31T23:59:59Z",
+                idempotency_key=f"mapping-key-scrub-{transport}",
+            )
+
+        assert result.is_error
+        result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+        assert_no_secret_leak(result.wire_error_envelope)
+        assert identifier_secret not in str(result.wire_error_envelope)
+        assert "nested_field" in result.wire_error_envelope["errors"][0]["field"]
+
+    @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
+    def test_typed_validation_message_is_never_trusted(self, integration_db, transport):
+        from tests.harness.creative_list import CreativeListEnv
+        from tests.harness.transport import Transport
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+
+        with CreativeListEnv() as env:
+            result = env.call_via(
+                Transport(transport),
+                created_after=SECRET_BEARING_MESSAGE,
+            )
+
+        assert result.is_error
+        result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+        assert_no_secret_leak(result.wire_error_envelope)
+        assert result.wire_error_envelope["errors"][0]["field"] == "created_after"
+
+
+@pytest.mark.requires_db
 class TestGetMediaBuyDeliveryRestSuggestionParity:
     """REST get_media_buy_delivery request-validation must carry a top-level suggestion."""
 

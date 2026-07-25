@@ -340,7 +340,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with missing agent_url"
+        assert success is False, "Approval should fail with missing agent_url"
         assert "agent_url" in message.lower()
         assert "format validation failed" in message.lower()
 
@@ -441,7 +441,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with empty agent_url"
+        assert success is False, "Approval should fail with empty agent_url"
         assert "agent_url" in message.lower()
 
         # Cleanup
@@ -541,7 +541,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with non-HTTP URL"
+        assert success is False, "Approval should fail with non-HTTP URL"
         assert "agent_url" in message.lower()
         assert "http" in message.lower()
 
@@ -644,7 +644,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with missing format_id"
+        assert success is False, "Approval should fail with missing format_id"
         # Error message varies: "no valid formats" or "format validation failed"
         assert "format" in message.lower() or "id" in message.lower()
 
@@ -845,7 +845,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with missing id/format_id"
+        assert success is False, "Approval should fail with missing id/format_id"
         assert "id" in message.lower()
 
         # Cleanup
@@ -940,7 +940,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with empty formats"
+        assert success is False, "Approval should fail with empty formats"
         assert "no valid formats" in message.lower()
 
         # Cleanup
@@ -1146,7 +1146,7 @@ class TestFormatConversionApproval:
         # Execute approval - should fail
         success, message = execute_approved_media_buy(media_buy_id, test_tenant)
 
-        assert not success, "Approval should fail with unknown format type"
+        assert success is False, "Approval should fail with unknown format type"
         assert "unknown format type" in message.lower() or "format validation failed" in message.lower()
 
         # Cleanup

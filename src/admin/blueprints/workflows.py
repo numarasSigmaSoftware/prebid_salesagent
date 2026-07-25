@@ -3,17 +3,21 @@
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from flask import Blueprint, Response, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from src.admin.utils import require_tenant_access, session_user_email
+from src.admin.utils import echo_context, require_tenant_access, session_user_email
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Context
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
+from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.workflow import APPROVABLE_STEP_STATUSES, WorkflowRepository
+from src.core.workflow_finalization import finalize_media_buy_approval_step
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +171,185 @@ def _refused_decision_response(
     return jsonify({"error": f"Workflow step is not {awaiting_desc} (status: {existing.status})"}), 409
 
 
+def _unapproved_creative_ids(db: Session, tenant_id: str, media_buy_id: str) -> list[str]:
+    """Return creatives that still block adapter execution for a media buy."""
+    assignments = CreativeAssignmentRepository(db, tenant_id).get_by_media_buy(media_buy_id)
+    if not assignments:
+        return []
+    creative_ids = [assignment.creative_id for assignment in assignments]
+    creatives = CreativeRepository(db, tenant_id).admin_get_by_ids(creative_ids)
+    return [creative.creative_id for creative in creatives if creative.status not in ["approved", "active"]]
+
+
+def _complete_plain_workflow_approval(db: Session, tenant_id: str, step_id: str) -> tuple[Response, int]:
+    """Complete a no-execution approval in the claim's original transaction."""
+    completed = WorkflowRepository(db, tenant_id).complete_claimed_approval(step_id)
+    if completed is None:
+        db.rollback()
+        logger.error("[APPROVAL] Claimed workflow step %s could not be completed atomically", step_id)
+        return jsonify({"success": False, "error": "Workflow result could not be finalized"}), 503
+    db.commit()
+    flash("Workflow step approved successfully", "success")
+    return jsonify({"success": True}), 200
+
+
+def _complete_executed_media_buy(
+    *,
+    db: Session,
+    media_buy_repo: MediaBuyRepository,
+    tenant_id: str,
+    step_id: str,
+    media_buy_id: str,
+    request_data: dict[str, Any],
+    user_email: str,
+) -> tuple[Response, int]:
+    """Publish domain and workflow success after adapter execution."""
+    db.expire_all()
+    media_buy = media_buy_repo.get_by_id(media_buy_id)
+    if media_buy is None or media_buy.status != "active":
+        logger.error(
+            "[APPROVAL] Media buy %s did not retain its active execution result; leaving workflow pending",
+            media_buy_id,
+        )
+        message = (
+            "Media buy was created externally, but its active local state could not be confirmed. "
+            "The workflow remains pending for safe reconciliation."
+        )
+        return jsonify({"success": False, "error": message, "pending": True}), 503
+
+    media_buy_repo.update_status(
+        media_buy_id,
+        "active",
+        approved_at=datetime.now(UTC),
+        approved_by=user_email,
+    )
+    db.commit()
+
+    finalization = finalize_media_buy_approval_step(
+        tenant_id=tenant_id,
+        step_id=step_id,
+        media_buy_id=media_buy_id,
+        succeeded=True,
+        context=echo_context(request_data),
+    )
+    if not finalization.applied:
+        logger.error("[APPROVAL] Adapter succeeded but workflow step %s could not be finalized", step_id)
+        return jsonify({"success": False, "error": "Workflow result could not be finalized"}), 500
+
+    logger.info("[APPROVAL] Media buy %s successfully created in adapter", media_buy_id)
+    flash("Workflow step approved and media buy created successfully", "success")
+    return jsonify({"success": True}), 200
+
+
+def _execute_claimed_media_buy(
+    *,
+    db: Session,
+    media_buy_repo: MediaBuyRepository,
+    tenant_id: str,
+    step_id: str,
+    media_buy_id: str,
+    request_data: dict[str, Any],
+    user_email: str,
+) -> tuple[Response, int]:
+    """Claim once, execute externally, and route the durable outcome."""
+    if not media_buy_repo.claim_approved_execution(media_buy_id):
+        db.rollback()
+        return jsonify({"success": False, "error": "Media buy is already executing or no longer pending"}), 409
+    db.commit()
+
+    from src.core.tools.media_buy_create import execute_approved_media_buy
+
+    logger.info("[APPROVAL] Executing adapter creation for approved media buy %s", media_buy_id)
+    success, error_msg = execute_approved_media_buy(
+        media_buy_id,
+        tenant_id,
+        execution_claimed=True,
+    )
+    if success is None:
+        logger.error(
+            "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
+            media_buy_id,
+        )
+        message = (
+            "Media buy was created externally, but activation could not be finalized. "
+            "The workflow remains pending for safe reconciliation."
+        )
+        flash(message, "warning")
+        return jsonify({"success": False, "error": message, "pending": True}), 503
+    if success is False:
+        finalize_media_buy_approval_step(
+            tenant_id=tenant_id,
+            step_id=step_id,
+            media_buy_id=media_buy_id,
+            succeeded=False,
+            error_message=error_msg,
+        )
+        logger.error("[APPROVAL] Adapter creation failed for %s: %s", media_buy_id, error_msg)
+        flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
+        return jsonify({"success": False, "error": error_msg}), 500
+    return _complete_executed_media_buy(
+        db=db,
+        media_buy_repo=media_buy_repo,
+        tenant_id=tenant_id,
+        step_id=step_id,
+        media_buy_id=media_buy_id,
+        request_data=request_data,
+        user_email=user_email,
+    )
+
+
+def _approve_mapped_media_buy(
+    *,
+    db: Session,
+    tenant_id: str,
+    step_id: str,
+    media_buy_id: str,
+    request_data: dict[str, Any],
+    user_email: str,
+) -> tuple[Response, int]:
+    """Handle the media-buy-specific portion of a claimed workflow approval."""
+    media_buy_repo = MediaBuyRepository(db, tenant_id)
+    media_buy = media_buy_repo.get_by_id(media_buy_id)
+    logger.info(
+        "[APPROVAL] Media buy lookup: found=%s, status=%s",
+        media_buy is not None,
+        media_buy.status if media_buy else "N/A",
+    )
+    if media_buy is None or media_buy.status != "pending_approval":
+        logger.warning(
+            "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
+            media_buy is not None,
+            media_buy.status if media_buy else "N/A",
+        )
+        return _complete_plain_workflow_approval(db, tenant_id, step_id)
+
+    unapproved_creatives = _unapproved_creative_ids(db, tenant_id, media_buy_id)
+    if unapproved_creatives:
+        logger.warning(
+            "[APPROVAL] Cannot execute adapter creation yet - %s creatives not approved: %s",
+            len(unapproved_creatives),
+            unapproved_creatives,
+        )
+        flash(
+            f"Media buy approved! Waiting for {len(unapproved_creatives)} creative(s) "
+            "to be approved before creating in GAM.",
+            "info",
+        )
+        media_buy.status = "pending_creatives"
+        db.commit()
+        return jsonify({"success": True}), 200
+
+    return _execute_claimed_media_buy(
+        db=db,
+        media_buy_repo=media_buy_repo,
+        tenant_id=tenant_id,
+        step_id=step_id,
+        media_buy_id=media_buy_id,
+        request_data=request_data,
+        user_email=user_email,
+    )
+
+
 @workflows_bp.route("/<tenant_id>/workflows/<workflow_id>/steps/<step_id>/approve", methods=["POST"])
 @require_tenant_access()
 @log_admin_action("approve_workflow_step")
@@ -197,7 +380,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             if not step:
                 return _refused_decision_response(workflow_repo, step_id, "awaiting approval")
 
-            db.commit()
+            request_data = dict(step.request_data) if isinstance(step.request_data, dict) else {}
 
             # Check if this is a media buy creation workflow step
             mappings = workflow_repo.get_mappings_for_step(step_id)
@@ -214,73 +397,15 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             if mapping:
                 media_buy_id = mapping.object_id
                 logger.info(f"[APPROVAL] Workflow step {step_id} approved for media buy {media_buy_id}")
-
-                # Get the media buy
-                media_buy_repo = MediaBuyRepository(db, tenant_id)
-                media_buy = media_buy_repo.get_by_id(media_buy_id)
-
-                logger.info(
-                    f"[APPROVAL] Media buy lookup: found={media_buy is not None}, status={media_buy.status if media_buy else 'N/A'}"
+                return _approve_mapped_media_buy(
+                    db=db,
+                    tenant_id=tenant_id,
+                    step_id=step_id,
+                    media_buy_id=media_buy_id,
+                    request_data=request_data,
+                    user_email=user_email,
                 )
-
-                if media_buy and media_buy.status == "pending_approval":
-                    # Check if all required creatives are approved before executing adapter creation
-                    from src.core.database.models import Creative as CreativeModel
-                    from src.core.database.models import CreativeAssignment
-
-                    stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
-                    assignments = db.scalars(stmt_assignments).all()
-
-                    if assignments:
-                        creative_ids = [a.creative_id for a in assignments]
-                        stmt_creatives = select(CreativeModel).filter(CreativeModel.creative_id.in_(creative_ids))
-                        creatives = db.scalars(stmt_creatives).all()
-
-                        unapproved_creatives = [
-                            c.creative_id for c in creatives if c.status not in ["approved", "active"]
-                        ]
-
-                        if unapproved_creatives:
-                            logger.warning(
-                                f"[APPROVAL] Cannot execute adapter creation yet - "
-                                f"{len(unapproved_creatives)} creatives not approved: {unapproved_creatives}"
-                            )
-                            flash(
-                                f"Media buy approved! Waiting for {len(unapproved_creatives)} creative(s) to be approved before creating in GAM.",
-                                "info",
-                            )
-                            media_buy.status = "pending_creatives"
-                            db.commit()
-                            return jsonify({"success": True}), 200
-
-                    # Execute adapter creation
-                    from src.core.tools.media_buy_create import execute_approved_media_buy
-
-                    logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
-                    success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
-
-                    if not success:
-                        logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
-                        flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
-                        return jsonify({"success": False, "error": error_msg}), 500
-
-                    # Update media buy status
-                    media_buy.status = "scheduled"
-                    media_buy.approved_at = datetime.now(UTC)
-                    media_buy.approved_by = user_email
-                    db.commit()
-
-                    logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")
-                    flash("Workflow step approved and media buy created successfully", "success")
-                else:
-                    logger.warning(
-                        f"[APPROVAL] Media buy not executed: media_buy={media_buy is not None}, status={media_buy.status if media_buy else 'N/A'}"
-                    )
-                    flash("Workflow step approved successfully", "success")
-            else:
-                flash("Workflow step approved successfully", "success")
-
-            return jsonify({"success": True}), 200
+            return _complete_plain_workflow_approval(db, tenant_id, step_id)
 
     except Exception as e:
         logger.error(f"Error approving workflow step {step_id}: {e}", exc_info=True)

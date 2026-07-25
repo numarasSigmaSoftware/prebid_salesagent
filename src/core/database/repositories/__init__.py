@@ -26,6 +26,7 @@ from src.core.database.repositories.push_notification_config import PushNotifica
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.uow import (
     AccountUoW,
+    ApprovalUoW,
     MediaBuyUoW,
     ProductUoW,
     PushNotificationConfigUoW,
@@ -37,6 +38,7 @@ from src.core.database.repositories.workflow import WorkflowRepository
 __all__ = [
     "AccountRepository",
     "AccountUoW",
+    "ApprovalUoW",
     "AdapterConfigRepository",
     "TenantNotConfiguredError",
     "CurrencyLimitRepository",

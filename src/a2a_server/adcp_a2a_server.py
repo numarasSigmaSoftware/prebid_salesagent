@@ -77,7 +77,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import coerce_creative_filters, to_account_reference, to_brand_reference
 from src.core.schemas import CreativeStatusEnum
 from src.core.tool_context import ToolContext
-from src.core.tool_error_logging import record_boundary_error
+from src.core.tool_error_logging import best_effort_boundary_identity, record_boundary_error
 from src.core.tools import (
     create_media_buy_raw as core_create_media_buy_tool,
 )
@@ -293,12 +293,13 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
 
 def _record_a2a_boundary_error(op_key: str, identity: ResolvedIdentity | None, exc: Exception) -> None:
     """Record an A2A boundary failure with one canonical identity scope."""
+    tenant_id, principal_id = best_effort_boundary_identity(lambda: identity, transport="a2a")
     record_boundary_error(
         "a2a",
         op_key,
         exc,
-        tenant_id=getattr(identity, "tenant_id", None),
-        principal_id=getattr(identity, "principal_id", None) or "anonymous",
+        tenant_id=tenant_id,
+        principal_id=principal_id,
     )
 
 
@@ -533,16 +534,23 @@ class AdCPRequestHandler(RequestHandler):
                 testing_context=testing_context,
             )
         except AdCPAuthenticationError as e:
-            # A presented token was rejected. Preserve the cause server-side but emit the
-            # AUTH_INVALID contract consistently for every A2A method.
+            # Preserve the cause server-side while classifying the wire code from
+            # the standard Authorization header, as required by AdCP 3.1.1.
             raise _enveloped_auth_error(
-                AdCPAuthInvalidError("Authentication credentials were rejected."),
+                classify_auth_credentials_error(
+                    headers,
+                    missing_message="Authentication credentials are required via the Authorization header.",
+                ),
             ) from e
 
         if require_valid_token:
             if not identity.principal_id:
                 raise _enveloped_auth_error(
-                    AdCPAuthInvalidError("Authentication token is invalid or expired."),
+                    classify_auth_credentials_error(
+                        headers,
+                        missing_message="Authentication credentials are required via the Authorization header.",
+                        invalid_message="Authentication token is invalid or expired.",
+                    ),
                 )
 
             if not identity.tenant:
@@ -828,7 +836,7 @@ class AdCPRequestHandler(RequestHandler):
         Returns:
             Task object or Message response
         """
-        logger.info("Handling message/send request: %s", params)
+        logger.info("Handling message/send request")
 
         # Parse message for both text and structured data parts
         message = params.message
@@ -849,9 +857,7 @@ class AdCPRequestHandler(RequestHandler):
                         # Support both "input" (A2A spec) and "parameters" (legacy) for skill params
                         params_data = data.get("input") or data.get("parameters", {})
                         skill_invocations.append({"skill": data["skill"], "parameters": params_data})
-                        logger.info(
-                            f"Found explicit skill invocation: {data['skill']} with params: {list(params_data.keys())}"
-                        )
+                        logger.info("Found explicit skill invocation")
 
         # Combine text for natural language fallback
         combined_text = " ".join(text_parts).strip().lower()
@@ -877,7 +883,10 @@ class AdCPRequestHandler(RequestHandler):
             "invocation_type": "explicit_skill" if skill_invocations else "natural_language",
         }
         if skill_invocations:
-            task_metadata["skills_requested"] = [inv["skill"] for inv in skill_invocations]
+            registered_skills = set(self._skill_handler_map())
+            task_metadata["skills_requested"] = [
+                inv["skill"] if inv["skill"] in registered_skills else "unsupported_skill" for inv in skill_invocations
+            ]
 
         task = Task(
             id=task_id,
@@ -944,10 +953,7 @@ class AdCPRequestHandler(RequestHandler):
                 # failed Task (UNSUPPORTED_FEATURE); no skill runs, so no side effects.
                 if len(skill_invocations) > 1:
                     raise AdCPCapabilityNotSupportedError(
-                        message=(
-                            "Batching multiple skills in one message is not supported "
-                            f"({[inv['skill'] for inv in skill_invocations]}); send one skill per message."
-                        )
+                        message="Batching multiple skills in one message is not supported; send one skill per message."
                     )
 
                 # Process the single explicit skill invocation.
@@ -955,7 +961,7 @@ class AdCPRequestHandler(RequestHandler):
                 for invocation in skill_invocations:
                     skill_name = invocation["skill"]
                     parameters = invocation["parameters"]
-                    logger.info("Processing explicit skill: %s with parameters: %s", skill_name, parameters)
+                    logger.info("Processing explicit skill invocation")
 
                     try:
                         result = await self._handle_explicit_skill(
@@ -982,7 +988,8 @@ class AdCPRequestHandler(RequestHandler):
                         # except branch (with audit log + activity feed); duplicating
                         # the logger call here would produce two messages for the
                         # same failure.
-                        results.append(self._build_failed_skill_result(skill_name, e))
+                        safe_skill_name = skill_name if skill_name in self._skill_handler_map() else "unsupported_skill"
+                        results.append(self._build_failed_skill_result(safe_skill_name, e))
                     except Exception as e:
                         # Untyped fallthrough — same envelope shape as the AdCPError
                         # branch so storyboard runners can `JSON.parse` the DataPart
@@ -1477,6 +1484,24 @@ class AdCPRequestHandler(RequestHandler):
         an async failure must not receive a differently-shaped artifact than the one they
         would have received had the same failure surfaced synchronously.
         """
+        recovery_media_buy_id: str | None = None
+        with self._owned_durable_step(task_id, identity) as owned:
+            if owned is not None:
+                _session, repo, step = owned
+                if step.status == "approved" and step.tool_name == "create_media_buy":
+                    mappings = repo.get_mappings_for_step(step.step_id)
+                    media_buy_mapping = next((m for m in mappings if m.object_type == "media_buy"), None)
+                    if media_buy_mapping is not None:
+                        recovery_media_buy_id = media_buy_mapping.object_id
+
+        if recovery_media_buy_id is not None and identity is not None and identity.tenant_id is not None:
+            from src.core.workflow_finalization import reconcile_claimed_media_buy_approval_step
+
+            reconcile_claimed_media_buy_approval_step(
+                tenant_id=identity.tenant_id,
+                media_buy_id=recovery_media_buy_id,
+            )
+
         with self._owned_durable_step(task_id, identity) as owned:
             if owned is None:
                 return None
@@ -1976,8 +2001,6 @@ class AdCPRequestHandler(RequestHandler):
         compat_result = normalize_request_params(skill_name, parameters)
         parameters = compat_result.params
 
-        logger.info("Handling explicit skill: %s with parameters: %s", skill_name, list(parameters.keys()))
-
         # Validate identity for non-discovery skills
         if skill_name not in DISCOVERY_SKILLS and (auth_error := _no_usable_identity_error(identity)) is not None:
             raise _enveloped_auth_error(auth_error)
@@ -1995,11 +2018,11 @@ class AdCPRequestHandler(RequestHandler):
             # dispatcher's `except AdCPError` re-wraps it into a failed-skill result,
             # preserving accumulated results from earlier skills.
             if skill_name not in skill_handlers:
-                available_skills = list(skill_handlers.keys())
                 raise AdCPCapabilityNotSupportedError(
-                    message=f"Unknown skill '{skill_name}'. Available skills: {available_skills}"
+                    message="The requested skill is not supported. Call discovery to list available skills."
                 )
 
+            logger.info("Handling explicit skill: %s", skill_name)
             handler = skill_handlers[skill_name]
             # Handlers return raw Pydantic models (or raise typed AdCPError on validation failure)
             if skill_name == "create_media_buy":
@@ -2025,7 +2048,8 @@ class AdCPRequestHandler(RequestHandler):
             #
             # Defensive about identity shape — test fixtures sometimes pass a string or
             # partially-built identity; the canonical recorder handles None internally.
-            _record_a2a_boundary_error(skill_name, identity, e)
+            operation = skill_name if skill_name in skill_handlers else "unsupported_skill"
+            _record_a2a_boundary_error(operation, identity, e)
 
             sanitized = safe_adcp_error(e)
             if sanitized is not e:

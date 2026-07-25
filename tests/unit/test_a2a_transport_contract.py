@@ -457,7 +457,8 @@ class TestA2AJsonRpcProtocol:
         (see test_invalid_method_returns_error). Identity is mocked so the
         request reaches skill dispatch.
         """
-        payload = _build_jsonrpc("nonexistent_skill", {})
+        buyer_controlled_skill = "Bearer_secret_hunter2"
+        payload = _build_jsonrpc(buyer_controlled_skill, {})
         response = client.post("/a2a", json=payload, headers=auth_headers)
         body = response.json()
 
@@ -465,7 +466,10 @@ class TestA2AJsonRpcProtocol:
         assert "result" in body, f"expected a failed-Task result, got: {json.dumps(body)[:400]}"
         data = _extract_artifact_data(body["result"])
         assert_envelope_shape(data, "UNSUPPORTED_FEATURE", recovery="correctable")
-        assert "nonexistent_skill" in data["errors"][0]["message"], data
+        assert data["errors"][0]["message"] == (
+            "The requested skill is not supported. Call discovery to list available skills."
+        )
+        assert buyer_controlled_skill not in json.dumps(body)
 
     def test_response_echoes_request_id(self, client, auth_headers):
         """JSON-RPC response must echo the request id."""
@@ -693,8 +697,9 @@ class TestA2AStubHandlers:
     failed Task carrying a two-layer ``UNSUPPORTED_FEATURE``/``correctable``
     envelope — NOT a JSON-RPC ``UnsupportedOperationError`` (-32004). Reserving
     JSON-RPC for transport faults is the AdCP 3.1.1 "Layer Separation"
-    contract; these stubs are advertised on the agent card, so a buyer must get
-    a structured, recoverable AdCP error rather than a transport exception.
+    contract; direct calls to a recognized stub must get a structured,
+    recoverable AdCP error rather than a transport exception even though the
+    unsupported skill is intentionally omitted from the agent card.
     """
 
     @pytest.mark.parametrize("skill", UNSUPPORTED_SKILLS)

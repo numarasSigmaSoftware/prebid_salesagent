@@ -758,8 +758,8 @@ class TestFormatValidationUnreachable:
                 envelope,
                 "SERVICE_UNAVAILABLE",
                 recovery="transient",
-                message_substr="unreachable",
             )
+            assert "unreachable" not in str(envelope).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1040,7 +1040,7 @@ class TestMissingFormatFails:
 
         if result.is_error:
             # MCP: TypeAdapter rejected missing format_id — correct behavior
-            assert_rejected(result, field="format_id", reason="Field required")
+            assert_rejected(result, field="format_id")
         else:
             # impl/a2a/rest: _impl handled it, returned action=failed
             assert_envelope(result, transport)
@@ -1098,7 +1098,7 @@ class TestStaticPreviewFailed:
             # MCP: TypeAdapter rejects missing assets field — correct schema rejection
             from tests.harness.assertions import assert_rejected
 
-            assert_rejected(result, field="assets", reason="Field required")
+            assert_rejected(result, field="assets")
         else:
             # impl/a2a/rest: _impl handles it, returns action=failed
             assert_envelope(result, transport)

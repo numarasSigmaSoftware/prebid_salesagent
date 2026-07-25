@@ -259,19 +259,49 @@ class TestTypeAdapterValidationEnvelope:
         )
 
     @pytest.mark.asyncio
+    async def test_anonymous_discovery_validation_error_is_tenant_unscoped(self, middleware):
+        """Client-selected tenant hints cannot authorize observability writes."""
+        ctx = _make_context("get_products", {"brief": []})
+        identity = MagicMock(tenant_id="header-selected-tenant", principal_id=None)
+        ctx.fastmcp_context = MagicMock()
+        ctx.fastmcp_context.get_state = AsyncMock(return_value=identity)
+        validation_error = _typeadapter_validation_error(
+            "get_products",
+            {
+                "type": "string_type",
+                "loc": ("brief",),
+                "input": [],
+            },
+        )
+
+        with (
+            patch("src.core.config.is_production", return_value=False),
+            patch("src.core.mcp_compat_middleware.record_boundary_error") as record_error,
+            pytest.raises(AdCPToolError),
+        ):
+            await middleware.on_call_tool(ctx, AsyncMock(side_effect=validation_error))
+
+        record_error.assert_called_once_with(
+            "mcp",
+            "get_products",
+            validation_error,
+            tenant_id=None,
+            principal_id=None,
+        )
+
+    @pytest.mark.asyncio
     async def test_typeadapter_secret_is_scrubbed_from_activity_and_audit_sinks(self, middleware):
         """Raw validator provenance reaches the recorder so tenant sinks receive safe text."""
-        ctx = _make_context("sync_creatives", {"creatives": [SECRET_BEARING_MESSAGE]})
+        ctx = _make_context("sync_creatives", {SECRET_BEARING_MESSAGE: SECRET_BEARING_MESSAGE})
         identity = MagicMock(tenant_id="tenant-1", principal_id="buyer-1")
         ctx.fastmcp_context = MagicMock()
         ctx.fastmcp_context.get_state = AsyncMock(return_value=identity)
         validation_error = _typeadapter_validation_error(
             "sync_creatives",
             {
-                "type": "value_error",
-                "loc": ("creatives", 0),
+                "type": "extra_forbidden",
+                "loc": (SECRET_BEARING_MESSAGE,),
                 "input": SECRET_BEARING_MESSAGE,
-                "ctx": {"error": ValueError(SECRET_BEARING_MESSAGE)},
             },
         )
         feed_records: list[dict[str, object]] = []

@@ -16,7 +16,7 @@ import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database.models import MediaBuy, MediaPackage
@@ -452,6 +452,74 @@ class MediaBuyRepository:
             media_buy.approved_by = approved_by
         self._session.flush()
         return media_buy
+
+    def claim_approved_execution(self, media_buy_id: str) -> bool:
+        """Atomically claim one approved media buy for irreversible execution.
+
+        The source-state guard lets exactly one concurrent admin request move
+        the buy into ``activating``. A loser must not call the external adapter.
+        ``activating`` is deliberately durable before dispatch, because an
+        exception after the request is sent cannot prove whether the ad server
+        created the order.
+        """
+        return self._transition_approved_execution(
+            media_buy_id,
+            source_statuses=("pending_approval", "pending_creatives", "draft"),
+            target_status="activating",
+        )
+
+    def mark_approved_execution_unknown(
+        self,
+        media_buy_id: str,
+        *,
+        expected_updated_at: datetime.datetime | None = None,
+    ) -> bool:
+        """Persist an ambiguous post-dispatch outcome without overwriting success."""
+        return self._transition_approved_execution(
+            media_buy_id,
+            source_statuses=("activating",),
+            target_status="activation_unknown",
+            expected_updated_at=expected_updated_at,
+        )
+
+    def renew_approved_execution_lease(self, media_buy_id: str) -> bool:
+        """Renew a live execution claim while its worker is still running."""
+        return self._transition_approved_execution(
+            media_buy_id,
+            source_statuses=("activating",),
+            target_status="activating",
+        )
+
+    def complete_approved_execution(self, media_buy_id: str) -> bool:
+        """Mark execution active only while this worker still owns the claim."""
+        return self._transition_approved_execution(
+            media_buy_id,
+            source_statuses=("activating",),
+            target_status="active",
+        )
+
+    def _transition_approved_execution(
+        self,
+        media_buy_id: str,
+        *,
+        source_statuses: tuple[str, ...],
+        target_status: str,
+        expected_updated_at: datetime.datetime | None = None,
+    ) -> bool:
+        """Shared tenant-scoped CAS for the approval execution lifecycle."""
+        statement = update(MediaBuy).where(
+            MediaBuy.tenant_id == self._tenant_id,
+            MediaBuy.media_buy_id == media_buy_id,
+            MediaBuy.status.in_(source_statuses),
+        )
+        if expected_updated_at is not None:
+            statement = statement.where(MediaBuy.updated_at == expected_updated_at)
+        updated_id = self._session.execute(
+            statement.values(status=target_status, updated_at=datetime.datetime.now(datetime.UTC))
+            .returning(MediaBuy.media_buy_id)
+            .execution_options(synchronize_session="fetch")
+        ).scalar_one_or_none()
+        return updated_id is not None
 
     def update_fields(self, media_buy_id: str, **kwargs: Any) -> MediaBuy | None:
         """Update arbitrary fields on a media buy within this tenant.

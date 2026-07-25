@@ -12,6 +12,7 @@ import pytest
 from src.core.database.models import WorkflowStep
 from src.core.exceptions import AdCPTaskNotFoundError
 from src.core.resolved_identity import ResolvedIdentity
+from tests.helpers import assert_envelope_shape
 
 
 class TestListTasksTool:
@@ -311,5 +312,14 @@ class TestCompleteTaskTool:
 
         identity = self._make_identity(sample_tenant)
 
-        with pytest.raises(ToolError, match="Invalid status"):
+        with pytest.raises(ToolError) as exc_info:
             await complete_task_fn(task_id="step_123", status="invalid_status", identity=identity)
+
+        assert_envelope_shape(
+            exc_info.value,
+            "VALIDATION_ERROR",
+            recovery="correctable",
+            check_mcp_tool_error=True,
+        )
+        assert '"field": "status"' in str(exc_info.value)
+        assert "invalid_status" not in str(exc_info.value)

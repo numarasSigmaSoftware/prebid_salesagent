@@ -29,9 +29,10 @@ def test_typeadapter_validation_error_emits_adcp_envelope_on_mcp_wire():
 
     assert is_error, f"{tool_name}: invalid typed params must produce a tool error"
     assert envelope is not None, f"{tool_name}: no MCP wire error envelope captured"
-    assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable", message_substr="List should have")
+    assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
     assert envelope["errors"][0].get("suggestion"), f"{tool_name}: envelope must include a recovery suggestion"
     assert envelope["errors"][0].get("field") == "filters.concept_ids"
+    assert "List should have" not in envelope["errors"][0]["message"]
     assert_no_raw_validation_leak(envelope["errors"][0]["message"])
 
 

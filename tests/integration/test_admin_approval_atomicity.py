@@ -15,7 +15,7 @@ import pytest
 
 from src.admin.app import create_app
 from src.core.context_manager import ContextManager
-from src.core.database.repositories import WorkflowUoW
+from src.core.database.repositories import MediaBuyUoW, WorkflowUoW
 
 app = create_app()
 
@@ -49,19 +49,27 @@ def _make_step(
     *,
     media_buy_id: str | None = None,
     step_type: str = "approval",
+    external_task_id: str | None = None,
+    mapping_action: str = "approve",
+    request_data: dict | None = None,
 ) -> str:
     """Create a Context + WorkflowStep (optionally mapped to a media_buy) via ContextManager
     (no raw session.add — factory/persistence-layer pattern). Returns the step id."""
     cm = ContextManager()
     ctx = cm.create_context(tenant_id=tenant_id, principal_id=principal_id)
-    mappings = [{"object_type": "media_buy", "object_id": media_buy_id, "action": "approve"}] if media_buy_id else None
+    mappings = (
+        [{"object_type": "media_buy", "object_id": media_buy_id, "action": mapping_action}] if media_buy_id else None
+    )
     step = cm.create_workflow_step(
         context_id=ctx.context_id,
         step_type=step_type,
         owner="publisher",
         status=status,
         tool_name="create_media_buy",
-        request_data={},
+        request_data=request_data or {},
+        request_metadata=(
+            {"protocol": "a2a", "external_task_id": external_task_id} if external_task_id is not None else None
+        ),
         object_mappings=mappings,
     )
     return step.step_id
@@ -74,7 +82,13 @@ def _status(tenant_id: str, step_id: str) -> str:
         return step.status if step else "missing"
 
 
-def _authed_media_buy_awaiting_approval(client, step_status: str = "requires_approval"):
+def _authed_media_buy_awaiting_approval(
+    client,
+    step_status: str = "requires_approval",
+    *,
+    external_task_id: str | None = None,
+    request_data: dict | None = None,
+):
     """A uniquely-suffixed tenant/principal/media-buy plus an authed session and an approval step.
 
     Returns ``(tenant_id, media_buy_id, step_id)``. The uuid suffix keeps the rows collision-free
@@ -93,7 +107,14 @@ def _authed_media_buy_awaiting_approval(client, step_status: str = "requires_app
         status="pending_approval",
     )
     _auth(client, media_buy.tenant_id)
-    step_id = _make_step(media_buy.tenant_id, media_buy.principal_id, step_status, media_buy_id=media_buy.media_buy_id)
+    step_id = _make_step(
+        media_buy.tenant_id,
+        media_buy.principal_id,
+        step_status,
+        media_buy_id=media_buy.media_buy_id,
+        external_task_id=external_task_id,
+        request_data=request_data,
+    )
     return media_buy.tenant_id, media_buy.media_buy_id, step_id
 
 
@@ -201,6 +222,40 @@ class TestOperationsApproveAtomicity:
         assert _status(tenant_id, step_id) == "requires_approval", "refused claim must not overwrite the step"
         assert resp.status_code in (302, 303)
 
+    def test_plain_approval_completion_failure_rolls_back_claim(
+        self,
+        client,
+        sample_tenant,
+        sample_principal,
+    ):
+        """A no-execution approval stays reclaimable when atomic completion is refused."""
+        tenant_id = sample_tenant["tenant_id"]
+        _auth(client, tenant_id)
+        media_buy_id = f"missing_mb_{uuid.uuid4().hex[:8]}"
+        step_id = _make_step(
+            tenant_id,
+            sample_principal["principal_id"],
+            "requires_approval",
+            media_buy_id=media_buy_id,
+        )
+
+        with (
+            patch(
+                "src.admin.blueprints.operations.WorkflowRepository.complete_claimed_approval",
+                return_value=None,
+            ),
+            patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute,
+        ):
+            response = client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        mock_execute.assert_not_called()
+        assert response.status_code in (302, 303)
+        assert _status(tenant_id, step_id) == "requires_approval"
+
     def test_media_buy_unknown_action_is_flagged_not_silent(self, client, factory_session):
         """An action that is neither approve nor reject must not silently no-op (indistinguishable
         from success to the operator). The route flashes an error and does not transition the step
@@ -239,10 +294,162 @@ class TestOperationsApproveAtomicity:
                 follow_redirects=True,
             )
 
-        mock_execute.assert_called_once_with(media_buy_id, tenant_id)
-        # ``claim_approval`` lands the step on ``approved`` — deliberately NON-terminal, which is
-        # why the route uses the source-state-guarded claim rather than a broad terminal guard.
-        assert _status(tenant_id, step_id) == "approved", "a successful approve must claim the step"
+        mock_execute.assert_called_once_with(media_buy_id, tenant_id, execution_claimed=True)
+        assert _status(tenant_id, step_id) == "completed", (
+            "a successful adapter execution must terminalize the claimed step"
+        )
+
+    def test_media_buy_is_claimed_before_adapter_dispatch(self, client, factory_session):
+        """The route commits ``activating`` before entering the execution helper."""
+        from src.core.database.repositories import MediaBuyUoW
+
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(client)
+
+        def assert_claimed_at_adapter_boundary(
+            observed_media_buy_id,
+            observed_tenant_id,
+            *,
+            execution_claimed,
+        ):
+            assert execution_claimed is True
+            with MediaBuyUoW(observed_tenant_id) as uow:
+                assert uow.media_buys is not None
+                media_buy = uow.media_buys.get_by_id(observed_media_buy_id)
+                assert media_buy is not None
+                assert media_buy.status == "activating"
+                uow.media_buys.update_status(observed_media_buy_id, "active")
+            return True, None
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            side_effect=assert_claimed_at_adapter_boundary,
+        ):
+            client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        assert _status(tenant_id, step_id) == "completed"
+
+    def test_post_creation_pending_outcome_does_not_terminalize_failure(self, client, factory_session):
+        """External success plus local uncertainty remains safely nonterminal."""
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from tests.factories import PrincipalFactory
+        from tests.utils.a2a_helpers import assert_failed_task_envelope
+
+        external_task_id = f"task_activation_pending_{uuid.uuid4().hex[:8]}"
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
+            client,
+            external_task_id=external_task_id,
+        )
+
+        def leave_ambiguous_claim(
+            observed_media_buy_id,
+            observed_tenant_id,
+            *,
+            execution_claimed,
+        ):
+            assert execution_claimed is True
+            with MediaBuyUoW(observed_tenant_id) as uow:
+                assert uow.media_buys is not None
+                assert uow.media_buys.mark_approved_execution_unknown(observed_media_buy_id) is True
+            return None, "local activation commit failed"
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            side_effect=leave_ambiguous_claim,
+        ):
+            response = client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 302
+        assert _status(tenant_id, step_id) == "approved"
+
+        identity = PrincipalFactory.make_identity(
+            tenant_id=tenant_id,
+            principal_id=f"p_{tenant_id.removeprefix('t_')}",
+            protocol="a2a",
+        )
+        task = AdCPRequestHandler()._durable_task_from_step(external_task_id, identity)
+        assert task is not None
+        assert_failed_task_envelope(task, code="SERVICE_UNAVAILABLE", recovery="transient")
+        assert _status(tenant_id, step_id) == "failed"
+
+    def test_successful_approve_is_durably_completed_for_fresh_a2a_handler(self, client, factory_session):
+        """A cross-process tasks/get sees the terminal result after admin approval."""
+        from a2a.types import TaskState
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from tests.factories import PrincipalFactory
+        from tests.utils.a2a_helpers import extract_data_from_artifact
+
+        external_task_id = f"task_admin_success_{uuid.uuid4().hex[:8]}"
+        request_context = {"trace_id": f"trace_{uuid.uuid4().hex[:8]}"}
+        tenant_id, media_buy_id, _step_id = _authed_media_buy_awaiting_approval(
+            client,
+            external_task_id=external_task_id,
+            request_data={"context": request_context},
+        )
+
+        with patch("src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)):
+            client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": _step_id},
+                follow_redirects=False,
+            )
+
+        identity = PrincipalFactory.make_identity(
+            tenant_id=tenant_id,
+            principal_id=f"p_{tenant_id.removeprefix('t_')}",
+            protocol="a2a",
+        )
+        task = AdCPRequestHandler()._durable_task_from_step(external_task_id, identity)
+
+        assert task is not None
+        assert task.status.state == TaskState.TASK_STATE_COMPLETED
+        assert task.artifacts and task.artifacts[0].name == "media_buy_result"
+        result = extract_data_from_artifact(task.artifacts[0])
+        assert result["media_buy_id"] == media_buy_id
+        assert result["status"] == "confirmed"
+        assert result["context"] == request_context
+
+    def test_failed_approve_is_durably_failed_for_fresh_a2a_handler(self, client, factory_session):
+        """Adapter failure persists a sanitized failed artifact for tasks/get."""
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from tests.factories import PrincipalFactory
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE
+        from tests.utils.a2a_helpers import assert_failed_task_envelope, assert_failed_task_no_secret_leak
+
+        external_task_id = f"task_admin_failure_{uuid.uuid4().hex[:8]}"
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
+            client,
+            external_task_id=external_task_id,
+        )
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=(False, SECRET_BEARING_MESSAGE),
+        ):
+            client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        identity = PrincipalFactory.make_identity(
+            tenant_id=tenant_id,
+            principal_id=f"p_{tenant_id.removeprefix('t_')}",
+            protocol="a2a",
+        )
+        task = AdCPRequestHandler()._durable_task_from_step(external_task_id, identity)
+
+        assert task is not None
+        assert_failed_task_envelope(task, code="SERVICE_UNAVAILABLE", recovery="transient")
+        assert_failed_task_no_secret_leak(task)
 
     def test_media_buy_detail_approves_legacy_approval_status_step(self, client, sample_tenant, sample_principal):
         """The media-buy detail approve route finds and approves a legacy ``approval``
@@ -260,9 +467,36 @@ class TestOperationsApproveAtomicity:
         )
 
         assert resp.status_code in (200, 302, 303)
-        assert _status(tenant_id, step_id) == "approved", (
-            "a legacy approval step must be approvable via the detail route"
+        assert _status(tenant_id, step_id) == "completed", (
+            "a legacy approval step must be approvable and terminalized via the detail route"
         )
+
+    def test_creative_unblock_ignores_newer_update_mapping(self, client, factory_session):
+        """Creative unblock terminalizes the claimed create step, not a later update mapping."""
+        from src.core.workflow_finalization import finalize_latest_media_buy_approval_step
+
+        tenant_id, media_buy_id, create_step_id = _authed_media_buy_awaiting_approval(client)
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows.claim_approval(create_step_id) is not None
+
+        update_step_id = _make_step(
+            tenant_id,
+            f"p_{tenant_id.removeprefix('t_')}",
+            "in_progress",
+            media_buy_id=media_buy_id,
+            step_type="tool_call",
+            mapping_action="update",
+        )
+
+        finalization = finalize_latest_media_buy_approval_step(
+            tenant_id=tenant_id,
+            media_buy_id=media_buy_id,
+            succeeded=True,
+        )
+
+        assert finalization.applied
+        assert _status(tenant_id, create_step_id) == "completed"
+        assert _status(tenant_id, update_step_id) == "in_progress"
 
     def test_media_buy_detail_rejects_legacy_approval_status_step(self, client, sample_tenant, sample_principal):
         """The media-buy detail reject action (same route, action=reject) rejects a
@@ -303,6 +537,92 @@ class TestApprovalClaimCompareAndSet:
             second = uow.workflows.claim_approval(step_id)
             assert second is None, "a second approver must not re-claim an already-approved step"
         assert _status(tenant_id, step_id) == "approved"
+
+    def test_media_buy_execution_claim_admits_exactly_one_claim(self, factory_session):
+        """The durable domain claim closes the creative-approval dispatch race."""
+        from tests.factories import MediaBuyFactory
+
+        suffix = uuid.uuid4().hex[:8]
+        media_buy = MediaBuyFactory(
+            tenant__tenant_id=f"t_claim_{suffix}",
+            tenant__subdomain=f"claim-{suffix}",
+            principal__principal_id=f"p_claim_{suffix}",
+            principal__access_token=f"tok_claim_{suffix}",
+            media_buy_id=f"mb_claim_{suffix}",
+            status="pending_creatives",
+        )
+
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.claim_approved_execution(media_buy.media_buy_id) is True
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.claim_approved_execution(media_buy.media_buy_id) is False
+            claimed = uow.media_buys.get_by_id(media_buy.media_buy_id)
+            assert claimed is not None
+            assert claimed.status == "activating"
+
+    def test_expired_claim_takeover_blocks_late_success(self, factory_session):
+        """A worker cannot publish active after reconciliation owns the row."""
+        from tests.factories import MediaBuyFactory
+
+        suffix = uuid.uuid4().hex[:8]
+        media_buy = MediaBuyFactory(
+            tenant__tenant_id=f"t_takeover_{suffix}",
+            tenant__subdomain=f"takeover-{suffix}",
+            principal__principal_id=f"p_takeover_{suffix}",
+            principal__access_token=f"tok_takeover_{suffix}",
+            media_buy_id=f"mb_takeover_{suffix}",
+            status="pending_approval",
+        )
+
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.claim_approved_execution(media_buy.media_buy_id) is True
+            assert uow.media_buys.mark_approved_execution_unknown(media_buy.media_buy_id) is True
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.complete_approved_execution(media_buy.media_buy_id) is False
+            recovered = uow.media_buys.get_by_id(media_buy.media_buy_id)
+            assert recovered is not None
+            assert recovered.status == "activation_unknown"
+
+    def test_heartbeat_between_observation_and_takeover_wins_timestamp_cas(self, factory_session):
+        """A renewed lease cannot be stolen using an older observed version."""
+        from tests.factories import MediaBuyFactory
+
+        suffix = uuid.uuid4().hex[:8]
+        media_buy = MediaBuyFactory(
+            tenant__tenant_id=f"t_renew_{suffix}",
+            tenant__subdomain=f"renew-{suffix}",
+            principal__principal_id=f"p_renew_{suffix}",
+            principal__access_token=f"tok_renew_{suffix}",
+            media_buy_id=f"mb_renew_{suffix}",
+            status="pending_approval",
+        )
+
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.claim_approved_execution(media_buy.media_buy_id) is True
+            claimed = uow.media_buys.get_by_id(media_buy.media_buy_id)
+            assert claimed is not None
+            observed_updated_at = claimed.updated_at
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert uow.media_buys.renew_approved_execution_lease(media_buy.media_buy_id) is True
+        with MediaBuyUoW(media_buy.tenant_id) as uow:
+            assert uow.media_buys is not None
+            assert (
+                uow.media_buys.mark_approved_execution_unknown(
+                    media_buy.media_buy_id,
+                    expected_updated_at=observed_updated_at,
+                )
+                is False
+            )
+            assert uow.media_buys.complete_approved_execution(media_buy.media_buy_id) is True
+            completed = uow.media_buys.get_by_id(media_buy.media_buy_id)
+            assert completed is not None
+            assert completed.status == "active"
 
     def test_claim_approval_refuses_non_approvable_statuses(self, sample_tenant, sample_principal):
         tenant_id = sample_tenant["tenant_id"]
@@ -470,7 +790,7 @@ class TestWorkflowsRouteConflict:
         resp = client.post(f"/tenant/{tenant_id}/workflows/wf_x/steps/{step_id}/approve")
 
         assert resp.status_code == 200, "a legacy approval-status step must be approvable, not 409"
-        assert _status(tenant_id, step_id) == "approved"
+        assert _status(tenant_id, step_id) == "completed"
 
 
 class TestMediaBuyDetailApprovalUI:

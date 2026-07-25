@@ -11,10 +11,8 @@ from src.core.validation_helpers import first_validation_error_field, format_val
 def test_first_validation_error_field_uses_bracket_notation():
     """first_validation_error_field renders list indices as [i] (bracket form).
 
-    The boundary-derived field path must match the hand-rolled field= strings
-    raised inside the _impl layer (e.g. packages[].budget), so the wire
-    envelope's `field` attribute has one consistent shape regardless of where
-    the validation error originated.
+    The schema-aware sanitizer keeps declared nested fields while redacting
+    arbitrary mapping keys.
     """
 
     class _Pkg(BaseModel):
@@ -117,9 +115,10 @@ def test_validation_error_formatting():
 
         # Check that we got a helpful error message
         assert "Invalid test request:" in error_msg
-        assert "brand_manifest.BrandManifest.target_audience" in error_msg
-        assert "Expected string, got object" in error_msg
-        assert "AdCP spec requires this field to be a simple string" in error_msg
+        # BrandManifest is a removed legacy union branch, so it is not trusted
+        # schema metadata in the current model graph.
+        assert "brand_manifest.nested_field.nested_field" in error_msg
+        assert "Expected a string value" in error_msg
         assert "https://adcontextprotocol.org/schemas/v1/" in error_msg
 
 
@@ -138,7 +137,7 @@ def test_validation_error_formatting_missing_field():
 
 
 def test_validation_error_formatting_extra_field():
-    """Test formatting for extra forbidden fields shows the actual value."""
+    """Extra-field diagnostics identify the field without echoing its value."""
     try:
         raise ValidationError.from_exception_data(
             "CreateMediaBuyRequest",
@@ -154,14 +153,14 @@ def test_validation_error_formatting_extra_field():
     except ValidationError as e:
         error_msg = format_validation_error(e)
 
-        assert "unknown_field: Extra field not allowed by AdCP spec" in error_msg
-        # Now we show the actual value for debugging
-        assert "some_value" in error_msg
-        assert "Received value:" in error_msg
+        assert "unrecognized_field: Extra field is not allowed by the AdCP request schema" in error_msg
+        assert "unknown_field" not in error_msg
+        assert "some_value" not in error_msg
+        assert "Received value:" not in error_msg
 
 
 def test_validation_error_formatting_extra_field_with_dict():
-    """Test formatting for extra forbidden fields with dict values shows full structure."""
+    """Nested extra-field diagnostics never echo the rejected structure."""
     # This tests the scenario from the bug where format_ids had an agent_url key
     # that was incorrectly placed, and Pydantic truncated it
     try:
@@ -179,9 +178,8 @@ def test_validation_error_formatting_extra_field_with_dict():
     except ValidationError as e:
         error_msg = format_validation_error(e)
 
-        # Error message should show the full value, not truncated
-        assert "format_ids.agent_url: Extra field not allowed by AdCP spec" in error_msg
-        assert "Received value:" in error_msg
-        # The full URL should be visible, not truncated like "ht...id"
-        assert "https://creative.adcontextprotocol.org/" in error_msg
-        assert "display_300x250" in error_msg
+        assert "format_ids.unrecognized_field: Extra field is not allowed by the AdCP request schema" in error_msg
+        assert "agent_url" not in error_msg
+        assert "Received value:" not in error_msg
+        assert "https://creative.adcontextprotocol.org/" not in error_msg
+        assert "display_300x250" not in error_msg

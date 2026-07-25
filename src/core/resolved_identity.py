@@ -171,11 +171,15 @@ def resolve_identity(
 
         if principal_id is None:
             if require_valid_token:
-                from src.core.exceptions import AdCPAuthInvalidError
+                from src.core.exceptions import classify_auth_credentials_error
 
-                raise AdCPAuthInvalidError(
-                    f"Authentication token is invalid for tenant '{tenant_id or 'any'}'. "
-                    f"The token may be expired, revoked, or associated with a different tenant.",
+                raise classify_auth_credentials_error(
+                    headers,
+                    missing_message="Authentication credentials are required via the Authorization header.",
+                    invalid_message=(
+                        "Authentication credentials were rejected. "
+                        "The token may be expired, revoked, or associated with a different tenant."
+                    ),
                 )
             # For discovery endpoints, continue without auth
         elif not tenant_context and token_tenant:

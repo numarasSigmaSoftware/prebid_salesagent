@@ -685,14 +685,15 @@ class TestSafeAdcpErrorSuggestionMatchesRecovery:
         def _special_kwargs(exc):
             return {"message": "resource missing", "field": "id", "details": {"probe": str(exc)}}
 
-        assert "INVALID_REQUEST" not in _SANITIZED_BY_WIRE_CODE, "test premise: INVALID_REQUEST is uncovered"
+        registry_without_invalid_request = dict(_SANITIZED_BY_WIRE_CODE)
+        registry_without_invalid_request.pop("INVALID_REQUEST")
         known_bad_registry = (
             (KeyError, AdCPNotFoundError, _special_kwargs),
             (LookupError, AdCPValidationError, _special_kwargs),  # covered control
         )
 
         uncovered = _uncovered_correctable_targets(
-            known_bad_registry, _SANITIZED_BY_WIRE_CODE, INTERNAL_WIRE_CODES, WIRE_STANDARD_CODES
+            known_bad_registry, registry_without_invalid_request, INTERNAL_WIRE_CODES, WIRE_STANDARD_CODES
         )
         assert ("AdCPNotFoundError", "INVALID_REQUEST") in uncovered, (
             "detector must flag a special projector whose target is an uncovered correctable code"
@@ -779,7 +780,7 @@ class TestA2AHandlerExplicitSkillReraises:
         handler = AdCPRequestHandler()
 
         async def mock_skill(params, token):
-            raise AdCPValidationError("invalid param")
+            raise AdCPValidationError("invalid param", _wire_safe_message=True)
 
         with patch.object(handler, "_handle_get_products_skill", mock_skill):
             with pytest.raises(AdCPValidationError) as exc_info:
@@ -876,7 +877,10 @@ class TestA2ADispatcherFailedSkillResult:
         """AdCPError instances flow through unchanged — typed code preserved."""
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
-        result = AdCPRequestHandler._build_failed_skill_result("get_products", AdCPValidationError("bad input"))
+        result = AdCPRequestHandler._build_failed_skill_result(
+            "get_products",
+            AdCPValidationError("bad input", _wire_safe_message=True),
+        )
 
         assert result["success"] is False
         assert result["skill"] == "get_products"
@@ -1069,7 +1073,10 @@ class TestA2ADispatcherFailedSkillResult:
         client-correctable typed error — the fix must not over-sanitize."""
         from src.a2a_server.adcp_a2a_server import _internal_error_for
 
-        err = _internal_error_for("set_task_push_notification_config", AdCPValidationError("url is required"))
+        err = _internal_error_for(
+            "set_task_push_notification_config",
+            AdCPValidationError("url is required", _wire_safe_message=True),
+        )
         assert "url is required" in err.message
 
     def test_client_correctable_typed_error_message_is_preserved(self):
@@ -1079,7 +1086,8 @@ class TestA2ADispatcherFailedSkillResult:
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         result = AdCPRequestHandler._build_failed_skill_result(
-            "get_products", AdCPValidationError("brief must not be empty")
+            "get_products",
+            AdCPValidationError("brief must not be empty", _wire_safe_message=True),
         )
 
         env = result["error_envelope"]
@@ -1219,7 +1227,7 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
-            side_effect=AdCPValidationError("invalid request"),
+            side_effect=AdCPValidationError("invalid request", _wire_safe_message=True),
         ):
             client = TestClient(app, raise_server_exceptions=False)
             response = client.get("/api/v1/capabilities")
@@ -1768,7 +1776,8 @@ class TestRecoveryRoundtrip:
         for exc_class, msg, expected_recovery, scrubbed in cases:
 
             async def mock_skill(params, token, klass=exc_class, message=msg):
-                raise klass(message)
+                kwargs = {"_wire_safe_message": True} if issubclass(klass, AdCPValidationError) else {}
+                raise klass(message, **kwargs)
 
             with patch.object(handler, "_handle_get_products_skill", mock_skill):
                 with pytest.raises(AdCPError) as exc_info:

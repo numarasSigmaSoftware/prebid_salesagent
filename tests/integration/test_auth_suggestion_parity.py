@@ -94,6 +94,25 @@ class TestRejectedCredentialWireBoundaries:
         assert result.is_error, f"Expected {transport} to reject a token with no principal row"
         assert_two_layer_auth_contract(result.wire_error_envelope, wire_transport, "invalid")
 
+    @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
+    def test_rejected_legacy_token_is_missing_standard_authorization(self, integration_db, transport):
+        """A rejected legacy credential does not satisfy the v3.1.1 Authorization split."""
+        from tests.factories import TenantFactory
+        from tests.harness.account_list import AccountListEnv
+        from tests.harness.transport import Transport
+
+        wire_transport = Transport(transport)
+        tenant_id = f"rejected_legacy_token_{transport}"
+        with AccountListEnv(tenant_id=tenant_id, principal_id=f"principal_{transport}") as env:
+            TenantFactory(tenant_id=tenant_id)
+            result = env.call_via(
+                wire_transport,
+                presented_legacy_auth_token="expired-or-revoked-legacy-token",
+            )
+
+        assert result.is_error, f"Expected {transport} to reject a legacy token with no principal row"
+        assert_two_layer_auth_contract(result.wire_error_envelope, wire_transport, "missing")
+
 
 class TestAuthHelperFamilySuggestion:
     """The remaining AUTH_REQUIRED raise sites in src/core/auth.py carry a suggestion.

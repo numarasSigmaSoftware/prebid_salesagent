@@ -11,11 +11,13 @@ Handles media buy creation including:
 import logging
 import random
 import secrets
+import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import wraps
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, TypedDict, cast
 from urllib.parse import urlparse
 
@@ -723,7 +725,99 @@ def _build_adapter_asset_from_creative(
     return asset, None
 
 
-def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
+def _persist_approved_execution_outcome(
+    execute: Callable[..., tuple[bool | None, str | None]],
+) -> Callable[..., tuple[bool | None, str | None]]:
+    """Persist failure evidence used by workflow reconciliation."""
+
+    @wraps(execute)
+    def wrapped(
+        media_buy_id: str,
+        tenant_id: str,
+        *,
+        execution_claimed: bool = False,
+    ) -> tuple[bool | None, str | None]:
+        success, error_message = execute(
+            media_buy_id,
+            tenant_id,
+            execution_claimed=execution_claimed,
+        )
+        if success is False:
+            from src.core.database.repositories import MediaBuyUoW
+
+            with MediaBuyUoW(tenant_id) as uow:
+                assert uow.media_buys is not None
+                uow.media_buys.update_status(media_buy_id, "failed")
+        return success, error_message
+
+    return wrapped
+
+
+def _mark_approved_execution_unknown(
+    media_buy_id: str,
+    tenant_id: str,
+    error_message: str,
+) -> tuple[None, str]:
+    """Persist a post-dispatch ambiguity without hiding the original outcome."""
+    from src.core.database.repositories import MediaBuyUoW
+
+    try:
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            uow.media_buys.mark_approved_execution_unknown(media_buy_id)
+    except Exception:
+        # The durable pre-dispatch ``activating`` claim still prevents a
+        # duplicate order. Its lease-based reconciler handles a failed marker
+        # write once the in-flight window expires.
+        logger.exception("[APPROVAL] Could not persist ambiguous execution marker for %s", media_buy_id)
+    return None, error_message
+
+
+class _ApprovalExecutionLease:
+    """Renew a durable execution claim until the owning worker exits."""
+
+    _RENEW_INTERVAL_SECONDS = 30.0
+
+    def __init__(self, media_buy_id: str, tenant_id: str) -> None:
+        self._media_buy_id = media_buy_id
+        self._tenant_id = tenant_id
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"approval-lease-{media_buy_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def _renew_once(self) -> bool:
+        from src.core.database.repositories import MediaBuyUoW
+
+        with MediaBuyUoW(self._tenant_id) as uow:
+            assert uow.media_buys is not None
+            return uow.media_buys.renew_approved_execution_lease(self._media_buy_id)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._RENEW_INTERVAL_SECONDS):
+            try:
+                if not self._renew_once():
+                    return
+            except Exception:
+                logger.exception("[APPROVAL] Could not renew execution lease for %s", self._media_buy_id)
+
+
+@_persist_approved_execution_outcome
+def execute_approved_media_buy(
+    media_buy_id: str,
+    tenant_id: str,
+    *,
+    execution_claimed: bool = False,
+) -> tuple[bool | None, str | None]:
     """Execute adapter creation for a manually approved media buy.
 
     This function is called after a media buy has been manually approved
@@ -739,7 +833,10 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         tenant_id: The tenant ID for context
 
     Returns:
-        Tuple of (success: bool, error_message: str | None)
+        Tuple of (success, error_message). ``True`` means the external and
+        local activation completed, ``False`` means external creation was
+        rejected, and ``None`` means external creation succeeded but later
+        activation/finalization remains pending.
     """
     from sqlalchemy import select
 
@@ -752,7 +849,23 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
     from src.core.config_loader import set_current_tenant
     from src.core.database.models import Tenant
 
+    adapter_invoked = False
+    external_creation_succeeded = False
+    execution_lease: _ApprovalExecutionLease | None = None
     try:
+        # Claim before dispatching any irreversible adapter work. This is a
+        # tenant-scoped compare-and-set, so concurrent approval entry points
+        # cannot both create the same external order.
+        if not execution_claimed:
+            with MediaBuyUoW(tenant_id) as claim_uow:
+                assert claim_uow.media_buys is not None
+                claimed = claim_uow.media_buys.claim_approved_execution(media_buy_id)
+            if not claimed:
+                return None, "Approved media buy execution is already claimed or no longer pending"
+
+        execution_lease = _ApprovalExecutionLease(media_buy_id, tenant_id)
+        execution_lease.start()
+
         # Load tenant and set context — single UoW for all reads
         with MediaBuyUoW(tenant_id) as uow:
             # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
@@ -1039,6 +1152,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             _validate_creatives_before_adapter_call(packages, tenant_id, buy_principal_id, session=session)
 
         # Execute adapter creation (outside session to avoid conflicts)
+        adapter_invoked = True
         response = _execute_adapter_media_buy_creation(
             request,
             packages,
@@ -1058,25 +1172,27 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
             return False, error_msg
 
+        external_creation_succeeded = True
         logger.info(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}: {response.media_buy_id}")
 
-        # Persist adapter IDs to package_config.
+        # The durable ``activating`` claim was persisted before adapter
+        # dispatch. Persist adapter IDs now that creation is confirmed.
         # platform_order_id is per-buy — always write to all packages so retroactive creative
         # push works regardless of whether the adapter also provides per-package line-item IDs.
         # platform_line_item_id is per-package and only present when the adapter maps them.
         platform_line_item_ids = getattr(response, "_platform_line_item_ids", {})
-        if response.media_buy_id:
-            with MediaBuyUoW(tenant_id) as uow_plids:
-                assert uow_plids.media_buys is not None
+        with MediaBuyUoW(tenant_id) as uow_external:
+            assert uow_external.media_buys is not None
+            if response.media_buy_id:
                 _persist_adapter_package_ids(
-                    uow_plids.media_buys,
+                    uow_external.media_buys,
                     media_buy_id=media_buy_id,
                     platform_order_id=str(response.media_buy_id),
                     platform_line_item_ids=platform_line_item_ids or None,
                     log_label="APPROVAL",
                 )
-        else:
-            logger.info("[APPROVAL] Adapter returned no media_buy_id — skipping ID persistence")
+            else:
+                logger.info("[APPROVAL] Adapter returned no media_buy_id — skipping ID persistence")
 
         # Upload and associate inline creatives if any exist
         # This handles inline creatives that were uploaded during initial media buy creation
@@ -1157,7 +1273,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         + "\n\nAll creatives must have dimensions (width/height) and a content URL."
                     )
                     logger.error(f"[APPROVAL] {error_msg}")
-                    return False, error_msg
+                    return _mark_approved_execution_unknown(media_buy_id, tenant_id, error_msg)
 
                 if assets:
                     logger.info(f"[APPROVAL] Uploading {len(assets)} creatives to adapter")
@@ -1201,10 +1317,12 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         else:
                             logger.warning("[APPROVAL] Adapter does not support creative upload, skipping")
                     except Exception as creative_error:
-                        # Creative upload failed - this is critical for GAM orders
+                        # The external order already exists. Keep the approval
+                        # pending for reconciliation instead of recording a
+                        # false adapter failure.
                         error_msg = f"Failed to upload creatives to adapter: {str(creative_error)}"
                         logger.error(f"[APPROVAL] {error_msg}", exc_info=True)
-                        return False, error_msg
+                        return _mark_approved_execution_unknown(media_buy_id, tenant_id, error_msg)
             else:
                 logger.info(f"[APPROVAL] No creative assignments found for {media_buy_id}, skipping creative upload")
 
@@ -1220,28 +1338,36 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 if approval_success:
                     logger.info(f"[APPROVAL] Successfully approved GAM order {response.media_buy_id}")
                 else:
-                    # GAM approval failed - return failure so status can be updated
+                    # External creation already succeeded; approval remains
+                    # incomplete but must not be terminalized as a rejection.
                     error_msg = (
                         f"Failed to approve order {response.media_buy_id}, "
                         f"it will remain in DRAFT status. This may be due to missing creatives or "
                         f"GAM still processing inventory forecasts."
                     )
                     logger.warning(f"[APPROVAL] {error_msg}")
-                    return False, error_msg
+                    return _mark_approved_execution_unknown(media_buy_id, tenant_id, error_msg)
             else:
                 logger.info("[APPROVAL] Adapter does not support order approval, skipping")
         except Exception as approval_error:
-            # Approval exception - return failure
+            # External creation already succeeded; approval outcome remains
+            # incomplete and requires reconciliation.
             error_msg = f"Failed to approve order {response.media_buy_id}: {str(approval_error)}"
             logger.error(f"[APPROVAL] {error_msg}", exc_info=True)
-            return False, error_msg
+            return _mark_approved_execution_unknown(media_buy_id, tenant_id, error_msg)
 
         # Update media buy status to 'active' after successful adapter execution
         # (UC-002:437 — "updates the media buy status to active")
         with MediaBuyUoW(tenant_id) as uow3:
             assert uow3.media_buys is not None
-            uow3.media_buys.update_status(media_buy_id, "active")
-            logger.info(f"[APPROVAL] Updated media buy {media_buy_id} status to 'active'")
+            completed = uow3.media_buys.complete_approved_execution(media_buy_id)
+        if not completed:
+            return _mark_approved_execution_unknown(
+                media_buy_id,
+                tenant_id,
+                "Approved media buy execution lost its durable claim before completion",
+            )
+        logger.info(f"[APPROVAL] Updated media buy {media_buy_id} status to 'active'")
 
         return True, None
 
@@ -1249,9 +1375,20 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         import traceback
 
         error_traceback = traceback.format_exc()
-        error_msg = f"Adapter creation failed: {str(e)}"
+        if external_creation_succeeded:
+            outcome = "Post-creation finalization failed"
+        elif adapter_invoked:
+            outcome = "Adapter creation outcome is unknown"
+        else:
+            outcome = "Adapter creation failed"
+        error_msg = f"{outcome}: {str(e)}"
         logger.error(f"[APPROVAL] {error_msg}\n{error_traceback}")
+        if adapter_invoked:
+            return _mark_approved_execution_unknown(media_buy_id, tenant_id, error_msg)
         return False, error_msg
+    finally:
+        if execution_lease is not None:
+            execution_lease.close()
 
 
 def push_creative_to_existing_buy(

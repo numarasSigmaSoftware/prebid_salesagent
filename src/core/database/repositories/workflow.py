@@ -16,7 +16,7 @@ beads: salesagent-4d4
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import ColumnExpressionArgument, func, select, update
@@ -282,6 +282,28 @@ class WorkflowRepository:
             .order_by(ObjectWorkflowMapping.created_at.desc())
         ).first()
 
+    def get_claimed_create_approval_step_for_media_buy(self, media_buy_id: str) -> WorkflowStep | None:
+        """Return the claimed create-approval step for a media buy.
+
+        A media buy can have newer update mappings. Creative-unblock execution
+        must terminalize the original ``create_media_buy`` approval, not an
+        arbitrary latest mapping.
+        """
+        return self._session.scalars(
+            select(WorkflowStep)
+            .join(ObjectWorkflowMapping, WorkflowStep.step_id == ObjectWorkflowMapping.step_id)
+            .join(DBContext, WorkflowStep.context_id == DBContext.context_id)
+            .where(
+                DBContext.tenant_id == self._tenant_id,
+                ObjectWorkflowMapping.object_type == "media_buy",
+                ObjectWorkflowMapping.object_id == media_buy_id,
+                ObjectWorkflowMapping.action.in_(("create", "approve")),
+                WorkflowStep.tool_name == "create_media_buy",
+                WorkflowStep.status == "approved",
+            )
+            .order_by(ObjectWorkflowMapping.created_at.desc(), WorkflowStep.created_at.desc())
+        ).first()
+
     def get_step_by_id(self, step_id: str) -> WorkflowStep | None:
         """Alias of :meth:`get_by_step_id` (identical tenant-scoped lookup).
 
@@ -504,6 +526,23 @@ class WorkflowRepository:
             step_id,
             status="approved",
             status_guard=WorkflowStep.status.in_(APPROVABLE_STEP_STATUSES),
+        )
+
+    def complete_claimed_approval(self, step_id: str) -> WorkflowStep | None:
+        """Atomically complete an approved step that needs no external execution.
+
+        This is intentionally a second update in the caller's SAME transaction
+        as ``claim_approval``.  Committing ``approved`` first and finalizing in
+        another UoW can strand an unreclaimable nonterminal step if that second
+        transaction fails.  Restricting the source state to ``approved`` also
+        prevents this convenience path from completing an unclaimed decision.
+        """
+        return self._atomic_transition(
+            step_id,
+            status="completed",
+            status_guard=WorkflowStep.status == "approved",
+            completed_at=datetime.now(UTC),
+            response_data={"approved": True},
         )
 
     def reject_if_approvable(

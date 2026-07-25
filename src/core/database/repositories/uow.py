@@ -192,6 +192,22 @@ class WorkflowUoW(BaseUoW):
         self.workflows = None
 
 
+class ApprovalUoW(BaseUoW):
+    """Single transaction for workflow and media-buy approval finalization."""
+
+    workflows: WorkflowRepository | None
+    media_buys: MediaBuyRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.workflows = WorkflowRepository(self._session, self._tenant_id)
+        self.media_buys = MediaBuyRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.workflows = None
+        self.media_buys = None
+
+
 class TenantConfigUoW(BaseUoW):
     """Unit of Work for tenant configuration reads.
 

@@ -44,6 +44,8 @@ from src.core.exceptions import (
     build_two_layer_error_envelope,
     build_validation_error_details,
     safe_adcp_error,
+    safe_validation_error_message,
+    validation_error_field,
 )
 from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
 from src.core.lifecycle import run_all_shutdown_callbacks
@@ -243,10 +245,15 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     # location prefix); join the rest into the JSONPath-lite ``field`` the envelope
     # already uses (e.g. attribution_window.post_click.interval). Stripping at any
     # position would erase a body field literally named "query"/"body"/"path".
-    raw_loc = [str(p) for p in first.get("loc", ())]
-    loc = raw_loc[1:] if raw_loc and raw_loc[0] in ("body", "query", "path") else raw_loc
-    field = ".".join(loc) or None
-    message = first.get("msg") or "Request failed schema validation"
+    projected_errors = []
+    for error in errors:
+        projected = dict(error)
+        raw_loc = list(error.get("loc", ()))
+        projected["loc"] = raw_loc[1:] if raw_loc and raw_loc[0] in ("body", "query", "path") else raw_loc
+        projected_errors.append(projected)
+    first = projected_errors[0] if projected_errors else {}
+    field = validation_error_field(first)
+    message = safe_validation_error_message(first) if first else "Request failed schema validation"
     # Code selection by failure semantics, grounded in the AdCP graded
     # error-compliance storyboard: a VALUE/enum/range violation on a
     # structurally-valid field is canonically VALIDATION_ERROR; a missing/
@@ -262,7 +269,8 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
         message,
         field=field,
         suggestion=suggestion,
-        details=build_validation_error_details(errors),
+        details=build_validation_error_details(projected_errors),
+        _wire_safe_message=True,
     )
     return _envelope_response(request, adcp_exc)
 

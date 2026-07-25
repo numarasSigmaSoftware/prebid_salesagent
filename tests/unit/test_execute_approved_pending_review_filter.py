@@ -17,7 +17,12 @@ class TestExecuteApprovedPendingReviewFilter:
         """A pending_review creative is excluded from the adapter asset list."""
         from src.core.tools.media_buy_create import execute_approved_media_buy
 
-        # UoW chain: first UoW loads data, second updates status
+        # UoW chain: claim, load data, persist IDs, creative handling, active status
+        claim_uow = MagicMock()
+        claim_uow.__enter__ = MagicMock(return_value=claim_uow)
+        claim_uow.__exit__ = MagicMock(return_value=False)
+        claim_uow.media_buys.claim_approved_execution.return_value = True
+
         uow1 = MagicMock()
         uow1.__enter__ = MagicMock(return_value=uow1)
         uow1.__exit__ = MagicMock(return_value=False)
@@ -34,7 +39,12 @@ class TestExecuteApprovedPendingReviewFilter:
         uow3.__exit__ = MagicMock(return_value=False)
         uow3.media_buys = MagicMock()
 
-        uow_iter = iter([uow1, uow2, uow3])
+        uow4 = MagicMock()
+        uow4.__enter__ = MagicMock(return_value=uow4)
+        uow4.__exit__ = MagicMock(return_value=False)
+        uow4.media_buys = MagicMock()
+
+        uow_iter = iter([claim_uow, uow1, uow2, uow3, uow4])
 
         # Tenant
         tenant = MagicMock()
@@ -54,8 +64,8 @@ class TestExecuteApprovedPendingReviewFilter:
         mb.advertiser_name = "Advertiser"
         mb.start_date = datetime.now(UTC).date()
         mb.end_date = (datetime.now(UTC) + timedelta(days=7)).date()
-        mb.start_time = None
-        mb.end_time = None
+        mb.start_time = datetime.now(UTC) + timedelta(days=1)
+        mb.end_time = datetime.now(UTC) + timedelta(days=8)
         mb.budget = Decimal("1000.00")
         mb.currency = "USD"
         mb.raw_request = {
@@ -70,6 +80,24 @@ class TestExecuteApprovedPendingReviewFilter:
         pkg.package_id = "pkg_1"
         pkg.package_config = {"product_id": "prod_1", "name": "Pkg", "budget": 1000.0, "pricing_model": "CPM"}
 
+        product = MagicMock()
+        product.name = "Product"
+        product.delivery_type = "non_guaranteed"
+        product.format_ids = [
+            {
+                "agent_url": "https://formats.example.com",
+                "id": "display_300x250",
+                "format_id": "display_300x250",
+            }
+        ]
+        pricing_option = MagicMock()
+        pricing_option.pricing_model = "CPM"
+        pricing_option.rate = Decimal("10")
+        pricing_option.currency = "USD"
+        pricing_option.is_fixed = True
+        pricing_option.root = pricing_option
+        product.pricing_options = [pricing_option]
+
         # Creative assignment — status is pending_review
         assignment = MagicMock()
         assignment.creative_id = "cre_pending"
@@ -81,12 +109,11 @@ class TestExecuteApprovedPendingReviewFilter:
         pending_creative.status = "pending_review"
 
         session = uow1.session
-        session.scalars.return_value.first.side_effect = [tenant, mb]
-        session.scalars.return_value.all.side_effect = [
-            [pkg],  # db_packages
-            [assignment],  # assignments
-            [pending_creative],  # creatives
-        ]
+        session.scalars.return_value.first.side_effect = [tenant, mb, product]
+        session.scalars.return_value.all.return_value = [pkg]
+        creative_session = MagicMock()
+        creative_session.scalars.return_value.all.side_effect = [[assignment], [pending_creative]]
+        uow3.session = creative_session
 
         from src.core.schemas import CreateMediaBuySuccess, Principal
 
@@ -104,14 +131,15 @@ class TestExecuteApprovedPendingReviewFilter:
             patch("src.core.database.repositories.MediaBuyUoW", side_effect=lambda _: next(uow_iter)),
             patch("src.core.config_loader.set_current_tenant"),
             patch("src.core.config_loader.get_tenant_by_id", return_value={"tenant_id": "t1"}),
-            patch(f"{_MODULE}.get_principal_object", return_value=principal),
+            patch("src.core.auth.get_principal_object", return_value=principal),
             patch(f"{_MODULE}._execute_adapter_media_buy_creation", return_value=adapter_response),
             patch(f"{_MODULE}._validate_creatives_before_adapter_call"),
-            patch(f"{_MODULE}.get_adapter", return_value=mock_adapter),
+            patch("src.core.helpers.adapter_helpers.get_adapter", return_value=mock_adapter),
         ):
             success, error = execute_approved_media_buy("mb_1", "t1")
 
         # The pending_review creative must NOT have been uploaded
+        assert success is True, error
         mock_adapter.creatives_manager.add_creative_assets.assert_not_called()
 
 

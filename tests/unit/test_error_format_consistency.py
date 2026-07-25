@@ -192,7 +192,7 @@ class TestA2AErrorShapes:
 
         assert not isinstance(exc_info.value, A2AError)
         assert exc_info.value.error_code == "UNSUPPORTED_FEATURE"
-        assert "Unknown skill" in str(exc_info.value)
+        assert str(exc_info.value) == ("The requested skill is not supported. Call discovery to list available skills.")
 
     @pytest.mark.asyncio
     async def test_invalid_auth_identity_raises_server_error(self):
@@ -537,7 +537,7 @@ class TestCrossTransportErrorConsistency:
             )
 
         assert exc_info.value.error_code == "UNSUPPORTED_FEATURE"
-        assert "totally_fake_skill" in str(exc_info.value)
+        assert str(exc_info.value) == ("The requested skill is not supported. Call discovery to list available skills.")
 
     @pytest.mark.asyncio
     async def test_serialize_for_a2a_error_response_structure(self):
@@ -609,7 +609,8 @@ class TestMCPRecoveryInErrorResponses:
         klass = getattr(exc_mod, exc_class)
 
         def failing_tool():
-            raise klass(msg)
+            kwargs = {"_wire_safe_message": True} if exc_class == "AdCPValidationError" else {}
+            raise klass(msg, **kwargs)
 
         wrapped = with_error_logging(failing_tool)
 

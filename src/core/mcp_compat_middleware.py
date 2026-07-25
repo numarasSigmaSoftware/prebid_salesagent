@@ -17,7 +17,11 @@ from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
 from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params
-from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
+from src.core.tool_error_logging import (
+    _translate_to_tool_error,
+    best_effort_boundary_identity,
+    record_boundary_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,16 +125,13 @@ class RequestCompatMiddleware(Middleware):
             # translation. Each boundary derives the semantic VALIDATION_ERROR
             # independently while scrubbing validator messages that may include
             # rejected secret values.
-            tenant_id = None
-            principal_id = None
+            identity = None
             if context.fastmcp_context is not None:
                 try:
                     identity = await context.fastmcp_context.get_state("identity")
-                    if identity is not None:
-                        tenant_id = identity.tenant_id
-                        principal_id = identity.principal_id
                 except Exception:
                     logger.debug("Could not read MCP identity for validation error logging", exc_info=True)
+            tenant_id, principal_id = best_effort_boundary_identity(lambda: identity, transport="mcp")
             record_boundary_error(
                 "mcp",
                 tool_name,

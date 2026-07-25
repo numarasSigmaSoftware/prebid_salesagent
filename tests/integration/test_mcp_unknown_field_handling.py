@@ -53,9 +53,9 @@ class TestMcpDevMode:
                 result.wire_error_envelope,
                 "VALIDATION_ERROR",
                 recovery="correctable",
-                message_substr="Unexpected keyword argument",
             )
-            assert result.wire_error_envelope["errors"][0]["field"] == "nonsense_field"
+            assert result.wire_error_envelope["errors"][0]["field"] == "unrecognized_field"
+            assert "Unexpected keyword argument" not in result.wire_error_envelope["errors"][0]["message"]
 
     def test_deprecated_field_translated_even_in_dev(self, integration_db):
         """Deprecated field translation works in dev mode (always active)."""

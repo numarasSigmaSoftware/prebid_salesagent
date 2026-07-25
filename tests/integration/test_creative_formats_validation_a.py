@@ -292,7 +292,7 @@ class TestMalformedFormatIdObjects:
             TenantFactory(tenant_id="test_tenant")
 
             result = env.call_via(Transport.MCP, format_ids=[{"id": "no_agent_url"}])
-            assert_rejected(result, field="agent_url", reason="Field required")
+            assert_rejected(result, field="agent_url")
 
     def test_valid_format_ids_accepted(self, integration_db):
         """UC-005-EXT-B-02 (positive counterpart): well-formed FormatId objects are accepted.

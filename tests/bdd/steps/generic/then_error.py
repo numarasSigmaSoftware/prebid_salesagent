@@ -321,12 +321,9 @@ def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
     envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
     assert envelope is not None, "Non-disclosure assertion requires the serialized wire envelope"
 
-    for layer_name, error_object in (
-        ("errors[0]", (envelope.get("errors") or [{}])[0]),
-        ("adcp_error", envelope.get("adcp_error") or {}),
-    ):
-        assert "details" not in error_object, f"{layer_name} must not expose account-resolution details"
-
+    # Safe, generic metadata may be added to ``details`` in the future. Grade
+    # the disclosure boundary by content across the entire envelope instead of
+    # imposing an unrelated blanket ban on the field itself.
     serialized = json.dumps(envelope, sort_keys=True).lower()
     forbidden = {
         str(ctx.get("request_brand", "")).lower(),

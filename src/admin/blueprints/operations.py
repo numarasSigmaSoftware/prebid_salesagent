@@ -6,9 +6,6 @@ from typing import Any
 
 from adcp import Error, create_a2a_webhook_payload, create_mcp_webhook_payload
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-
-# FIXME(#1388): Package has a local subclass; import from src.core.schemas (Pattern #7/#4).
-from adcp.types import Package
 from flask import Blueprint, request
 from sqlalchemy import select
 
@@ -17,8 +14,9 @@ from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.exceptions import AdCPMediaBuyRejectedError
-from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
+from src.core.schemas import CreateMediaBuyError
 from src.core.webhook_validator import resolve_webhook_task_id, validate_webhook_task_type
+from src.core.workflow_finalization import finalize_media_buy_approval_step
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
@@ -26,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def _as_request_dict(value: dict[str, Any] | str | None) -> dict[str, Any]:
     """Narrow JSONType (dict|str|None) to a dict for .get() / echo_context."""
-    return value if isinstance(value, dict) else {}
+    return dict(value) if isinstance(value, dict) else {}
 
 
 # Create blueprint
@@ -357,7 +355,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
             # Extract step data to dict to avoid detached instance errors after commit/nested sessions.
             # JSONType columns are typed as dict|str|None; narrow before echo_context / .get().
             request_data = _as_request_dict(step.request_data)
-            step_data = {
+            step_data: dict[str, Any] = {
                 "step_id": step.step_id,
                 "context_id": step.context_id,
                 "tool_name": step.tool_name,
@@ -395,6 +393,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         "This step is no longer awaiting approval (already approved or finalized).",
                     )
                 step.updated_at = datetime.now(UTC)
+                should_execute_media_buy = media_buy is not None and media_buy.status == "pending_approval"
 
                 if not step.comments:
                     step.comments = []
@@ -407,65 +406,18 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 )
                 attributes.flag_modified(step, "comments")
 
-                if media_buy and media_buy.status == "pending_approval":
-                    # Check if all creatives are approved before moving to scheduled
-                    from src.core.database.models import Creative, CreativeAssignment
-
-                    stmt_assignments = select(CreativeAssignment).filter_by(
-                        tenant_id=tenant_id, media_buy_id=media_buy_id
-                    )
-                    assignments = db_session.scalars(stmt_assignments).all()
-
-                    all_creatives_approved = True
-                    if assignments:
-                        creative_ids = [a.creative_id for a in assignments]
-                        stmt_creatives = select(Creative).filter(
-                            Creative.tenant_id == tenant_id, Creative.creative_id.in_(creative_ids)
+                if should_execute_media_buy:
+                    # Commit the human decision and irreversible domain claim
+                    # atomically. A crash after this commit is recoverable from
+                    # ``activating``; no second request may dispatch the adapter.
+                    if not approve_repo.claim_approved_execution(media_buy_id):
+                        db_session.rollback()
+                        return _refused_media_buy_redirect(
+                            tenant_id,
+                            media_buy_id,
+                            "This media buy is already executing or no longer pending approval.",
                         )
-                        creatives = db_session.scalars(stmt_creatives).all()
-
-                        # Check if any creatives are not approved
-                        for creative in creatives:
-                            if creative.status != "approved":
-                                all_creatives_approved = False
-                                break
-                    else:
-                        # No creatives assigned yet
-                        all_creatives_approved = False
-
-                    # Update status based on creative approval state
-                    if all_creatives_approved:
-                        if media_buy.start_time and media_buy.end_time:
-                            # Compute flight window
-                            if media_buy.start_time:
-                                start_time = (
-                                    media_buy.start_time.astimezone(UTC)
-                                    if media_buy.start_time.tzinfo
-                                    else media_buy.start_time.replace(tzinfo=UTC)
-                                )
-
-                            if media_buy.end_time:
-                                end_time = (
-                                    media_buy.end_time.astimezone(UTC)
-                                    if media_buy.end_time.tzinfo
-                                    else media_buy.end_time.replace(tzinfo=UTC)
-                                )
-
-                            now = datetime.now(UTC)
-                            if now < start_time:
-                                media_buy.status = "scheduled"
-                            elif now > end_time:
-                                media_buy.status = "completed"
-                            else:
-                                media_buy.status = "active"
-                        else:
-                            # No start or end time - set to active
-                            media_buy.status = "active"
-                    else:
-                        # Keep it in a state that shows it needs creative approval
-                        # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
-                        media_buy.status = "draft"
-
+                    assert media_buy is not None
                     media_buy.approved_at = datetime.now(UTC)
                     media_buy.approved_by = user_email
                     db_session.commit()
@@ -476,17 +428,45 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     from src.core.tools.media_buy_create import execute_approved_media_buy
 
                     logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
-                    success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
+                    success, error_msg = execute_approved_media_buy(
+                        media_buy_id,
+                        tenant_id,
+                        execution_claimed=True,
+                    )
+                    approve_context = echo_context(request_data)
+                    if success is None:
+                        logger.error(
+                            "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
+                            media_buy_id,
+                        )
+                        flash(
+                            "Media buy was created externally, but activation could not be finalized. "
+                            "The workflow remains pending for safe reconciliation.",
+                            "warning",
+                        )
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
+                    finalization = finalize_media_buy_approval_step(
+                        tenant_id=tenant_id,
+                        step_id=step_data["step_id"],
+                        media_buy_id=media_buy_id,
+                        succeeded=success,
+                        error_message=error_msg,
+                        context=approve_context,
+                    )
 
-                    if not success:
-                        # Adapter creation failed - update status and show error
-                        with get_db_session() as error_session:
-                            error_repo = MediaBuyRepository(error_session, tenant_id)
-                            error_buy = error_repo.update_status(media_buy_id, "failed")
-                            if error_buy:
-                                error_session.commit()
-
+                    if success is False:
                         flash(f"Media buy approved but adapter creation failed: {error_msg}", "error")
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
+                    if not finalization.applied or finalization.result is None:
+                        logger.error(
+                            "[APPROVAL] Adapter succeeded but workflow step %s could not be finalized",
+                            step_data["step_id"],
+                        )
+                        flash("Media buy was created but its workflow result could not be finalized", "error")
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )
@@ -509,22 +489,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         webhook_config = db_session.scalars(stmt_webhook).first()
 
                     if webhook_config and media_buy_data:
-                        approve_repo = MediaBuyRepository(db_session, tenant_id)
-                        all_packages = approve_repo.get_packages(media_buy_id)
-
-                        # Echo the buyer's request context (shared helper, also used by
-                        # the creative approval webhook in blueprints/creatives.py).
-                        approve_context = echo_context(request_data)
-
-                        # The buy IS committed at this point, so a confirmed Success
-                        # (status/confirmed_at/revision from the subclass defaults) is
-                        # semantically correct here — route through the sync_success()
-                        # factory like every sibling construction site.
-                        create_media_buy_approved_result = CreateMediaBuySuccess.sync_success(
-                            media_buy_id=media_buy_id,
-                            packages=[Package(package_id=x.package_id) for x in all_packages],
-                            context=approve_context,
-                        )
+                        create_media_buy_approved_result = finalization.result
                         metadata = _media_buy_webhook_metadata(step_data, tenant_id, media_buy_id, media_buy_data)
 
                         # Determine protocol type from workflow step request_data
@@ -567,6 +532,15 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
                     flash("Media buy approved and order created successfully", "success")
                 else:
+                    if (
+                        WorkflowRepository(db_session, tenant_id).complete_claimed_approval(step_data["step_id"])
+                        is None
+                    ):
+                        db_session.rollback()
+                        flash("Workflow result could not be finalized; please retry approval", "error")
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
                     db_session.commit()
                     flash("Media buy approved successfully", "success")
 

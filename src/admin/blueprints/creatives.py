@@ -46,6 +46,7 @@ from src.admin.utils import echo_context, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.repositories.uow import AdminCreativeUoW
 from src.core.tools.media_buy_create import execute_approved_media_buy, push_creative_to_existing_buy
+from src.core.workflow_finalization import finalize_latest_media_buy_approval_step
 
 # Note: CreativeFormat table was dropped in migration f2addf453200
 # All format-related routes have been removed
@@ -622,7 +623,13 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     )
 
                     if not unapproved_creatives:
-                        media_buy_actions.append({"media_buy_id": media_buy_id})
+                        if uow.media_buys.claim_approved_execution(media_buy_id):
+                            media_buy_actions.append({"media_buy_id": media_buy_id})
+                        else:
+                            logger.info(
+                                "[CREATIVE APPROVAL] Media buy %s execution was already claimed",
+                                media_buy_id,
+                            )
                     else:
                         logger.info(
                             f"[CREATIVE APPROVAL] Media buy {media_buy_id} still waiting for {len(unapproved_creatives)} creatives: {unapproved_creatives}"
@@ -646,9 +653,13 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
             )
 
-            success, error_msg = execute_approved_media_buy(action["media_buy_id"], tenant_id)
+            success, error_msg = execute_approved_media_buy(
+                action["media_buy_id"],
+                tenant_id,
+                execution_claimed=True,
+            )
 
-            if success:
+            if success is True:
                 # Update media buy status in a separate UoW
                 with AdminCreativeUoW(tenant_id) as uow2:
                     assert uow2.media_buys is not None
@@ -660,9 +671,30 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                         mb.approved_by = "system"
                     # auto-commits
 
+                finalization = finalize_latest_media_buy_approval_step(
+                    tenant_id=tenant_id,
+                    media_buy_id=action["media_buy_id"],
+                    succeeded=True,
+                )
+                if not finalization.applied:
+                    logger.warning(
+                        "[CREATIVE APPROVAL] No claimed workflow step was finalized for media buy %s",
+                        action["media_buy_id"],
+                    )
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
-            else:
+            elif success is False:
+                finalize_latest_media_buy_approval_step(
+                    tenant_id=tenant_id,
+                    media_buy_id=action["media_buy_id"],
+                    succeeded=False,
+                    error_message=error_msg,
+                )
                 logger.error(f"[CREATIVE APPROVAL] Adapter creation failed for {action['media_buy_id']}: {error_msg}")
+            else:
+                logger.error(
+                    "[CREATIVE APPROVAL] External media buy creation succeeded but activation remains pending for %s",
+                    action["media_buy_id"],
+                )
 
         # Retroactive push for already-live buys (#1038):
         # Buys in pending_creatives/draft were handled above. For buys that are

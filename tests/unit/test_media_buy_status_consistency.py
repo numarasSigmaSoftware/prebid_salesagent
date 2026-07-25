@@ -160,6 +160,8 @@ class TestAdcpProjectionAgreesWithCanonicalMap:
         "approved": "active",
         "ready": "pending_start",  # sanctioned adaptation #2
         "scheduled": "pending_start",  # sanctioned adaptation #2
+        "activating": "pending_start",
+        "activation_unknown": "pending_start",
         "pending_activation": "pending_start",
         "paused": "paused",
         "completed": "completed",

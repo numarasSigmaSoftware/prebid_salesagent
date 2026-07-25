@@ -584,14 +584,13 @@ class BaseTestEnv:
         """
         from tests.harness.dispatchers import DISPATCHERS
 
-        # ``presented_auth_token`` is the real-auth test seam: the token is put
-        # on the transport request and production resolves it. Never also inject
-        # a pre-resolved identity, which would bypass the boundary under test.
-        if "presented_auth_token" in kwargs:
-            if not isinstance(kwargs["presented_auth_token"], str):
-                raise TypeError("presented_auth_token must be a string")
+        # Presented-token seams put a credential on the transport request so
+        # production resolves it. Never also inject a pre-resolved identity,
+        # which would bypass the boundary under test.
+        presented_auth_key = self._validate_presented_auth_kwargs(kwargs)
+        if presented_auth_key is not None:
             if "identity" in kwargs:
-                raise ValueError("presented_auth_token and identity are mutually exclusive")
+                raise ValueError(f"{presented_auth_key} and identity are mutually exclusive")
         else:
             kwargs.setdefault("identity", self.identity_for(transport))
 
@@ -670,15 +669,16 @@ class BaseTestEnv:
 
         Identity is normally injected by monkey-patching
         ``_resolve_a2a_identity`` and ``_get_auth_token`` on the handler
-        instance. Supplying ``presented_auth_token`` instead puts that token in
-        the real AuthContext and exercises production token resolution.
+        instance. Supplying ``presented_auth_token`` or
+        ``presented_legacy_auth_token`` instead puts that token in the real
+        AuthContext and exercises production token resolution.
 
         Args:
             skill_name: A2A skill name (e.g., "get_products").
             response_cls: Pydantic model class to parse artifact data into.
-            **kwargs: Skill parameters. ``identity`` or
-                ``presented_auth_token`` is popped for auth; remaining kwargs
-                become skill parameters.
+            **kwargs: Skill parameters. ``identity`` or one presented-token
+                seam is popped for auth; remaining kwargs become skill
+                parameters.
         """
         import asyncio
 
@@ -691,7 +691,7 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
-        presented_auth_token = self._pop_presented_auth_token(kwargs)
+        presented_auth_token, presented_auth_headers = self._pop_presented_auth(kwargs)
 
         # Pop identity — used for the handler mock, not sent as a skill parameter.
         _NO_OVERRIDE = object()
@@ -736,8 +736,9 @@ class BaseTestEnv:
             assert auth_token is not None
             from src.core.auth_context import AUTH_CONTEXT_STATE_KEY, AuthContext
 
+            credential_headers = presented_auth_headers or {"x-adcp-auth": auth_token}
             headers = {
-                "x-adcp-auth": auth_token,
+                **credential_headers,
                 "x-adcp-tenant": (a2a_identity.tenant_id if a2a_identity else self._tenant_id) or "",
             }
             server_context = ServerCallContext(
@@ -827,7 +828,7 @@ class BaseTestEnv:
         complete server path: middleware chain → TypeAdapter → tool function.
 
         When the identity carries a real ``auth_token`` (integration mode), or
-        the caller supplies ``presented_auth_token``, patches
+        the caller supplies a presented-token seam, patches
         ``get_http_headers`` so the full auth chain runs: header extraction →
         tenant detection → token-to-principal DB lookup → ResolvedIdentity from
         real data.
@@ -838,9 +839,9 @@ class BaseTestEnv:
         Args:
             tool_name: MCP tool name (e.g., "get_products").
             response_cls: Pydantic model class to parse structured_content into.
-            **kwargs: Tool arguments. ``identity`` or
-                ``presented_auth_token`` is popped for auth; ``req`` is popped
-                and its fields unpacked into the arguments dict.
+            **kwargs: Tool arguments. ``identity`` or one presented-token seam
+                is popped for auth; ``req`` is popped and its fields unpacked
+                into the arguments dict.
         """
         import asyncio
         from unittest.mock import patch
@@ -852,7 +853,7 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
-        presented_auth_token = self._pop_presented_auth_token(kwargs)
+        presented_auth_token, presented_auth_headers = self._pop_presented_auth(kwargs)
 
         # Pop identity — used for the auth mock, not sent as a tool argument.
         _NO_OVERRIDE = object()
@@ -885,8 +886,9 @@ class BaseTestEnv:
             # Patch get_http_headers in BOTH modules that import it:
             # transport_helpers (called by resolve_identity_from_context) and
             # mcp_auth_middleware (called for context_id extraction).
+            credential_headers = presented_auth_headers or {"x-adcp-auth": auth_token}
             headers = {
-                "x-adcp-auth": auth_token,
+                **credential_headers,
                 "x-adcp-tenant": (mcp_identity.tenant_id if mcp_identity else self._tenant_id) or "",
             }
 
@@ -983,27 +985,41 @@ class BaseTestEnv:
         return client.post(endpoint, json=body, headers=headers)
 
     @staticmethod
-    def _pop_presented_auth_token(kwargs: dict[str, Any]) -> str | None:
-        """Pop the real-auth harness seam without letting it reach tool input."""
-        sentinel = object()
-        token = kwargs.pop("presented_auth_token", sentinel)
-        if token is sentinel:
+    def _validate_presented_auth_kwargs(kwargs: dict[str, Any]) -> str | None:
+        """Validate and identify the single real-auth harness seam in use."""
+        keys = [key for key in ("presented_auth_token", "presented_legacy_auth_token") if key in kwargs]
+        if len(keys) > 1:
+            raise ValueError("presented_auth_token and presented_legacy_auth_token are mutually exclusive")
+        if not keys:
             return None
-        if not isinstance(token, str):
-            raise TypeError("presented_auth_token must be a string")
-        return token
+        key = keys[0]
+        if not isinstance(kwargs[key], str):
+            raise TypeError(f"{key} must be a string")
+        return key
+
+    @classmethod
+    def _pop_presented_auth(cls, kwargs: dict[str, Any]) -> tuple[str | None, dict[str, str]]:
+        """Pop a real-auth seam and return its token plus exact wire header."""
+        key = cls._validate_presented_auth_kwargs(kwargs)
+        if key is None:
+            return None, {}
+        token = kwargs.pop(key)
+        header = "Authorization" if key == "presented_auth_token" else "x-adcp-auth"
+        value = f"Bearer {token}" if header == "Authorization" else token
+        return token, {header: value}
 
     def _prepare_rest_request(self, kwargs: dict[str, Any]) -> tuple[Any, Any, dict[str, str]]:
         """Resolve identity, commit factory data, get the client, and install auth.
 
         Single source of truth for the REST request preamble every dispatcher
-        shares. ``presented_auth_token`` selects the real production dependency
-        path and is sent as a request header; otherwise this installs the normal
-        per-request identity override. Returns ``(client, identity, headers)``.
+        shares. Either presented-token seam selects the real production
+        dependency path and is sent as its exact request header; otherwise this
+        installs the normal per-request identity override. Returns
+        ``(client, identity, headers)``.
         """
         from tests.harness.transport import Transport
 
-        presented_auth_token = self._pop_presented_auth_token(kwargs)
+        presented_auth_token, presented_auth_headers = self._pop_presented_auth(kwargs)
         _NO_OVERRIDE = object()
         identity = kwargs.pop("identity", _NO_OVERRIDE)
         if presented_auth_token is not None:
@@ -1016,10 +1032,7 @@ class BaseTestEnv:
         headers: dict[str, str] = {}
         if presented_auth_token is not None:
             self._configure_rest_real_auth()
-            headers = {
-                "x-adcp-auth": presented_auth_token,
-                "x-adcp-tenant": self._tenant_id,
-            }
+            headers = {**presented_auth_headers, "x-adcp-tenant": self._tenant_id}
         else:
             self._configure_rest_auth_override(identity)
         return client, identity, headers

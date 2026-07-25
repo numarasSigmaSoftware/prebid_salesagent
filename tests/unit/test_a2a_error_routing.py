@@ -42,6 +42,7 @@ from src.core.exceptions import (
     AUTH_REQUIRED_CANONICAL_SUGGESTION,
     VALIDATION_ERROR_SUGGESTION,
     AdCPAuthenticationError,
+    AdCPAuthInvalidError,
     AdCPError,
     AdCPValidationError,
 )
@@ -320,14 +321,14 @@ async def test_unknown_skill_records_boundary_error_exactly_once():
         artifact_name="error_result",
     )
     assert records == [
-        ("a2a", "nonexistent_skill", "UNSUPPORTED_FEATURE", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
+        ("a2a", "unsupported_skill", "UNSUPPORTED_FEATURE", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
     ]
 
 
 @pytest.mark.parametrize(
     ("identity", "expected_tenant_id", "expected_principal_id"),
     [
-        pytest.param(None, None, "anonymous", id="no-identity"),
+        pytest.param(None, None, None, id="no-identity"),
         pytest.param(
             PrincipalFactory.make_identity(tenant_id="t_boundary", principal_id="p_boundary", protocol="a2a"),
             "t_boundary",
@@ -368,6 +369,29 @@ def test_boundary_internal_error_uses_one_sentinel_regardless_of_caller(
     assert isinstance(result, InternalError)
 
 
+def test_anonymous_discovery_boundary_error_is_tenant_unscoped():
+    """A header-selected tenant cannot receive anonymous discovery failures."""
+    from src.a2a_server.adcp_a2a_server import _record_a2a_boundary_error
+
+    identity = PrincipalFactory.make_identity(
+        tenant_id="header-selected-tenant",
+        principal_id=None,
+        protocol="a2a",
+    )
+    exc = ValueError("anonymous get_products validation failed")
+
+    with patch("src.a2a_server.adcp_a2a_server.record_boundary_error") as mock_record:
+        _record_a2a_boundary_error("get_products", identity, exc)
+
+    mock_record.assert_called_once_with(
+        "a2a",
+        "get_products",
+        exc,
+        tenant_id=None,
+        principal_id=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
     """A typed AdCPError escaping to the outer handler keeps its own wire code.
@@ -383,7 +407,7 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
     with patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY):
         with patch(
             "src.a2a_server.adcp_a2a_server.core_get_products_tool",
-            side_effect=AdCPValidationError("brief must not be empty"),
+            side_effect=AdCPValidationError("brief must not be empty", _wire_safe_message=True),
         ):
             result = await handler.on_message_send(params, context=ctx)
 
@@ -523,8 +547,12 @@ async def test_send_protocol_webhook_serializes_every_artifact_including_duplica
 
     handler = AdCPRequestHandler()
 
-    env_a = AdCPRequestHandler._build_error_envelope(AdCPValidationError("first skill exploded"))
-    env_b = AdCPRequestHandler._build_error_envelope(AdCPValidationError("second skill exploded"))
+    env_a = AdCPRequestHandler._build_error_envelope(
+        AdCPValidationError("first skill exploded", _wire_safe_message=True)
+    )
+    env_b = AdCPRequestHandler._build_error_envelope(
+        AdCPValidationError("second skill exploded", _wire_safe_message=True)
+    )
     task = Task(id="task_sub", context_id="ctx_sub", status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
     # Two artifacts with the SAME name (repeated skill) + a distinct sibling.
     task.artifacts.append(
@@ -791,7 +819,10 @@ async def test_auth_resolution_failure_arm_carries_the_auth_invalid_envelope(han
 
     context = make_a2a_context(
         auth_token="a-rejected-token",
-        headers={"x-adcp-tenant": "tenant-from-a2a-headers"},
+        headers={
+            "Authorization": "Bearer a-rejected-token",
+            "x-adcp-tenant": "tenant-from-a2a-headers",
+        },
     )
     records, recorder = _capture_a2a_auth_records()
 
@@ -830,12 +861,44 @@ async def test_principal_less_identity_arm_carries_the_auth_invalid_envelope(han
         patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
-            await getattr(handler, handler_method)(params, context=None)
+            await getattr(handler, handler_method)(
+                params,
+                context=make_a2a_context(
+                    auth_token="a-stale-token",
+                    headers={"Authorization": "Bearer a-stale-token"},
+                ),
+            )
 
     assert len(mock_resolve.call_args_list) == 1
     assert mock_resolve.call_args_list[0].kwargs["require_valid_token"] is True
     assert records == [("a2a", "authentication", "AUTH_INVALID", None, None)]
     assert_envelope_shape(exc_info.value.data, "AUTH_INVALID", recovery="terminal")
+
+
+@pytest.mark.asyncio
+async def test_rejected_legacy_a2a_token_without_authorization_is_auth_missing():
+    """A2A must not let the accepted legacy header redefine the v3.1.1 split."""
+    handler = AdCPRequestHandler()
+    context = make_a2a_context(
+        auth_token="legacy-rejected-token",
+        headers={
+            "x-adcp-auth": "legacy-rejected-token",
+            "x-adcp-tenant": "header-selected-tenant",
+        },
+    )
+
+    with patch(
+        "src.core.resolved_identity.resolve_identity",
+        side_effect=AdCPAuthInvalidError("legacy token rejected"),
+    ):
+        with pytest.raises(InvalidRequestError) as exc_info:
+            handler._resolve_a2a_identity(
+                "legacy-rejected-token",
+                require_valid_token=True,
+                context=context,
+            )
+
+    assert_envelope_shape(exc_info.value.data, "AUTH_MISSING", recovery="correctable")
 
 
 @pytest.mark.asyncio

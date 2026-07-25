@@ -256,6 +256,32 @@ def _create_assignment(session, tenant_id: str, creative_id: str, media_buy_id: 
 # Patch at the use site: creatives.py binds this name via `from ... import`, so the
 # definition module (src.core.tools.media_buy_create) is not where the call resolves.
 _PUSH_PATCH = "src.admin.blueprints.creatives.push_creative_to_existing_buy"
+_EXECUTE_PATCH = "src.admin.blueprints.creatives.execute_approved_media_buy"
+
+
+def _create_claimed_a2a_approval(
+    tenant_id: str,
+    media_buy_id: str,
+    external_task_id: str,
+    *,
+    request_context: dict | None = None,
+) -> str:
+    """Persist the exact claimed create step the creative-unblock path must finalize."""
+    from src.core.context_manager import ContextManager
+
+    manager = ContextManager()
+    context = manager.create_context(tenant_id=tenant_id, principal_id=_PRINCIPAL_ID)
+    step = manager.create_workflow_step(
+        context_id=context.context_id,
+        step_type="approval",
+        owner="publisher",
+        status="approved",
+        tool_name="create_media_buy",
+        request_data={"context": request_context} if request_context is not None else {},
+        request_metadata={"protocol": "a2a", "external_task_id": external_task_id},
+        object_mappings=[{"object_type": "media_buy", "object_id": media_buy_id, "action": "create"}],
+    )
+    return step.step_id
 
 
 class TestCreativeApprovalRetroactivePush:
@@ -304,6 +330,110 @@ class TestCreativeApprovalRetroactivePush:
 
         assert response.status_code == 200
         mock_push.assert_not_called()
+
+    @pytest.mark.parametrize("adapter_succeeds", [True, False])
+    def test_creative_unblock_terminalizes_durable_a2a_task(
+        self,
+        client,
+        test_tenant,
+        factory_session,
+        adapter_succeeds,
+    ):
+        """The last creative drives the claimed create step to a durable terminal result."""
+        from a2a.types import TaskState
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from tests.factories import PrincipalFactory
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE
+        from tests.utils.a2a_helpers import (
+            assert_failed_task_envelope,
+            assert_failed_task_no_secret_leak,
+            extract_data_from_artifact,
+        )
+
+        _auth_session(client, test_tenant)
+        creative_id = _create_creative_for_retro_push(factory_session, test_tenant, status="pending_review")
+        media_buy_id, package_id = _create_active_media_buy(
+            factory_session,
+            test_tenant,
+            status="pending_creatives",
+        )
+        _create_assignment(factory_session, test_tenant, creative_id, media_buy_id, package_id)
+        external_task_id = f"task_creative_unblock_{uuid.uuid4().hex[:8]}"
+        request_context = {"trace_id": f"trace_{uuid.uuid4().hex[:8]}"}
+        _create_claimed_a2a_approval(
+            test_tenant,
+            media_buy_id,
+            external_task_id,
+            request_context=request_context,
+        )
+
+        adapter_result = (True, None) if adapter_succeeds else (False, SECRET_BEARING_MESSAGE)
+        with (
+            patch(_SIDE_EFFECTS_PATCH),
+            patch(_EXECUTE_PATCH, return_value=adapter_result),
+            patch(_PUSH_PATCH, return_value=(True, None)),
+        ):
+            response = client.post(
+                f"/tenant/{test_tenant}/creatives/review/{creative_id}/approve",
+                content_type="application/json",
+                json={"approved_by": "test@example.com"},
+            )
+
+        assert response.status_code == 200
+        identity = PrincipalFactory.make_identity(
+            tenant_id=test_tenant,
+            principal_id=_PRINCIPAL_ID,
+            protocol="a2a",
+        )
+        task = AdCPRequestHandler()._durable_task_from_step(external_task_id, identity)
+        assert task is not None
+        if adapter_succeeds:
+            assert task.status.state == TaskState.TASK_STATE_COMPLETED
+            assert task.artifacts and task.artifacts[0].name == "media_buy_result"
+            result = extract_data_from_artifact(task.artifacts[0])
+            assert result["media_buy_id"] == media_buy_id
+            assert result["status"] == "confirmed"
+            assert result["context"] == request_context
+        else:
+            assert_failed_task_envelope(task, code="SERVICE_UNAVAILABLE", recovery="transient")
+            assert_failed_task_no_secret_leak(task)
+
+    def test_creative_unblock_leaves_ambiguous_execution_nonterminal(
+        self,
+        client,
+        test_tenant,
+        factory_session,
+    ):
+        """A post-dispatch unknown outcome is never rewritten as adapter failure."""
+        _auth_session(client, test_tenant)
+        creative_id = _create_creative_for_retro_push(factory_session, test_tenant, status="pending_review")
+        media_buy_id, package_id = _create_active_media_buy(
+            factory_session,
+            test_tenant,
+            status="pending_creatives",
+        )
+        _create_assignment(factory_session, test_tenant, creative_id, media_buy_id, package_id)
+        _create_claimed_a2a_approval(
+            test_tenant,
+            media_buy_id,
+            f"task_creative_pending_{uuid.uuid4().hex[:8]}",
+        )
+
+        with (
+            patch(_SIDE_EFFECTS_PATCH),
+            patch(_EXECUTE_PATCH, return_value=(None, "adapter outcome unknown")),
+            patch(_PUSH_PATCH, return_value=(True, None)),
+            patch("src.admin.blueprints.creatives.finalize_latest_media_buy_approval_step") as mock_finalize,
+        ):
+            response = client.post(
+                f"/tenant/{test_tenant}/creatives/review/{creative_id}/approve",
+                content_type="application/json",
+                json={"approved_by": "test@example.com"},
+            )
+
+        assert response.status_code == 200
+        mock_finalize.assert_not_called()
 
     def test_push_failure_returns_200_with_warnings(self, client, test_tenant, factory_session):
         """Push failure is non-fatal: response is 200 with a warnings field."""

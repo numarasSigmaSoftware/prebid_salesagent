@@ -106,11 +106,12 @@ class TestExecuteApprovedStatusUpdate:
         mock_adapter = MagicMock()
         mock_adapter.orders_manager = None
 
-        # Set up four UoW instances the function opens:
-        # 1. Load tenant, media_buy, packages, products
-        # 2. Persist platform_order_id after adapter success
-        # 3. Handle creative uploads
-        # 4. Update media buy status to 'active' (the fix)
+        # Set up the UoW instances the function opens:
+        # 1. Claim irreversible execution
+        # 2. Load tenant, media_buy, packages, products
+        # 3. Persist platform_order_id after adapter success
+        # 4. Handle creative uploads
+        # 5. Update media buy status to 'active' (the fix)
         mock_session_1 = MagicMock()
         mock_session_2 = MagicMock()
         mock_session_3 = MagicMock()
@@ -128,6 +129,11 @@ class TestExecuteApprovedStatusUpdate:
         mock_session_2.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
 
         # Build mock UoWs — each call to MediaBuyUoW() returns the next one
+        mock_uow_claim = MagicMock()
+        mock_uow_claim.__enter__ = MagicMock(return_value=mock_uow_claim)
+        mock_uow_claim.__exit__ = MagicMock(return_value=None)
+        mock_uow_claim.media_buys.claim_approved_execution.return_value = True
+
         mock_uow_1 = MagicMock()
         mock_uow_1.__enter__ = MagicMock(return_value=mock_uow_1)
         mock_uow_1.__exit__ = MagicMock(return_value=None)
@@ -155,7 +161,7 @@ class TestExecuteApprovedStatusUpdate:
         mock_uow_3.session = mock_session_3
         mock_uow_3.media_buys = mock_repo_3
 
-        uow_iter = iter([mock_uow_1, mock_uow_plids, mock_uow_2, mock_uow_3])
+        uow_iter = iter([mock_uow_claim, mock_uow_1, mock_uow_plids, mock_uow_2, mock_uow_3])
 
         with (
             patch("src.core.database.repositories.MediaBuyUoW", side_effect=lambda _: next(uow_iter)),
@@ -180,5 +186,26 @@ class TestExecuteApprovedStatusUpdate:
         assert success is True, f"Expected success but got error: {error}"
         assert error is None
 
-        # THE KEY ASSERTION: update_status must be called with 'active'
-        mock_repo_3.update_status.assert_called_once_with("mb_test_001", "active")
+        # THE KEY ASSERTION: active is a CAS from the still-owned lease.
+        mock_repo_3.complete_approved_execution.assert_called_once_with("mb_test_001")
+        mock_uow_claim.media_buys.claim_approved_execution.assert_called_once_with("mb_test_001")
+
+    def test_lost_execution_claim_never_dispatches_adapter(self):
+        """Only the atomic media-buy claim winner may create an external order."""
+        claim_uow = MagicMock()
+        claim_uow.__enter__ = MagicMock(return_value=claim_uow)
+        claim_uow.__exit__ = MagicMock(return_value=None)
+        claim_uow.media_buys.claim_approved_execution.return_value = False
+
+        with (
+            patch("src.core.database.repositories.MediaBuyUoW", return_value=claim_uow),
+            patch("src.core.config_loader.set_current_tenant"),
+            patch("src.core.tools.media_buy_create._execute_adapter_media_buy_creation") as mock_adapter,
+        ):
+            from src.core.tools.media_buy_create import execute_approved_media_buy
+
+            success, error = execute_approved_media_buy("mb_test_001", "tenant_1")
+
+        assert success is None
+        assert error == "Approved media buy execution is already claimed or no longer pending"
+        mock_adapter.assert_not_called()

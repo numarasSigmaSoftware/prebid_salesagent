@@ -16,6 +16,9 @@ from pydantic import ValidationError
 from src.core.exceptions import (
     AdCPValidationError,
     build_validation_error_details,
+    safe_validation_error_location,
+    safe_validation_error_message,
+    validation_error_field,
 )
 from src.core.exceptions import (
     first_validation_error_field as first_validation_error_field,
@@ -56,6 +59,7 @@ def adcp_validation_boundary(context: str = "parameters", field: str | None = No
             field=field if field is not None else first_validation_error_field(e),
             suggestion=suggest_validation_fix(e),
             details=build_validation_error_details(errors),
+            _wire_safe_message=True,
         ) from e
 
 
@@ -180,38 +184,8 @@ def format_validation_error(validation_error: ValidationError, context: str = "r
     """
     error_details = []
     for error in validation_error.errors():
-        field_path = ".".join(str(loc) for loc in error["loc"])
-        error_type = error["type"]
-        msg = error["msg"]
-        input_val = error.get("input")
-
-        # Add helpful context for common validation errors
-        if "string_type" in error_type and isinstance(input_val, dict):
-            error_details.append(
-                f"  • {field_path}: Expected string, got object. "
-                f"AdCP spec requires this field to be a simple string, not a structured object."
-            )
-        elif "string_type" in error_type:
-            error_details.append(
-                f"  • {field_path}: Expected string, got {type(input_val).__name__}. Please provide a string value."
-            )
-        elif "missing" in error_type:
-            error_details.append(f"  • {field_path}: Required field is missing")
-        elif "extra_forbidden" in error_type:
-            # For extra_forbidden, show the actual value to help debug what was passed
-            if input_val is not None:
-                # Format the input value more verbosely for debugging
-                try:
-                    input_repr = json.dumps(input_val, indent=2, default=str)
-                except (TypeError, ValueError):
-                    input_repr = repr(input_val)
-                error_details.append(
-                    f"  • {field_path}: Extra field not allowed by AdCP spec.\n    Received value: {input_repr}"
-                )
-            else:
-                error_details.append(f"  • {field_path}: Extra field not allowed by AdCP spec")
-        else:
-            error_details.append(f"  • {field_path}: {msg}")
+        field_path = ".".join(str(loc) for loc in safe_validation_error_location(error))
+        error_details.append(f"  • {field_path}: {safe_validation_error_message(error)}")
 
     error_msg = (
         f"Invalid {context}: The following fields do not match the AdCP specification:\n\n"
@@ -241,7 +215,7 @@ def suggest_validation_fix(validation_error: ValidationError) -> str:
         return "Correct the request to match the AdCP specification and resend."
 
     first = errors[0]
-    field_path = ".".join(str(loc) for loc in first.get("loc", ())) or "request"
+    field_path = validation_error_field(first) or "request"
     error_type = first.get("type", "")
 
     if "missing" in error_type:

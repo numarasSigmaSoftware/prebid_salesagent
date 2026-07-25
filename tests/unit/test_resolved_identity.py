@@ -143,20 +143,40 @@ class TestResolveIdentity:
     @patch("src.core.auth_utils.get_principal_from_token", return_value=(None, None))
     @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
     @patch("src.core.resolved_identity.get_tenant_by_subdomain", return_value={"tenant_id": "default"})
-    def test_rejected_token_raises_auth_invalid(self, mock_get_subdomain, mock_get_vhost, mock_get_principal):
-        """A supplied token rejected by the credential resolver is terminal."""
-        from src.core.exceptions import AdCPAuthInvalidError
+    def test_rejected_legacy_token_without_authorization_is_auth_missing(
+        self, mock_get_subdomain, mock_get_vhost, mock_get_principal
+    ):
+        """Legacy credentials do not change the standard Authorization classifier."""
+        from src.core.exceptions import AdCPAuthMissingError
 
-        with pytest.raises(AdCPAuthInvalidError) as exc_info:
+        with pytest.raises(AdCPAuthMissingError) as exc_info:
             resolve_identity(
                 headers={"x-adcp-tenant": "default", "x-adcp-auth": "rejected"},
                 auth_token="rejected",
                 protocol="mcp",
             )
 
+        assert exc_info.value.error_code == "AUTH_MISSING"
+        assert exc_info.value.recovery == "correctable"
+        mock_get_principal.assert_called_once_with("rejected", "default")
+
+    @patch("src.core.auth_utils.get_principal_from_token", return_value=(None, None))
+    @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
+    @patch("src.core.resolved_identity.get_tenant_by_subdomain", return_value={"tenant_id": "hunter2"})
+    def test_rejected_authorization_token_is_auth_invalid(self, mock_get_subdomain, mock_get_vhost, mock_get_principal):
+        from src.core.exceptions import AdCPAuthInvalidError
+
+        with pytest.raises(AdCPAuthInvalidError) as exc_info:
+            resolve_identity(
+                headers={"x-adcp-tenant": "hunter2", "Authorization": "Bearer rejected"},
+                auth_token="rejected",
+                protocol="mcp",
+            )
+
         assert exc_info.value.error_code == "AUTH_INVALID"
         assert exc_info.value.recovery == "terminal"
-        mock_get_principal.assert_called_once_with("rejected", "default")
+        assert "hunter2" not in exc_info.value.message
+        mock_get_principal.assert_called_once_with("rejected", "hunter2")
 
     @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
     @patch("src.core.resolved_identity.get_tenant_by_subdomain")
