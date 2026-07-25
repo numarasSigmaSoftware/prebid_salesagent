@@ -366,21 +366,9 @@ _XFAIL_TAGS: dict[str, str] = {
 # some examples exercise unimplemented features. Each entry: (tag, node_id
 # substrings that should xfail, reason).
 _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
-    # UC-003 targeting-overlay cross-field constraints are graduated across
-    # impl/A2A/MCP/REST. Unknown fields remain environment-dependent by design:
-    # strict development rejects them while production ignores them for forward
-    # compatibility, so the generated environment-agnostic expectation cannot be
-    # treated as a universally enforced protocol rule.
-    (
-        "T-UC-003-partition-targeting-overlay",
-        {"unknown_field"},
-        "unknown targeting fields are strict-mode errors but production-forward-compatible ignored extensions",
-    ),
-    (
-        "T-UC-003-boundary-targeting-overlay",
-        {"unknown field name"},
-        "unknown targeting fields are strict-mode errors but production-forward-compatible ignored extensions",
-    ),
+    # UC-003 targeting-overlay constraints run normally in strict development/CI.
+    # Production's forward-compatible unknown-field behavior is covered separately
+    # by the production-mode schema tests and must not suppress these BDD oracles.
     # Duplicate disclosure filter values are rejected by the local AdCP 3.1.1
     # uniqueItems override; invalid examples must not be selectively suppressed.
     # Graduated: T-UC-005-boundary-asset-types (all 4 transports pass — brief/catalog now in enum)
@@ -3154,6 +3142,8 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         _UC003_TARGETING_OVERLAY = {
             "T-UC-003-partition-targeting-overlay",
             "T-UC-003-boundary-targeting-overlay",
+            "T-UC-003-partition-frequency-cap-suppress",
+            "T-UC-003-boundary-frequency-cap-suppress",
         }
         # The 3 manual-approval submitted-envelope scenarios (PR #1567) are graded
         # too (they exercise UpdateMediaBuySubmitted cross-transport, adcp 6.6 /

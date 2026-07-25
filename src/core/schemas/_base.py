@@ -1408,6 +1408,12 @@ def _validate_targeting_overlay_constraints(targeting: Targeting | None) -> None
             raise ValueError(
                 "frequency_cap must specify at least one of suppress, suppress_minutes, or max_impressions"
             )
+        if (
+            frequency_cap.suppress is not None
+            and enum_value(frequency_cap.suppress.unit) == "campaign"
+            and frequency_cap.suppress.interval != 1
+        ):
+            raise ValueError("frequency_cap suppress with unit campaign must use interval 1")
         if frequency_cap.max_impressions is not None and (frequency_cap.per is None or frequency_cap.window is None):
             raise ValueError("frequency_cap per and window are required when max_impressions is set")
 

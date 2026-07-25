@@ -1448,14 +1448,8 @@ def given_update_request_with_identification(ctx: dict, id_config: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-@given(parsers.parse("the package targeting_overlay includes frequency_cap: {freq_cap_config}"))
-@given(parsers.parse("the package targeting_overlay includes frequency_cap with suppress: {freq_cap_config}"))
-def given_frequency_cap_config(ctx: dict, freq_cap_config: str) -> None:
-    """Set frequency_cap on the first package update's targeting_overlay.
-
-    The parameter is the FULL frequency_cap configuration object (JSON).
-    Examples: {"interval": 60, "unit": "minutes"}, {"suppress": {...}, "max_impressions": 3}.
-    """
+def _set_frequency_cap(ctx: dict, config: object) -> None:
+    """Set the first package update's frequency-cap configuration."""
     import json
 
     kwargs = _ensure_update_defaults(ctx)
@@ -1466,8 +1460,38 @@ def given_frequency_cap_config(ctx: dict, freq_cap_config: str) -> None:
     if isinstance(overlay, str):
         overlay = json.loads(overlay)
         pkg["targeting_overlay"] = overlay
-    parsed_config = json.loads(freq_cap_config)
-    overlay["frequency_cap"] = parsed_config
+    overlay["frequency_cap"] = config
+
+
+@given(parsers.parse("the package targeting_overlay includes frequency_cap: {freq_cap_config}"))
+def given_frequency_cap_config(ctx: dict, freq_cap_config: str) -> None:
+    """Set frequency_cap on the first package update's targeting_overlay.
+
+    The parameter is the FULL frequency_cap configuration object (JSON).
+    Examples: {"interval": 60, "unit": "minutes"}, {"suppress": {...}, "max_impressions": 3}.
+    """
+    import json
+
+    _set_frequency_cap(ctx, json.loads(freq_cap_config))
+
+
+@given(parsers.parse("the package targeting_overlay includes frequency_cap with suppress: {suppress_config}"))
+def given_frequency_cap_suppress_config(ctx: dict, suppress_config: str) -> None:
+    """Set the suppress arm while preserving full frequency-cap examples.
+
+    Simple interval/unit values describe ``frequency_cap.suppress``. The
+    storyboard also includes complete frequency-cap objects (combined,
+    deprecated suppress_minutes, and the empty-object invalid partition);
+    those remain complete objects rather than being nested again.
+    """
+    import json
+
+    parsed_config = json.loads(suppress_config)
+    full_cap_keys = {"suppress", "suppress_minutes", "max_impressions", "per", "window", "scope"}
+    if parsed_config == {} or (isinstance(parsed_config, dict) and full_cap_keys & parsed_config.keys()):
+        _set_frequency_cap(ctx, parsed_config)
+    else:
+        _set_frequency_cap(ctx, {"suppress": parsed_config})
 
 
 # ═══════════════════════════════════════════════════════════════════════

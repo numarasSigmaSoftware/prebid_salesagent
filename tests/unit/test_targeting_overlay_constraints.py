@@ -23,6 +23,7 @@ from src.core.schemas import AdCPPackageUpdate, PackageRequest
         },
         {"frequency_cap": {"max_impressions": 3}},
         {"frequency_cap": {}},
+        {"frequency_cap": {"suppress": {"interval": 2, "unit": "campaign"}}},
         {
             "keyword_targets": [
                 {"keyword": "shoes", "match_type": "broad"},
