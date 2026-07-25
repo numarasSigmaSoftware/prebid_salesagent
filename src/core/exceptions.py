@@ -1294,8 +1294,8 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
 
     Adoption is NOT universal, so this is not a claim that every buyer-facing emission is
     scrubbed: the MCP/REST boundaries and the approval-service webhook still build their own
-    messages and depend on source-site scrubbing (tracked in #1587). Route any NEW buyer-facing
-    error surface through here instead of adding a second policy.
+    messages and depend on source-site scrubbing. Route any NEW buyer-facing error surface
+    through here instead of adding a second policy.
 
     Two ORTHOGONAL decisions, deliberately kept separate — conflating them is what leaked secrets
     (a raw ``ValueError`` pre-normalized to a *trusted* ``AdCPValidationError`` whose raw message

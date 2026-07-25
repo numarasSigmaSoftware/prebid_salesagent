@@ -197,6 +197,48 @@ class TestMcpWireErrorEnvelope:
         past_or_start_msg = f"Envelope message must explain the failure, got: {envelope['adcp_error']['message']}"
         assert "past" in msg_lower or "start" in msg_lower, past_or_start_msg
 
+    def test_top_level_create_failure_emits_envelope_on_wire(self, mcp_real_tenant_setup, monkeypatch):
+        """A typed failure escaping the create implementation keeps its envelope on the MCP wire.
+
+        This is intentionally injected below request parsing and above the normal
+        tool boundary: it proves the middleware/tool translator, rather than a
+        particular business validator, preserves both error-envelope layers.
+        """
+        from src.core.exceptions import AdCPValidationError
+
+        async def _raise_top_level_failure(*_args, **_kwargs):
+            raise AdCPValidationError("forced MCP top-level failure")
+
+        monkeypatch.setattr("src.core.tools.media_buy_create._create_media_buy_impl", _raise_top_level_failure)
+        identity = mcp_real_tenant_setup
+
+        is_error, envelope = call_mcp_tool_capturing_envelope(
+            "create_media_buy",
+            {
+                "brand": {"domain": "wiretest.example"},
+                "idempotency_key": f"int-key-{uuid.uuid4().hex}",
+                "packages": [
+                    create_test_package_request_dict(
+                        product_id=_PRODUCT_ID,
+                        pricing_option_id="cpm_usd_fixed",
+                        budget=5000.0,
+                    )
+                ],
+                "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "end_time": (datetime.now(UTC) + timedelta(days=31)).isoformat(),
+            },
+            identity,
+        )
+
+        assert is_error, "top-level implementation failure must produce an MCP tool error"
+        assert envelope is not None, "MCP tool error must carry the two-layer envelope"
+        assert_envelope_shape(
+            envelope,
+            "VALIDATION_ERROR",
+            recovery="correctable",
+            message_substr="forced MCP top-level failure",
+        )
+
     def test_get_media_buy_delivery_missing_identity_emits_auth_envelope_on_wire(self, integration_db):
         """Missing identity in get_media_buy_delivery surfaces AUTH_REQUIRED on the MCP wire.
 

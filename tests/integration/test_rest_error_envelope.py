@@ -13,6 +13,7 @@ beads: salesagent-kjfy
 import pytest
 
 from tests.harness.transport import Transport
+from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -81,4 +82,25 @@ class TestRestErrorSuggestionPreservation:
         )
         assert result.error.suggestion == wire_suggestion, (
             f"result.error.suggestion '{result.error.suggestion}' != wire suggestion '{wire_suggestion}'"
+        )
+
+    def test_rest_top_level_create_failure_emits_two_layer_envelope(self, env_with_data, monkeypatch):
+        """A typed failure from the REST route's raw implementation reaches the global envelope handler."""
+        from src.core.exceptions import AdCPValidationError
+
+        async def _raise_top_level_failure(*_args, **_kwargs):
+            raise AdCPValidationError("forced REST top-level failure")
+
+        monkeypatch.setattr("src.routes.api_v1.media_buy_create_module.create_media_buy_raw", _raise_top_level_failure)
+        request = self._zero_budget_req()
+        request.packages[0].budget = 5000.0
+
+        result = env_with_data.call_via(Transport.REST, req=request)
+
+        assert result.is_error, f"Expected error, got payload: {result.payload}"
+        assert_envelope_shape(
+            result.wire_error_envelope,
+            "VALIDATION_ERROR",
+            recovery="correctable",
+            message_substr="forced REST top-level failure",
         )

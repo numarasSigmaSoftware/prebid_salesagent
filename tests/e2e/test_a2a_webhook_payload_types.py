@@ -256,20 +256,33 @@ class TestA2AWebhookPayloadTypes:
         }
 
         # Hold the legitimate workflow webhook at the capture boundary while the
-        # A2A request is in flight. Once released, a regression that re-adds the
-        # immediate-terminal webhook must finish that awaited send before the A2A
-        # response can return. The response is therefore a deterministic producer
-        # completion signal: after it arrives, every forbidden immediate send is
-        # already present in the capture list.
+        # A2A request is in flight. The workflow notification is scheduled in the
+        # background, so the response must complete while it is blocked. Re-adding
+        # an immediate-terminal webhook makes ``on_message_send`` await that blocked
+        # delivery, preventing the response from completing at this checkpoint.
         WebhookPayloadCapture.arm_request_barrier()
+        response_completed_while_blocked = False
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=30.0) as client:
             response_task = asyncio.create_task(client.post(a2a_url, json=message, headers=headers))
             try:
                 webhook_started = await asyncio.to_thread(WebhookPayloadCapture.request_started.wait, 15.0)
+                if webhook_started:
+                    try:
+                        response = await asyncio.wait_for(asyncio.shield(response_task), timeout=5.0)
+                        response_completed_while_blocked = True
+                    except TimeoutError:
+                        response = None
             finally:
                 WebhookPayloadCapture.disarm_request_barrier()
             assert webhook_started, "Workflow completion webhook did not reach the capture barrier"
-            response = await response_task
+            if response is None:
+                response = await response_task
+            assert response_completed_while_blocked, (
+                "A2A response waited for a blocked webhook delivery; an immediate-terminal "
+                "response must not send a webhook"
+            )
+            assert response is not None
 
             # Request should succeed
             assert response.status_code == 200, f"A2A request failed: {response.text}"

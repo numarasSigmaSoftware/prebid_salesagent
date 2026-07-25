@@ -42,7 +42,6 @@ from src.core.exceptions import (
     AUTH_REQUIRED_SUGGESTION,
     VALIDATION_ERROR_SUGGESTION,
     AdCPAuthenticationError,
-    AdCPCapabilityNotSupportedError,
     AdCPValidationError,
 )
 from tests.a2a_helpers import make_a2a_context
@@ -259,18 +258,23 @@ async def test_unknown_skill_records_boundary_error_exactly_once():
     inside the logged boundary, so an unknown skill records exactly once — not zero,
     not twice.
     """
-    handler = AdCPRequestHandler()
-    with patch("src.a2a_server.adcp_a2a_server.record_boundary_error") as mock_record:
-        with pytest.raises(AdCPCapabilityNotSupportedError) as exc_info:
-            await handler._handle_explicit_skill("nonexistent_skill", {}, _TEST_IDENTITY)
-    # Exactly one boundary record, for this skill, carrying the re-raised error.
-    mock_record.assert_called_once_with(
-        "a2a",
-        "nonexistent_skill",
-        exc_info.value,
-        tenant_id=_TEST_IDENTITY.tenant_id,
-        principal_id=_TEST_IDENTITY.principal_id or "anonymous",
+    handler, ctx = _make_handler()
+    params = SendMessageRequest(message=create_a2a_message_with_skill("nonexistent_skill", {}))
+    records, record = _boundary_recording_spy()
+
+    with patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY):
+        with patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=record):
+            result = await handler.on_message_send(params, context=ctx)
+
+    assert_failed_task_envelope(
+        result,
+        code="UNSUPPORTED_FEATURE",
+        recovery="correctable",
+        artifact_name="error_result",
     )
+    assert records == [
+        ("a2a", "nonexistent_skill", "UNSUPPORTED_FEATURE", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
+    ]
 
 
 @pytest.mark.parametrize(

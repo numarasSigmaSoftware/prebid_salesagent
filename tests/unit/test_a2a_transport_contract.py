@@ -24,6 +24,7 @@ from src.a2a_server.adcp_a2a_server import DISCOVERY_SKILLS as _PROD_DISCOVERY_S
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.app import app
 from src.core.exceptions import AdCPAuthenticationError
+from tests.helpers import assert_envelope_shape
 from tests.utils.a2a_helpers import make_test_a2a_identity
 
 _TEST_IDENTITY = make_test_a2a_identity()
@@ -341,10 +342,7 @@ class TestA2AJsonRpcProtocol:
         assert "error" not in body, f"unknown skill must not be a JSON-RPC error: {body.get('error')}"
         assert "result" in body, f"expected a failed-Task result, got: {json.dumps(body)[:400]}"
         data = _extract_artifact_data(body["result"])
-        assert data.get("adcp_error", {}).get("code") == "UNSUPPORTED_FEATURE", (
-            f"unknown skill must surface UNSUPPORTED_FEATURE in the task body: {data}"
-        )
-        assert data.get("adcp_error", {}).get("recovery") == "correctable", data
+        assert_envelope_shape(data, "UNSUPPORTED_FEATURE", recovery="correctable")
         assert "nonexistent_skill" in data["errors"][0]["message"], data
 
     def test_response_echoes_request_id(self, client, auth_headers):

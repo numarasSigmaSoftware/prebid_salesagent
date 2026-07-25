@@ -169,9 +169,9 @@ def _sanitized_envelope(exc: Exception) -> tuple[AdCPError, dict[str, Any]]:
     secret-decryption raise sites can interpolate a connection string) — are scrubbed to
     a generic message with wire code/recovery preserved; client-correctable typed errors
     pass through unchanged. The policy lives in ``src/core/exceptions.py`` so the webhook
-    push path (``ContextManager.audit_workflow_step_failure``) shares one definition
-    (MCP/REST adoption tracked in #1587). Do NOT reintroduce a normalizer that trusts a
-    typed message verbatim.
+    push path (``ContextManager.audit_workflow_step_failure``) shares one definition.
+    New buyer-facing error surfaces must use this policy rather than adding another
+    normalizer that trusts a typed message verbatim.
     """
     sanitized = safe_adcp_error(exc)
     return sanitized, build_two_layer_error_envelope(sanitized)
@@ -946,13 +946,7 @@ class AdCPRequestHandler(RequestHandler):
                         # (AdCPError/ValueError/PermissionError) failures were already
                         # recorded inside _handle_explicit_skill, so this only fires for
                         # genuinely-unexpected exceptions that escaped it.
-                        record_boundary_error(
-                            "a2a",
-                            skill_name,
-                            e,
-                            tenant_id=getattr(identity, "tenant_id", None),
-                            principal_id=getattr(identity, "principal_id", None) or "anonymous",
-                        )
+                        _record_a2a_boundary_error(skill_name, identity, e)
                         results.append(self._build_failed_skill_result(skill_name, e))
 
                 # Create artifacts for ALL skill results FIRST, before any status
@@ -1980,15 +1974,9 @@ class AdCPRequestHandler(RequestHandler):
             # server-side observability still sees the raw message.
             #
             # Defensive about identity shape — test fixtures sometimes pass a string or
-            # partially-built identity; record_boundary_error handles None internally.
+            # partially-built identity; the canonical recorder handles None internally.
             normalized = normalize_to_adcp_error(e)
-            record_boundary_error(
-                "a2a",
-                skill_name,
-                normalized,
-                tenant_id=getattr(identity, "tenant_id", None),
-                principal_id=getattr(identity, "principal_id", None) or "anonymous",
-            )
+            _record_a2a_boundary_error(skill_name, identity, normalized)
 
             sanitized = safe_adcp_error(e)
             if sanitized is not e:
