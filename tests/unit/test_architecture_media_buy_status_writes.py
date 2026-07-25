@@ -250,6 +250,7 @@ def _nearest_ref_name(value: ast.expr) -> str | None:
 def _detect(tree: ast.AST) -> set[tuple[str, str]]:
     """(binding, attr) pairs where a MediaBuy status/approval write happens."""
     media_buy_typed = _media_buy_typed_locals(tree)
+    repo_locals = _media_buy_repo_locals(tree)
     write_bindings = MEDIA_BUY_SINGULAR_NAMES | MEDIA_BUY_COLLECTION_NAMES | media_buy_typed
     setattr_bindings = MEDIA_BUY_SINGULAR_NAMES | media_buy_typed
 
@@ -275,6 +276,11 @@ def _detect(tree: ast.AST) -> set[tuple[str, str]]:
             ref = _nearest_ref_name(node.args[0])
             if ref in setattr_bindings:
                 hits.add((ref, node.args[1].value))
+            elif _rhs_is_media_buy(node.args[0], repo_locals):
+                # ``setattr(uow.media_buys.get_by_id(...), "status", ...)``
+                # has no local binding for _nearest_ref_name to return, but it
+                # is still a direct write on a repository-sourced MediaBuy.
+                hits.add(("<inline_media_buy>", node.args[1].value))
     return hits
 
 
@@ -540,6 +546,9 @@ def test_guard_detects_setattr_bypass():
         "def f(uow, req):\n"
         "    created_mb = uow.media_buys.create_from_request(req)\n"
         "    setattr(created_mb, 'approved_by', 'admin')\n"
+    )
+    assert ("<inline_media_buy>", "status") in _detector_hits(
+        "def f(uow):\n    setattr(uow.media_buys.get_by_id('mb'), 'status', 'active')\n"
     )
 
 

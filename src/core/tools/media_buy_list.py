@@ -480,7 +480,7 @@ def _resolve_status_filter(
         raise AdCPValidationError(
             f"Invalid status_filter value: {e}",
             field="status_filter",
-            suggestion="status_filter values must be valid media-buy statuses",
+            suggestion="Use a valid media-buy status for status_filter",
         ) from e
 
 

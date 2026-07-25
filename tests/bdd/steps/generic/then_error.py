@@ -28,6 +28,8 @@ _ACTIONABLE_SUGGESTION_VERBS = frozenset(
         "omit",
         "add",
         "verify",
+        "review",
+        "fix",
     }
 )
 

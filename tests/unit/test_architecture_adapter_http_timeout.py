@@ -45,8 +45,12 @@ def _requests_module_names(tree: ast.AST) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "requests" and alias.asname:
+                if alias.name in {"requests", "requests.api"} and alias.asname:
                     names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom) and node.module == "requests":
+            for alias in node.names:
+                if alias.name == "api":
+                    names.add(alias.asname or alias.name)
     return names
 
 
@@ -270,6 +274,16 @@ def test_guard_detects_requests_api_call():
 def test_guard_detects_directly_imported_requests_api_call():
     """Known-bad: ``from requests.api import get`` cannot bypass the guard."""
     assert _snippet_hits("from requests.api import get\n\n\ndef f(url):\n    return get(url)\n") == [5]
+
+
+def test_guard_detects_aliased_requests_api_module_call():
+    """Known-bad: api-module aliases cannot hide an unbounded request."""
+    assert _snippet_hits("import requests.api as request_api\n\n\ndef f(url):\n    return request_api.get(url)\n") == [
+        5
+    ]
+    assert _snippet_hits(
+        "from requests import api as request_api\n\n\ndef f(url):\n    return request_api.get(url)\n"
+    ) == [5]
 
 
 def test_guard_detects_nested_session_constructor():
