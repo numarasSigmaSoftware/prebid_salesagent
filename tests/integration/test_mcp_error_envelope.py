@@ -27,7 +27,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.factories.principal import PrincipalFactory
 from tests.harness._idempotency import fresh_idempotency_key
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_package_request_dict
@@ -65,7 +64,7 @@ def mcp_real_tenant_setup(integration_db):
 class TestMcpWireErrorEnvelope:
     """MCP-routed _impl raises typed AdCPError → spec two-layer envelope on wire."""
 
-    def test_update_media_buy_not_found_emits_two_layer_envelope_on_wire(self, integration_db):
+    def test_update_media_buy_not_found_emits_two_layer_envelope_on_wire(self, mcp_real_tenant_setup):
         """AdCPMediaBuyNotFoundError from _impl surfaces as a two-layer envelope on the MCP wire.
 
         Flow exercised end-to-end:
@@ -88,7 +87,7 @@ class TestMcpWireErrorEnvelope:
         MEDIA_BUY_NOT_FOUND is a STANDARD_ERROR_CODES entry — it passes through
         the boundary translator unchanged (no ERROR_CODE_MAPPING rewrite).
         """
-        identity = PrincipalFactory.make_identity(protocol="mcp")
+        identity = mcp_real_tenant_setup
 
         is_error, envelope = call_mcp_tool_capturing_envelope(
             "update_media_buy",

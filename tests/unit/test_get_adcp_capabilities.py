@@ -171,14 +171,11 @@ class TestGetAdcpCapabilitiesImpl:
         assert response.adcp.major_versions[0].root == 3
         assert SupportedProtocol.media_buy in response.supported_protocols
         # `supported` is one agent-wide claim, not per-tool: only
-        # create_media_buy deduplicates today, while update_media_buy/
-        # sync_accounts/sync_creatives validate-and-reexecute. False is the
-        # accurate blanket declaration under the binary discriminated union.
-        assert response.adcp.idempotency.supported is False
-        assert not hasattr(response.adcp.idempotency, "replay_ttl_seconds"), (
-            "IdempotencyUnsupported must not carry replay_ttl_seconds — the discriminated "
-            "union forbids it ('they have no meaning without replay support')"
-        )
+        # Every advertised mutation now reserves and replays idempotency keys,
+        # so the seller-wide binary capability must expose the enforced windows.
+        assert response.adcp.idempotency.supported is True
+        assert response.adcp.idempotency.replay_ttl_seconds == 86_400
+        assert response.adcp.idempotency.in_flight_max_seconds == 300
         # Specialism declaration activates storyboard scenarios bundled under
         # sales-non-guaranteed (inventory_list_*, delivery_reporting, etc.).
         assert response.specialisms is not None
@@ -418,8 +415,9 @@ class TestGetAdcpCapabilitiesWithTenant:
                 assert response.adcp.major_versions[0].root == 3
                 assert SupportedProtocol.media_buy in response.supported_protocols
                 # Full response carries the same seller-wide replay posture.
-                assert response.adcp.idempotency.supported is False
-                assert not hasattr(response.adcp.idempotency, "replay_ttl_seconds")
+                assert response.adcp.idempotency.supported is True
+                assert response.adcp.idempotency.replay_ttl_seconds == 86_400
+                assert response.adcp.idempotency.in_flight_max_seconds == 300
                 # Specialism declaration must be consistent across minimal and full paths.
                 assert response.specialisms is not None
                 assert AdcpSpecialism.sales_non_guaranteed in response.specialisms

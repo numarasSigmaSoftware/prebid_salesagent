@@ -136,85 +136,31 @@ actually exposes; `list_tasks` remains intentionally MCP-only as documented in
 it is a local, ungraded consistency rule using the same 16–255 character
 constraint.
 
-### Idempotency capability contradiction — neither value is fully truthful (open, #1607)
+### Idempotency capability — mutation-wide support
 
-The agent-wide capability block models `idempotency.supported` as ONE
-discriminated-union boolean covering every mutating tool at once. This
-agent's real behavior does not fit that shape: `create_media_buy` deduplicates
-(verbatim replay of the stored success; a same-key different-payload retry
-rejects with `IDEMPOTENCY_CONFLICT`; a retry past the replay window raises
-`IDEMPOTENCY_EXPIRED`), while the other twelve `require_idempotency_key(` call
-sites — including the spend-affecting `update_media_buy`, plus
-`sync_accounts` and `sync_creatives` — VALIDATE and accept the key but perform
-no cache read, so a retried request re-executes.
+The agent-wide capability now declares `supported: true`,
+`replay_ttl_seconds: 86400`, and `in_flight_max_seconds: 300`. This is backed
+by every implemented mutating tool:
 
-Neither discriminant value is truthful for this mix:
+- `create_media_buy` retains verbatim replay plus its domain unique-index
+  backstop.
+- `update_media_buy`, `sync_accounts`, and `sync_creatives` reserve the
+  `(tenant, principal, account, idempotency_key)` tuple in a committed
+  transaction before work begins.
+- A live identical retry returns `IDEMPOTENCY_IN_FLIGHT`; a changed canonical
+  payload returns `IDEMPOTENCY_CONFLICT`; a completed identical retry returns
+  the original response with `replayed: true`.
+- Reservation takeover rotates the attempt ID as a fencing token, so a stale
+  worker cannot complete or release its successor's claim.
+- Handler failures are not cached. An atomic `sync_accounts` rollback releases
+  its claim so a retry can re-execute; multi-unit-of-work or external-adapter
+  failures stay in flight until lease expiry because a side effect may already
+  have landed. Completion failures likewise fail closed.
 
-- `supported: true` claims every mutating call is safe to retry blind — false
-  for twelve of thirteen call sites, and the hazard the spec names for that
-  gap is buyer double-spend/double-sync on a retried mutation. This is what an
-  earlier revision of this PR advertised.
-- `supported: false` claims (per `IdempotencyUnsupported`'s own schema text)
-  that "sending a key is a no-op ... the seller will NOT return
-  IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
-  double-process" — false for `create_media_buy` specifically, which still
-  deduplicates, still conflicts, still expires.
-
-The current code declares `false`. That is a deliberate choice of the
-NARROWER defect, not a resolved, truthful one: `create_media_buy` behaving
-BETTER than advertised (a buyer might not realize a retry is safe and send an
-unnecessary natural-key check) is a materially smaller hazard than the other
-twelve behaving WORSE than advertised (a buyer trusting `true` and retrying
-blind causes a real double-spend). Resolving this for real requires either (a)
-extending genuine replay/conflict/expired handling to every mutating tool,
-then flipping to `true`, or (b) removing `create_media_buy`'s dedup so `false`
-becomes wire-accurate — (a) is a substantial feature build with real
-regression risk on spend-affecting `update_media_buy`; (b) is an active
-regression of a working duplicate-booking safety net. Both are deliberately
-deferred, tracked at #1607 — this is an open contradiction, not a closed one,
-and should not be read as fixed by the choice of `false` alone.
-
-Grading status:
-
-- `dist/compliance/3.1.1/universal/idempotency.yaml` contains a `missing_key`
-  phase and the replay, changed-payload conflict, fresh-key, and concurrent
-  first-insert-wins checks.
-- That storyboard validates replay behavior for sellers declaring
-  `supported: true`. Its capability check explicitly treats `supported: false`
-  as a valid, advisory declaration for which replay-window phases are not
-  applicable; the published file notes that a complete storyboard precondition
-  gate is still pending runner support. Under the current `false` declaration,
-  a future runner implementing that precondition gate will skip grading
-  `create_media_buy`'s real replay behavior — an accepted cost of choosing the
-  narrower defect over the false blanket promise.
-
-`create_media_buy`'s own implementation, independent of what the capability
-block advertises: a repeated `idempotency_key` replays the stored success
-verbatim (`replayed: true`); a same-key different-canonical-payload request
-rejects with `IDEMPOTENCY_CONFLICT`; errors are never cached (a retry after an
-error re-executes); the `media_buys` unique index remains the dup-booking
-backstop with a fail-closed degraded path; the per-scope insert ceiling guards
-admission. On registered standard reads, omission is accepted under the 3.1
-grace and a valid supplied key is validated inert metadata — that read-side
-behavior is unaffected by this section and not part of the contradiction.
-
-The `dist/compliance/3.1.1/universal/idempotency.yaml` replay / changed-payload
-conflict / fresh-key phases grade against this seller's live create behavior
-regardless of what the capability block currently declares (see "Generated
-UC-002 status" below — the scenario dispatches a real `create_media_buy` call
-and does not read the capabilities response).
-
-The concurrent-first-insert-wins phase grades what the BUYER observes — one
-`media_buy_id` across both responses — and that holds: the unique index makes
-the second insert lose and the loser never returns a second buy. It is NOT full
-rule-9 conformance. Rule 9 requires the canonical hash on an in-flight claim row
-written BEFORE the downstream invoke ("write-claim-before-invoke"), and this
-seller writes the hash on the committed `MediaBuy`, so the adapter call at
-`media_buy_create.py` runs before the duplicate is detected. A concurrent
-same-key retry can therefore book a second ad-server order whose orphan the
-code notes at the degraded-replay site. The claim row is the reservation
-subsystem, tracked separately; the gap is stated here rather than implied to be
-covered.
+The canonical hash is computed from the pre-normalization wire payload on MCP,
+A2A, and REST. Per-scope admission limits apply before inserting a new
+reservation. Registered reads continue to treat a valid supplied key as inert
+envelope metadata under the 3.1 grace behavior.
 
 ### Generated UC-002 status
 
@@ -231,12 +177,11 @@ declarative `<256 chars>` token, which the bound Given step expands to exactly
 modes, records provenance, and fails if the target ID disappears; unit coverage
 grades both compiler paths.
 
-The upstream supported-true phases this seller does NOT yet implement
-(in-flight tracking, expired-window, canonical-comparison, conflict-details)
-remain visible in the generated feature but unwired — tracked for the
-reservation-subsystem rebuild (#1683). The local applicability guard asserts
-the live `supported: true` discriminant matches the enforced replay window and
-that the unimplemented phases stay visible-not-claimed.
+The remaining upstream phases stay visible in the generated feature while
+transport-level and repository tests grade in-flight tracking, canonical
+comparison, replay-window behavior, and fenced lease takeover directly. The
+local applicability guard pins the live `supported: true` discriminant to the
+advertised replay and in-flight windows.
 
 ## Update-media-buy revision
 

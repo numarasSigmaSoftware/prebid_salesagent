@@ -2,9 +2,16 @@
 
 from typing import Any
 
+import pytest
 from adcp.types import ContextObject
 
-from src.core.application_context import dump_adcp_response, serialize_application_context
+from src.core.application_context import (
+    MAX_APPLICATION_CONTEXT_DEPTH,
+    dump_adcp_response,
+    serialize_application_context,
+    validate_application_context,
+)
+from src.core.exceptions import AdCPValidationError
 from src.core.schemas._base import CreateMediaBuyResult, CreateMediaBuySuccess
 from src.core.schemas.product import GetProductsResponse
 
@@ -41,15 +48,7 @@ def test_plain_context_is_detached_recursively() -> None:
 
 
 def test_deeply_nested_plain_context_survives_intact() -> None:
-    """No depth ceiling: ``core/context.json`` sets none, so none is enforced.
-
-    ``copy.deepcopy`` exhausts CPython's call stack around 500 levels — an
-    earlier version of this function used it and silently dropped context past
-    a 100-level bound, violating the normative echo contract for perfectly
-    schema-valid input. The iterative detach in ``_detach`` has no such limit:
-    a context nested 5,000 objects deep — an order of magnitude past both the
-    old bound and the recursion ceiling it was avoiding — is echoed exactly.
-    """
+    """The low-level iterative copier itself remains recursion-independent."""
     raw = _nested_context(5000)
 
     assert serialize_application_context(raw) == raw
@@ -65,6 +64,18 @@ def test_deeply_nested_typed_context_survives_intact() -> None:
     context = ContextObject.model_validate(raw)
 
     assert serialize_application_context(context) == raw
+
+
+def test_application_context_accepts_the_transport_safe_depth_limit() -> None:
+    validate_application_context(_nested_context(MAX_APPLICATION_CONTEXT_DEPTH))
+
+
+def test_application_context_rejects_depth_before_business_logic_runs() -> None:
+    with pytest.raises(AdCPValidationError, match="maximum nesting depth") as exc_info:
+        validate_application_context(_nested_context(MAX_APPLICATION_CONTEXT_DEPTH + 1))
+
+    assert exc_info.value.field == "context"
+    assert exc_info.value.context is None
 
 
 def test_response_dump_restores_lossless_context_and_omits_absence() -> None:

@@ -89,42 +89,23 @@ class TestCapabilitiesProtocolsQuery:
             message_substr="idempotency_key is too short",
         )
 
-    def test_deeply_nested_context_on_a_successful_response_is_echoed_on_the_real_wire(self):
-        """Real-transport sibling of the unit-level dump_adcp_response oracle.
-
-        dump_adcp_response() used to call the whole response model's
-        model_dump() before its own safe iterative context serialization ran,
-        so a SUCCESSFUL response with a pathologically deep context crashed
-        just as hard as an error response did. GET's query string can't carry
-        a payload this size (a real HTTP URL-length limit, unrelated to this
-        fix), so this drives a POST body instead — get_products' real
-        apply_version_compat -> dump_adcp_response call chain, with only the
-        DB-bound impl mocked, so the actual wire serialization path is
-        exercised end to end.
-        """
-        from adcp.types import ContextObject
-
-        from src.core.schemas.product import GetProductsResponse
-
-        # 500 levels: comfortably past the old 100-level bound this fix
-        # removed, and within FastAPI's own jsonable_encoder ceiling (a
-        # SEPARATE, framework-level pure-Python-recursion limit around
-        # ~900-1000 levels, independent of this module — tracked separately,
-        # not this fix's concern).
+    def test_deeply_nested_context_is_rejected_before_dispatch_on_the_real_wire(self):
+        """A context unsafe for FastAPI's encoder becomes a typed 400, not a 500."""
         deep = cursor = {}
-        for _ in range(500):
+        for _ in range(65):
             cursor["nested"] = {}
             cursor = cursor["nested"]
 
         with patch("src.core.tools.products._get_products_impl") as mock_core:
-            mock_core.return_value = GetProductsResponse(products=[], context=ContextObject.model_validate(deep))
             response = client.post(
                 "/api/v1/products",
-                json={"brief": "ads", "adcp_version": "3.1"},
+                json={"brief": "ads", "adcp_version": "3.1", "context": deep},
             )
 
-        assert response.status_code == 200, response.text
-        assert response.json()["context"] == deep
+        assert response.status_code == 400, response.text
+        assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
+        assert response.json()["errors"][0]["field"] == "context"
+        mock_core.assert_not_called()
 
 
 _STANDARD_READ_REST_CASES = (

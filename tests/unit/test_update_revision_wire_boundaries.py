@@ -49,6 +49,7 @@ async def test_mcp_omitted_revision_reaches_impl() -> None:
         req=UpdateMediaBuyRequest(**_VALID_REQUEST),
         identity=_IDENTITY,
         context_id=None,
+        raw_wire_payload=_VALID_REQUEST,
     )
 
 
@@ -138,6 +139,10 @@ def test_rest_omitted_revision_reaches_impl() -> None:
         req=UpdateMediaBuyRequest(**_VALID_REQUEST),
         identity=rest_identity,
         context_id=None,
+        raw_wire_payload={
+            "paused": True,
+            "idempotency_key": "revision-boundary-key-0001",
+        },
     )
 
 

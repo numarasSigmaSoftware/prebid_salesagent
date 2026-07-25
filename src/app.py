@@ -31,6 +31,7 @@ from src.a2a_server.adcp_a2a_server import (
 )
 from src.a2a_server.context_builder import AdCPCallContextBuilder
 from src.admin.app import create_app
+from src.core.application_context import validate_application_context
 from src.core.auth_middleware import UnifiedAuthMiddleware
 from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain
 from src.core.domain_routing import route_landing_page
@@ -131,14 +132,27 @@ app.mount("/mcp", mcp_app)
 # ---------------------------------------------------------------------------
 
 
+def _transport_safe_rest_context(value: object) -> dict[str, object] | None:
+    """Return an echoable context, dropping one already rejected as unsafe."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        validate_application_context(value)
+    except AdCPValidationError:
+        return None
+    return dict(value)
+
+
 async def _rest_application_context(request: Request) -> dict[str, object] | None:
     """Best-effort extraction of a valid application context for error echo."""
     try:
         body = await request.json()
     except Exception:
         body = None
-    if isinstance(body, dict) and isinstance(body.get("context"), dict):
-        return dict(body["context"])
+    if isinstance(body, dict):
+        body_context = _transport_safe_rest_context(body.get("context"))
+        if body_context is not None:
+            return body_context
 
     raw_query_context = request.query_params.get("context")
     if raw_query_context is not None:
@@ -146,8 +160,7 @@ async def _rest_application_context(request: Request) -> dict[str, object] | Non
             query_context = json.loads(raw_query_context)
         except (TypeError, ValueError):
             query_context = None
-        if isinstance(query_context, dict):
-            return query_context
+        return _transport_safe_rest_context(query_context)
     return None
 
 

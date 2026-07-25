@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import Field
 
 from src.core.adcp_version import validate_adcp_version_pins
-from src.core.application_context import dump_adcp_response
+from src.core.application_context import dump_adcp_response, validate_application_context
 from src.core.auth_context import require_auth, resolve_auth
 from src.core.exceptions import AdCPValidationError
 from src.core.request_compat import ADCP_NEGOTIATION_FIELDS, validate_standard_read_idempotency_key
@@ -195,6 +195,7 @@ async def _validate_version_pins(request: Request) -> str | None:
             body = None  # malformed/empty JSON is reported by the endpoint's body parsing
         if isinstance(body, dict):
             pins = _merge_rest_version_pins(query_pins, body)
+    validate_application_context(pins.get("context"))
     validate_adcp_version_pins(pins)
     return _effective_compat_version(pins)
 
@@ -678,7 +679,12 @@ async def create_media_buy(
 
 
 @router.put("/media-buys/{media_buy_id}", dependencies=[Depends(_version_after_require)])
-async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity: ResolvedIdentity = require_auth):
+async def update_media_buy(
+    media_buy_id: str,
+    body: UpdateMediaBuyBody,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+    identity: ResolvedIdentity = require_auth,
+):
     """Update an existing media buy (auth required)."""
     # Same context string as _build_update_request's boundary, so a malformed
     # object rejects with an identical message prefix wherever it validates.
@@ -715,6 +721,7 @@ async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity
             idempotency_key=body.idempotency_key,
             revision=body.revision,
             identity=identity,
+            raw_wire_payload=raw_wire_payload,
         )
     return dump_adcp_response(response)
 
@@ -747,7 +754,11 @@ async def get_media_buy_delivery(body: GetMediaBuyDeliveryBody, identity: Resolv
 
 
 @router.post("/creatives/sync", dependencies=[Depends(_version_after_require)])
-async def sync_creatives(body: SyncCreativesBody, identity: ResolvedIdentity = require_auth):
+async def sync_creatives(
+    body: SyncCreativesBody,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+    identity: ResolvedIdentity = require_auth,
+):
     """Sync creatives (auth required)."""
     # Coerce the raw account dict into an AccountReference so sync_creatives_raw
     # resolves it at the transport boundary (mirror create_media_buy / the sibling
@@ -775,6 +786,7 @@ async def sync_creatives(body: SyncCreativesBody, identity: ResolvedIdentity = r
             account=account_ref,
             idempotency_key=body.idempotency_key,
             identity=identity,
+            raw_wire_payload=raw_wire_payload,
         )
     return dump_adcp_response(response)
 
@@ -836,12 +848,20 @@ async def list_accounts(body: ListAccountsBody, identity: ResolvedIdentity = req
 
 
 @router.post("/accounts/sync", dependencies=[Depends(_version_after_require)])
-async def sync_accounts(body: SyncAccountsBody, identity: ResolvedIdentity = require_auth):
+async def sync_accounts(
+    body: SyncAccountsBody,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+    identity: ResolvedIdentity = require_auth,
+):
     """Sync accounts by natural key (auth required)."""
     from src.core.schemas.account import SyncAccountsRequest
 
     require_idempotency_key(body.idempotency_key)
     with adcp_validation_boundary(context="sync_accounts request"):
         req = SyncAccountsRequest(**body.model_dump(exclude_none=True, exclude=ADCP_NEGOTIATION_FIELDS))
-    response = await accounts_module.sync_accounts_raw(req=req, identity=identity)
+    response = await accounts_module.sync_accounts_raw(
+        req=req,
+        identity=identity,
+        raw_wire_payload=raw_wire_payload,
+    )
     return dump_adcp_response(response)

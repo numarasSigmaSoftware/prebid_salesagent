@@ -225,13 +225,16 @@ class AccountUoW(BaseUoW):
     """
 
     accounts: AccountRepository | None
+    idempotency_attempts: IdempotencyAttemptRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.accounts = AccountRepository(self._session, self._tenant_id)
+        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.accounts = None
+        self.idempotency_attempts = None
 
 
 class PushNotificationConfigUoW(BaseUoW):
@@ -253,6 +256,19 @@ class PushNotificationConfigUoW(BaseUoW):
 
     def _clear_repos(self) -> None:
         self.push_notification_configs = None
+
+
+class IdempotencyUoW(BaseUoW):
+    """Short transaction containing only the tenant-scoped replay repository."""
+
+    idempotency_attempts: IdempotencyAttemptRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.idempotency_attempts = None
 
 
 class CreativeUoW(BaseUoW):

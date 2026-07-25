@@ -1789,26 +1789,18 @@ def _lookup_cached_replay(
     """
     # Lazy: tests patch src.core.database.repositories.MediaBuyUoW; the call-time import binds the patched object.
     from src.core.database.repositories import MediaBuyUoW
+    from src.services.idempotency_replay import lookup_cached_replay
 
-    with MediaBuyUoW(tenant_id) as uow:
-        assert uow.idempotency_attempts is not None
-        cached = uow.idempotency_attempts.find_by_key(
-            principal_id=principal_id,
-            account_id=account_id,
-            idempotency_key=idempotency_key,
-        )
-        if cached is None:
-            if enforce_ceiling:
-                from src.services.idempotency_policy import enforce_insert_ceiling
-
-                enforce_insert_ceiling(
-                    uow.idempotency_attempts,
-                    principal_id=principal_id,
-                    account_id=account_id,
-                )
-            return None
-        _raise_on_payload_conflict(cached.payload_hash, request_hash)
-        return _replay_cached_success(cached.response_envelope)
+    return lookup_cached_replay(
+        MediaBuyUoW,
+        tenant_id,
+        principal_id=principal_id,
+        account_id=account_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        decode=_replay_cached_success,
+        enforce_ceiling=enforce_ceiling,
+    )
 
 
 # Fraction of successful keyed creates that run storage reclamation. Eviction
@@ -4492,11 +4484,11 @@ async def create_media_buy(
     # idempotency payload-hash input — the request as the buyer sent it.
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
-    raw_wire_payload = (await ctx.get_state("raw_wire_payload")) if isinstance(ctx, Context) else None
+    from src.core.transport_helpers import enrich_identity_with_account, get_mcp_raw_wire_payload
+
+    raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
 
     # Resolve account at transport boundary (before _impl)
-    from src.core.transport_helpers import enrich_identity_with_account
-
     identity = enrich_identity_with_account(identity, req.account)
 
     # Serialize PushNotificationConfig model to dict for _impl (which accepts dict|None).

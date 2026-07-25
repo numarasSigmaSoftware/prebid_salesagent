@@ -79,8 +79,8 @@ def _make_request(**overrides) -> CreateMediaBuyRequest:
         "start_time": _future(1),
         "end_time": _future(8),
         "packages": [{"product_id": "prod_1", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
-        # Required by AdCP 3.1.1. The key is inert while the seller advertises
-        # idempotency unsupported; mocked UoWs need no cache/probe setup.
+        # Required by AdCP 3.1.1. Most tests in this module call internal worker
+        # seams directly; dedicated replay suites cover the protocol reservation.
         "idempotency_key": "unit-test-default-key-0001",
     }
     defaults.update(overrides)
@@ -323,9 +323,8 @@ class TestCreateMediaBuyResponseShapes:
     def test_result_serializes_replayed_marker_when_set(self):
         """The schema-compatible marker serializes when parsing external data.
 
-        Production create responses keep it false while this seller advertises
-        idempotency unsupported; the wrapper still accepts/serializes the AdCP
-        field so shared clients can round-trip the envelope type.
+        Fresh production responses omit the false marker, while replayed
+        responses serialize it as true for shared clients.
         """
         success = _make_success(media_buy_id="mb_1")
 

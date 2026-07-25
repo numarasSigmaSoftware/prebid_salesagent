@@ -480,3 +480,290 @@ class TestFindIncludingExpired:
             session = _setup(env)
             repo = IdempotencyAttemptRepository(session, "idem_t1")
             assert repo.find_including_expired(principal_id="idem_p1", idempotency_key="never-written") is None
+
+
+class TestReserve:
+    """Two-phase reservation: reserve() -> complete()/release(), first-insert-wins."""
+
+    def test_non_unique_integrity_error_propagates_without_retry(self, integration_db):
+        """A foreign-key failure is not misclassified as a key collision."""
+        from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+
+            with pytest.raises(IntegrityError):
+                repo.reserve(
+                    principal_id="missing-principal",
+                    account_id=None,
+                    tool_name="update_media_buy",
+                    idempotency_key="non-collision-integrity-error",
+                    payload_hash="hash-missing-principal",
+                    lease=timedelta(seconds=300),
+                )
+
+    def test_fresh_reserve_returns_reserved_and_persists_in_flight(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            RESERVED,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-1",
+                payload_hash="hash-1",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+
+            assert outcome.kind == RESERVED
+            assert outcome.attempt_id is not None
+            # The reserved row is in_flight and does NOT replay via find_by_key.
+            assert repo.find_by_key(principal_id="idem_p1", idempotency_key="res-key-1", now=now) is None
+            row = repo.find_including_expired(principal_id="idem_p1", idempotency_key="res-key-1")
+            assert row is not None
+            assert row.status == "in_flight"
+            assert row.response_envelope is None
+            assert row.expires_at == now + timedelta(seconds=300)
+
+    def test_expired_completed_response_is_not_replayed_or_reexecuted(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            EXPIRED,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            written_at = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            repo.record_success(
+                principal_id="idem_p1",
+                tool_name="sync_accounts",
+                idempotency_key="res-key-expired-completed",
+                response_model=_model(accounts=[]),
+                protocol_status="completed",
+                payload_hash="expired-hash",
+                ttl=timedelta(seconds=60),
+                now=written_at,
+            )
+
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-expired-completed",
+                payload_hash="expired-hash",
+                lease=timedelta(seconds=300),
+                now=written_at + timedelta(seconds=61),
+            )
+
+        assert outcome.kind == EXPIRED
+
+    def test_second_reserve_while_live_returns_in_flight_with_retry_after(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            IN_FLIGHT,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-2",
+                payload_hash="hash-2",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+
+            # Second attempt collides against the live in_flight row.
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-2",
+                payload_hash="hash-2",
+                lease=timedelta(seconds=300),
+                now=now + timedelta(seconds=60),
+            )
+
+            assert outcome.kind == IN_FLIGHT
+            # 300s lease, 60s elapsed → ~240s remaining.
+            assert outcome.retry_after == 240
+
+    def test_live_collision_preserves_hash_for_conflict_classification(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            IN_FLIGHT,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-conflict",
+                payload_hash="original-hash",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-conflict",
+                payload_hash="changed-hash",
+                lease=timedelta(seconds=300),
+                now=now + timedelta(seconds=1),
+            )
+
+        assert outcome.kind == IN_FLIGHT
+        assert outcome.stored_hash == "original-hash"
+        assert outcome.response_envelope is None
+
+    def test_complete_flips_in_flight_to_completed_and_replays(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            COMPLETED,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            reserved = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-3",
+                payload_hash="hash-3",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+
+            repo.complete(
+                reserved.attempt_id,
+                response_model=_model(accounts=[{"account_id": "a1"}]),
+                protocol_status="completed",
+                now=now,
+            )
+
+            # Now it replays via find_by_key with the stored envelope.
+            row = repo.find_by_key(principal_id="idem_p1", idempotency_key="res-key-3", now=now)
+            assert row is not None
+            assert row.status == "completed"
+            assert row.response_envelope == _envelope("completed", accounts=[{"account_id": "a1"}])
+
+            # A same-key reserve now classifies COMPLETED (caller conflict-checks the hash).
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-3",
+                payload_hash="hash-3",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+            assert outcome.kind == COMPLETED
+            assert outcome.stored_hash == "hash-3"
+            assert outcome.response_envelope == _envelope("completed", accounts=[{"account_id": "a1"}])
+
+    def test_release_deletes_in_flight_and_frees_the_key(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            RESERVED,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            reserved = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-4",
+                payload_hash="hash-4",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+            repo.release(reserved.attempt_id, now=now)
+
+            assert repo.find_including_expired(principal_id="idem_p1", idempotency_key="res-key-4") is None
+            # The key is free again — a fresh reserve wins.
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-4",
+                payload_hash="hash-4b",
+                lease=timedelta(seconds=300),
+                now=now,
+            )
+            assert outcome.kind == RESERVED
+
+    def test_expired_in_flight_is_stolen_by_next_reserver(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import (
+            RESERVED,
+            IdempotencyAttemptRepository,
+        )
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            first = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-5",
+                payload_hash="hash-5",
+                lease=timedelta(seconds=60),
+                now=now,
+            )
+
+            # Well past the 60s lease → the reservation is expired and stealable.
+            later = now + timedelta(seconds=120)
+            outcome = repo.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="res-key-5",
+                payload_hash="hash-5",
+                lease=timedelta(seconds=60),
+                now=later,
+            )
+
+            assert outcome.kind == RESERVED
+            # Lease takeover rotates the fencing token. The stale worker can
+            # neither complete nor release the successor's reservation.
+            assert outcome.attempt_id != first.attempt_id
+            assert (
+                repo.complete(
+                    first.attempt_id,
+                    response_model=_model(media_buy_id="stale"),
+                    protocol_status="completed",
+                    now=later,
+                )
+                is False
+            )
+            row = repo.find_including_expired(principal_id="idem_p1", idempotency_key="res-key-5")
+            assert row is not None
+            assert row.attempt_id == outcome.attempt_id
+            assert row.payload_hash == "hash-5"
+            assert row.expires_at == later + timedelta(seconds=60)

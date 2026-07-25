@@ -111,13 +111,14 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
     except SyntaxError:
         return []
 
+    function_nodes = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
     # Find the wrapper function node
     wrapper_node = None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name == wrapper_name:
-                wrapper_node = node
-                break
+    if wrapper_name in function_nodes:
+        wrapper_node = function_nodes[wrapper_name]
 
     if wrapper_node is None:
         return []
@@ -136,6 +137,22 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
             continue
 
         kwargs = {kw.arg for kw in node.keywords if kw.arg is not None}
+        for keyword in node.keywords:
+            if keyword.arg is not None or not isinstance(keyword.value, ast.Call):
+                continue
+            kwargs.update(nested.arg for nested in keyword.value.keywords if nested.arg is not None)
+            helper_name = keyword.value.func.id if isinstance(keyword.value.func, ast.Name) else None
+            helper_node = function_nodes.get(helper_name or "")
+            if helper_node is None:
+                continue
+            for helper_child in ast.walk(helper_node):
+                if not isinstance(helper_child, ast.Return) or not isinstance(helper_child.value, ast.Dict):
+                    continue
+                kwargs.update(
+                    key.value
+                    for key in helper_child.value.keys
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                )
         n_positional = len(node.args)
         results.append((kwargs, n_positional))
 

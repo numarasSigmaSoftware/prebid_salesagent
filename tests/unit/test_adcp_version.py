@@ -15,6 +15,7 @@ from src.core.adcp_version import (
 )
 from src.core.exceptions import AdCPConfigurationError, AdCPValidationError, AdCPVersionUnsupportedError
 from src.core.version import get_version
+from tests.helpers import assert_envelope_shape
 
 
 def _request_compat_log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -615,22 +616,10 @@ class TestRESTVersionNegotiation:
         self._assert_version_unsupported(response)
         assert response.json()["context"] == request_context
 
-    def test_rest_deeply_nested_context_is_echoed_exactly_not_dropped(self):
-        """A pathologically nested context must not collapse the error, nor vanish from it.
-
-        The body-read echo hands the raw ``context`` to the error constructor,
-        which detaches it while the request is already failing. An earlier
-        recursive detach raised ``RecursionError`` inside the exception
-        handler (collapsing the response into a bare 500) and a subsequent fix
-        silently dropped anything past a 100-level bound instead — trading one
-        contract violation for another, since ``core/context.json`` sets no
-        depth ceiling and the echo contract requires accepted context to
-        survive unchanged. The iterative detach in
-        ``src.core.application_context`` has no such limit: a context nested
-        3,000 objects deep — thirty times the old bound — is echoed exactly.
-        """
+    def test_rest_deeply_nested_context_is_rejected_before_version_echo(self):
+        """Unsafe context wins before an error path can recursively echo it."""
         deep = cursor = {}
-        for _ in range(3000):
+        for _ in range(65):
             cursor["nested"] = {}
             cursor = cursor["nested"]
 
@@ -639,8 +628,10 @@ class TestRESTVersionNegotiation:
             json={"brief": "ads", "adcp_version": "4.0", "context": deep},
         )
 
-        self._assert_version_unsupported(response)
-        assert response.json()["context"] == deep
+        assert response.status_code == 400
+        assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
+        assert response.json()["errors"][0]["field"] == "context"
+        assert response.json().get("context") is None
 
     def test_rest_query_major_pin_is_coerced_then_rejected(self):
         """The URL's textual integer representation reaches the strict core as an int."""

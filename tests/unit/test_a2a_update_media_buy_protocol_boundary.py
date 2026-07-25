@@ -138,6 +138,11 @@ def test_update_media_buy_accepts_omitted_revision_before_core_call() -> None:
         ),
         identity=_MOCK_IDENTITY,
         context_id=None,
+        raw_wire_payload={
+            "media_buy_id": "mb-1",
+            "paused": True,
+            "idempotency_key": "a2a-update-key-0001",
+        },
     )
 
 

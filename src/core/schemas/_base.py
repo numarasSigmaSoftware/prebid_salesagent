@@ -454,6 +454,14 @@ class CreateMediaBuySubmitted(AdCPCreateMediaBuySubmitted):
 CreateMediaBuyResponse = CreateMediaBuySuccess | CreateMediaBuyError
 
 
+def apply_replay_marker(result: dict[str, Any], replayed: bool) -> dict[str, Any]:
+    """Make ``replayed`` a true-only wire marker from one shared implementation."""
+    result.pop("replayed", None)
+    if replayed:
+        result["replayed"] = True
+    return result
+
+
 class TaskResultEnvelope(SalesAgentBaseModel):
     """DRY base for protocol-status-wrapping result types.
 
@@ -463,12 +471,13 @@ class TaskResultEnvelope(SalesAgentBaseModel):
     """
 
     status: str
+    replayed: bool = False
 
     @model_serializer(mode="wrap")
     def _serialize(self, serializer, info):
         result = self.response.model_dump(mode=info.mode, context=info.context)
         result["status"] = self.status
-        return result
+        return apply_replay_marker(result, self.replayed)
 
 
 class CreateMediaBuyResult(TaskResultEnvelope):
@@ -488,20 +497,6 @@ class CreateMediaBuyResult(TaskResultEnvelope):
     # OR submitted — the replay test asserts True on a submitted replay). Injected
     # at response time, never stored in the cached body; omitted when False on
     # EVERY variant so fresh responses are byte-identical across variants.
-    replayed: bool = False
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, serializer, info):
-        result = self.response.model_dump(mode=info.mode, context=info.context)
-        result["status"] = self.status
-        # The adcp 6.6 submitted base declares replayed=False as a FIELD, so it
-        # rides response.model_dump(); strip it — the wrapper is the marker's
-        # single source (PR #1567 round-3).
-        result.pop("replayed", None)
-        if self.replayed:
-            result["replayed"] = True
-        return result
-
     def __iter__(self):
         """Support tuple unpacking: response, status = result."""
         return iter((self.response, self.status))
@@ -2058,9 +2053,9 @@ def require_idempotency_key(key: str | None) -> None:
     """Enforce the spec-required idempotency key at a transport boundary.
 
     AdCP 3.1.1 requires the field on every mutating task request. Requiredness
-    and shape are separate from the capability's replay guarantee: this seller
-    advertises idempotency support, and the tools that do not yet deduplicate
-    still MUST reject a missing key.
+    and shape are separate checks from replay behavior: this seller advertises
+    mutation-wide idempotency support and every mutation still rejects a
+    missing key before attempting reservation or work.
     """
     if key is None:
         from src.core.exceptions import missing_idempotency_key_error
