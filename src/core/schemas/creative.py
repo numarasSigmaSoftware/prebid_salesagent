@@ -58,6 +58,7 @@ from src.core.schemas._base import (
     SalesAgentBaseModel,
     Targeting,
     _upgrade_legacy_format_ids,
+    apply_replay_marker,
 )
 
 
@@ -478,12 +479,21 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
     # (#1399 R3-F2).
     creatives: list[SyncCreativeResult]  # type: ignore[assignment]
 
+    # Spec idempotency replay marker (AdCP 3.1.1): top-level on the structured
+    # result, set True ONLY when this response is a verbatim replay of a
+    # previously cached success. Wrapper/impl-owned; emitted at response time,
+    # never stored in the cached body, and omitted when False so fresh responses
+    # stay byte-identical (mirrors SyncAccountsResponse.replayed).
+    replayed: bool = False
+
     def model_dump(self, **kwargs):
         """Override to call child model_dump() for nested SyncCreativeResult (Pattern #4)."""
         result = super().model_dump(**kwargs)
         if "creatives" in result and self.creatives:
             result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
-        return result
+        # `replayed=False` rides the default dump; strip it so the marker is present
+        # ONLY on a genuine replay (this dump is its single source, per #1546).
+        return apply_replay_marker(result, self.replayed)
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

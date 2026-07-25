@@ -29,7 +29,7 @@ from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     # FIXME(#1388): Targeting has a local subclass; import from src.core.schemas (Pattern #7/#4).
     Targeting,
 )
-from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import Idempotency3 as IdempotencyUnsupported
+from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import Idempotency as IdempotencySupported
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 
@@ -42,6 +42,7 @@ from fastmcp.tools.tool import ToolResult
 from src.core import adcp_version
 from src.core.application_context import dump_adcp_response
 from src.core.auth import get_principal_object, require_identity
+from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
 from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.helpers import enum_value
 from src.core.helpers.activity_helpers import log_tool_activity
@@ -85,6 +86,8 @@ def _requested_protocol_domains(req: GetAdcpCapabilitiesRequest | None) -> set[s
 
 
 _DEFAULT_SPECIALISMS: tuple[AdcpSpecialism, ...] = (AdcpSpecialism.sales_non_guaranteed,)
+IN_FLIGHT_MAX_SECONDS = 300
+assert IN_FLIGHT_MAX_SECONDS <= int(DEFAULT_REPLAY_TTL.total_seconds())
 
 
 def _build_capabilities_request(
@@ -123,39 +126,11 @@ def _build_adcp_block() -> Adcp:
         # semver: the schema types it ``string`` and marks it optional, so an
         # absent advisory field is conformant where a null would not be.
         **adcp_version.advisory_build_version_field(),
-        # FIXME(#1607): the schema models `supported` as ONE agent-wide binary
-        # claim, but this agent's real behavior is genuinely mixed — neither
-        # value is fully truthful, and `false` below is the lesser-wrong
-        # choice, not a resolved one. `IdempotencyUnsupported`'s own semantics
-        # ("sending a key is a no-op ... the seller will NOT return
-        # IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
-        # double-process") are FALSE for create_media_buy specifically: it
-        # still deduplicates a repeated key (verbatim replay of the stored
-        # success), still raises IDEMPOTENCY_CONFLICT on a same-key
-        # different-payload retry, and still raises IDEMPOTENCY_EXPIRED past
-        # the replay window. Every OTHER mutating tool (update_media_buy,
-        # sync_accounts, sync_creatives) validates and accepts the key but
-        # performs no cache read, so a retry re-executes and can double-spend
-        # or double-sync — which is what `supported=true` would have falsely
-        # promised was safe, for twelve of thirteen call sites. `false` was
-        # chosen as the narrower defect (create_media_buy behaving BETTER
-        # than advertised is safer than the other twelve behaving WORSE than
-        # advertised), not as a truthful declaration. Resolving this for real
-        # means either extending genuine replay/conflict/expired handling to
-        # every mutating tool (then flipping to true) or removing
-        # create_media_buy's dedup so false becomes wire-accurate — both are
-        # deliberately deferred: the first is a substantial feature build with
-        # real regression risk on spend-affecting update_media_buy, the second
-        # is an active regression of a working duplicate-booking safety net.
-        # Do not treat this line as closed by future drive-by cleanup without
-        # picking one of those two.
-        # The SDK generates the discriminated union as two classes named
-        # ``Idempotency`` (supported=True) and ``Idempotency3`` (supported=False)
-        # — the numeric suffix is a codegen artifact of the schema's own
-        # generation note ("code generators produce two named types
-        # (IdempotencySupported, IdempotencyUnsupported)"), imported here under
-        # a readable alias since the generated name carries no meaning.
-        idempotency=IdempotencyUnsupported(supported=False),
+        idempotency=IdempotencySupported(
+            supported=True,
+            replay_ttl_seconds=int(DEFAULT_REPLAY_TTL.total_seconds()),
+            in_flight_max_seconds=IN_FLIGHT_MAX_SECONDS,
+        ),
     )
 
 

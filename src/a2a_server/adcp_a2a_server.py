@@ -54,7 +54,7 @@ from google.protobuf import json_format, struct_pb2
 from pydantic import BaseModel
 
 from src.core.adcp_version import validate_adcp_version_pins
-from src.core.application_context import dump_adcp_response
+from src.core.application_context import dump_adcp_response, validate_application_context
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import AUTH_REQUIRED_SUGGESTION
 from src.core.auth_context import AUTH_CONTEXT_STATE_KEY
@@ -185,11 +185,9 @@ DISCOVERY_SKILLS = frozenset(
 )
 
 # Skills whose handler receives the raw DataPart params for the idempotency
-# payload hash. Only create_media_buy deduplicates retries today; the other
-# mutating skills validate and accept the key without a cache read, so they
-# take no wire payload. Extend alongside the dedupe implementation, never ahead
-# of it — a threaded payload with no cache probe is a guarantee we do not keep.
-_RAW_WIRE_PAYLOAD_SKILLS = frozenset({"create_media_buy"})
+# payload hash. Every advertised mutating skill reserves/replays against this
+# exact wire form so transport coercion cannot collapse distinct payloads.
+_RAW_WIRE_PAYLOAD_SKILLS = frozenset({"create_media_buy", "update_media_buy", "sync_creatives", "sync_accounts"})
 
 
 def _json_safe_wire_params(parameters: dict) -> dict | None:
@@ -221,6 +219,19 @@ def _json_safe_wire_params(parameters: dict) -> dict | None:
         # None, never {} — an empty dict would hash every non-reducible request
         # to the SAME value, colliding unrelated buyers under one key.
         return None
+
+
+def _validate_a2a_application_context(
+    skill_name: str,
+    parameters: dict[str, Any],
+    identity: ResolvedIdentity | None,
+) -> None:
+    """Bound context before any recursive A2A wire normalization."""
+    try:
+        validate_application_context(parameters.get("context"))
+    except AdCPError as boundary_exc:
+        record_boundary_error_for_identity("a2a", skill_name, boundary_exc, identity)
+        raise
 
 
 def _internal_error_for(
@@ -1696,6 +1707,11 @@ class AdCPRequestHandler(RequestHandler):
             record_boundary_error_for_identity("a2a", skill_name, auth_exc, identity)
             raise auth_exc
 
+        # Validate before _json_safe_wire_params invokes the stdlib's recursive
+        # JSON encoder. Otherwise an over-deep context can raise RecursionError
+        # before the typed boundary handler has a chance to reject it.
+        _validate_a2a_application_context(skill_name, parameters, identity)
+
         # The DataPart params AS SENT — the idempotency payload-hash input, the
         # A2A analogue of MCPAuthMiddleware's pre-compat capture and
         # RestCompatMiddleware's pre-rewrite body bytes. Taken here, before the
@@ -1982,7 +1998,12 @@ class AdCPRequestHandler(RequestHandler):
 
         return response
 
-    async def _handle_sync_creatives_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
+    async def _handle_sync_creatives_skill(
+        self,
+        parameters: dict,
+        identity: ResolvedIdentity,
+        raw_wire_payload: dict[str, Any] | None = None,
+    ) -> dict:
         """Handle explicit sync_creatives skill invocation (AdCP spec endpoint)."""
         logger.debug(
             "[A2A sync_creatives] parameter keys: %s, creatives: %d",
@@ -2044,6 +2065,7 @@ class AdCPRequestHandler(RequestHandler):
                 account=to_account_reference(parameters.get("account")),
                 idempotency_key=parameters.get("idempotency_key"),
                 identity=identity,
+                raw_wire_payload=raw_wire_payload,
             )
 
         return response
@@ -2237,7 +2259,12 @@ class AdCPRequestHandler(RequestHandler):
             )
         return core_list_accounts_tool(req=request, identity=identity)
 
-    async def _handle_sync_accounts_skill(self, parameters: dict, identity: ResolvedIdentity | None) -> Any:
+    async def _handle_sync_accounts_skill(
+        self,
+        parameters: dict,
+        identity: ResolvedIdentity | None,
+        raw_wire_payload: dict[str, Any] | None = None,
+    ) -> Any:
         """Handle explicit sync_accounts skill invocation.
 
         Authentication is REQUIRED per BR-RULE-055.
@@ -2254,7 +2281,11 @@ class AdCPRequestHandler(RequestHandler):
                 context=parameters.get("context"),
                 idempotency_key=parameters.get("idempotency_key"),
             )
-        return await core_sync_accounts_tool(req=request, identity=identity)
+        return await core_sync_accounts_tool(
+            req=request,
+            identity=identity,
+            raw_wire_payload=raw_wire_payload,
+        )
 
     async def _handle_list_authorized_properties_skill(
         self, parameters: dict, identity: ResolvedIdentity | None
@@ -2288,7 +2319,12 @@ class AdCPRequestHandler(RequestHandler):
 
         return response
 
-    async def _handle_update_media_buy_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
+    async def _handle_update_media_buy_skill(
+        self,
+        parameters: dict,
+        identity: ResolvedIdentity,
+        raw_wire_payload: dict[str, Any] | None = None,
+    ) -> dict:
         """Handle explicit update_media_buy skill invocation (CRITICAL for campaign management)."""
         # Identity already resolved at transport boundary (on_message_send)
 
@@ -2354,6 +2390,7 @@ class AdCPRequestHandler(RequestHandler):
                 idempotency_key=params.get("idempotency_key"),
                 identity=identity,
                 revision=revision,
+                raw_wire_payload=raw_wire_payload,
             )
 
         return response

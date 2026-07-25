@@ -170,6 +170,7 @@ class TestA2AParameterMapping:
                 idempotency_key="a2a-update-key-0001",
                 revision=REVISION_OMITTED,
                 identity=_MOCK_IDENTITY,
+                raw_wire_payload=None,
             )
 
     def test_update_media_buy_validates_required_parameters(self):

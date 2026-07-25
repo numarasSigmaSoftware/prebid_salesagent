@@ -129,6 +129,26 @@ class TestMiddlewareRejectsUnsupportedMajor:
         call_next.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unsafe_context_depth_is_typed_and_never_dispatched(self, middleware):
+        deep = cursor = {}
+        for _ in range(65):
+            cursor["nested"] = {}
+            cursor = cursor["nested"]
+        ctx = _make_context("get_products", {"brief": "ads", "context": deep})
+        call_next = AsyncMock()
+
+        with pytest.raises(AdCPToolError) as exc:
+            await middleware.on_call_tool(ctx, call_next)
+
+        assert_envelope_shape(
+            exc.value,
+            "VALIDATION_ERROR",
+            recovery="correctable",
+            check_mcp_tool_error=True,
+        )
+        call_next.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_supported_major_dispatches(self, middleware):
         from src.core.adcp_version import adcp_major_version
 

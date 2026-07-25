@@ -25,7 +25,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from src.core.exceptions import AdCPValidationError
-from src.core.tools import list_creatives_raw, sync_creatives_raw
+from src.core.tools import list_creatives_raw
 from tests.factories import PrincipalFactory
 from tests.harness._idempotency import fresh_idempotency_key
 
@@ -40,23 +40,7 @@ class TestSyncCreativesErrorPaths:
     @pytest.mark.asyncio
     async def test_invalid_creative_format_returns_error(self, integration_db):
         """Test that invalid creative format is handled gracefully."""
-        from src.core.config_loader import set_current_tenant
-
-        identity = PrincipalFactory.make_identity(
-            tenant_id="test_tenant",
-            principal_id="test_principal",
-            protocol="a2a",
-        )
-
-        # Set tenant (mock for this test)
-        set_current_tenant(
-            {
-                "tenant_id": "test_tenant",
-                "name": "Test Tenant",
-                "subdomain": "test",
-                "ad_server": "mock",
-            }
-        )
+        from tests.harness import CreativeSyncEnv
 
         # Invalid creative - missing required fields
         invalid_creatives = [
@@ -70,11 +54,12 @@ class TestSyncCreativesErrorPaths:
         # buyer-invalid creative data must become an explicit failed item, not a
         # request-level exception. Supply the required request key so the test
         # reaches that validation path instead of false-greening on ingress.
-        response = sync_creatives_raw(
-            creatives=invalid_creatives,
-            idempotency_key=fresh_idempotency_key(),
-            identity=identity,
-        )
+        with CreativeSyncEnv(tenant_id="test_tenant", principal_id="test_principal") as env:
+            env.setup_default_data()
+            response = env.call_a2a(
+                creatives=invalid_creatives,
+                idempotency_key=fresh_idempotency_key(),
+            )
 
         # sync_creatives_raw returned a response: it must report the failure
         # explicitly via a per-creative ``action == failed`` entry, not silently

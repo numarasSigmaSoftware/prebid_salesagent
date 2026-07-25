@@ -4493,6 +4493,7 @@ class TestA2ATransportGaps:
         Covers: UC-006-MAIN-REST-01
         """
         from src.core.tools.creatives.sync_wrappers import sync_creatives_raw
+        from src.services.idempotency_replay import ReservationResult
 
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
@@ -4500,6 +4501,12 @@ class TestA2ATransportGaps:
 
         with (
             patch("src.core.tools.creatives._sync.CreativeUoW") as mock_db,
+            patch("src.core.tools.creatives._sync.IdempotencyUoW") as mock_idempotency_uow,
+            patch(
+                "src.core.tools.creatives._sync.reserve_idempotent",
+                return_value=ReservationResult(attempt_id="attempt-a2a-1"),
+            ),
+            patch("src.core.tools.creatives._sync.complete_idempotent") as complete_idempotent,
             patch("src.core.creative_agent_registry.get_creative_agent_registry") as mock_reg_getter,
             patch("src.core.tools.creatives._sync.run_async_in_sync_context") as mock_run_async,
             patch(
@@ -4529,6 +4536,8 @@ class TestA2ATransportGaps:
             mock_uow.creatives = mock_creative_repo
             mock_db.return_value.__enter__.return_value = mock_uow
             mock_db.return_value.__exit__.return_value = None
+            idempotency_uow = MagicMock()
+            mock_idempotency_uow.return_value.__enter__.return_value = idempotency_uow
 
             result = sync_creatives_raw(
                 creatives=[_make_creative_asset()],
@@ -4539,6 +4548,12 @@ class TestA2ATransportGaps:
             assert isinstance(result, SyncCreativesResponse)
             assert len(result.creatives) == 1
             assert result.creatives[0].creative_id == "c_test_1"
+            complete_idempotent.assert_called_once_with(
+                idempotency_uow,
+                attempt_id="attempt-a2a-1",
+                response_model=result,
+                protocol_status="completed",
+            )
 
     def test_a2a_slack_notification_require_human(self):
         """A2A path sends Slack notification for require-human approval mode.

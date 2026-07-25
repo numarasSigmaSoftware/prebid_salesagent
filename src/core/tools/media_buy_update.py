@@ -18,7 +18,7 @@ from adcp import PushNotificationConfig
 from adcp.server.helpers import MEDIA_BUY_STATE_MACHINE, is_terminal_status, valid_actions_for_status
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic.fields import FieldInfo
 
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
@@ -76,11 +76,14 @@ from src.core.database.models import (
     Product as DBProduct,
 )
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
 from src.core.helpers.adapter_helpers import get_adapter
+from src.core.idempotency_canonical import canonical_payload_hash
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
     Budget,
+    Principal,
     RawIdempotencyKey,
     RawUnsupportedRevision,
     UpdateMediaBuyError,
@@ -99,10 +102,11 @@ from src.core.tools.financial_validation import (
     validate_max_daily_package_spend,
     validate_min_package_budget,
 )
-from src.core.transport_helpers import resolve_identity_from_context
+from src.core.transport_helpers import get_mcp_raw_wire_payload, resolve_identity_from_context
 from src.core.utils import utc_flight_start
 from src.core.validation_helpers import adcp_validation_boundary, package_field_path
 from src.core.webhook_validator import require_valid_callback_config_urls, validated_callback_url_scope
+from src.services.idempotency_replay import complete_idempotent, reserve_idempotent
 from src.services.targeting_capabilities import (
     property_list_unsupported_advisories,
     raise_if_property_targeting_violations,
@@ -472,8 +476,103 @@ def _verify_principal(
         )
 
 
+def _decode_update_media_buy_replay(envelope: dict[str, Any]) -> UpdateMediaBuyResult | None:
+    """Reconstruct a completed/submitted update response and mark it replayed."""
+    try:
+        protocol_status = envelope["status"]
+        if protocol_status == AdcpTaskStatus.submitted.value:
+            response: UpdateMediaBuySuccess | UpdateMediaBuySubmitted = UpdateMediaBuySubmitted.model_validate(
+                envelope["response"]
+            )
+        else:
+            response = UpdateMediaBuySuccess.model_validate(envelope["response"])
+    except (KeyError, TypeError, ValidationError):
+        logger.warning("Cached update_media_buy envelope failed validation - treating as a miss", exc_info=True)
+        return None
+    return UpdateMediaBuyResult(response=response, status=protocol_status, replayed=True)
+
+
 def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
+    identity: ResolvedIdentity | None = None,
+    context_id: str | None = None,
+    raw_wire_payload: dict[str, Any] | None = None,
+) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
+    """Reserve, execute, and durably complete one media-buy update."""
+    resolved_identity = require_identity(identity, context=req.context)
+    principal_id = require_principal_id(resolved_identity, context=req.context)
+    tenant = require_tenant(resolved_identity, context=req.context)
+    idempotency_key = req.idempotency_key
+
+    # Raw wire capture is injected by every MCP/A2A/REST boundary. Direct
+    # in-process callers (unit/domain harnesses) deliberately bypass transport
+    # replay semantics and exercise the worker exactly once.
+    if raw_wire_payload is None:
+        return _update_media_buy_work(req=req, identity=resolved_identity, context_id=context_id)
+
+    # Authenticate against persisted state before claiming an idempotency row.
+    # The reservation FK intentionally rejects unknown principals, but leaking
+    # that database error would turn AUTH_REQUIRED into SERVICE_UNAVAILABLE.
+    principal = resolve_principal_or_raise(
+        principal_id,
+        tenant_id=resolved_identity.tenant_id,
+        context=req.context,
+    )
+    require_idempotency_key(idempotency_key)
+    assert idempotency_key is not None
+
+    reservation = reserve_idempotent(
+        MediaBuyUoW,
+        tenant["tenant_id"],
+        principal_id=principal_id,
+        account_id=resolved_identity.account_id,
+        tool_name="update_media_buy",
+        idempotency_key=idempotency_key,
+        request_hash=canonical_payload_hash(raw_wire_payload),
+        lease=DEFAULT_IN_FLIGHT_LEASE,
+        decode=_decode_update_media_buy_replay,
+        enforce_ceiling=True,
+    )
+    if reservation.replay is not None:
+        return reservation.replay
+    assert reservation.attempt_id is not None
+
+    try:
+        result = _update_media_buy_work(
+            req=req,
+            identity=resolved_identity,
+            principal=principal,
+            context_id=context_id,
+        )
+    except Exception:
+        # The worker can cross an external adapter boundary before raising.
+        # Leave the claim in flight until its advertised lease expires; freeing
+        # it immediately could repeat an update whose remote side effect landed.
+        logger.warning(
+            "update_media_buy failed after reservation %s; leaving it in flight to fail closed",
+            reservation.attempt_id,
+            exc_info=True,
+        )
+        raise
+
+    # Work may span adapter and workflow side effects, so completion uses a
+    # separate strict transaction. If fencing fails, leave the key in-flight
+    # and fail closed rather than allowing an immediate duplicate update.
+    response_model = result.response if isinstance(result, UpdateMediaBuyResult) else result
+    protocol_status = result.status if isinstance(result, UpdateMediaBuyResult) else AdcpTaskStatus.submitted.value
+    with MediaBuyUoW(tenant["tenant_id"]) as uow:
+        complete_idempotent(
+            uow,
+            attempt_id=reservation.attempt_id,
+            response_model=response_model,
+            protocol_status=protocol_status,
+        )
+    return result
+
+
+def _update_media_buy_work(
+    req: UpdateMediaBuyRequest,
+    principal: Principal | None = None,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
 ) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
@@ -598,8 +697,12 @@ def _update_media_buy_impl(
                     request_metadata={"protocol": identity.protocol},
                 )
 
-            principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)
-
+            if principal is None:
+                principal = resolve_principal_or_raise(
+                    principal_id,
+                    tenant_id=identity.tenant_id,
+                    context=req.context,
+                )
             adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
             today = req.today or date.today()
 
@@ -1571,9 +1674,8 @@ def _build_update_request(
         str | None,
         Field(
             description=(
-                "Required request key. This seller advertises idempotency support; replay is "
-                "implemented on create_media_buy today, so a repeated key here is validated and "
-                "accepted but not yet deduplicated."
+                "Required request key. Repeated canonical requests replay the stored update response; "
+                "reuse with a different payload is rejected."
             )
         ),
     ] = None,
@@ -1712,8 +1814,8 @@ async def update_media_buy(
         context: Application-level context per adcp spec
         reporting_webhook: Webhook configuration for automated reporting delivery (optional, per AdCP spec)
         ext: Extension object for custom fields (optional, per AdCP spec)
-        idempotency_key: Required AdCP request key. This seller validates it but
-            does not currently advertise a replay/deduplication guarantee.
+        idempotency_key: Required AdCP request key. Successful retries replay
+            the original response and conflicting payload reuse is rejected.
         ctx: FastMCP context (automatically provided)
 
     Returns:
@@ -1752,7 +1854,13 @@ async def update_media_buy(
     # Read identity and context_id pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
-    response = _update_media_buy_impl(req=req, identity=identity, context_id=_ctx_id)
+    raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
+    response = _update_media_buy_impl(
+        req=req,
+        identity=identity,
+        context_id=_ctx_id,
+        raw_wire_payload=raw_wire_payload,
+    )
     return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
 
 
@@ -1776,10 +1884,11 @@ def update_media_buy_raw(
     context: ContextObject | None = None,  # payload-level context
     reporting_webhook: ReportingWebhook | None = None,  # AdCP ReportingWebhook
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
-    idempotency_key: str | None = None,  # Required wire key; validated, accepted, not yet deduplicated (#1607).
+    idempotency_key: str | None = None,
     revision: RawUnsupportedRevision = REVISION_OMITTED,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
+    raw_wire_payload: dict[str, Any] | None = None,
 ):
     """Update an existing media buy (raw function for A2A server use).
 
@@ -1803,8 +1912,7 @@ def update_media_buy_raw(
         context: Application level context per adcp spec
         reporting_webhook: Webhook configuration for automated reporting delivery
         ext: Extension object for custom fields (optional, per AdCP spec)
-        idempotency_key: Required AdCP request key. This seller validates it but
-            does not currently advertise a replay/deduplication guarantee.
+        idempotency_key: Required AdCP request key with durable replay semantics.
         ctx: Context for authentication (deprecated, use identity)
         identity: Pre-resolved identity (if available)
 
@@ -1834,4 +1942,9 @@ def update_media_buy_raw(
         identity = resolve_identity_from_context(ctx, require_valid_token=True)
     # A2A/REST callers pass identity directly without a FastMCP Context, so there
     # is no workflow context_id to forward — _impl creates one if needed.
-    return _update_media_buy_impl(req=req, identity=identity, context_id=None)
+    return _update_media_buy_impl(
+        req=req,
+        identity=identity,
+        context_id=None,
+        raw_wire_payload=raw_wire_payload,
+    )

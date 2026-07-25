@@ -275,8 +275,8 @@ class TestUpdateRequestPackagesFlow:
 class TestAdvisoryComputedPerCreate:
     """Each create uses the adapter's current property-list capability.
 
-    With idempotency unsupported, a repeated key executes again and therefore
-    recomputes this advisory from current adapter state.
+    This unit covers advisory construction for a fresh execution. Protocol
+    retries replay the original completed response rather than recomputing it.
     """
 
     def test_fresh_create_advisory_present_when_capability_off(self):

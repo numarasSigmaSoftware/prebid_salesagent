@@ -14,22 +14,85 @@ from pydantic import BaseModel
 
 _CONTEXT_UNSET = object()
 
+# Keep accepted application contexts below every production transport's
+# recursive JSON-encoding ceiling.  The lowest observed framework ceiling is
+# FastAPI's jsonable_encoder at roughly 900 levels; a deliberately conservative
+# bound leaves ample headroom for the response envelope around the context.
+MAX_APPLICATION_CONTEXT_DEPTH = 64
+MAX_APPLICATION_CONTEXT_NODES = 10_000
+
+
+def validate_application_context(context: Any) -> None:
+    """Reject context that a production transport cannot safely encode.
+
+    ``context`` is opaque JSON, but the HTTP/MCP/A2A frameworks all recursively
+    encode the final response envelope.  Accepting an arbitrarily deep or broad
+    object and only copying it iteratively postpones the failure until after
+    business logic has run, where it becomes an untyped 500.  Validate the raw
+    buyer-owned object at each transport boundary instead, before dispatch.
+    """
+    if context is None:
+        return
+    if isinstance(context, BaseModel):
+        context = context.model_extra or {}
+    if not isinstance(context, dict):
+        return  # Request-schema validation owns the object/type error.
+
+    stack: list[tuple[dict[Any, Any] | list[Any], int]] = [(context, 1)]
+    seen: set[int] = set()
+    nodes = 0
+    while stack:
+        container, depth = stack.pop()
+        container_id = id(container)
+        if container_id in seen:
+            from src.core.exceptions import AdCPValidationError
+
+            raise AdCPValidationError(
+                "context must be an acyclic JSON object",
+                field="context",
+                suggestion="Remove cyclic references from context and retry.",
+                context=None,
+            )
+        seen.add(container_id)
+        if depth > MAX_APPLICATION_CONTEXT_DEPTH:
+            from src.core.exceptions import AdCPValidationError
+
+            raise AdCPValidationError(
+                f"context exceeds the maximum nesting depth of {MAX_APPLICATION_CONTEXT_DEPTH}",
+                field="context",
+                suggestion=(
+                    "Flatten deeply nested context values or store the large object externally "
+                    "and pass a stable reference."
+                ),
+                context=None,
+            )
+        values = container.values() if isinstance(container, dict) else container
+        for value in values:
+            nodes += 1
+            if nodes > MAX_APPLICATION_CONTEXT_NODES:
+                from src.core.exceptions import AdCPValidationError
+
+                raise AdCPValidationError(
+                    f"context exceeds the maximum size of {MAX_APPLICATION_CONTEXT_NODES} values",
+                    field="context",
+                    suggestion="Reduce context size or pass a stable external reference.",
+                    context=None,
+                )
+            if isinstance(value, (dict, list)):
+                stack.append((value, depth + 1))
+
 
 def _detach(value: Any) -> Any:
     """Deep-copy JSON containers with an explicit heap stack, never Python recursion.
 
-    ``context`` is opaque per ``core/context.json`` (v3.1.1) and the schema sets
-    no depth ceiling, so this agent must be able to echo a context of ANY
-    nesting depth unchanged — the normative echo contract
-    (``context-sessions.mdx``) requires accepted context to survive the round
-    trip exactly, and every caller of this module runs inside an exception
-    handler or a response builder, where silently dropping the buyer's context
-    (or raising) would violate that contract or mask the original error.
+    ``context`` is opaque per ``core/context.json`` (v3.1.1). Transport
+    boundaries call :func:`validate_application_context` before dispatch, so
+    every accepted context fits the recursive final encoders; this helper then
+    detaches that accepted object without adding a second, lower recursion
+    ceiling.
 
     ``copy.deepcopy`` and Pydantic's own JSON serializer both recurse per
-    nesting level and exhaust their respective recursion guards on a
-    pathologically deep structure (~500 levels for CPython's call stack;
-    pydantic-core's cycle detector separately caps out around the same order).
+    nesting level and exhaust their respective recursion guards.
     This function instead walks the structure with an explicit Python list as
     the traversal stack — heap-allocated, so its capacity is bounded by
     available memory, not a fixed recursion limit. JSON scalars (str / int /
@@ -194,4 +257,10 @@ def dump_adcp_response(
     return data
 
 
-__all__ = ["dump_adcp_response", "serialize_application_context"]
+__all__ = [
+    "MAX_APPLICATION_CONTEXT_DEPTH",
+    "MAX_APPLICATION_CONTEXT_NODES",
+    "dump_adcp_response",
+    "serialize_application_context",
+    "validate_application_context",
+]

@@ -1,0 +1,204 @@
+"""update_media_buy replay and canonical-payload conflict on a real database."""
+
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
+from pydantic import BaseModel
+
+from src.core.database.repositories import MediaBuyUoW
+from src.core.exceptions import (
+    AdCPIdempotencyConflictError,
+    AdCPIdempotencyExpiredError,
+    AdCPIdempotencyInFlightError,
+    AdCPServiceUnavailableError,
+)
+from src.core.idempotency_canonical import canonical_payload_hash
+from src.core.resolved_identity import ResolvedIdentity
+from src.core.schemas import Principal, UpdateMediaBuyResult, UpdateMediaBuySuccess
+from src.core.tools.media_buy_update import _update_media_buy_impl
+from tests.harness._base import BareIntegrationEnv
+
+pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
+
+
+def _setup(env: BareIntegrationEnv) -> ResolvedIdentity:
+    from tests.factories import PrincipalFactory, TenantFactory
+
+    tenant = TenantFactory(tenant_id="update_idem_tenant")
+    PrincipalFactory(tenant=tenant, principal_id="update_idem_principal")
+    env._commit_factory_data()
+    return PrincipalFactory.make_identity(
+        principal_id="update_idem_principal",
+        tenant_id="update_idem_tenant",
+        tenant={"tenant_id": "update_idem_tenant"},
+    ).model_copy(update={"account_id": "update_idem_account"})
+
+
+def _request() -> MagicMock:
+    req = MagicMock()
+    req.context = None
+    req.idempotency_key = "update-real-idem-0001"
+    return req
+
+
+def _principal() -> Principal:
+    return Principal(
+        principal_id="update_idem_principal",
+        name="Test Advertiser update_idem_principal",
+        platform_mappings={"mock": {"advertiser_id": "test_adv"}},
+    )
+
+
+def _success() -> UpdateMediaBuyResult:
+    return UpdateMediaBuyResult(
+        response=UpdateMediaBuySuccess(media_buy_id="mb-idem-1", affected_packages=[]),
+        status="completed",
+    )
+
+
+def test_identical_wire_retry_replays_without_reexecuting_work(integration_db) -> None:
+    with BareIntegrationEnv() as env:
+        identity = _setup(env)
+        first_request = _request()
+        with patch("src.core.tools.media_buy_update._update_media_buy_work", return_value=_success()) as work:
+            first = _update_media_buy_impl(
+                req=first_request,
+                identity=identity,
+                raw_wire_payload={
+                    "idempotency_key": "update-real-idem-0001",
+                    "media_buy_id": "mb-idem-1",
+                    "paused": True,
+                },
+            )
+            replay = _update_media_buy_impl(
+                req=_request(),
+                identity=identity,
+                raw_wire_payload={
+                    "idempotency_key": "update-real-idem-0001",
+                    "media_buy_id": "mb-idem-1",
+                    "paused": True,
+                },
+            )
+
+    assert first.replayed is False
+    assert replay.replayed is True
+    assert replay.response.media_buy_id == first.response.media_buy_id
+    work.assert_called_once_with(req=first_request, identity=identity, principal=_principal(), context_id=None)
+
+
+def test_changed_wire_payload_conflicts_before_work(integration_db) -> None:
+    with BareIntegrationEnv() as env:
+        identity = _setup(env)
+        first_request = _request()
+        with patch("src.core.tools.media_buy_update._update_media_buy_work", return_value=_success()) as work:
+            _update_media_buy_impl(
+                req=first_request,
+                identity=identity,
+                raw_wire_payload={
+                    "idempotency_key": "update-real-idem-0001",
+                    "media_buy_id": "mb-idem-1",
+                    "paused": True,
+                },
+            )
+            with pytest.raises(AdCPIdempotencyConflictError):
+                _update_media_buy_impl(
+                    req=_request(),
+                    identity=identity,
+                    raw_wire_payload={
+                        "idempotency_key": "update-real-idem-0001",
+                        "media_buy_id": "mb-idem-1",
+                        "paused": False,
+                    },
+                )
+
+    work.assert_called_once_with(req=first_request, identity=identity, principal=_principal(), context_id=None)
+
+
+def test_unusable_completed_replay_fails_closed(integration_db) -> None:
+    class MalformedStoredResponse(BaseModel):
+        unexpected: str
+
+    raw = {
+        "idempotency_key": "update-real-idem-0001",
+        "media_buy_id": "mb-idem-1",
+        "paused": True,
+    }
+    with BareIntegrationEnv() as env:
+        identity = _setup(env)
+        with MediaBuyUoW("update_idem_tenant") as uow:
+            assert uow.idempotency_attempts is not None
+            uow.idempotency_attempts.record_success(
+                principal_id="update_idem_principal",
+                account_id="update_idem_account",
+                tool_name="another_mutation",
+                idempotency_key="update-real-idem-0001",
+                response_model=MalformedStoredResponse(unexpected="shape"),
+                protocol_status="completed",
+                payload_hash=canonical_payload_hash(raw),
+            )
+
+        with (
+            patch("src.core.tools.media_buy_update._update_media_buy_work") as work,
+            pytest.raises(AdCPServiceUnavailableError, match="could not be replayed safely"),
+        ):
+            _update_media_buy_impl(
+                req=_request(),
+                identity=identity,
+                raw_wire_payload=raw,
+            )
+
+    work.assert_not_called()
+
+
+def test_expired_completed_replay_requires_a_fresh_key(integration_db) -> None:
+    raw = {
+        "idempotency_key": "update-real-idem-0001",
+        "media_buy_id": "mb-idem-1",
+        "paused": True,
+    }
+    with BareIntegrationEnv() as env:
+        identity = _setup(env)
+        with MediaBuyUoW("update_idem_tenant") as uow:
+            assert uow.idempotency_attempts is not None
+            uow.idempotency_attempts.record_success(
+                principal_id="update_idem_principal",
+                account_id="update_idem_account",
+                tool_name="update_media_buy",
+                idempotency_key="update-real-idem-0001",
+                response_model=_success().response,
+                protocol_status="completed",
+                payload_hash=canonical_payload_hash(raw),
+                ttl=timedelta(seconds=1),
+                now=datetime(2020, 1, 1, tzinfo=UTC),
+            )
+
+        with (
+            patch("src.core.tools.media_buy_update._update_media_buy_work") as work,
+            pytest.raises(AdCPIdempotencyExpiredError),
+        ):
+            _update_media_buy_impl(
+                req=_request(),
+                identity=identity,
+                raw_wire_payload=raw,
+            )
+
+    work.assert_not_called()
+
+
+def test_failure_after_reservation_stays_in_flight(integration_db) -> None:
+    raw = {
+        "idempotency_key": "update-real-idem-0001",
+        "media_buy_id": "mb-idem-1",
+        "paused": True,
+    }
+    with BareIntegrationEnv() as env:
+        identity = _setup(env)
+        with patch(
+            "src.core.tools.media_buy_update._update_media_buy_work",
+            side_effect=RuntimeError("adapter failed after reservation"),
+        ):
+            with pytest.raises(RuntimeError, match="adapter failed"):
+                _update_media_buy_impl(req=_request(), identity=identity, raw_wire_payload=raw)
+            with pytest.raises(AdCPIdempotencyInFlightError):
+                _update_media_buy_impl(req=_request(), identity=identity, raw_wire_payload=raw)

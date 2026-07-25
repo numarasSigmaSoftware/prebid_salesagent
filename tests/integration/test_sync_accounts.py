@@ -122,19 +122,19 @@ class TestSyncAccountsUpdate:
         with AccountSyncEnv(tenant_id="sync_t4", principal_id="agent_sync4") as env:
             env.setup_default_data()
 
-            req = make_sync_accounts_request(
-                accounts=[
-                    {
-                        "brand": {"domain": "acme.com"},
-                        "operator": "example.com",
-                        "billing": "operator",
-                    }
-                ],
-            )
+            accounts = [
+                {
+                    "brand": {"domain": "acme.com"},
+                    "operator": "example.com",
+                    "billing": "operator",
+                }
+            ]
             # Create
-            await env.call_impl_async(req=req)
-            # Sync identical
-            response = await env.call_impl_async(req=req)
+            await env.call_impl_async(req=make_sync_accounts_request(accounts=accounts))
+            # Sync identical as a new operation. Reusing the first request's
+            # idempotency key would correctly replay its original "created"
+            # result instead of exercising unchanged-account detection.
+            response = await env.call_impl_async(req=make_sync_accounts_request(accounts=accounts))
 
         assert len(response.accounts) == 1
         assert _action_value(response.accounts[0].action) == "unchanged"

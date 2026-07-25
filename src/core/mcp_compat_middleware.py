@@ -17,6 +17,7 @@ from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
 from src.core.adcp_version import validate_adcp_version_pins
+from src.core.application_context import validate_application_context
 from src.core.exceptions import AdCPError, normalize_to_adcp_error
 from src.core.request_compat import (
     DROPPED_FIELDS_NEGOTIATION,
@@ -90,7 +91,8 @@ class RequestCompatMiddleware(Middleware):
         if compat_result.translations_applied:
             modified = True
 
-        # Step 2: Version negotiation — reject an unsupported AdCP version pin
+        # Step 2: Bound opaque context before any error path can echo it through
+        # a recursive framework encoder. Then perform version negotiation.
         # (string adcp_version or deprecated int adcp_major_version). Runs
         # before the negotiation-field strip below, while the claim is still
         # present. validate_* raises a transport-agnostic AdCPError; a
@@ -101,9 +103,10 @@ class RequestCompatMiddleware(Middleware):
         # middleware's context state) and the AdCPToolError wire translation
         # (VERSION_UNSUPPORTED).
         try:
+            validate_application_context(application_context)
             validate_adcp_version_pins(normalized)
             # Step 3: optional read-key shape. Authentication already ran in
-            # MCPAuthMiddleware, and VERSION wins when both fields are bad.
+            # MCPAuthMiddleware, and VERSION wins when only the version and key are bad.
             # Validate before Step 5 strips an undeclared envelope key.
             validate_standard_read_idempotency_key(tool_name, normalized)
         except AdCPError as exc:
