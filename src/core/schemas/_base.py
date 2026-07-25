@@ -1398,8 +1398,17 @@ def _validate_targeting_overlay_constraints(targeting: Targeting | None) -> None
         if method_count != 1:
             raise ValueError("each geo_proximity entry must specify exactly one targeting method")
 
-    if targeting.frequency_cap and targeting.frequency_cap.max_impressions is not None:
-        if targeting.frequency_cap.per is None or targeting.frequency_cap.window is None:
+    if targeting.frequency_cap:
+        frequency_cap = targeting.frequency_cap
+        if (
+            frequency_cap.suppress is None
+            and frequency_cap.suppress_minutes is None
+            and frequency_cap.max_impressions is None
+        ):
+            raise ValueError(
+                "frequency_cap must specify at least one of suppress, suppress_minutes, or max_impressions"
+            )
+        if frequency_cap.max_impressions is not None and (frequency_cap.per is None or frequency_cap.window is None):
             raise ValueError("frequency_cap per and window are required when max_impressions is set")
 
     keyword_keys = [(target.keyword, target.match_type) for target in targeting.keyword_targets or []]

@@ -366,9 +366,21 @@ _XFAIL_TAGS: dict[str, str] = {
 # some examples exercise unimplemented features. Each entry: (tag, node_id
 # substrings that should xfail, reason).
 _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
-    # UC-003 targeting-overlay partitions and boundaries are fully graduated:
-    # canonical AdCP 3.1.1 proximity shapes reach production and every cross-field
-    # constraint is enforced consistently across impl/A2A/MCP/REST.
+    # UC-003 targeting-overlay cross-field constraints are graduated across
+    # impl/A2A/MCP/REST. Unknown fields remain environment-dependent by design:
+    # strict development rejects them while production ignores them for forward
+    # compatibility, so the generated environment-agnostic expectation cannot be
+    # treated as a universally enforced protocol rule.
+    (
+        "T-UC-003-partition-targeting-overlay",
+        {"unknown_field"},
+        "unknown targeting fields are strict-mode errors but production-forward-compatible ignored extensions",
+    ),
+    (
+        "T-UC-003-boundary-targeting-overlay",
+        {"unknown field name"},
+        "unknown targeting fields are strict-mode errors but production-forward-compatible ignored extensions",
+    ),
     # Duplicate disclosure filter values are rejected by the local AdCP 3.1.1
     # uniqueItems override; invalid examples must not be selectively suppressed.
     # Graduated: T-UC-005-boundary-asset-types (all 4 transports pass — brief/catalog now in enum)

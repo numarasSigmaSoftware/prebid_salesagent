@@ -53,4 +53,6 @@ class StrategyRepository:
         """Update the scenario value when the strategy exists."""
         strategy = self.get_by_id(strategy_id)
         if strategy is not None:
-            strategy.config["scenario"] = scenario
+            # JSONType is plain JSONB rather than MutableDict, so an in-place
+            # mutation is invisible to SQLAlchemy's dirty tracking.
+            strategy.config = {**(strategy.config or {}), "scenario": scenario}

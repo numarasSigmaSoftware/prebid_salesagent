@@ -9,6 +9,8 @@ To test production-mode behavior, run:
 """
 
 import os
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -243,3 +245,22 @@ class TestProductionModeBehavior:
 
             with pytest.raises(ValidationError, match="unknown_field"):
                 DevModel(brief="test", unknown_field="should_fail")
+
+    def test_production_targeting_ignores_future_nested_field(self):
+        """The concrete Targeting model preserves the production compatibility policy."""
+        code = (
+            "from src.core.schemas import Targeting; "
+            "targeting = Targeting.model_validate({'future_dimension': ['value']}); "
+            "assert targeting.model_dump(exclude_none=True) == {}"
+        )
+        env = {**os.environ, "ENVIRONMENT": "production"}
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr

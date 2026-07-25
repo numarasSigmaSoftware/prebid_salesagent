@@ -22,6 +22,7 @@ from src.core.schemas import AdCPPackageUpdate, PackageRequest
             ]
         },
         {"frequency_cap": {"max_impressions": 3}},
+        {"frequency_cap": {}},
         {
             "keyword_targets": [
                 {"keyword": "shoes", "match_type": "broad"},
@@ -78,5 +79,17 @@ def test_create_package_enforces_targeting_overlay_constraints():
                     "device_type": ["mobile"],
                     "device_type_exclude": ["mobile"],
                 },
+            }
+        )
+
+
+def test_create_package_rejects_empty_frequency_cap():
+    with pytest.raises(ValidationError, match="at least one of suppress"):
+        PackageRequest.model_validate(
+            {
+                "budget": 100,
+                "pricing_option_id": "pricing_1",
+                "product_id": "product_1",
+                "targeting_overlay": {"frequency_cap": {}},
             }
         )
