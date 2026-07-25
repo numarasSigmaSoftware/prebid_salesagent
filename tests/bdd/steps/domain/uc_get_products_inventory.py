@@ -214,12 +214,13 @@ def then_has_products(ctx: dict) -> None:
     ctx["first_product"] = actual
 
 
-@then(parsers.parse('the request is rejected with INVALID_REQUEST naming field "{field}"'))
-def then_rejected_invalid_request_field(ctx: dict, field: str) -> None:
-    """Assert the wire envelope is INVALID_REQUEST and names the field structurally."""
+@then(parsers.parse('the request is rejected with {error_code} naming field "{field}"'))
+def then_rejected_request_field(ctx: dict, error_code: str, field: str) -> None:
+    """Assert the wire envelope has the expected taxonomy code and field."""
+    assert error_code in {"INVALID_REQUEST", "VALIDATION_ERROR"}, f"Unexpected error code {error_code!r}"
     envelope = ctx.get("wire_error_envelope")
     assert envelope is not None, f"No wire error envelope (error={ctx.get('error')!r})"
-    assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
+    assert_envelope_shape(envelope, error_code, recovery="correctable")
     assert envelope["errors"][0].get("field") == field, (
         f"errors[0].field={envelope['errors'][0].get('field')!r}, expected {field!r}"
     )

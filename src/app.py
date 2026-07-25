@@ -36,10 +36,8 @@ from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain
 from src.core.domain_routing import route_landing_page
 from src.core.exceptions import (
     INVALID_REQUEST_SUGGESTION,
-    VALIDATION_ERROR_SUGGESTION,
     AdCPError,
     AdCPInvalidRequestError,
-    AdCPValidationError,
     build_two_layer_error_envelope,
     build_validation_error_details,
     normalize_to_adcp_error,
@@ -238,21 +236,10 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     loc = raw_loc[1:] if raw_loc and raw_loc[0] in ("body", "query", "path") else raw_loc
     field = ".".join(loc) or None
     message = first.get("msg") or "Request failed schema validation"
-    # Code selection by failure semantics, grounded in the AdCP graded
-    # error-compliance storyboard: a VALUE/enum/range violation on a
-    # structurally-valid field is canonically VALIDATION_ERROR; a missing/
-    # malformed/unknown field (structural) is INVALID_REQUEST. The full
-    # value-vs-structural reclassification across all fields is a repo-wide
-    # follow-up; for now the attribution_window family — reconciled to
-    # VALIDATION_ERROR upstream in adcp-req — is mapped explicitly. (salesagent-meho)
-    if field and field.startswith("attribution_window"):
-        exc_cls, suggestion = AdCPValidationError, VALIDATION_ERROR_SUGGESTION
-    else:
-        exc_cls, suggestion = AdCPInvalidRequestError, INVALID_REQUEST_SUGGESTION
-    adcp_exc = exc_cls(
+    adcp_exc = AdCPInvalidRequestError(
         message,
         field=field,
-        suggestion=suggestion,
+        suggestion=INVALID_REQUEST_SUGGESTION,
         details=build_validation_error_details(errors),
     )
     return _envelope_response(request, adcp_exc)

@@ -35,16 +35,16 @@ Feature: Brand string shorthand coercion on _BRAND_TOOLS
     And an inventory profile with only domain "example.com"
     And a product linked to that inventory profile with pricing
     When the buyer requests products with brand <brand>
-    Then the request is rejected with INVALID_REQUEST naming field "brand"
+    Then the request is rejected with <error_code> naming field "brand"
 
     Examples:
-      | brand                                              |
-      | "https://["                                        |
-      | "acme.com/products"                                |
-      | "my_brand.com"                                     |
-      | "https://münchen.de"                               |
-      | {"domain": 123}                                    |
-      | {"domain": "acme.com", "industries": "not-a-list"} |
+      | brand                                              | error_code       |
+      | "https://["                                        | VALIDATION_ERROR |
+      | "acme.com/products"                                | VALIDATION_ERROR |
+      | "my_brand.com"                                     | VALIDATION_ERROR |
+      | "https://münchen.de"                               | VALIDATION_ERROR |
+      | {"domain": 123}                                    | VALIDATION_ERROR |
+      | {"domain": "acme.com", "industries": "not-a-list"} | INVALID_REQUEST  |
 
   @brand_shorthand @create_media_buy @requires_db
   Scenario Outline: create_media_buy accepts valid brand shorthand
@@ -67,13 +67,13 @@ Feature: Brand string shorthand coercion on _BRAND_TOOLS
   Scenario Outline: create_media_buy rejects malformed brand
     Given a tenant is configured for media buy creation
     When the buyer sends create_media_buy with brand <brand>
-    Then the request is rejected with INVALID_REQUEST naming field "brand"
+    Then the request is rejected with <error_code> naming field "brand"
 
     Examples:
-      | brand                                              |
-      | "https://["                                        |
-      | "acme.com/products"                                |
-      | "my_brand.com"                                     |
-      | "https://münchen.de"                               |
-      | {"domain": 123}                                    |
-      | {"domain": "acme.com", "industries": "not-a-list"} |
+      | brand                                              | error_code       |
+      | "https://["                                        | VALIDATION_ERROR |
+      | "acme.com/products"                                | VALIDATION_ERROR |
+      | "my_brand.com"                                     | VALIDATION_ERROR |
+      | "https://münchen.de"                               | VALIDATION_ERROR |
+      | {"domain": 123}                                    | VALIDATION_ERROR |
+      | {"domain": "acme.com", "industries": "not-a-list"} | INVALID_REQUEST  |
