@@ -17,7 +17,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from a2a.types import GetTaskRequest, TaskState
+from a2a.types import GetTaskRequest, TaskNotFoundError, TaskState
 
 from src.core.context_manager import ContextManager
 from src.core.database.repositories import WorkflowUoW
@@ -121,7 +121,8 @@ class TestA2ATaskCorrelation:
 
         A sibling buyer in the owner's tenant polls the owner's task id with no
         in-memory task: the durable rebuild must find nothing, so ``on_get_task``
-        returns ``None`` rather than the owner's terminal result artifact.
+        raises the same not-found response as an unknown task rather than serving
+        the owner's terminal result artifact.
         """
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
@@ -138,9 +139,8 @@ class TestA2ATaskCorrelation:
             patch.object(handler, "_get_auth_token", return_value="tok"),
             patch.object(handler, "_resolve_a2a_identity", return_value=sibling),
         ):
-            task = asyncio.run(handler.on_get_task(GetTaskRequest(id=_EXTERNAL_TASK_ID), context=None))
-
-        assert task is None
+            with pytest.raises(TaskNotFoundError):
+                asyncio.run(handler.on_get_task(GetTaskRequest(id=_EXTERNAL_TASK_ID), context=None))
 
     def test_on_get_task_rebuilds_terminal_task_from_step(
         self, integration_db, sample_tenant, sample_principal, context_manager
@@ -213,7 +213,7 @@ class TestA2ATaskCorrelation:
         The red oracle for the auth bypass: before authorization was added, ANY
         caller who supplied this task_id got the owner's terminal artifacts back,
         with zero authentication. A sibling buyer authenticating as themselves
-        must get ``None`` instead — identical to an unknown task_id, so this
+        must get ``TaskNotFoundError`` instead — identical to an unknown task_id, so this
         cannot be used as an existence oracle either.
         """
         from a2a.types import Task, TaskStatus
@@ -235,14 +235,13 @@ class TestA2ATaskCorrelation:
             patch.object(handler, "_get_auth_token", return_value="tok"),
             patch.object(handler, "_resolve_a2a_identity", return_value=sibling),
         ):
-            task = asyncio.run(handler.on_get_task(GetTaskRequest(id="task_owned"), context=None))
-
-        assert task is None
+            with pytest.raises(TaskNotFoundError):
+                asyncio.run(handler.on_get_task(GetTaskRequest(id="task_owned"), context=None))
 
     def test_on_get_task_denies_an_unauthenticated_poller(
         self, integration_db, sample_tenant, sample_principal, context_manager
     ):
-        """A poller who cannot authenticate at all gets ``None``, even for a terminal
+        """A poller who cannot authenticate at all gets ``TaskNotFoundError``, even for a terminal
         in-memory hit — no anonymous existence or content oracle survives the fix."""
         from a2a.types import Task, TaskStatus
 
@@ -257,9 +256,8 @@ class TestA2ATaskCorrelation:
         handler._task_owners = {"task_owned": (tenant_id, owner_id)}
 
         with patch.object(handler, "_get_auth_token", return_value=None):
-            task = asyncio.run(handler.on_get_task(GetTaskRequest(id="task_owned"), context=None))
-
-        assert task is None
+            with pytest.raises(TaskNotFoundError):
+                asyncio.run(handler.on_get_task(GetTaskRequest(id="task_owned"), context=None))
 
     def _poll_with_stale_in_memory(self, handler, tenant_id, principal_id, external_task_id):
         """Seed a SUBMITTED in-memory task OWNED by (tenant_id, principal_id), then poll on_get_task."""

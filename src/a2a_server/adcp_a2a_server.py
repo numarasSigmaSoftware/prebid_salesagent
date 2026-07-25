@@ -1069,54 +1069,43 @@ class AdCPRequestHandler(RequestHandler):
         }
     )
 
+    @staticmethod
+    def _raise_task_not_found(task_id: str) -> None:
+        """Raise the uniform response for unknown and inaccessible task IDs."""
+        raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
+
+    def _resolve_task_identity_or_raise(self, task_id: str, context: ServerCallContext):
+        """Authenticate a task caller or hide the task as not found."""
+        try:
+            auth_token = self._get_auth_token(context)
+            identity = self._resolve_a2a_identity(auth_token, require_valid_token=True, context=context)
+        except Exception as exc:
+            logger.warning(
+                "Denying task access %s — identity resolution failed: %s",
+                sanitize_log_value(task_id),
+                sanitize_log_value(exc),
+            )
+            self._raise_task_not_found(task_id)
+        if identity is None or not identity.tenant_id:
+            self._raise_task_not_found(task_id)
+        return identity
+
     async def on_get_task(
         self,
         params: GetTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/get' method to retrieve task status.
 
-        Authenticates the poller and checks OWNERSHIP before returning anything —
-        terminal or not, in-memory or persisted. A task_id is unguessable but not
-        secret once known (it can surface in webhook payloads, logs, or a shared
-        support channel); serving an in-memory hit unconditionally let any caller
-        who learned it read a sibling principal's terminal result artifacts with
-        no authentication at all. Ownership for the in-memory path is checked
-        against ``self._task_owners`` (the (tenant_id, principal_id) recorded when
-        the task was created); the persisted path is scoped inside
-        ``resolve_durable_task_outcome`` itself. A poller who fails to
-        authenticate, or who authenticates as someone else, gets ``None`` either
-        way — identical to an unknown task_id, so this cannot be used as an
-        existence oracle.
-
-        Once ownership is established, prefers the TERMINAL decision, wherever it
-        lives. The in-memory ``self.tasks`` snapshot for an async media-buy task
-        stays ``SUBMITTED``/``WORKING`` — the admin approve/reject that
-        terminalizes the persisted workflow step runs in a DIFFERENT process and
-        never mutates this map. So a bare in-memory hit would keep reporting
-        ``SUBMITTED`` after the buy is decided (until restart/eviction). Instead:
-        an already-terminal OWNED in-memory task is authoritative; otherwise
-        consult the persisted step and return it when IT is terminal (the
-        out-of-band decision); only when neither is terminal fall back to the
-        OWNED in-flight in-memory task (or the durable non-terminal view).
-        See #1544 (B6/P1).
+        Authenticates and checks ownership before returning any task data.  Task
+        IDs are correlation handles, not bearer credentials: unknown and
+        inaccessible IDs deliberately share ``TaskNotFoundError``.
         """
         task_id = params.id
-        try:
-            auth_token = self._get_auth_token(context)
-            identity = self._resolve_a2a_identity(auth_token, require_valid_token=True, context=context)
-        except Exception as e:
-            logger.warning(
-                "Denying task poll %s — identity resolution failed: %s",
-                sanitize_log_value(task_id),
-                sanitize_log_value(e),
-            )
-            return None
-        if not identity.tenant_id:
-            return None
+        identity = self._resolve_task_identity_or_raise(task_id, context)
 
         in_memory = self.tasks.get(task_id)
-        owns_in_memory = in_memory is not None and self._task_owners.get(task_id) == (
+        owns_in_memory = in_memory is not None and getattr(self, "_task_owners", {}).get(task_id) == (
             identity.tenant_id,
             identity.principal_id,
         )
@@ -1125,7 +1114,11 @@ class AdCPRequestHandler(RequestHandler):
         durable = self._durable_task_from_step(task_id, identity.tenant_id, identity.principal_id)
         if durable is not None and durable.status.state in self._TERMINAL_TASK_STATES:
             return durable
-        return in_memory if owns_in_memory else durable
+        if owns_in_memory and in_memory is not None:
+            return in_memory
+        if durable is not None:
+            return durable
+        self._raise_task_not_found(task_id)
 
     def _durable_task_from_step(self, task_id: str, tenant_id: str, principal_id: str | None) -> Task | None:
         """Rebuild a terminal Task from the workflow step that stored this transport id.
@@ -1161,21 +1154,22 @@ class AdCPRequestHandler(RequestHandler):
         self,
         params: CancelTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/cancel' method to cancel a task.
 
-        Args:
-            params: Parameters specifying the task ID
-            context: Server call context
-
-        Returns:
-            Task object with canceled status, or None if not found
+        A caller may cancel only an in-memory task it owns.  Persisted workflow
+        tasks intentionally have no cancellation transition yet, so they use the
+        same non-disclosing ``TaskNotFoundError`` response as an unknown id.
         """
         task_id = params.id
+        identity = self._resolve_task_identity_or_raise(task_id, context)
         task = self.tasks.get(task_id)
-        if task:
-            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
-            self.tasks[task_id] = task
+        owner = getattr(self, "_task_owners", {}).get(task_id)
+        if task is None or owner != (identity.tenant_id, identity.principal_id):
+            self._raise_task_not_found(task_id)
+        # CopyFrom mutates the stored Task in place — self.tasks already holds
+        # this exact reference, so re-storing it would rebind the same object.
+        task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
         return task
 
     async def on_list_tasks(
