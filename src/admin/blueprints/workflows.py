@@ -12,6 +12,7 @@ from src.admin.services.media_buy_completion import (
     WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE,
     FinalizeOutcome,
     claim_pending_creatives_hold,
+    classify_finalize_outcome,
     creatives_ready_for_finalize,
     finalize_media_buy_rejection,
     finalize_pending_media_buy_approval,
@@ -247,6 +248,7 @@ def _finalize_and_render(db, tenant_id: str, *, media_buy_id: str, step_data: di
         step_data=step_data,
         approved_by=user_email,
     )
+    outcome = classify_finalize_outcome(outcome)
 
     if outcome is FinalizeOutcome.NOT_CLAIMED:
         logger.info(
@@ -445,6 +447,7 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                     reason=reason,
                     expected_status=media_buy.status,
                 )
+                outcome = classify_finalize_outcome(outcome)
                 if outcome is FinalizeOutcome.NOT_CLAIMED:
                     return jsonify({"success": False, "error": MEDIA_BUY_ALREADY_DECIDED_MESSAGE}), 409
                 # finalize_media_buy_rejection returns only NOT_CLAIMED or APPLIED

@@ -11,6 +11,7 @@ from src.admin.services.media_buy_completion import (
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
     FinalizeOutcome,
     claim_pending_creatives_hold,
+    classify_finalize_outcome,
     creatives_ready_for_finalize,
     finalize_media_buy_rejection,
     finalize_pending_media_buy_approval,
@@ -427,6 +428,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                             step_data=step_data,
                             approved_by=user_email,
                         )
+                        outcome = classify_finalize_outcome(outcome)
                         if outcome is FinalizeOutcome.NOT_CLAIMED:
                             flash(MEDIA_BUY_ALREADY_DECIDED_MESSAGE, "warning")
                             return redirect(
@@ -525,6 +527,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         reason=reason_text,
                         expected_status=media_buy.status,
                     )
+                    outcome = classify_finalize_outcome(outcome)
                     if outcome is FinalizeOutcome.NOT_CLAIMED:
                         flash(MEDIA_BUY_ALREADY_DECIDED_MESSAGE, "warning")
                     else:

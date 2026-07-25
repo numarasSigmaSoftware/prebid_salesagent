@@ -40,6 +40,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 
 from src.admin.services.media_buy_completion import (
     FinalizeOutcome,
+    classify_finalize_outcome,
     emit_protocol_result_webhook_async,
     finalize_unblocked_media_buy,
 )
@@ -626,6 +627,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             # (this blueprint is a scanned business-logic module that must route DB
             # access through repositories, not open get_db_session itself).
             outcome, error_msg = finalize_unblocked_media_buy(tenant_id, media_buy_id)
+            outcome = classify_finalize_outcome(outcome)
             if outcome is FinalizeOutcome.APPLIED:
                 logger.info(
                     "[CREATIVE APPROVAL] Media buy %s successfully created in adapter",
@@ -646,16 +648,6 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             elif outcome is FinalizeOutcome.ADAPTER_FAILED:
                 logger.error(
                     "[CREATIVE APPROVAL] Adapter creation failed for %s: %s",
-                    sanitize_log_value(media_buy_id),
-                    sanitize_log_value(error_msg),
-                )
-            else:
-                # A FinalizeOutcome member with no branch above. Naming it keeps this
-                # ladder exhaustive instead of filing an unknown member under the
-                # adapter-failure message.
-                logger.error(
-                    "[CREATIVE APPROVAL] Unhandled FinalizeOutcome %s for media buy %s: %s",
-                    sanitize_log_value(outcome),
                     sanitize_log_value(media_buy_id),
                     sanitize_log_value(error_msg),
                 )

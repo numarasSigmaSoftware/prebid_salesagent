@@ -107,7 +107,6 @@ def workflow_step_snapshot(step: WorkflowStep) -> dict[str, Any]:
         dict instead of the live row. ``request_data`` is JSONType (``dict|str|None``)
         — narrowed to a dict here so every consumer's ``.get()`` is safe, rather than
         each of the five call sites narrowing (or forgetting to narrow) it themselves.
-    .
     """
     request_data = step.request_data
     return {
@@ -118,27 +117,34 @@ def workflow_step_snapshot(step: WorkflowStep) -> dict[str, Any]:
     }
 
 
-def require_finalize_applied(outcome: FinalizeOutcome) -> None:
-    """Guard a success branch against a silently mis-rendered ``FinalizeOutcome``.
+def classify_finalize_outcome(outcome: FinalizeOutcome) -> FinalizeOutcome:
+    """Validate the complete ``FinalizeOutcome`` vocabulary at every admin boundary.
 
-    Every admin surface hand-rolls its own ``if outcome is …`` ladder and then
-    falls through to a terminal branch. Those fall-throughs disagreed: the two
-    approve routes reported an unmatched member to the operator as "order created
-    successfully" while the creative route logged it as an error. ``FinalizeOutcome``
-    is a StrEnum designed to grow (the lease states), so a member added later
-    would be rendered as SUCCESS on the surfaces the operator actually sees.
-
-    Calling this immediately before a success branch makes each ladder exhaustive
-    by construction: anything that is not ``APPLIED`` raises rather than being
-    reported as a completed booking. The routes keep their own wording and
-    modality (flash vs jsonify); only the "is this actually success?" decision is
-    single-sourced.
+    The operations, workflow, and creative routes retain their own presentation,
+    but all first pass through this exhaustive classifier. A future enum member
+    therefore raises at every boundary until its operator-facing behavior is
+    deliberately defined, rather than falling through to a success flash.
     """
-    if outcome is not FinalizeOutcome.APPLIED:
-        raise ValueError(
-            f"Unhandled FinalizeOutcome at a success branch: {outcome!r}. "
-            "Add an explicit branch for it before the success path."
-        )
+    match outcome:
+        case FinalizeOutcome.APPLIED:
+            return outcome
+        case FinalizeOutcome.ADAPTER_FAILED:
+            return outcome
+        case FinalizeOutcome.NOT_CLAIMED:
+            return outcome
+        case FinalizeOutcome.RETRYING:
+            return outcome
+        case _:
+            raise ValueError(
+                f"Unhandled FinalizeOutcome at an admin boundary: {outcome!r}. "
+                "Define its presentation before returning it from finalization."
+            )
+
+
+def require_finalize_applied(outcome: FinalizeOutcome) -> None:
+    """Guard a success branch against a non-success ``FinalizeOutcome``."""
+    if classify_finalize_outcome(outcome) is not FinalizeOutcome.APPLIED:
+        raise ValueError(f"FinalizeOutcome is not successful: {outcome!r}")
 
 
 def _positive_duration_from_env(name: str, default: int) -> int:
@@ -622,7 +628,6 @@ def _flag_manual_reconciliation(
         - CAS LOST (a NEWER owner already took the row over — a real takeover): DON'T touch the
           finalize state (the winner owns it), but still record the incident ownership-independently
           and return ``NOT_CLAIMED``. The incident marker SURVIVES the winner's clean publish.
-    .
     """
     flagged = repo.set_finalize_recovery_manual(media_buy_id, lease_id=lease_id, cooldown_seconds=cooldown_seconds)
     if not flagged:
