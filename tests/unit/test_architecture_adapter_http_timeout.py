@@ -81,6 +81,25 @@ def _requests_sessions_module_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _requests_method_aliases(tree: ast.AST, module_names: set[str]) -> set[str]:
+    """Local names assigned from a recognized ``requests`` method."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if value is None:
+            continue
+        chain = _attribute_chain(value)
+        if not chain or chain[0] not in module_names:
+            continue
+        if len(chain) not in {2, 3} or chain[-1] not in _REQUESTS_METHODS or chain[1:-1] not in ([], ["api"]):
+            continue
+        aliases.update(target.id for target in targets if isinstance(target, ast.Name))
+    return aliases
+
+
 def _attribute_chain(node: ast.expr) -> list[str] | None:
     """Flatten ``requests.sessions.Session``-style attribute chains."""
     parts: list[str] = []
@@ -110,12 +129,13 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
     module_names = _requests_module_names(tree)
     direct_methods, direct_sessions = _requests_function_names(tree)
     sessions_module_names = _requests_sessions_module_names(tree)
+    method_aliases = _requests_method_aliases(tree, module_names)
     hits: list[int] = []
     for node in iter_call_expressions(tree):
         if isinstance(node.func, ast.Name):
             if node.func.id in direct_sessions:
                 hits.append(node.lineno)
-            elif node.func.id in direct_methods:
+            elif node.func.id in direct_methods | method_aliases:
                 timeout_kw = next((kw for kw in node.keywords if kw.arg == "timeout"), None)
                 if timeout_kw is None or _is_none_literal(timeout_kw.value):
                     hits.append(node.lineno)
@@ -189,6 +209,11 @@ def test_guard_detects_aliased_requests_call():
     """Known-bad: an aliased ``import requests as r`` call without a timeout is flagged —
     the module-name anchor must follow the alias, not just the literal ``requests``."""
     assert _snippet_hits("import requests as r\n\n\ndef f(url):\n    return r.get(url)\n") == [5]
+
+
+def test_guard_detects_locally_aliased_requests_method():
+    """Known-bad: assigning ``requests.post`` to a local cannot hide an unbounded call."""
+    assert _snippet_hits("import requests\n\n\ndef f(url):\n    send = requests.post\n    return send(url)\n") == [6]
 
 
 def test_guard_detects_directly_imported_request_call():

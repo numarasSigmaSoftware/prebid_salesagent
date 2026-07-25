@@ -368,6 +368,12 @@ def test_detector_flags_status_write_after_repository_get_by_id():
     assert ("row", "status") in _detect(ast.parse(src))
 
 
+def test_detector_flags_status_write_after_uow_repository_alias_get_by_id():
+    """A UoW ``media_buys`` alias is the same repository type as a constructed one."""
+    src = "def update(uow):\n    repo = uow.media_buys\n    row = repo.get_by_id('buy')\n    row.status = 'active'\n"
+    assert ("row", "status") in _detect(ast.parse(src))
+
+
 # ---------------------------------------------------------------------------
 # Companion guard: no discarded returns from None-tolerant MediaBuy mutators.
 #
@@ -388,14 +394,16 @@ DISCARDED_MUTATION_ALLOWLIST: set[tuple[str, str, str]] = set()
 
 
 def _media_buy_repo_locals(tree: ast.AST) -> set[str]:
-    """Local names bound (anywhere in the file) from ``MediaBuyRepository(...)``."""
+    """Local names bound from a ``MediaBuyRepository`` or UoW media-buy repository."""
     names: set[str] = set()
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and node.value.func.id == "MediaBuyRepository"
+        if isinstance(node, ast.Assign) and (
+            (
+                isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "MediaBuyRepository"
+            )
+            or _attr_chain_contains(node.value, "media_buys")
         ):
             names.update(t.id for t in node.targets if isinstance(t, ast.Name))
     return names
