@@ -17,7 +17,7 @@ from src.core.database.repositories.workflow import (
 # Hardcoded expectations (NOT derived from the production constants) so a drift in the
 # source set is caught, not mirrored. ``approval`` is the legacy adapter-emitted alias of
 # ``requires_approval`` (a pre-side-effect awaiting-decision state) — cancellable for the same
-# reason, and carried here until the alias is normalized away (#1659).
+# reason, and carried here until the alias is normalized away.
 _CANCELLABLE = {"pending", "requires_approval", "pending_approval", "approval"}
 # Non-terminal statuses that are nonetheless NOT cancellable because irreversible external
 # work has committed (``approved``) or is underway (``in_progress``).

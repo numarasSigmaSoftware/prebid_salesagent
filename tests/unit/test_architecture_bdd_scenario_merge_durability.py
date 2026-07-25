@@ -32,7 +32,7 @@ TRACEABILITY_PATH = _ROOT / "docs" / "test-obligations" / "bdd-traceability.yaml
 # upstream adcp-req id. Add new hand-edited scenarios here when introduced.
 HAND_MAINTAINED_SCENARIOS = [
     # Grounded in transport-errors.mdx "Layer Separation"; upstream obligation
-    # tracked in #1574 — until it lands, only @hand-edited keeps it alive.
+    # Until the upstream obligation lands, only @hand-edited keeps it alive.
     ("BR-UC-002-create-media-buy.feature", "@T-UC-002-ext-nl-unsupported"),
 ]
 

@@ -1106,7 +1106,7 @@ class TestA2ASkillInvocation:
         skill has real side effects (a submitted create_media_buy persists a workflow
         while a sibling fails), so a multi-skill batch is rejected up front as a typed
         UNSUPPORTED_FEATURE failed Task — no skill executes. Full-Task identity across
-        real per-skill child Tasks is tracked in #1614."""
+        real per-skill child Tasks remains a separate follow-up."""
         # Mock authentication token
         handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
 

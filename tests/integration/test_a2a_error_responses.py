@@ -362,7 +362,7 @@ class TestA2AErrorPropagation:
 
         Grounding: AdCP 3.1.1
         ``building/operating/transport-errors.mdx`` "Layer Separation";
-        storyboard: ungraded, pending upstream obligation (#1574).
+        storyboard: ungraded, pending an upstream obligation.
         """
         identity = PrincipalFactory.make_identity(
             principal_id=test_principal["principal_id"],

@@ -328,7 +328,7 @@ class TestA2AWebhookPayloadTypes:
         assert "status" in wpayload, "Task payload must have 'status'"
         assert wpayload.get("artifacts"), "completed Task must carry artifacts"
         assert wpayload["artifacts"][0].get("parts"), "artifact must have parts"
-        # #1544 B6: the completion webhook must correlate to the id the BUYER holds —
+        # The completion webhook must correlate to the id the BUYER holds —
         # the outer task_* returned in the sync response — NOT the internal step_id.
         # (Pre-fix this sent task_id=step_id, which the buyer never saw.)
         assert wpayload["id"] == sync_task["id"], (

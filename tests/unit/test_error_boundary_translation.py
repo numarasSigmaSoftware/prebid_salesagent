@@ -959,7 +959,7 @@ class TestA2ADispatcherFailedSkillResult:
         """
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
-        # Conformant raise sites carry a top-level suggestion (#1417); the untyped
+        # Conformant raise sites carry a top-level suggestion; the untyped
         # branch synthesizes one, so the typed sample must too for shape parity.
         typed = AdCPRequestHandler._build_failed_skill_result(
             "s", AdCPValidationError("bad", suggestion="Correct the request and resend.")

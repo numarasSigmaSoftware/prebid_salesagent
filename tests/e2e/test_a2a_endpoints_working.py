@@ -315,7 +315,7 @@ class TestA2ARequestHandler:
 
         Fast smoke check on the raise only. It does NOT prove the wire code: the
         exception carries no code, and the client actually sees -32603 — see
-        #1670 for why, plus the xfail'd live-server test in
+        # See the xfail'd live-server test in
         TestA2AServerIntegration that grades the code on the wire. Assert on
         str(exc), not exc.code — there is none.
 

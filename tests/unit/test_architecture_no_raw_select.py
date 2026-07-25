@@ -402,7 +402,7 @@ class TestColumnSelectDetection:
     closes that gap. (The actual violation was removed by moving tenant resolution
     into ``WorkflowRepository.resolve_tenant_for_step``; enabling this detector across
     all of src/ requires migrating ~30 pre-existing column-selects and is tracked in
-    issue #1654.)
+    a dedicated follow-up.)
     """
 
     def _select_call(self, expr: str) -> ast.Call:

@@ -50,7 +50,7 @@ KNOWN_VIOLATIONS: set[str] = set()
 # transport's OUTER async task id: only the A2A boundary has one (the ``task_*`` returned
 # to the buyer), and it MUST forward it — MCP/REST have no outer id and legitimately do
 # not. Exempting it for A2A too would leave the A2A forwarding unguarded (deleting it
-# would keep the guard green). #1544 B6.
+# would keep the guard green).
 _ALL_WRAPPER_KINDS = frozenset({"mcp", "a2a", "rest"})
 BOUNDARY_RESOLVED_PARAMS: dict[str, frozenset[str]] = {
     "identity": _ALL_WRAPPER_KINDS,

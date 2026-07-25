@@ -8,7 +8,7 @@ import copy
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 
 # Import core functions for direct calls (raw functions without FastMCP decorators)
@@ -199,6 +199,26 @@ def _enveloped_invalid_request(exc: AdCPError) -> InvalidRequestError:
     return InvalidRequestError(message=sanitized.message, data=envelope)
 
 
+def _a2a_auth_headers(context: ServerCallContext | None) -> Mapping[str, str]:
+    """Return the request headers captured by the A2A auth middleware."""
+    auth_ctx = context.state.get(AUTH_CONTEXT_STATE_KEY) if context is not None else None
+    return auth_ctx.headers if auth_ctx else {}
+
+
+def _no_usable_credentials_error(
+    headers: Mapping[str, str], *, missing_message: str
+) -> AdCPAuthMissingError | AdCPAuthInvalidError:
+    """Classify absent credentials separately from a presented unusable Authorization header.
+
+    The auth middleware keeps the raw headers even when it cannot extract a Bearer
+    token. AdCP 3.1.1 requires ``AUTH_INVALID`` for that supplied-but-malformed
+    case; only a request with no Authorization header is ``AUTH_MISSING``.
+    """
+    if any(name.lower() == "authorization" for name in headers):
+        return AdCPAuthInvalidError("Authentication credentials were rejected.")
+    return AdCPAuthMissingError(missing_message)
+
+
 def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequestError:
     """THE single source for every A2A auth rejection's two-layer envelope.
 
@@ -213,8 +233,8 @@ def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequest
     failure, and deliberately routes through ``_enveloped_invalid_request`` with
     ``AdCPConfigurationError`` instead; it is excluded from this helper by design, not by omission.)
 
-    Takes the TYPED error rather than a message + optional cause: the wire code, recovery, and the
-    graded ``suggestion`` then all come from the class defaults (one definition, never re-specified
+    Takes the TYPED error rather than a message + optional cause: the wire code, recovery, and
+    pinned-spec ``suggestion`` then all come from the class defaults (one definition, never re-specified
     per raise site), no argument can be silently discarded, and a non-auth ``AdCPError`` cannot be
     adopted by a function documented as the authentication-envelope source — that would emit a different wire
     code from here. Non-auth rejections use ``_enveloped_invalid_request`` directly.
@@ -478,11 +498,12 @@ class AdCPRequestHandler(RequestHandler):
         from src.core.resolved_identity import resolve_identity
         from src.core.testing_hooks import AdCPTestContext
 
-        auth_ctx = context.state.get(AUTH_CONTEXT_STATE_KEY) if context is not None else None
-        headers = auth_ctx.headers if auth_ctx else {}
+        headers = _a2a_auth_headers(context)
 
         if require_valid_token and not auth_token:
-            raise _enveloped_auth_error(AdCPAuthMissingError("Missing authentication token"))
+            raise _enveloped_auth_error(
+                _no_usable_credentials_error(headers, missing_message="Missing authentication token")
+            )
 
         # Extract testing context from A2A request headers (same as MCP does)
         testing_context = AdCPTestContext.from_headers(headers)
@@ -538,7 +559,7 @@ class AdCPRequestHandler(RequestHandler):
         ``token → identity → ToolContext`` was byte-identical in all four. No missing-token
         pre-check: ``_resolve_a2a_identity`` (``require_valid_token=True`` by default) already
         raises the single enveloped auth error for exactly that condition, so each of these
-        methods inherits the AUTH_REQUIRED envelope from one source.
+        methods inherit the shared ``AUTH_MISSING``/``AUTH_INVALID`` envelope source.
         """
         auth_token = self._get_auth_token(context)
         identity = self._resolve_a2a_identity(auth_token, context=context)
@@ -874,7 +895,10 @@ class AdCPRequestHandler(RequestHandler):
             # cannot drift between message/send and the rest.
             if requires_auth and not auth_token:
                 raise _enveloped_auth_error(
-                    AdCPAuthMissingError("Authentication required - Bearer token required in Authorization header")
+                    _no_usable_credentials_error(
+                        _a2a_auth_headers(context),
+                        missing_message="Authentication required - Bearer token required in Authorization header",
+                    )
                 )
 
             # ── Transport boundary: resolve identity ONCE ──

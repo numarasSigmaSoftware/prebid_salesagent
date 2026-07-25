@@ -253,6 +253,26 @@ class TestA2AAuthContract:
             ({"Content-Type": "application/json", "A2A-Version": "1.0"}, None, "AUTH_MISSING", "correctable"),
             (
                 {
+                    "Authorization": "Basic malformed",
+                    "Content-Type": "application/json",
+                    "A2A-Version": "1.0",
+                },
+                None,
+                "AUTH_INVALID",
+                "terminal",
+            ),
+            (
+                {
+                    "Authorization": "Bearer ",
+                    "Content-Type": "application/json",
+                    "A2A-Version": "1.0",
+                },
+                None,
+                "AUTH_INVALID",
+                "terminal",
+            ),
+            (
+                {
                     "Authorization": "Bearer invalid-task-token",
                     "Content-Type": "application/json",
                     "A2A-Version": "1.0",
@@ -262,7 +282,7 @@ class TestA2AAuthContract:
                 "terminal",
             ),
         ],
-        ids=["missing-token", "invalid-token"],
+        ids=["missing-token", "malformed-authorization", "empty-bearer", "invalid-token"],
     )
     @pytest.mark.parametrize("method", ["GetTask", "CancelTask"])
     def test_task_management_auth_errors_use_json_rpc_dispatcher(
@@ -310,6 +330,23 @@ class TestA2AAuthContract:
         assert adcp_error["code"] == expected_code
         assert adcp_error["recovery"] == expected_recovery
         assert body["error"]["message"] == adcp_error["message"]
+
+    @pytest.mark.parametrize("authorization", ["Basic malformed", "Bearer "], ids=["basic", "empty-bearer"])
+    def test_non_discovery_skill_rejects_presented_unusable_credentials(self, client, authorization):
+        """The message/send auth guard classifies malformed presented credentials as AUTH_INVALID."""
+        response = client.post(
+            "/a2a",
+            json=_build_jsonrpc("create_media_buy"),
+            headers={
+                "Authorization": authorization,
+                "Content-Type": "application/json",
+                "A2A-Version": "1.0",
+            },
+        )
+
+        body = response.json()
+        assert body["error"]["code"] == -32600
+        assert_envelope_shape(body["error"]["data"], "AUTH_INVALID", recovery="terminal")
 
 
 # ---------------------------------------------------------------------------
