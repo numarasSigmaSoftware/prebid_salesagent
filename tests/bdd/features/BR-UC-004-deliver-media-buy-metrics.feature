@@ -710,10 +710,10 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
 
     Examples: Invalid partitions
       | partition | value | expected |
-      | interval_zero | {"post_click": {"interval": 0, "unit": "days"}} | error "VALIDATION_ERROR" with suggestion |
-      | interval_negative | {"post_click": {"interval": -1, "unit": "days"}} | error "VALIDATION_ERROR" with suggestion |
-      | invalid_unit | {"post_click": {"interval": 1, "unit": "weeks"}} | error "VALIDATION_ERROR" with suggestion |
-      | invalid_model | {"model": "last_click"} | error "VALIDATION_ERROR" with suggestion |
+      | interval_zero | {"post_click": {"interval": 0, "unit": "days"}} | error "INVALID_REQUEST" with suggestion |
+      | interval_negative | {"post_click": {"interval": -1, "unit": "days"}} | error "INVALID_REQUEST" with suggestion |
+      | invalid_unit | {"post_click": {"interval": 1, "unit": "weeks"}} | error "INVALID_REQUEST" with suggestion |
+      | invalid_model | {"model": "last_click"} | error "INVALID_REQUEST" with suggestion |
       | campaign_interval_not_one | {"post_click": {"interval": 2, "unit": "campaign"}} | error "VALIDATION_ERROR" with suggestion |
 
   @T-UC-004-boundary-attribution @boundary @attribution_window @BR-RULE-092
@@ -732,10 +732,10 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
       | model only (data_driven) | {"model": "data_driven"} | valid |
       | unit=campaign with interval=1 | {"post_click": {"interval": 1, "unit": "campaign"}} | valid |
       | unit=campaign with interval=2 (desc says must be 1) | {"post_click": {"interval": 2, "unit": "campaign"}} | error "VALIDATION_ERROR" |
-      | interval=0 (below minimum) | {"post_click": {"interval": 0, "unit": "days"}} | error "VALIDATION_ERROR" |
+      | interval=0 (below minimum) | {"post_click": {"interval": 0, "unit": "days"}} | error "INVALID_REQUEST" |
       | interval=1 (minimum boundary) | {"post_click": {"interval": 1, "unit": "days"}} | valid |
-      | unit=weeks (not in enum) | {"post_click": {"interval": 1, "unit": "weeks"}} | error "VALIDATION_ERROR" |
-      | model=last_click (not in enum) | {"model": "last_click"} | error "VALIDATION_ERROR" |
+      | unit=weeks (not in enum) | {"post_click": {"interval": 1, "unit": "weeks"}} | error "INVALID_REQUEST" |
+      | model=last_click (not in enum) | {"model": "last_click"} | error "INVALID_REQUEST" |
       | seller ignores field (no configurable window support) | {"post_click": {"interval": 30, "unit": "days"}} | valid |
 
   @T-UC-004-partition-daily-breakdown @partition @include_package_daily_breakdown
@@ -913,7 +913,7 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
       | neither_provided     | valid                                    |
       | partial_resolution   | valid                                    |
       | zero_resolution      | valid                                    |
-      | empty_array          | error "VALIDATION_ERROR" with suggestion |
+      | empty_array          | error "INVALID_REQUEST" with suggestion  |
 
   @T-UC-004-boundary-resolution @boundary @media_buy_resolution @BR-RULE-030
   Scenario Outline: Media buy resolution boundary - <boundary_point>

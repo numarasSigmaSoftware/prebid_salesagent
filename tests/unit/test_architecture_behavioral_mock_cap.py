@@ -45,7 +45,7 @@ BEHAVIORAL_MOCK_CONSTRUCTION_CAP: dict[str, int] = {
     "tests/unit/test_delivery_service_behavioral.py": 6,
     "tests/unit/test_performance_index_behavioral.py": 33,
     "tests/unit/test_sync_creatives_behavioral.py": 28,
-    "tests/unit/test_update_media_buy_behavioral.py": 113,
+    "tests/unit/test_update_media_buy_behavioral.py": 111,
 }
 
 # unittest.mock construction callables counted as hand-rolled mocking.

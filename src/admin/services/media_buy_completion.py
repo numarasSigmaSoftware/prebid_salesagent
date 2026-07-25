@@ -670,6 +670,49 @@ def _record_manual_reconciliation(
     )
 
 
+def _finalize_adapter_failure(
+    session: Session,
+    repo: MediaBuyRepository,
+    *,
+    tenant_id: str,
+    media_buy_id: str,
+    step_id: str | None,
+    lease_id: str,
+    error_msg: str | None,
+) -> tuple[FinalizeOutcome, str | None]:
+    """Persist a handled adapter failure without leaking its raw message."""
+    failed = repo.update_status_computed(
+        media_buy_id,
+        lambda _mb: "failed",
+        expected_status=MEDIA_BUY_FINALIZING_STATUS,
+        expected_lease_id=lease_id,
+        clear_finalize_state=True,
+    )
+    if failed is None:
+        _record_takeover_incident(
+            session,
+            repo,
+            tenant_id=tenant_id,
+            media_buy_id=media_buy_id,
+            step_id=step_id,
+            reason="adapter ran (reported failure) but the failed-status transition lost the "
+            "finalize lease to a newer owner; a duplicate remote order may exist",
+        )
+        return FinalizeOutcome.NOT_CLAIMED, error_msg
+    if step_id is not None:
+        error_envelope = build_two_layer_error_envelope(
+            AdCPAdapterError(
+                "Adapter execution failed while creating the media buy",
+                details={"media_buy_id": media_buy_id},
+            )
+        )
+        WorkflowRepository(session, tenant_id).update_status(
+            step_id, status="failed", error_message=error_msg, response_data=error_envelope
+        )
+    session.commit()
+    return FinalizeOutcome.ADAPTER_FAILED, error_msg
+
+
 def _run_adapter_and_finalize(
     session: Session,
     tenant_id: str,
@@ -820,52 +863,15 @@ def _run_adapter_and_finalize(
             cooldown_seconds=FINALIZE_AMBIGUOUS_COOLDOWN_SECONDS,
         )
     if not success:
-        failed = repo.update_status_computed(
-            media_buy_id,
-            lambda _mb: "failed",
-            expected_status=MEDIA_BUY_FINALIZING_STATUS,
-            expected_lease_id=lease_id,
-            clear_finalize_state=True,
+        return _finalize_adapter_failure(
+            session,
+            repo,
+            tenant_id=tenant_id,
+            media_buy_id=media_buy_id,
+            step_id=step_id,
+            lease_id=lease_id,
+            error_msg=error_msg,
         )
-        if failed is None:
-            # Lost ownership while the adapter ran — a newer owner decides. The adapter RAN this
-            # attempt (the invoked marker was committed before it), so a duplicate/partial remote
-            # graph may exist once the newer owner also runs: record the ownership-independent
-            # incident before returning NOT_CLAIMED, exactly like the ownership_lost path but for
-            # the case where the heartbeat did NOT prove the loss in time (failure mode A, path (ii)).
-            _record_takeover_incident(
-                session,
-                repo,
-                tenant_id=tenant_id,
-                media_buy_id=media_buy_id,
-                step_id=step_id,
-                reason="adapter ran (reported failure) but the failed-status transition lost the "
-                "finalize lease to a newer owner; a duplicate remote order may exist",
-            )
-            return FinalizeOutcome.NOT_CLAIMED, error_msg
-        if step_id is not None:
-            # Store a buyer-facing two-layer error envelope as the step's response_data
-            # (NOT just error_message): durable tasks/get rebuilds the failed Task's
-            # artifact from response_data.
-            #
-            # SECURITY: response_data is served to the BUYER cross-process via
-            # durable ``on_get_task``. The raw adapter ``error_msg`` (``str(e)`` /
-            # reconstruction text) may embed internal state (e.g. package_config
-            # corruption) and MUST NOT reach the wire. Use a STABLE generic message
-            # for the envelope and carry only structured ``details`` (media_buy_id)
-            # for buyer correlation. The raw ``error_msg`` stays in the internal
-            # ``error_message`` column, never on the envelope.
-            error_envelope = build_two_layer_error_envelope(
-                AdCPAdapterError(
-                    "Adapter execution failed while creating the media buy",
-                    details={"media_buy_id": media_buy_id},
-                )
-            )
-            WorkflowRepository(session, tenant_id).update_status(
-                step_id, status="failed", error_message=error_msg, response_data=error_envelope
-            )
-        session.commit()
-        return FinalizeOutcome.ADAPTER_FAILED, error_msg
 
     # Publish the serving status — OWNERSHIP-CHECKED: a stale worker whose
     # lease was taken over (or whose buy was already published/failed by the new

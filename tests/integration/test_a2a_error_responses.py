@@ -246,7 +246,7 @@ class TestA2AErrorPropagation:
         assert_envelope_shape(artifact_data, "INVALID_REQUEST", recovery="correctable")
 
     async def test_get_media_buy_delivery_malformed_account_wire_envelope(self, handler, test_tenant, test_principal):
-        """A malformed account on get_media_buy_delivery surfaces VALIDATION_ERROR on the A2A wire.
+        """A malformed account on get_media_buy_delivery surfaces INVALID_REQUEST on the A2A wire.
 
         Companion to the handler-level unit test in test_a2a_parameter_mapping.py: this drives
         the real on_message_send pipeline so the buyer-facing two-layer DataPart envelope — not
@@ -279,7 +279,7 @@ class TestA2AErrorPropagation:
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
         assert_envelope_shape(
             artifact_data,
-            "VALIDATION_ERROR",
+            "INVALID_REQUEST",
             recovery="correctable",
             message_substr="Required field is missing",
         )
@@ -287,11 +287,11 @@ class TestA2AErrorPropagation:
         assert "account" in (artifact_data["errors"][0].get("field") or "")
 
     async def test_create_media_buy_negative_budget_wire_envelope(self, handler, test_tenant, test_principal):
-        """A negative package budget surfaces VALIDATION_ERROR on the A2A wire.
+        """A negative package budget surfaces INVALID_REQUEST on the A2A wire.
 
         The Pydantic ``ge=0`` budget constraint fails when the create_media_buy skill
         builds CreateMediaBuyRequest; the boundary converts that Pydantic
-        ValidationError to AdCPValidationError (VALIDATION_ERROR) and emits the
+        ValidationError to AdCPInvalidRequestError (INVALID_REQUEST) and emits the
         two-layer envelope. Drives on_message_send, not the raw shim.
         """
         identity = PrincipalFactory.make_identity(
@@ -333,7 +333,7 @@ class TestA2AErrorPropagation:
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
         assert_envelope_shape(
             artifact_data,
-            "VALIDATION_ERROR",
+            "INVALID_REQUEST",
             message_substr="greater than or equal to 0",
             recovery="correctable",
         )

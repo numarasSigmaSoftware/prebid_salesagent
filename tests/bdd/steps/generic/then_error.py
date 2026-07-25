@@ -3,7 +3,7 @@
 These steps assert on ``ctx["error"]`` which is populated by When steps when
 an operation fails. Errors are real exceptions from production code:
     - AdCPError subclasses (have .error_code, .message)
-    - pydantic.ValidationError (mapped to VALIDATION_ERROR)
+    - pydantic.ValidationError (mapped to INVALID_REQUEST)
     - Other exceptions
 """
 
@@ -499,26 +499,26 @@ def then_error_duplicates(ctx: dict) -> None:
     assert "duplicate" in message.lower(), f"Expected 'duplicate' in error message: {message}"
 
 
-def _assert_validation_wire_error(ctx: dict, *, message_substr: str, label: str) -> None:
-    """Assert a validation failure through the canonical wire oracle or IMPL seam."""
+def _assert_invalid_request_wire_error(ctx: dict, *, message_substr: str, label: str) -> None:
+    """Assert a request-schema failure through the canonical wire oracle or IMPL seam."""
     from tests.harness.transport import Transport
 
     result = ctx.get("result")
     transport = ctx.get("transport")
     if transport not in (None, Transport.IMPL):
         assert result is not None, f"{transport}: transport result missing"
-        result.assert_wire_error("VALIDATION_ERROR", message_substr=message_substr)
+        result.assert_wire_error("INVALID_REQUEST", message_substr=message_substr)
         return
     error = ctx.get("error")
     assert error is not None, f"IMPL {label} request did not fail"
-    assert _get_error_code(error) == "VALIDATION_ERROR"
+    assert _get_error_code(error) == "INVALID_REQUEST"
     assert message_substr in _get_error_message(error).lower()
 
 
-@then("the duplicate request should fail with a VALIDATION_ERROR wire envelope")
+@then("the duplicate request should fail with an INVALID_REQUEST wire envelope")
 def then_duplicate_request_wire_error(ctx: dict) -> None:
-    """Assert duplicate validation through the canonical transport error oracle."""
-    _assert_validation_wire_error(ctx, message_substr="duplicate", label="duplicate")
+    """Assert duplicate schema rejection through the canonical transport error oracle."""
+    _assert_invalid_request_wire_error(ctx, message_substr="duplicate", label="duplicate")
 
 
 @then("the error message should indicate FormatId must include agent_url and id")

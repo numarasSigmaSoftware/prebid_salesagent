@@ -52,14 +52,14 @@ def _typeadapter_validation_error(tool_name: str, line_error: dict):
     )
 
 
-class _ValidationErrorRecord:
-    """Matcher that pins the typed boundary error passed to the recorder."""
+class _InvalidRequestErrorRecord:
+    """Matcher that pins the typed schema-boundary error passed to the recorder."""
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, AdCPValidationError) and other.error_code == "VALIDATION_ERROR"
+        return isinstance(other, AdCPValidationError) and other.error_code == "INVALID_REQUEST"
 
     def __repr__(self) -> str:
-        return "AdCPValidationError(error_code='VALIDATION_ERROR')"
+        return "AdCPValidationError(error_code='INVALID_REQUEST')"
 
 
 class TestMiddlewareCallsNormalizer:
@@ -226,7 +226,7 @@ class TestTypeAdapterValidationEnvelope:
 
         assert_envelope_shape(
             exc_info.value,
-            "VALIDATION_ERROR",
+            "INVALID_REQUEST",
             recovery="correctable",
             message_substr=message,
             check_mcp_tool_error=True,
@@ -262,7 +262,7 @@ class TestTypeAdapterValidationEnvelope:
         record_error.assert_called_once_with(
             "mcp",
             "list_creatives",
-            _ValidationErrorRecord(),
+            _InvalidRequestErrorRecord(),
             tenant_id="tenant-1",
             principal_id="buyer-1",
         )

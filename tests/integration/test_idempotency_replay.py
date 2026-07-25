@@ -265,11 +265,11 @@ class TestOpportunisticEviction:
 
 
 class TestMissingKeyRejectedAtWire:
-    """Storyboard ``missing_key``: a create without idempotency_key rejects as VALIDATION_ERROR.
+    """Storyboard ``missing_key``: a create without idempotency_key rejects as INVALID_REQUEST.
 
     The key is required at the schema boundary (AdCP 3.0.1) — the request never
     reaches ``_impl``, no buy is created, and the buyer sees the two-layer
-    VALIDATION_ERROR envelope on the real wire.
+    INVALID_REQUEST envelope on the real wire.
     """
 
     def test_rest_missing_key_rejects_validation_error(self, integration_db):
@@ -295,7 +295,7 @@ class TestMissingKeyRejectedAtWire:
         assert result.is_error, f"Missing idempotency_key must reject, got success: {result.payload}"
         assert_envelope_shape(
             result.wire_error_envelope,
-            "VALIDATION_ERROR",
+            "INVALID_REQUEST",
             recovery="correctable",
             message_substr="idempotency_key",
         )

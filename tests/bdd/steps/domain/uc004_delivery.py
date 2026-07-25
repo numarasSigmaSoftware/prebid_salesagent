@@ -1866,14 +1866,14 @@ def then_circuit_healthy(ctx: dict) -> None:
 
 @then("the configuration should be rejected")
 def then_config_rejected(ctx: dict) -> None:
-    """Assert production rejected the webhook config on the wire (VALIDATION_ERROR).
+    """Assert production rejected the webhook config on the wire (INVALID_REQUEST).
 
     The short credential is rejected by production's Pydantic boundary
     (Authentication.credentials MinLen=32) — assert the real two-layer AdCP
     wire envelope, not a reconstructed/hand-built exception.
     """
     result = ctx["result"]
-    result.assert_wire_error("VALIDATION_ERROR", recovery="correctable", message_substr="32")
+    result.assert_wire_error("INVALID_REQUEST", recovery="correctable", message_substr="32")
 
 
 @then("the error should indicate minimum credential length is 32 characters")
@@ -1886,7 +1886,7 @@ def then_error_min_credential_length(ctx: dict) -> None:
     suggestion — carries the boundary value.
     """
     result = ctx["result"]
-    result.assert_wire_error("VALIDATION_ERROR", recovery="correctable", message_substr="32 characters")
+    result.assert_wire_error("INVALID_REQUEST", recovery="correctable", message_substr="32 characters")
 
 
 @then("the configuration should be accepted")

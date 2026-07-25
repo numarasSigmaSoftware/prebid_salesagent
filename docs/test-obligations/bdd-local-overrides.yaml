@@ -50,7 +50,7 @@ overrides:
       Scenario: Duplicate disclosure positions are rejected
         Given the Buyer has tenant context
         When the Buyer Agent requests formats with disclosure_positions filter ["prominent", "prominent"]
-        Then the duplicate request should fail with a VALIDATION_ERROR wire envelope
+        Then the duplicate request should fail with an INVALID_REQUEST wire envelope
   - feature: BR-UC-005-discover-creative-formats.feature
     scenario_id: T-UC-005-ext-b-persistence-dupes
     authority: "AdCP 3.1.1 list-creative-formats-request schema: disclosure_persistence.uniqueItems=true"
@@ -60,7 +60,7 @@ overrides:
       Scenario: Duplicate disclosure persistence modes are rejected
         Given the Buyer has tenant context
         When the Buyer Agent requests formats with disclosure_persistence filter ["continuous", "continuous"]
-        Then the duplicate request should fail with a VALIDATION_ERROR wire envelope
+        Then the duplicate request should fail with an INVALID_REQUEST wire envelope
   - feature: BR-UC-005-discover-creative-formats.feature
     scenario_id: T-UC-005-main-filtered
     authority: "AdCP 3.1.1 media-buy list-creative-formats request schema: properties omit type; additionalProperties=true"

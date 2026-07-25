@@ -1173,7 +1173,7 @@ Feature: BR-UC-002 Create Media Buy
 
     Examples: Invalid partitions
       | partition                    | outcome                                         |
-      | invalid_oneOf_both           | error VALIDATION_ERROR                             |
+      | invalid_oneOf_both           | error INVALID_REQUEST                              |
       | explicit_not_found           | error ACCOUNT_NOT_FOUND terminal                  |
       | natural_key_not_found        | error ACCOUNT_NOT_FOUND terminal                  |
       | natural_key_ambiguous        | error ACCOUNT_AMBIGUOUS correctable               |
@@ -1633,7 +1633,7 @@ Feature: BR-UC-002 Create Media Buy
       | account resolved + payment due                       | acc payment-due          | error ACCOUNT_PAYMENT_REQUIRED terminal           |
       | account resolved + suspended                         | acc suspended            | error ACCOUNT_SUSPENDED terminal                 |
       | account field absent                                 | no account               | account resolution succeeds                      |
-      | both account_id and brand/operator present           | both fields              | error VALIDATION_ERROR                            |
+      | both account_id and brand/operator present           | both fields              | error INVALID_REQUEST                             |
       | brand + operator + sandbox:true present + sandbox account exists + active | brand+op+sandbox active | account resolution succeeds                      |
 
   @T-UC-002-boundary-optimization-goals @boundary @optimization-goals

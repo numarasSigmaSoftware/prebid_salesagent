@@ -396,7 +396,7 @@ Feature: BR-UC-005 Discover Creative Formats
   Scenario: Duplicate disclosure positions are rejected
     Given the Buyer has tenant context
     When the Buyer Agent requests formats with disclosure_positions filter ["prominent", "prominent"]
-    Then the duplicate request should fail with a VALIDATION_ERROR wire envelope
+    Then the duplicate request should fail with an INVALID_REQUEST wire envelope
 
   @T-UC-005-ext-b-persistence-invalid @extension @ext-b @error @post-f1 @post-f2 @post-f3
   Scenario: Invalid disclosure persistence value
@@ -430,7 +430,7 @@ Feature: BR-UC-005 Discover Creative Formats
   Scenario: Duplicate disclosure persistence modes are rejected
     Given the Buyer has tenant context
     When the Buyer Agent requests formats with disclosure_persistence filter ["continuous", "continuous"]
-    Then the duplicate request should fail with a VALIDATION_ERROR wire envelope
+    Then the duplicate request should fail with an INVALID_REQUEST wire envelope
 
   @T-UC-005-ext-b-output-empty @UC-005-EXT-B-13 @extension @ext-b @error @post-f1 @post-f2 @post-f3
   Scenario: Empty output format IDs array

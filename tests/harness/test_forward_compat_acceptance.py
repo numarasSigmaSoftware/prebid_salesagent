@@ -439,7 +439,7 @@ class TestDeepStripRetryE2E:
             ):
                 with pytest.raises(AdCPToolError) as exc_info:
                     await middleware.on_call_tool(ctx, call_next)
-                assert_envelope_shape(exc_info.value, "VALIDATION_ERROR", recovery="correctable")
+                assert_envelope_shape(exc_info.value, "INVALID_REQUEST", recovery="correctable")
                 assert exc_info.value.__cause__ is error
                 assert call_next.call_count == 1
 
@@ -813,7 +813,7 @@ class TestErrorPropagation:
             ):
                 with pytest.raises(AdCPToolError) as exc_info:
                     await middleware.on_call_tool(ctx, call_next_with_different_errors)
-                assert_envelope_shape(exc_info.value, "VALIDATION_ERROR", recovery="correctable")
+                assert_envelope_shape(exc_info.value, "INVALID_REQUEST", recovery="correctable")
                 assert exc_info.value.__cause__ is retry_error
 
         asyncio.run(_call())
@@ -847,7 +847,7 @@ class TestMiddlewareAdversarial:
             ):
                 with pytest.raises(AdCPToolError) as exc_info:
                     await middleware.on_call_tool(ctx, call_next)
-                assert_envelope_shape(exc_info.value, "VALIDATION_ERROR", recovery="correctable")
+                assert_envelope_shape(exc_info.value, "INVALID_REQUEST", recovery="correctable")
                 assert exc_info.value.__cause__ is error
                 # Only called once — no retry when schema unavailable
                 assert call_next.call_count == 1

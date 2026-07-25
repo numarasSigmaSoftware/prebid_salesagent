@@ -108,7 +108,7 @@ Feature: BR-UC-019 Query Media Buys
   Scenario: Request validation failed - invalid parameter values
     Given an authenticated Buyer with principal_id "buyer-001"
     When the Buyer Agent sends a get_media_buys request with invalid parameter types
-    Then the operation should fail with error code "VALIDATION_ERROR"
+    Then the operation should fail with error code "INVALID_REQUEST"
     And the error message should include field-level validation details
     And the error should include a "recovery" field indicating correctable failure
     And the error should include a "suggestion" field
@@ -595,7 +595,7 @@ Feature: BR-UC-019 Query Media Buys
     Given the principal "buyer-001" owns media buy "mb-001" with 10 history entries
     When the Buyer Agent sends a get_media_buys request with <request_form>
     Then <expected_outcome>
-    # BR-RULE-289: range [0, 1000] integer; below or above is VALIDATION_ERROR
+    # BR-RULE-289: range [0, 1000] integer; schema violations are INVALID_REQUEST
     # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/media-buy/get-media-buys-response.json
 
     Examples: Boundary values
@@ -604,9 +604,9 @@ Feature: BR-UC-019 Query Media Buys
       | include_history = 0 (lower bound inclusive) | include_history 0           | the history field should be absent on each media buy entry                                |
       | include_history = 1                       | include_history 1            | the history array should contain 1 entry                                                  |
       | include_history = 1000 (upper bound inclusive) | include_history 1000     | the history array should contain 10 entries (min of include_history and available)        |
-      | include_history = 1001                    | include_history 1001         | error code "VALIDATION_ERROR" with suggestion mentioning range "[0, 1000]"                |
-      | include_history = -1                      | include_history -1           | error code "VALIDATION_ERROR" with suggestion mentioning range "[0, 1000]"                |
-      | include_history = 5.5 (non-integer)       | include_history 5.5          | error code "VALIDATION_ERROR" with suggestion mentioning integer                          |
+      | include_history = 1001                    | include_history 1001         | error code "INVALID_REQUEST" with suggestion mentioning range "[0, 1000]"                  |
+      | include_history = -1                      | include_history -1           | error code "INVALID_REQUEST" with suggestion mentioning range "[0, 1000]"                  |
+      | include_history = 5.5 (non-integer)       | include_history 5.5          | error code "INVALID_REQUEST" with suggestion mentioning integer                            |
 
   @T-UC-019-inv-289-3 @invariant @BR-RULE-289 @schema-v3.1
   Scenario: INV-3 holds - response returns min(include_history, available) most recent entries

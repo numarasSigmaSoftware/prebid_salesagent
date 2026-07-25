@@ -1580,11 +1580,11 @@ class TestUC003UpdateCreativeAssignments:
                 {"placement_id": "P2"},
                 {"placement_id": "P3"},
             ]
+            env.mock["uow"].return_value.products.get_by_id.return_value = mock_product
 
             # Existing assignments and new assignments
             scalars_calls = iter(
                 [
-                    MagicMock(first=Mock(return_value=mock_product)),  # product lookup
                     MagicMock(all=Mock(return_value=[])),  # existing assignments
                     MagicMock(first=Mock(return_value=None)),  # find assignment for C1
                 ]
@@ -1627,9 +1627,9 @@ class TestUC003UpdateCreativeAssignments:
             mock_product = MagicMock()
             mock_product.placements = []
             mock_product.product_id = "prod_1"
+            env.mock["uow"].return_value.products.get_by_id.return_value = mock_product
 
             mock_scalars = MagicMock()
-            mock_scalars.first.return_value = mock_product
             mock_session.scalars.return_value = mock_scalars
 
             identity = env.identity
@@ -2655,9 +2655,9 @@ class TestUC003ExtM:
             mock_product = MagicMock()
             mock_product.placements = []  # No placements
             mock_product.product_id = "prod_1"
+            env.mock["uow"].return_value.products.get_by_id.return_value = mock_product
 
             mock_scalars = MagicMock()
-            mock_scalars.first.return_value = mock_product
             mock_session.scalars.return_value = mock_scalars
 
             identity = env.identity

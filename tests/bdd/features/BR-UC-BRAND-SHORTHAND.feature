@@ -35,7 +35,7 @@ Feature: Brand string shorthand coercion on _BRAND_TOOLS
     And an inventory profile with only domain "example.com"
     And a product linked to that inventory profile with pricing
     When the buyer requests products with brand <brand>
-    Then the request is rejected with VALIDATION_ERROR naming field "brand"
+    Then the request is rejected with INVALID_REQUEST naming field "brand"
 
     Examples:
       | brand                                              |
@@ -67,7 +67,7 @@ Feature: Brand string shorthand coercion on _BRAND_TOOLS
   Scenario Outline: create_media_buy rejects malformed brand
     Given a tenant is configured for media buy creation
     When the buyer sends create_media_buy with brand <brand>
-    Then the request is rejected with VALIDATION_ERROR naming field "brand"
+    Then the request is rejected with INVALID_REQUEST naming field "brand"
 
     Examples:
       | brand                                              |

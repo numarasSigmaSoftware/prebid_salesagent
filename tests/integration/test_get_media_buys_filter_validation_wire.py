@@ -4,11 +4,9 @@
 concrete AdCP shapes (``list[str] | None`` /
 ``MediaBuyStatus | list[MediaBuyStatus] | None``). This preserves a malformed
 wire value until the shared
-``GetMediaBuysRequest`` validation boundary MCP/A2A go through — producing
-``INVALID_REQUEST`` on REST while MCP/A2A produce ``VALIDATION_ERROR`` for the
-identical buyer mistake. Staying ``Any`` lets the raw value reach the SAME
-shared boundary on every transport, so all three converge on
-``VALIDATION_ERROR`` instead of diverging (contrast with ``revision`` on
+``GetMediaBuysRequest`` validation boundary every transport goes through.
+Staying ``Any`` lets the raw value reach that SAME shared boundary, so all
+three converge on ``INVALID_REQUEST`` instead of diverging (contrast with ``revision`` on
 ``update_media_buy``, which IS concretely typed and accepts that divergence
 for a different reason — see test_update_media_buy_revision_validation_wire.py).
 
@@ -40,14 +38,14 @@ _WIRE_TRANSPORTS = [Transport.A2A, Transport.MCP, Transport.REST]
 
 @pytest.mark.requires_db
 class TestGetMediaBuysFilterValidationWire:
-    """A wrong-typed ``media_buy_ids``/``status_filter`` must emit VALIDATION_ERROR
+    """A wrong-typed ``media_buy_ids``/``status_filter`` must emit INVALID_REQUEST
     identically on every wire transport — proving the raw-value-preserving typing in
     ``GetMediaBuysBody`` achieves parity rather than merely claiming to."""
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_wrong_type_media_buy_ids_emits_validation_error_on_every_transport(self, integration_db, transport):
         """media_buy_ids as a bare string (not an array) reaches the shared
-        GetMediaBuysRequest boundary on every transport -> VALIDATION_ERROR/correctable.
+        GetMediaBuysRequest boundary on every transport -> INVALID_REQUEST/correctable.
 
         If GetMediaBuysBody drops ``SkipValidation``, FastAPI would reject this during
         REST body parsing -> INVALID_REQUEST, and
@@ -63,12 +61,12 @@ class TestGetMediaBuysFilterValidationWire:
             assert result.is_error, (
                 f"{transport.value}: malformed media_buy_ids must be rejected, got success payload: {result.payload!r}"
             )
-            result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+            result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_wrong_type_status_filter_emits_validation_error_on_every_transport(self, integration_db, transport):
         """status_filter as an invalid-shaped value reaches the shared
-        GetMediaBuysRequest boundary on every transport -> VALIDATION_ERROR/correctable.
+        GetMediaBuysRequest boundary on every transport -> INVALID_REQUEST/correctable.
         Same split risk as media_buy_ids if this field is ever typed concretely.
         """
         with MediaBuyListEnv(tenant_id="t2", principal_id="p2") as env:
@@ -80,4 +78,4 @@ class TestGetMediaBuysFilterValidationWire:
             assert result.is_error, (
                 f"{transport.value}: malformed status_filter must be rejected, got success payload: {result.payload!r}"
             )
-            result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+            result.assert_wire_error("INVALID_REQUEST", recovery="correctable")

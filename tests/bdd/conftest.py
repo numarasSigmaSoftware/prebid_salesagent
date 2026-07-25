@@ -1195,8 +1195,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         _UC004_GENUINE_XFAIL_ROWS: list[tuple[str, set[str], str]] = [
             (
                 "T-UC-004-partition-reporting-dims",
-                {"geo_missing_geo_level", "geo_metro_missing_system", "limit_zero", "limit_negative"},
-                "Pydantic raises ValidationError, not AdCPError(INVALID_REQUEST, suggestion). See docs/test-debt-bdd-strict-markers.md item C4.",
+                {"geo_metro_missing_system"},
+                "The SDK has no validator for the metro/postal-area system requirement. "
+                "See docs/test-debt-bdd-strict-markers.md item C10.",
             ),
             # GRADUATED (removed): T-UC-004-partition-attribution interval_zero /
             # interval_negative / invalid_unit / invalid_model — the attribution_window
@@ -1365,9 +1366,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             (
                 "T-UC-004-partition-account",
                 {
-                    "impl-invalid_oneOf_both",
                     "impl-account_not_found",
-                    "impl-empty_object",
                     # valid rows (explicit_account_id / natural_key) now resolve the
                     # account on a2a/mcp/rest — the delivery When seeds the named valid
                     # accounts via _seed_valid_account_if_named / seed_account_with_access
@@ -1377,19 +1376,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     # so the earlier REVERT no longer applies — the valid rows are removed.
                     # account_not_found now correctly raises ACCOUNT_NOT_FOUND on
                     # a2a/mcp/rest once resolution runs (seeded siblings exist, the unseeded
-                    # id 404s) — removed. Only invalid_oneOf_both / empty_object still raise
-                    # ValidationError-not-AdCPError on the wire, kept (impl path also fails).
-                    "a2a-invalid_oneOf_both",
-                    "a2a-empty_object",
-                    "mcp-invalid_oneOf_both",
-                    "mcp-empty_object",
-                    "[rest-invalid_oneOf_both",
-                    "[rest-empty_object",
+                    # id 404s) — removed. Schema-invalid account references are normalized
+                    # to INVALID_REQUEST on every boundary and are no longer marked.
                 },
-                "a2a/mcp/rest do not parse/resolve the invalid oneOf/empty account "
-                "reference into an AdCPError(INVALID_REQUEST) at the transport boundary; "
-                "these rows raise ValidationError instead. "
-                "See docs/test-debt-bdd-strict-markers.md items C1/C2/C4.",
+                "The direct implementation account-not-found path does not emit the "
+                "storyboard's expected envelope. See docs/test-debt-bdd-strict-markers.md.",
             ),
             (
                 "T-UC-004-boundary-account",
@@ -1400,14 +1391,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     # once their accounts are seeded (salesagent-jr5b, present in the merged
                     # tree) — removed. a2a invalid rows (both / not found / empty) already
                     # raise AdCPError (wire-drop XPASS, #1417) — removed.
-                    "mcp-both account_id and brand/operator",
-                    # mcp-account_id present + not found genuinely passes
-                    # (ValidationError satisfies 'invalid') — NOT marked.
-                    "mcp-empty object {}",
+                    # Schema-invalid account references are normalized to
+                    # INVALID_REQUEST on every boundary and are no longer marked.
                 },
-                "mcp does not parse/resolve the invalid oneOf/empty account reference "
-                "into an AdCPError(INVALID_REQUEST) at the transport boundary; these rows "
-                "raise ValidationError instead. See docs/test-debt-bdd-strict-markers.md items C1/C2/C4.",
+                "The direct implementation account-not-found boundary row does not emit "
+                "the storyboard's expected envelope. See docs/test-debt-bdd-strict-markers.md.",
             ),
             # sampling (salesagent-03q): sampling_method is NOT a
             # GetMediaBuyDeliveryRequest field — the artifact-sampling feature
@@ -1422,21 +1410,17 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     "impl-stratified",
                     "impl-recent",
                     "impl-failures_only",
-                    "impl-unknown_value-systematic",
                     "a2a-random-random",
                     "a2a-stratified",
                     "a2a-recent",
                     "a2a-failures_only",
-                    "a2a-unknown_value-systematic",
                     "mcp-random-random",
                     "mcp-stratified",
                     "mcp-recent",
                     "mcp-failures_only",
-                    "mcp-unknown_value-systematic",
-                    "[rest-unknown_value-systematic",
                 },
                 "sampling_method is unimplemented in get_media_buy_delivery (no schema "
-                "field); ValidationError not AdCPError (rest silently drops it). "
+                "field); the named supported methods therefore cannot be honored. "
                 "See docs/test-debt-bdd-strict-markers.md item C4.",
             ),
             (
@@ -1450,24 +1434,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     # -> AdCPError (wire-drop confirmed XPASS, #1417) — removed.
                     "mcp-random (first enum value)",
                     "mcp-failures_only (last enum value)",
-                    "mcp-Unknown string not in enum",
                     "[rest-Unknown string not in enum",
                 },
                 "sampling_method is unimplemented in get_media_buy_delivery (no schema "
-                "field); ValidationError not AdCPError (rest silently drops it). "
+                "field); REST silently drops the unknown extension value. "
                 "See docs/test-debt-bdd-strict-markers.md item C4.",
             ),
-            # resolution (salesagent-x18x, #1545): GRADUATED on all transports. The
-            # Examples now name error "VALIDATION_ERROR" with suggestion, and the empty
-            # media_buy_ids=[] hits the SDK min_length=1 constraint, surfacing as
-            # AdCPValidationError(VALIDATION_ERROR)+suggestion on the a2a/mcp/rest wire
-            # (empirically verified: a2a/mcp/rest all PASS the named code). The earlier
-            # INVALID_REQUEST framing (and the "A2A wraps in RuntimeError" note) were both
-            # stale — production emits VALIDATION_ERROR here, not INVALID_REQUEST — so no
-            # partition marker remains. (e2e-harness-wiring corroborates: strict XPASS
-            # observed on the merged tree 2026-07-09, the merged A2A boundary raises
-            # AdCPError on the empty-array reject — adcp_validation_boundary from the
-            # #1417 embed — matching the boundary-resolution graduation below. Entry removed.)
+            # Resolution is graduated on all transports. Empty media_buy_ids violates
+            # the request schema and is normalized to INVALID_REQUEST at each boundary,
+            # so no partition marker remains.
             # T-UC-004-boundary-resolution: a2a now raises AdCPError on the empty-array
             # reject (wire-drop confirmed XPASS, #1417); the only remaining
             # transport-aware failure (a2a empty array) is handled below — entry removed
@@ -1497,33 +1472,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 "AdCPError(MEDIA_BUY_NOT_FOUND). impl genuinely passes. "
                 "See docs/test-debt-bdd-strict-markers.md item C3.",
             ),
-            # status-filter (salesagent-6vu): all valid single statuses +
-            # arrays + (field absent) pass. pending_activation rows fail
-            # (Gherkin uses a non-spec MediaBuyStatus — item B1); empty-array /
-            # unknown-value "failed" rows raise ValidationError not
-            # AdCPError(INVALID_REQUEST) — item C4.
-            # partition: impl now genuinely PASSES single_pending (production
-            # normalizes the legacy 'pending_activation' label). a2a/mcp/rest
-            # still fail on the unknown-value/empty-array C4 normalization.
-            (
-                "T-UC-004-partition-status-filter",
-                {
-                    # single_pending now normalizes on all wire transports (wire-drop
-                    # confirmed XPASS, #1417) — removed. empty_array/unknown_value
-                    # still raise ValidationError-not-AdCPError on a2a/mcp/rest, kept.
-                    "a2a-empty_array",
-                    "mcp-empty_array",
-                    "[rest-empty_array",
-                    "a2a-unknown_value",
-                    "mcp-unknown_value",
-                    "[rest-unknown_value",
-                },
-                "single_pending: Gherkin 'pending_activation' is not a valid AdCP "
-                "MediaBuyStatus (item B1) — impl normalizes the legacy label, "
-                "a2a/mcp/rest do not. empty_array/unknown_value: ValidationError "
-                "not AdCPError(INVALID_REQUEST) (item C4). "
-                "See docs/test-debt-bdd-strict-markers.md.",
-            ),
+            # Partition status-filter rows are graduated: schema-invalid values
+            # now surface as INVALID_REQUEST on every transport.
             # boundary: pending_activation fails everywhere; the 'failed' /
             # '[] (empty array...)' rows pass on impl/rest (ValidationError
             # satisfies 'invalid') but fail on a2a/mcp — transport-prefixed
@@ -1533,15 +1483,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 {
                     "impl-pending_activation (first enum value)",
                     "a2a-pending_activation (first enum value)",
-                    # a2a now raises AdCPError on failed/[] (wire-drop confirmed XPASS,
-                    # #1417) — removed. mcp still fails (mcp-failed kept).
+                    # Schema-invalid failed/[] values are normalized to INVALID_REQUEST
+                    # on every typed transport and are no longer marked.
                     "mcp-pending_activation (first enum value)",
-                    "mcp-failed (not in AdCP enum",
                     "[rest-pending_activation (first enum value)",
                 },
                 "pending_activation: Gherkin value not a valid AdCP MediaBuyStatus "
-                "(item B1). failed/[]: ValidationError not AdCPError on a2a/mcp (item C4). "
-                "See docs/test-debt-bdd-strict-markers.md.",
+                "(item B1). See docs/test-debt-bdd-strict-markers.md.",
             ),
             # credentials (salesagent-f8u4): FULLY reconciled — the When step
             # now validates the real AdCP reporting_webhook Authentication

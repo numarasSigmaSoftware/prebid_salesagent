@@ -2805,8 +2805,12 @@ def then_brandless_rejected_validation_error(ctx: dict) -> None:
 
     envelope = ctx.get("wire_error_envelope") or ctx.get("synthesized_error_envelope")
     if envelope is not None:
-        # Seller's own validation (IMPL/A2A/REST) → assert the two-layer AdCP envelope.
-        assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+        # MCP rejects at its request-schema boundary; the other transports reach
+        # the tool's semantic brand requirement.
+        from tests.harness.transport import Transport
+
+        expected_code = "INVALID_REQUEST" if ctx.get("transport") is Transport.MCP else "VALIDATION_ERROR"
+        assert_envelope_shape(envelope, expected_code, recovery="correctable")
     else:
         # MCP: the tool surface types accounts as list[Accounts] (brand required),
         # so FastMCP's TypeAdapter rejects the brandless dict at the schema

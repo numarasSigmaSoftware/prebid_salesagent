@@ -241,7 +241,7 @@ class TestA2AErrorShapes:
                 identity=mock_identity,
             )
 
-        assert exc_info.value.error_code == "VALIDATION_ERROR"
+        assert exc_info.value.error_code == "INVALID_REQUEST"
 
     @pytest.mark.asyncio
     async def test_discovery_skill_no_auth_does_not_raise_auth_error(self):

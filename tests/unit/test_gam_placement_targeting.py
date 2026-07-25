@@ -299,15 +299,10 @@ class TestPlacementIdsValidation:
             # the placement-support check is the one that rejects.
             mock_creative = MagicMock(creative_id="c1", status="approved", agent_url=None, format="display_300x250")
             mock_uow.creatives.get_by_ids.return_value = [mock_creative]
-            mock_uow.products.get_by_id.return_value = MagicMock(format_ids=[])
-
-            # Mock product with NO placements (empty list) via session
             mock_product = MagicMock()
+            mock_product.format_ids = []
             mock_product.placements = []
-
-            mock_scalars = MagicMock()
-            mock_scalars.first.side_effect = [mock_product]
-            mock_session.scalars.return_value = mock_scalars
+            mock_uow.products.get_by_id.return_value = mock_product
 
             req = UpdateMediaBuyRequest(
                 media_buy_id="mb_no_placements",

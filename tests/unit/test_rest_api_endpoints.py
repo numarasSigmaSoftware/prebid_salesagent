@@ -167,6 +167,6 @@ class TestGetMediaBuyDeliveryEndpoint:
         )
 
         assert response.status_code == 400
-        assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
+        assert_envelope_shape(response.json(), "INVALID_REQUEST", recovery="correctable")
         mock_enrich.assert_not_called()
         mock_impl.assert_not_called()

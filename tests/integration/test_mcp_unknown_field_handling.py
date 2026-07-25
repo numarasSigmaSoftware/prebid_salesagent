@@ -51,7 +51,7 @@ class TestMcpDevMode:
             assert result.is_error
             assert_envelope_shape(
                 result.wire_error_envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 message_substr="Unexpected keyword argument",
             )

@@ -7,7 +7,7 @@ AdCP 3.0.1 graded steps pinned at the real wire (not reconstructed exceptions):
   booking exists.
 - ``key_reuse_conflict``: the same key with a different canonical payload rejects
   with ``IDEMPOTENCY_CONFLICT`` on every transport.
-- ``missing_key``: a create without idempotency_key rejects as VALIDATION_ERROR
+- ``missing_key``: a create without idempotency_key rejects as INVALID_REQUEST
   (the REST pin lives in test_idempotency_replay; A2A/MCP are pinned here — the
   IMPL transport cannot express absence, the model requires the field).
 - ``fresh_key_new_resource``: a different key with an identical payload creates a
@@ -242,7 +242,7 @@ class TestMissingKeyWireMatrix:
         assert envelope is not None, f"missing-key rejection must carry the wire envelope on {transport.value}"
         assert_envelope_shape(
             envelope,
-            "VALIDATION_ERROR",
+            "INVALID_REQUEST",
             recovery="correctable",
             message_substr="Required field is missing",
         )

@@ -10,13 +10,13 @@ Two layers of guarantee:
 
 1. **Rejected on every wire transport** (a2a/mcp/rest) — the malformed filter never
    degrades to "return everything".
-2. **Spec two-layer ``VALIDATION_ERROR`` envelope with a recovery suggestion**
+2. **Spec two-layer ``INVALID_REQUEST`` envelope with a recovery suggestion**
    (POST-F3) on every wire transport. REST and A2A coerce the wire dict through
    the shared ``coerce_creative_filters`` helper; MCP catches FastMCP TypeAdapter
    validation at the boundary and emits the same AdCP envelope.
 
 Spec: ``core/creative-filters.json`` (concept_ids ``minItems: 1``) + the BR-UC-018
-ext-c contract (validation failure → VALIDATION_ERROR + suggestion).
+ext-c contract (schema failure → INVALID_REQUEST + suggestion).
 """
 
 import pytest
@@ -60,7 +60,7 @@ class TestConceptIdsFilterValidation:
 
     @pytest.mark.parametrize("transport", _ALL_WIRE)
     def test_empty_concept_ids_emits_validation_envelope(self, integration_db, transport):
-        """Wire transports surface the two-layer VALIDATION_ERROR envelope with a suggestion."""
+        """Wire transports surface the two-layer INVALID_REQUEST envelope with a suggestion."""
         with CreativeListEnv() as env:
             _seed_authenticated_principal(env)
 
@@ -68,11 +68,11 @@ class TestConceptIdsFilterValidation:
 
             envelope = result.wire_error_envelope
             assert envelope is not None, f"{transport}: no wire error envelope captured"
-            assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+            assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
             # POST-F3: the buyer is told how to recover. wire_error_envelope is always
             # a dict here (the AdCPToolError accessor lives in assert_envelope_shape).
             assert envelope["errors"][0].get("suggestion"), (
-                f"{transport}: VALIDATION_ERROR envelope must carry a recovery suggestion: {envelope['errors'][0]}"
+                f"{transport}: INVALID_REQUEST envelope must carry a recovery suggestion: {envelope['errors'][0]}"
             )
 
 
