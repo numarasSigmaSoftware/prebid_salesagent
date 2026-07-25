@@ -40,8 +40,8 @@ TERMINAL_STEP_STATUSES = frozenset({"completed", "rejected", "failed", "canceled
 #     state behind a canceled task.
 # ``approval`` is the legacy adapter-emitted awaiting-decision alias of ``requires_approval``
 # (GAM/Broadstreet/base_workflow — see APPROVABLE_STEP_STATUSES below): a pre-side-effect state,
-# so it is cancellable for the same reason ``requires_approval`` is. (Normalizing the alias away
-# is tracked in #1659; until then it is carried in BOTH the cancellable and approvable sets.)
+# so it is cancellable for the same reason ``requires_approval`` is. Until historic
+# ``approval`` rows and their producers are normalized, it is carried in BOTH sets.
 # Terminal statuses are (trivially) excluded too. A cancel is only accepted while the step is
 # still purely pending human/forecasting action, before any side-effects have run.
 CANCELLABLE_STEP_STATUSES = frozenset({"pending", "requires_approval", "pending_approval", "approval"})
@@ -59,8 +59,8 @@ CANCELLABLE_STEP_STATUSES = frozenset({"pending", "requires_approval", "pending_
 # Broadstreet via the base manager). It is semantically identical to ``requires_approval`` —
 # a step a publisher must approve/reject — so it MUST be approvable, otherwise those live human
 # workflows can never be actioned. Normalizing every producer to the canonical
-# ``requires_approval`` (+ a migration for existing ``approval`` rows) is tracked in #1659;
-# until then this set carries the legacy alias.
+# ``requires_approval`` (including normalizing existing ``approval`` rows) is not
+# complete yet; until then this set carries the legacy alias.
 APPROVABLE_STEP_STATUSES = frozenset({"requires_approval", "pending_approval", "approval"})
 
 

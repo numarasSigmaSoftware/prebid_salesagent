@@ -238,7 +238,7 @@ async def _call_webhook_for_creative_status(
 
             # step_tool_name is untrusted (workflow_steps DB column). Validate a
             # COPY for the SDK payload; keep the original label for metadata
-            # (salesagent-yi3s, salesagent-yk7o).
+            # used by delivery metadata.
             wire_task_type = validate_webhook_task_type(step_tool_name or "sync_creatives")
 
             # Send the buyer-facing correlation id (the id they hold), falling back to the

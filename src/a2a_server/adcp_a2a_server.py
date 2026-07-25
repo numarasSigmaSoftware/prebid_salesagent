@@ -254,6 +254,17 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     return InternalError(message=message, data=envelope)
 
 
+def _record_a2a_boundary_error(op_key: str, identity: ResolvedIdentity | None, exc: Exception) -> None:
+    """Record an A2A boundary failure with one canonical identity scope."""
+    record_boundary_error(
+        "a2a",
+        op_key,
+        exc,
+        tenant_id=getattr(identity, "tenant_id", None),
+        principal_id=getattr(identity, "principal_id", None) or "anonymous",
+    )
+
+
 def _boundary_internal_error(
     op_key: str, op_label: str, identity: ResolvedIdentity | None, exc: Exception
 ) -> InternalError:
@@ -271,13 +282,7 @@ def _boundary_internal_error(
 
     Returns (never raises) so each caller keeps its own ``raise ... from exc`` chaining.
     """
-    record_boundary_error(
-        "a2a",
-        op_key,
-        exc,
-        tenant_id=getattr(identity, "tenant_id", None),
-        principal_id=getattr(identity, "principal_id", None) or "anonymous",
-    )
+    _record_a2a_boundary_error(op_key, identity, exc)
     return _internal_error_for(op_label, exc)
 
 
@@ -720,7 +725,7 @@ class AdCPRequestHandler(RequestHandler):
                 # take the status=="submitted" early-return in on_message_send
                 # (Task state=SUBMITTED, no artifacts) BEFORE artifact/text
                 # reconstruction, so a submitted body can never reach here —
-                # same control-flow fact as update_media_buy (PR #1567 round-2 follow-up).
+                # same control-flow fact as update_media_buy.
                 if "media_buy_id" in data:
                     return CreateMediaBuySuccess(**data)
                 else:
@@ -732,7 +737,7 @@ class AdCPRequestHandler(RequestHandler):
                 # be mis-reconstructed as UpdateMediaBuySuccess (whose status is Literal completed).
                 # NB: on the normal path a submitted result takes the status=="submitted"
                 # early-return in on_message_send (Task state=SUBMITTED, no artifacts) BEFORE
-                # artifact/text reconstruction reaches here (PR #1567 round-2); this branch is a
+                # artifact/text reconstruction reaches here; this branch is a
                 # defensive backstop guarded by test_a2a_update_media_buy_submitted_guard.py.
                 if data.get("status") == "submitted":
                     return UpdateMediaBuySubmitted(**data)
@@ -864,7 +869,7 @@ class AdCPRequestHandler(RequestHandler):
             # InvalidRequestError (protocol-level rejection) while carrying the two-layer
             # envelope in ``data`` — via the same _auth_required_error source every other
             # A2A auth raise uses, so the code/recovery/suggestion and both layers' message
-            # cannot drift between message/send and the rest. (#1417)
+            # cannot drift between message/send and the rest.
             if requires_auth and not auth_token:
                 raise _auth_required_error(
                     AdCPAuthRequiredError("Authentication required - Bearer token required in Authorization header")
@@ -1237,7 +1242,10 @@ class AdCPRequestHandler(RequestHandler):
             # message is CONTROLLED (e.g. "Unknown skill 'x'", "brief must not be
             # empty"), so it is client-safe to surface. Immediate terminal response
             # returned synchronously below → no webhook (a2a-guide.mdx). Falls through
-            # to the shared store-and-return.
+            # to the shared store-and-return. Explicit-skill failures are already
+            # recorded by ``_handle_explicit_skill``; errors reaching this outer
+            # boundary (multi-skill rejection and NL routing) are recorded here.
+            _record_a2a_boundary_error("message_processing", identity, e)
             del task.artifacts[:]
             task.artifacts.append(self._failed_task_artifact(e))
             self._mark_task_failed(task)
@@ -1342,8 +1350,8 @@ class AdCPRequestHandler(RequestHandler):
         ``a2a.compat.v0_3.jsonrpc_adapter``, whose ``handle_request`` ends in a
         bare ``except Exception -> CoreInternalError`` with no ``A2AError -> code``
         mapping — the mapping the SDK's own main dispatcher performs. Raising the
-        right type is still correct and is what will surface ``-32001`` the
-        moment that gap closes (#1670).
+        right type is still correct and will surface ``-32001`` once the
+        compatibility adapter preserves typed A2A error codes.
         """
         task_id = params.id
         identity: ResolvedIdentity | None = None
@@ -1489,13 +1497,12 @@ class AdCPRequestHandler(RequestHandler):
         terminal state; the SDK ``default_request_handler`` is the reference
         cross-check). AdCP 3.1.1 prose defines no cancel contract of its own —
         a2a-guide.mdx "Webhook Trigger Rules" lists ``canceled`` among the final
-        states ("Cancellation confirmed"). Storyboard: ungraded, pending the
-        upstream task-lifecycle obligation (#1574).
+        states ("Cancellation confirmed"). Storyboard: ungraded.
 
         Raises ``TaskNotFoundError`` when neither store has the task (unknown id,
         or not owned by the caller) — cancelling a task that does not exist is the
-        same not-found condition as get, not a silent no-op (and #1670 for why the
-        wire code is still -32603, not the spec's -32001).
+        same not-found condition as get, not a silent no-op. The compatibility adapter
+        still emits ``-32603`` rather than the spec's ``-32001`` for typed A2A errors.
         """
         task_id = params.id
         identity: ResolvedIdentity | None = None
@@ -2099,7 +2106,7 @@ class AdCPRequestHandler(RequestHandler):
             )
 
         # Validate via the shared boundary so every A2A handler emits the same
-        # field + message + buyer-facing suggestion (AdCP POST-F3, #1417):
+        # field + message + buyer-facing suggestion (AdCP POST-F3):
         # idempotency_key_missing / duplicate_product_id rejections include a
         # non-empty suggestion derived by adcp_validation_boundary.
         with adcp_validation_boundary():

@@ -69,6 +69,16 @@ def _make_handler() -> tuple[AdCPRequestHandler, object]:
     return handler, ctx
 
 
+def _boundary_recording_spy():
+    """Capture the stable boundary-record fields without asserting mock internals."""
+    records: list[tuple[str, str, str, str | None, str]] = []
+
+    def record(transport, operation, error, *, tenant_id, principal_id):
+        records.append((transport, operation, error.wire_error_code, tenant_id, principal_id))
+
+    return records, record
+
+
 @pytest.mark.asyncio
 async def test_untyped_crash_raises_sanitized_internal_error_without_leaking_secrets():
     """An untyped internal crash → sanitized JSON-RPC InternalError; the raw exception
@@ -339,6 +349,32 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
 
 
 @pytest.mark.asyncio
+async def test_nl_typed_failure_records_outer_boundary_once():
+    """A typed NL-routing failure is recorded once by the outer task boundary."""
+    handler, ctx = _make_handler()
+    params = make_nl_send_message_request("Show me available products in the catalog")
+    records, record = _boundary_recording_spy()
+
+    with patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY):
+        with patch(
+            "src.a2a_server.adcp_a2a_server.core_get_products_tool",
+            side_effect=AdCPValidationError("brief must not be empty"),
+        ):
+            with patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=record):
+                result = await handler.on_message_send(params, context=ctx)
+
+    assert_failed_task_envelope(
+        result,
+        code="VALIDATION_ERROR",
+        recovery="correctable",
+        artifact_name="processing_error",
+    )
+    assert records == [
+        ("a2a", "message_processing", "VALIDATION_ERROR", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_auth_extraction_failure_raises_sanitized_internal_error_no_nameerror():
     """A crash before identity resolution raises a sanitized InternalError, no NameError.
 
@@ -380,8 +416,10 @@ async def test_multi_skill_message_rejected_before_any_side_effect():
     message.parts.append(create_a2a_message_with_skill("approve_creative", {}).parts[0])
     params = SendMessageRequest(message=message)
 
+    records, record = _boundary_recording_spy()
     with patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY):
-        result = await handler.on_message_send(params, context=ctx)
+        with patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=record):
+            result = await handler.on_message_send(params, context=ctx)
 
     assert isinstance(result, Task)
     assert result.status.state == TaskState.TASK_STATE_FAILED
@@ -391,6 +429,9 @@ async def test_multi_skill_message_rejected_before_any_side_effect():
     assert "multiple skills" in envelope["errors"][0]["message"].lower()
     handler._handle_explicit_skill.assert_not_awaited()  # zero side effects
     handler._send_protocol_webhook.assert_not_awaited()
+    assert records == [
+        ("a2a", "message_processing", "UNSUPPORTED_FEATURE", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
+    ]
 
 
 @pytest.mark.asyncio

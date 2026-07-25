@@ -296,7 +296,7 @@ def _media_buy_webhook_metadata(step_data: dict, tenant_id: str, media_buy_id: s
     The protocol webhook service reads task_type/tenant_id/principal_id/
     media_buy_id from this dict for delivery logging and the audit trail
     (protocol_webhook_service.py) — populate all four. Shared by the approve
-    and reject branches (PR #1567 round-2 cleanup).
+    and reject branches.
     """
     return {
         "task_type": step_data["tool_name"],
@@ -519,7 +519,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # The buy IS committed at this point, so a confirmed Success
                         # (status/confirmed_at/revision from the subclass defaults) is
                         # semantically correct here — route through the sync_success()
-                        # factory like every sibling construction site (PR #1567 round-2 cleanup).
+                        # factory like every sibling construction site.
                         create_media_buy_approved_result = CreateMediaBuySuccess.sync_success(
                             media_buy_id=media_buy_id,
                             packages=[Package(package_id=x.package_id) for x in all_packages],
@@ -544,7 +544,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         else:
                             # tool_name is untrusted (workflow_steps DB column).
                             # Validate a COPY for the SDK payload; metadata keeps
-                            # the original label (salesagent-yi3s, salesagent-yk7o).
+                            # the original label for delivery metadata.
                             create_media_buy_approved_payload = create_mcp_webhook_payload(
                                 task_id=correlation_task_id,
                                 task_type=validate_webhook_task_type(step_data.get("tool_name", "create_media_buy")),
@@ -629,7 +629,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # Route the code through the typed AdCPError cascade so the buyer sees
                     # the same WIRE code the tool path emits for this event
                     # (MEDIA_BUY_REJECTED is internal-only; wire_error_code translates it
-                    # to POLICY_VIOLATION — never hand-pick codes here; PR #1567 round-2 item 1).
+                    # to POLICY_VIOLATION — never hand-pick codes here).
                     rejection = AdCPMediaBuyRejectedError(f"Rejected: {reason or 'No reason provided'}")
                     create_media_buy_rejected_result = CreateMediaBuyError(
                         errors=[Error(code=rejection.wire_error_code, message=rejection.message)]
@@ -653,7 +653,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     else:
                         # tool_name is untrusted (workflow_steps DB column).
                         # Validate a COPY for the SDK payload; metadata keeps the
-                        # original label (salesagent-yi3s, salesagent-yk7o).
+                        # original label for delivery metadata.
                         create_media_buy_rejected_payload = create_mcp_webhook_payload(
                             task_id=correlation_task_id,
                             task_type=validate_webhook_task_type(step_data.get("tool_name", "create_media_buy")),
