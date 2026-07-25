@@ -973,7 +973,15 @@ class TestApprovalCrashRecovery:
     # ── Fix A: real takeover records a durable ownership-independent incident ──
 
     def _run_worker_through_takeover(
-        self, context_manager, tenant_id, principal_id, media_buy_id, takeover_lease_id, adapter_terminal
+        self,
+        context_manager,
+        tenant_id,
+        principal_id,
+        media_buy_id,
+        takeover_lease_id,
+        adapter_terminal,
+        *,
+        expect_incident: bool = True,
     ):
         """Drive W1 (the real approval finalizer) through a REAL takeover and assert the
         ownership-independent-incident invariants COMMON to both CAS-loss branches.
@@ -985,9 +993,10 @@ class TestApprovalCrashRecovery:
         is mid-adapter so W1's owner-CAS on its OWN lease id loses, and releases + joins W1.
 
         Asserts the shared outcome: the worker neither hung nor raised, lost the CAS
-        (NOT_CLAIMED) yet was NOT silent — it recorded EXACTLY ONE durable
-        ownership-independent incident (buy column + AuditLog) without stealing W2's finalize
-        state (W2 still owns ``takeover_lease_id``, status still ``finalizing``).
+        (NOT_CLAIMED), and does not steal W2's finalize state (W2 still owns
+        ``takeover_lease_id``, status still ``finalizing``). Outcomes whose adapter call may
+        have mutated remotely record exactly one ownership-independent incident; a provably
+        pre-mutation uncertainty records none.
 
         Returns ``(step_id, worker_result, buy_snapshot)`` so each caller pins its OWN
         branch discriminator (the incident REASON, incident survival, step terminal-ness) —
@@ -1015,16 +1024,40 @@ class TestApprovalCrashRecovery:
 
         assert not t.is_alive(), "worker hung"
         assert "error" not in worker_result, f"worker failed: {worker_result.get('error')}"
-        # W1 lost the owner-CAS to W2's lease → NOT_CLAIMED, but NOT silent.
+        # W1 lost the owner-CAS to W2's lease → NOT_CLAIMED.
         assert worker_result["outcome"] is FinalizeOutcome.NOT_CLAIMED
         buy = _buy_snapshot(tenant_id, media_buy_id)
-        # Durable ownership-independent incident recorded (buy column + AuditLog), exactly once.
-        assert buy.finalize_reconcile_incident_at is not None
-        assert _finalize_incident_audit_count(tenant_id, media_buy_id) == 1
+        if expect_incident:
+            # Durable ownership-independent incident recorded (buy column + AuditLog), exactly once.
+            assert buy.finalize_reconcile_incident_at is not None
+            assert _finalize_incident_audit_count(tenant_id, media_buy_id) == 1
+        else:
+            assert buy.finalize_reconcile_incident_at is None
+            assert _finalize_incident_audit_count(tenant_id, media_buy_id) == 0
         # W1 did NOT steal W2's finalize state.
         assert buy.finalize_lease_id == takeover_lease_id
         assert buy.status == "finalizing"
         return step_id, worker_result, buy
+
+    def test_uncertain_adapter_that_lost_lease_returns_not_claimed_without_incident(
+        self, integration_db, sample_tenant, sample_principal, context_manager
+    ):
+        """A stale worker with provably no remote mutation leaves the replacement owner alone."""
+        tenant_id = sample_tenant["tenant_id"]
+
+        def w1_uncertain():
+            raise AdapterIdempotencyUncertain("W1 lookup failed before mutation")
+
+        _step_id, _worker_result, buy = self._run_worker_through_takeover(
+            context_manager,
+            tenant_id,
+            sample_principal["principal_id"],
+            "mb_uncertain_takeover",
+            "lease_w2_uncertain_takeover",
+            w1_uncertain,
+            expect_incident=False,
+        )
+        assert buy.finalize_lease_id == "lease_w2_uncertain_takeover"
 
     def test_real_takeover_records_incident_that_survives_winner_publish(
         self, integration_db, sample_tenant, sample_principal, context_manager

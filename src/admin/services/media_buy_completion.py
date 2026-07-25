@@ -766,7 +766,7 @@ def _run_adapter_and_finalize(
             sanitize_log_value(media_buy_id),
             sanitize_log_value(exc),
         )
-        repo.update_status_computed(
+        released = repo.update_status_computed(
             media_buy_id,
             lambda _mb: None,
             expected_status=MEDIA_BUY_FINALIZING_STATUS,
@@ -774,6 +774,9 @@ def _run_adapter_and_finalize(
             clear_finalize_state=True,
             bump=False,
         )
+        if released is None:
+            session.rollback()
+            return FinalizeOutcome.NOT_CLAIMED, str(exc)
         session.commit()
         return FinalizeOutcome.RETRYING, str(exc)
     except AdapterPostMutationIncomplete as exc:

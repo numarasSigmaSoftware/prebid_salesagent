@@ -19,10 +19,17 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.context_manager import ContextManager
+from tests.e2e._webhook_capture import WebhookCaptureHandler, run_webhook_capture_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 WEBHOOK_URL = "https://buyer.example.com/adcp-webhook"
+
+
+class _AdminWebhookCapture(WebhookCaptureHandler):
+    """Per-test receiver for asserting bytes delivered by the real webhook service."""
+
+    received_webhooks: list[dict] = []
 
 
 @pytest.fixture
@@ -63,7 +70,11 @@ def make_pending_media_buy(integration_db):
     engine = get_engine()
     session = SASession(bind=engine)
 
-    def _make(request_data_context: dict | None = None, protocol: str = "mcp"):
+    def _make(
+        request_data_context: dict | None = None,
+        protocol: str = "mcp",
+        webhook_url: str = WEBHOOK_URL,
+    ):
         tenant = TenantFactory(tenant_id="reject_wh_tenant")
         PropertyTagFactory(tenant=tenant, tag_id="all_inventory", name="All Inventory")
         principal = PrincipalFactory(
@@ -130,13 +141,13 @@ def make_pending_media_buy(integration_db):
         PushNotificationConfigFactory(
             tenant=tenant,
             principal=principal,
-            url=WEBHOOK_URL,
+            url=webhook_url,
             is_active=True,
         )
 
         # Tenant-scoped approval workflow step + object mapping (production API).
         request_data = {
-            "push_notification_config": {"url": WEBHOOK_URL},
+            "push_notification_config": {"url": webhook_url},
             "protocol": protocol,
         }
         if request_data_context is not None:
@@ -209,6 +220,17 @@ def webhook_capture():
         yield captured
 
 
+@pytest.fixture
+def live_webhook_capture():
+    """Capture the actual HTTP JSON sent by ``ProtocolWebhookService``."""
+    with run_webhook_capture_server(
+        _AdminWebhookCapture,
+        _AdminWebhookCapture.received_webhooks,
+        host="127.0.0.1",
+    ) as capture:
+        yield capture
+
+
 def _post_approval_action(admin_session, ids: dict, data: dict):
     """Drive the real admin approve/reject route and assert the 302 redirect."""
     resp = admin_session.post(
@@ -218,22 +240,56 @@ def _post_approval_action(admin_session, ids: dict, data: dict):
     assert resp.status_code == 302, f"expected redirect, got {resp.status_code}"
 
 
-def _webhook_body(captured: dict) -> dict:
-    """The outbound webhook body serialized through the PRODUCTION wire seam.
+def _captured_mcp_payload_body(captured: dict) -> dict:
+    """Return the typed MCP payload passed to the mocked delivery service.
 
-    Uses ``_to_wire_dict`` — the same serializer ProtocolWebhookService applies at
-    the delivery boundary (HMAC signing + JSON send) — so these assertions grade
-    the bytes the buyer receives, not a test-local ``model_dump`` re-serialization
-    that could diverge from the wire (e.g. ``exclude_none`` handling).
+    Delivery bytes are asserted separately through ``live_webhook_capture``. These
+    mocked-route tests intentionally cover only payload construction.
     """
-    from src.services.protocol_webhook_service import _to_wire_dict
-
     assert "payload" in captured, "route did not send a webhook payload"
-    return _to_wire_dict(captured["payload"])
+    return captured["payload"].model_dump(mode="json", exclude_none=True)
 
 
 class TestAdminMediaBuyRejectWebhook:
     """Rejecting a pending media buy from the admin UI must fire the buyer webhook."""
+
+    @pytest.mark.parametrize(
+        ("action", "protocol", "expected_status"),
+        [
+            ("reject", "mcp", "rejected"),
+            ("approve", "mcp", "completed"),
+            ("reject", "a2a", "rejected"),
+        ],
+    )
+    def test_admin_route_delivers_webhook_json_over_http(
+        self,
+        authenticated_admin_session,
+        make_pending_media_buy,
+        live_webhook_capture,
+        action,
+        protocol,
+        expected_status,
+    ):
+        """Approval and rejection routes deliver the protocol service's actual JSON bytes."""
+        ids = make_pending_media_buy(protocol=protocol, webhook_url=live_webhook_capture["url"])
+        data = {"action": action}
+        if action == "reject":
+            data["reason"] = "Budget too low"
+
+        _post_approval_action(authenticated_admin_session, ids, data)
+
+        received = live_webhook_capture["received"]
+        assert len(received) == 1, f"expected one delivered webhook, got {received!r}"
+        body = received[0]
+        if protocol == "a2a":
+            assert body["status"]["state"] == expected_status
+            assert "id" in body and "contextId" in body and "context_id" not in body
+        else:
+            assert body["status"] == expected_status
+            if action == "approve":
+                assert body["result"]["media_buy_id"] == ids["media_buy_id"]
+            else:
+                assert body["result"]["errors"][0]["code"] == "POLICY_VIOLATION"
 
     def test_reject_fires_buyer_webhook(self, authenticated_admin_session, pending_reject_media_buy, webhook_capture):
         """POST reject -> 302 and the webhook service's send_notification is awaited once.
@@ -278,7 +334,7 @@ class TestAdminMediaBuyRejectWebhook:
         _post_approval_action(
             authenticated_admin_session, pending_reject_media_buy, {"action": "reject", "reason": "test"}
         )
-        body = _webhook_body(webhook_capture)
+        body = _captured_mcp_payload_body(webhook_capture)
 
         # Outer envelope correctly reports the rejection.
         assert body["status"] == "rejected", f"outer status should be rejected, got {body.get('status')!r}"
@@ -309,7 +365,7 @@ class TestAdminMediaBuyRejectWebhook:
         _post_approval_action(
             authenticated_admin_session, pending_reject_media_buy, {"action": "reject", "reason": "Budget too low"}
         )
-        body = _webhook_body(webhook_capture)
+        body = _captured_mcp_payload_body(webhook_capture)
 
         embedded = body.get("result") or {}
         errors = embedded.get("errors") or []
@@ -346,7 +402,7 @@ class TestAdminMediaBuyRejectWebhook:
         media_buy_id = pending_reject_media_buy["media_buy_id"]
 
         _post_approval_action(authenticated_admin_session, pending_reject_media_buy, {"action": "approve"})
-        body = _webhook_body(webhook_capture)
+        body = _captured_mcp_payload_body(webhook_capture)
 
         assert body["status"] == "completed", f"outer status should be completed, got {body.get('status')!r}"
         embedded = body.get("result") or {}
@@ -480,7 +536,7 @@ class TestAdminMediaBuyRejectWebhook:
         ids = make_pending_media_buy(request_data_context=buyer_context)
 
         _post_approval_action(authenticated_admin_session, ids, {"action": "approve"})
-        body = _webhook_body(webhook_capture)
+        body = _captured_mcp_payload_body(webhook_capture)
 
         embedded = body.get("result") or {}
         assert embedded.get("context") == buyer_context, (
