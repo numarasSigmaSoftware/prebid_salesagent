@@ -69,20 +69,34 @@ _ADMIN_CALL_ALLOWLIST: set[tuple[str, str]] = {
 }
 
 
-def _model_aliases(tree: ast.Module) -> dict[str, str]:
+def _model_aliases(tree: ast.Module) -> tuple[dict[str, str], set[str]]:
     """Map local names (incl. ``import ... as`` aliases) to Creative-family models."""
     aliases: dict[str, str] = {name: name for name in _CREATIVE_MODELS}
+    modules: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "src.core.database.models" and alias.asname:
+                    modules.add(alias.asname)
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name in _CREATIVE_MODELS and alias.asname:
                     aliases[alias.asname] = alias.name
-    return aliases
+    return aliases, modules
 
 
-def _is_model_attr(expr: ast.expr, aliases: dict[str, str]) -> bool:
+def _is_model_attr(expr: ast.expr, aliases: dict[str, str], modules: set[str]) -> bool:
     """True for ``<CreativeFamilyAlias>.<attr>`` attribute access."""
-    return isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id in aliases
+    if not isinstance(expr, ast.Attribute):
+        return False
+    if isinstance(expr.value, ast.Name):
+        return expr.value.id in aliases
+    return (
+        isinstance(expr.value, ast.Attribute)
+        and isinstance(expr.value.value, ast.Name)
+        and expr.value.value.id in modules
+        and expr.value.attr in _CREATIVE_MODELS
+    )
 
 
 def _chain_parts(node: ast.Call) -> tuple[ast.Call | None, list[ast.Call]]:
@@ -168,7 +182,7 @@ def _accumulated_chains(tree: ast.Module) -> list[tuple[ast.Call, list[ast.Call]
     return merged
 
 
-def _attrs_compared_in_chain(parts: list[ast.Call], aliases: dict[str, str]) -> set[str]:
+def _attrs_compared_in_chain(parts: list[ast.Call], aliases: dict[str, str], modules: set[str]) -> set[str]:
     """Collect model attrs pinned by a single query chain's filter stages.
 
     Counts ``Model.attr == value`` comparisons (excluding pure JOIN conditions
@@ -186,16 +200,16 @@ def _attrs_compared_in_chain(parts: list[ast.Call], aliases: dict[str, str]) -> 
             for node in ast.walk(arg):
                 if isinstance(node, ast.Compare):
                     sides = [node.left, *node.comparators]
-                    if all(_is_model_attr(s, aliases) for s in sides):
+                    if all(_is_model_attr(s, aliases, modules) for s in sides):
                         continue  # JOIN condition, not a lookup filter
                     for expr in sides:
-                        if _is_model_attr(expr, aliases):
+                        if _is_model_attr(expr, aliases, modules):
                             names.add(expr.attr)  # type: ignore[union-attr]
                 elif (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "in_"
-                    and _is_model_attr(node.func.value, aliases)
+                    and _is_model_attr(node.func.value, aliases, modules)
                 ):
                     names.add(node.func.value.attr)  # type: ignore[union-attr]
     return names
@@ -223,7 +237,7 @@ def _function_at(funcs: list, lineno: int) -> str:
 
 def find_unscoped_creative_queries(tree: ast.Module) -> list[tuple[int, str]]:
     """Return (lineno, description) per QUERY comparing creative_id without principal_id."""
-    aliases = _model_aliases(tree)
+    aliases, modules = _model_aliases(tree)
     funcs = _enclosing_function_map(tree)
     violations: list[tuple[int, str]] = []
     seen_selects: set[int] = set()
@@ -248,9 +262,19 @@ def find_unscoped_creative_queries(tree: ast.Module) -> list[tuple[int, str]]:
         if id(select_call) in seen_selects:
             continue
         seen_selects.add(id(select_call))
-        if not (select_call.args and isinstance(select_call.args[0], ast.Name) and select_call.args[0].id in aliases):
+        if not select_call.args:
             continue
-        compared = _attrs_compared_in_chain(parts, aliases)
+        selected = select_call.args[0]
+        selected_is_creative = isinstance(selected, ast.Name) and selected.id in aliases
+        selected_is_module_creative = (
+            isinstance(selected, ast.Attribute)
+            and isinstance(selected.value, ast.Name)
+            and selected.value.id in modules
+            and selected.attr in _CREATIVE_MODELS
+        )
+        if not (selected_is_creative or selected_is_module_creative):
+            continue
+        compared = _attrs_compared_in_chain(parts, aliases, modules)
         if "creative_id" in compared and "principal_id" not in compared:
             func_name = _function_at(funcs, select_call.lineno)
             violations.append((select_call.lineno, func_name))
@@ -342,6 +366,16 @@ class TestDetectorMetaTests:
             "        DBCreative.creative_id.in_(ids),\n"
             "    )\n"
             "    return session.scalars(stmt).all()\n"
+        )
+        assert [f for _, f in find_unscoped_creative_queries(tree)] == ["load"]
+
+    @pytest.mark.arch_guard
+    def test_detector_catches_module_aliased_creative_lookup(self):
+        tree = ast.parse(
+            "import src.core.database.models as models\n"
+            "def load(session, creative_id):\n"
+            "    return session.scalars(select(models.Creative).where(\n"
+            "        models.Creative.creative_id == creative_id)).first()\n"
         )
         assert [f for _, f in find_unscoped_creative_queries(tree)] == ["load"]
 
