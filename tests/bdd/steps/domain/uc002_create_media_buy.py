@@ -119,8 +119,10 @@ def given_valid_request(ctx: dict) -> None:
 
 @given("an authenticated buyer")
 def given_authenticated_buyer(ctx: dict) -> None:
-    """Record that this scenario uses the harness-created buyer identity."""
-    ctx["has_auth"] = True
+    """Bind the scenario to the harness-created A2A buyer identity."""
+    from tests.harness.transport import Transport
+
+    ctx["authenticated_identity"] = ctx["env"].identity_for(Transport.A2A)
 
 
 @given(parsers.parse('a valid create_media_buy request with account "{account_id}"'))
@@ -322,11 +324,10 @@ def when_buyer_sends_nl_a2a_request(ctx: dict, request_text: str) -> None:
     from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
     from src.core.config_loader import set_current_tenant
     from tests.harness._base import _read_failed_a2a_task
-    from tests.harness.transport import Transport
     from tests.utils.a2a_helpers import make_nl_send_message_request
 
     env = ctx["env"]
-    identity = env.identity_for(Transport.A2A)
+    identity = ctx["authenticated_identity"]
     set_current_tenant(identity.tenant)
 
     handler = AdCPRequestHandler()

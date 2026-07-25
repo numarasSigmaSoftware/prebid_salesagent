@@ -247,11 +247,10 @@ class TestA2AAuthContract:
             f"Error for '{skill}' should mention auth/token: {body['error']['message']}"
         )
 
-    @pytest.mark.parametrize("method", ["GetTask", "CancelTask"])
     @pytest.mark.parametrize(
-        ("headers", "resolver_error"),
+        ("headers", "resolver_error", "expected_code", "expected_recovery"),
         [
-            ({"Content-Type": "application/json", "A2A-Version": "1.0"}, None),
+            ({"Content-Type": "application/json", "A2A-Version": "1.0"}, None, "AUTH_MISSING", "correctable"),
             (
                 {
                     "Authorization": "Bearer invalid-task-token",
@@ -259,13 +258,18 @@ class TestA2AAuthContract:
                     "A2A-Version": "1.0",
                 },
                 "Authentication token is invalid or expired.",
+                "AUTH_INVALID",
+                "terminal",
             ),
         ],
         ids=["missing-token", "invalid-token"],
     )
-    def test_task_management_auth_errors_use_json_rpc_dispatcher(self, client, method, headers, resolver_error):
+    @pytest.mark.parametrize("method", ["GetTask", "CancelTask"])
+    def test_task_management_auth_errors_use_json_rpc_dispatcher(
+        self, client, method, headers, resolver_error, expected_code, expected_recovery
+    ):
         """The real dispatcher must serialize task auth failures as JSON-RPC errors carrying the
-        full two-layer AUTH_REQUIRED envelope in ``error.data`` — not just a bare message.
+        full two-layer auth envelope in ``error.data`` — not just a bare message.
 
         Drives the ACTUAL SDK ``JsonRpcDispatcher`` via a real HTTP POST (not a direct handler
         call), so this catches regressions in dispatcher routing, request parsing, and response
@@ -273,7 +277,7 @@ class TestA2AAuthContract:
 
         The invalid-token case patches ``resolve_identity`` at its SOURCE module (not
         ``_resolve_a2a_identity`` itself) so the REAL ``_resolve_a2a_identity`` exception
-        handling — and its own enveloping via ``_auth_required_error`` — actually runs. An
+        handling — and its own enveloping via ``_enveloped_auth_error`` — actually runs. An
         earlier version of this test patched ``_resolve_a2a_identity`` with a bare
         ``InvalidRequestError`` side effect, which bypassed that enveloping entirely and made
         the invalid-token case silently untested for ``error.data``.
@@ -303,8 +307,8 @@ class TestA2AAuthContract:
         # separate unit test calling the handler directly (which cannot prove the real dispatcher
         # actually places the envelope in the serialized HTTP response body).
         adcp_error = body["error"]["data"]["adcp_error"]
-        assert adcp_error["code"] == "AUTH_REQUIRED"
-        assert adcp_error["recovery"] == "correctable"
+        assert adcp_error["code"] == expected_code
+        assert adcp_error["recovery"] == expected_recovery
         assert body["error"]["message"] == adcp_error["message"]
 
 

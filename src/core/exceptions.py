@@ -32,17 +32,14 @@ RecoveryHint = Literal["transient", "correctable", "terminal"]
 # WIRE_STANDARD_CODES.  Codes in ERROR_CODE_MAPPING are translated at the
 # transport boundary; codes in INTERNAL_CODES never leave the server.
 
-# Spec codes the SDK helper table has not caught up to. The pinned 3.1 enum
-# (enums/error-code.json @ adcp 04f59d2d5) defines these as real wire codes;
-# adcp 5.7's ``STANDARD_ERROR_CODES`` predates them, and the SDK is a
-# cross-check, not the authority. CREATIVE_NOT_FOUND per the enum: correctable,
-# and "Sellers MUST return this code uniformly for any creative_id not owned by
-# the calling account" (#1430 review). CONFIGURATION_ERROR per the enum:
-# terminal — "the buyer cannot resolve a seller-side deployment
-# misconfiguration and MUST NOT auto-retry" (#1430 review). The remaining
-# demoted spec code (BILLING_NOT_SUPPORTED) is tracked for the same treatment
-# in #1602.
+# Spec codes the SDK helper table has not caught up to. The tagged AdCP 3.1.1
+# enum is authoritative; the SDK is a cross-check, not the authority.
+# AUTH_MISSING / AUTH_INVALID distinguish no credentials from rejected
+# credentials. CREATIVE_NOT_FOUND is correctable; CONFIGURATION_ERROR and
+# AUTH_INVALID are terminal.
 _SPEC_SUPPLEMENT_CODES: dict[str, dict[str, str]] = {
+    "AUTH_MISSING": {"recovery": "correctable", "message": "Authentication credentials are required"},
+    "AUTH_INVALID": {"recovery": "terminal", "message": "Authentication credentials were rejected"},
     "CREATIVE_NOT_FOUND": {"recovery": "correctable", "message": "Creative not found"},
     "CONFIGURATION_ERROR": {"recovery": "terminal", "message": "Configuration error"},
 }
@@ -474,6 +471,25 @@ class AdCPAuthRequiredError(AdCPAuthenticationError):
     Raised when the request contains no auth token at all. Inherits the
     standard ``AUTH_REQUIRED`` wire code from its parent.
     """
+
+
+class AdCPAuthMissingError(AdCPAuthenticationError):
+    """No Authorization credentials were presented (401, ``AUTH_MISSING``)."""
+
+    _default_error_code: ClassVar[str] = "AUTH_MISSING"
+    _default_recovery: ClassVar[RecoveryHint] = "correctable"
+    _default_suggestion: ClassVar[str | None] = "provide credentials via the auth header and retry"
+
+
+class AdCPAuthInvalidError(AdCPAuthenticationError):
+    """Presented Authorization credentials were rejected (401, ``AUTH_INVALID``)."""
+
+    _default_error_code: ClassVar[str] = "AUTH_INVALID"
+    _default_recovery: ClassVar[RecoveryHint] = "terminal"
+    _default_suggestion: ClassVar[str | None] = (
+        "do NOT auto-retry — credentials were rejected; rotate keys, refresh OAuth tokens once if applicable, "
+        "otherwise escalate to a human"
+    )
 
 
 class AdCPAuthorizationError(AdCPError):

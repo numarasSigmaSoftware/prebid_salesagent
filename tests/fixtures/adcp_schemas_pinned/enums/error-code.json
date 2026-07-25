@@ -7,6 +7,8 @@
   "enum": [
     "INVALID_REQUEST",
     "AUTH_REQUIRED",
+    "AUTH_MISSING",
+    "AUTH_INVALID",
     "RATE_LIMITED",
     "SERVICE_UNAVAILABLE",
     "CONFIGURATION_ERROR",
@@ -72,7 +74,9 @@
   ],
   "enumDescriptions": {
     "INVALID_REQUEST": "Request is malformed, missing required fields, or violates schema constraints. Recovery: correctable (check request parameters and fix).",
-    "AUTH_REQUIRED": "Authentication is required, or presented credentials were rejected. Recovery: correctable when credentials are missing; agents MUST NOT auto-retry presented-but-rejected credentials \u2014 escalate to operator for credential rotation. See `error-handling.mdx#auth_required-sub-cases` for the operational distinction.\n\nSub-cases (full guidance). The wire code carries two operationally distinct cases: (a) credentials missing \u2014 agent provides credentials and retries; (b) credentials presented but rejected (expired, revoked, or malformed signature) \u2014 agent SHOULD NOT auto-retry, since re-presenting a rejected credential against an SSO endpoint creates retry-storm patterns indistinguishable from brute-force probes. In sub-case (b) the agent SHOULD escalate to operator for credential rotation rather than loop. A future minor release splits this code into `AUTH_MISSING` (correctable) and `AUTH_INVALID` (terminal); until then, agents apply the same distinction at the application layer by branching on whether credentials were attached to the failing request.",
+    "AUTH_REQUIRED": "**Deprecated** — use `AUTH_MISSING` (no credentials presented) or `AUTH_INVALID` (credentials presented and rejected). Retained as a backward-compatible alias during the 3.x deprecation window. Recovery: correctable.",
+    "AUTH_MISSING": "No credentials were presented. Sellers MUST return this code when no `Authorization` header was included in the request. Recovery: correctable (provide credentials via the auth header and retry).",
+    "AUTH_INVALID": "Credentials were presented but rejected — revoked, malformed signature, or a key no longer in the seller's keystore. Sellers MUST return this code when an `Authorization` header was present but verification failed. Recovery: terminal. Exception: agents with a valid OAuth 2.1 refresh grant MAY treat this as correctable when the rejection reason is token expiry — silently refresh and retry once; if the refresh fails or the seller explicitly signals revocation, escalate to human.",
     "RATE_LIMITED": "Request rate exceeded. Retry after the retry_after interval. Recovery: transient.",
     "SERVICE_UNAVAILABLE": "Seller service is temporarily unavailable. Retry with exponential backoff. Recovery: transient.",
     "CONFIGURATION_ERROR": "The seller's deployment is misconfigured in a way that prevents handling the request \u2014 the buyer cannot fix it, retrying will not help, and reporting to the seller's operator is the only remediation. Examples: account declared with `mode: 'mock'` but no `mock_upstream_url` populated; platform declared with `mode: 'live'` or `mode: 'sandbox'` but no `upstream_url` declared; required environment variable unset on the seller process. Distinct from `INVALID_REQUEST` (buyer-fixable; the request itself is malformed), `SERVICE_UNAVAILABLE` (transient; retry-with-backoff may succeed), `UNSUPPORTED_FEATURE` (capability mismatch \u2014 the seller does not implement the requested specialism), `ACCOUNT_SETUP_REQUIRED` (buyer-side onboarding incomplete; this code is seller-side deployment incomplete), and `GOVERNANCE_UNAVAILABLE` (governance-agent-scoped; transient). Wire placement. The deployment cannot produce a success artifact, so sellers MUST flip transport-level failure markers (HTTP 5xx, MCP `isError: true`, A2A `failed`) and populate both layers per the two-layer model in `error-handling.mdx#envelope-vs-payload-errors-the-two-layer-model`. The code itself is the discriminator; no `error.details` shape is defined for this code (mirroring the minimal-disclosure precedent of `AGENT_SUSPENDED` / `AGENT_BLOCKED`). Sellers SHOULD populate `error.message` with operator-actionable detail (which metadata key is missing, which env var is unset) and MUST NOT include credentials, connection strings, or stack traces \u2014 the message is wire-visible to the buyer. Recovery: terminal \u2014 the buyer MUST surface to the seller's operator and MUST NOT auto-retry (retries cannot resolve a misconfigured deployment until the operator intervenes).",
@@ -145,6 +149,14 @@
     "AUTH_REQUIRED": {
       "recovery": "correctable",
       "suggestion": "provide credentials when missing; do NOT auto-retry rejected credentials \u2014 escalate for rotation"
+    },
+    "AUTH_MISSING": {
+      "recovery": "correctable",
+      "suggestion": "provide credentials via the auth header and retry"
+    },
+    "AUTH_INVALID": {
+      "recovery": "terminal",
+      "suggestion": "do NOT auto-retry \u2014 credentials were rejected; rotate keys, refresh OAuth tokens once if applicable, otherwise escalate to a human"
     },
     "RATE_LIMITED": {
       "recovery": "transient",

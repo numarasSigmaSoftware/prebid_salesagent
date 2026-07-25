@@ -65,6 +65,8 @@ def _adcp_error_from_code(
         AdCPAccountSuspendedError,
         AdCPAdapterError,
         AdCPAuthenticationError,
+        AdCPAuthInvalidError,
+        AdCPAuthMissingError,
         AdCPBudgetExhaustedError,
         AdCPBudgetTooLowError,
         AdCPCapabilityNotSupportedError,
@@ -89,6 +91,8 @@ def _adcp_error_from_code(
         for cls in (
             AdCPValidationError,
             AdCPAuthenticationError,
+            AdCPAuthMissingError,
+            AdCPAuthInvalidError,
             AdCPNotFoundError,
             AdCPAccountNotFoundError,
             AdCPAccountSetupRequiredError,

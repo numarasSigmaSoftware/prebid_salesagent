@@ -62,7 +62,8 @@ from src.core.database.repositories.workflow import TERMINAL_STEP_STATUSES, Work
 from src.core.domain_config import get_a2a_server_url
 from src.core.exceptions import (
     AdCPAuthenticationError,
-    AdCPAuthRequiredError,
+    AdCPAuthInvalidError,
+    AdCPAuthMissingError,
     AdCPCapabilityNotSupportedError,
     AdCPConfigurationError,
     AdCPError,
@@ -198,15 +199,16 @@ def _enveloped_invalid_request(exc: AdCPError) -> InvalidRequestError:
     return InvalidRequestError(message=sanitized.message, data=envelope)
 
 
-def _auth_required_error(auth_error: AdCPAuthenticationError) -> InvalidRequestError:
-    """THE single source for every A2A auth rejection — AUTH_REQUIRED envelope in ``data``.
+def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequestError:
+    """THE single source for every A2A auth rejection's two-layer envelope.
 
     Covers five auth raises: the missing-token, resolution-failure, and invalid-principal arms of
     ``_resolve_a2a_identity`` (inherited by tasks/get, tasks/cancel and the four
     push-notification-config methods), the ``message/send`` pre-dispatch check, and the standalone
     ``_handle_explicit_skill`` identity guard. Before this, only ``message/send`` carried the
-    envelope, so a buyer branching on ``error.data.adcp_error.code == "AUTH_REQUIRED"`` got it
-    there and nowhere else. (``_resolve_a2a_identity`` has a SIXTH raise — no resolvable tenant for
+    envelope, so a buyer got it there and nowhere else. Missing credentials emit AUTH_MISSING with
+    correctable recovery; rejected credentials emit AUTH_INVALID with terminal recovery.
+    (``_resolve_a2a_identity`` has a SIXTH raise — no resolvable tenant for
     an otherwise-authenticated principal — that is a seller-side config failure, not an auth
     failure, and deliberately routes through ``_enveloped_invalid_request`` with
     ``AdCPConfigurationError`` instead; it is excluded from this helper by design, not by omission.)
@@ -214,7 +216,7 @@ def _auth_required_error(auth_error: AdCPAuthenticationError) -> InvalidRequestE
     Takes the TYPED error rather than a message + optional cause: the wire code, recovery, and the
     graded ``suggestion`` then all come from the class defaults (one definition, never re-specified
     per raise site), no argument can be silently discarded, and a non-auth ``AdCPError`` cannot be
-    adopted by a function documented as the AUTH_REQUIRED source — that would emit a different wire
+    adopted by a function documented as the authentication-envelope source — that would emit a different wire
     code from here. Non-auth rejections use ``_enveloped_invalid_request`` directly.
     """
     return _enveloped_invalid_request(auth_error)
@@ -480,7 +482,7 @@ class AdCPRequestHandler(RequestHandler):
         headers = auth_ctx.headers if auth_ctx else {}
 
         if require_valid_token and not auth_token:
-            raise _auth_required_error(AdCPAuthRequiredError("Missing authentication token"))
+            raise _enveloped_auth_error(AdCPAuthMissingError("Missing authentication token"))
 
         # Extract testing context from A2A request headers (same as MCP does)
         testing_context = AdCPTestContext.from_headers(headers)
@@ -494,13 +496,13 @@ class AdCPRequestHandler(RequestHandler):
                 testing_context=testing_context,
             )
         except AdCPAuthenticationError as e:
-            # One source for the enveloped auth error (sanitized message, AUTH_REQUIRED in
-            # ``data``) so every A2A method surfaces it identically — not just message/send.
-            raise _auth_required_error(e) from e
+            # A presented token was rejected. Preserve the cause server-side but emit the
+            # AUTH_INVALID contract consistently for every A2A method.
+            raise _enveloped_auth_error(AdCPAuthInvalidError("Authentication credentials were rejected.")) from e
 
         if require_valid_token:
             if not identity.principal_id:
-                raise _auth_required_error(AdCPAuthenticationError("Authentication token is invalid or expired."))
+                raise _enveloped_auth_error(AdCPAuthInvalidError("Authentication token is invalid or expired."))
 
             if not identity.tenant:
                 # The credentials were VALID — the principal authenticated and only the tenant
@@ -867,12 +869,12 @@ class AdCPRequestHandler(RequestHandler):
 
             # Require authentication for non-public skills. Stays a JSON-RPC
             # InvalidRequestError (protocol-level rejection) while carrying the two-layer
-            # envelope in ``data`` — via the same _auth_required_error source every other
+            # envelope in ``data`` — via the same _enveloped_auth_error source every other
             # A2A auth raise uses, so the code/recovery/suggestion and both layers' message
             # cannot drift between message/send and the rest.
             if requires_auth and not auth_token:
-                raise _auth_required_error(
-                    AdCPAuthRequiredError("Authentication required - Bearer token required in Authorization header")
+                raise _enveloped_auth_error(
+                    AdCPAuthMissingError("Authentication required - Bearer token required in Authorization header")
                 )
 
             # ── Transport boundary: resolve identity ONCE ──
@@ -1932,7 +1934,7 @@ class AdCPRequestHandler(RequestHandler):
 
         # Validate identity for non-discovery skills
         if skill_name not in DISCOVERY_SKILLS and (identity is None or not identity.principal_id):
-            raise _auth_required_error(AdCPAuthRequiredError("Authentication required for skill invocation"))
+            raise _enveloped_auth_error(AdCPAuthMissingError("Authentication required for skill invocation"))
 
         skill_handlers = self._skill_handler_map()
 

@@ -39,7 +39,6 @@ from a2a.types import (
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler, _dict_to_value
 from src.core.exceptions import (
     AUTH_REQUIRED_CANONICAL_SUGGESTION,
-    AUTH_REQUIRED_SUGGESTION,
     VALIDATION_ERROR_SUGGESTION,
     AdCPAuthenticationError,
     AdCPValidationError,
@@ -687,13 +686,13 @@ def _auth_guarded_methods():
 
 @pytest.mark.parametrize(("handler_method", "params"), _auth_guarded_methods())
 @pytest.mark.asyncio
-async def test_every_auth_guarded_method_carries_the_auth_required_envelope(handler_method, params):
-    """EVERY A2A method's auth failure carries the two-layer AUTH_REQUIRED envelope in ``data``.
+async def test_every_auth_guarded_method_carries_the_auth_missing_envelope(handler_method, params):
+    """EVERY A2A method's missing-credential failure carries AUTH_MISSING in ``data``.
 
     "Stays on the JSON-RPC wire" and "carries the envelope in ``data``" are orthogonal: the
     sibling test above pins only the former. Regression this closes: the envelope was attached
     at the message/send arm alone, so a buyer branching on
-    ``error.data.adcp_error.code == "AUTH_REQUIRED"`` got it from message/send but NOT from
+    ``error.data.adcp_error.code == "AUTH_MISSING"`` got it from message/send but NOT from
     tasks/get, tasks/cancel, or any push-notification-config method. All auth raises now share
     one enveloped source, so this parametrization reddens if any arm regresses to a bare error.
     """
@@ -709,13 +708,13 @@ async def test_every_auth_guarded_method_carries_the_auth_required_envelope(hand
     # object: ``build_error_response`` is the SDK dispatcher's own serializer, so a payload that
     # failed to survive it would never reach a buyer regardless of what the object held.
     body = build_error_response("req-auth", err)
-    assert_envelope_shape(body["error"]["data"], "AUTH_REQUIRED", recovery="correctable")
+    assert_envelope_shape(body["error"]["data"], "AUTH_MISSING", recovery="correctable")
     # Both wire layers must carry the SAME sanitized message (per _enveloped_invalid_request's
-    # contract), and the suggestion must be the graded AUTH_REQUIRED hint — neither property was
+    # contract), and the suggestion must be the graded AUTH_MISSING hint — neither property was
     # pinned above, so a regression that desynced ``error.message`` from the envelope's message, or
     # dropped/replaced the suggestion, would have gone undetected.
     assert body["error"]["message"] == body["error"]["data"]["adcp_error"]["message"]
-    assert body["error"]["data"]["adcp_error"]["suggestion"] == AUTH_REQUIRED_SUGGESTION
+    assert body["error"]["data"]["adcp_error"]["suggestion"] == "provide credentials via the auth header and retry"
 
 
 # The parametrization above drives only the MISSING-TOKEN arm. The remaining auth arms each
@@ -724,8 +723,9 @@ async def test_every_auth_guarded_method_carries_the_auth_required_envelope(hand
 
 
 @pytest.mark.asyncio
-async def test_auth_resolution_failure_arm_carries_the_envelope():
-    """The `resolve_identity` raised-AdCPAuthenticationError arm (a presented-but-rejected token)."""
+@pytest.mark.parametrize(("handler_method", "params"), _auth_guarded_methods())
+async def test_auth_resolution_failure_arm_carries_the_auth_invalid_envelope(handler_method, params):
+    """Every A2A auth boundary classifies a rejected presented token as AUTH_INVALID."""
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value="a-rejected-token")
 
@@ -734,14 +734,15 @@ async def test_auth_resolution_failure_arm_carries_the_envelope():
         side_effect=AdCPAuthenticationError("Token rejected by the credential store."),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
-            await handler.on_get_task(GetTaskRequest(id="task_envelope"), context=None)
+            await getattr(handler, handler_method)(params, context=None)
 
-    assert_envelope_shape(exc_info.value.data, "AUTH_REQUIRED", recovery="correctable")
+    assert_envelope_shape(exc_info.value.data, "AUTH_INVALID", recovery="terminal")
 
 
 @pytest.mark.asyncio
-async def test_principal_less_identity_arm_carries_the_envelope():
-    """A token that resolves but yields no principal — the invalid/expired arm."""
+@pytest.mark.parametrize(("handler_method", "params"), _auth_guarded_methods())
+async def test_principal_less_identity_arm_carries_the_auth_invalid_envelope(handler_method, params):
+    """Every A2A auth boundary classifies a principal-less token as AUTH_INVALID."""
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value="a-stale-token")
     principal_less = PrincipalFactory.make_identity(
@@ -750,9 +751,9 @@ async def test_principal_less_identity_arm_carries_the_envelope():
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=principal_less):
         with pytest.raises(InvalidRequestError) as exc_info:
-            await handler.on_get_task(GetTaskRequest(id="task_envelope"), context=None)
+            await getattr(handler, handler_method)(params, context=None)
 
-    assert_envelope_shape(exc_info.value.data, "AUTH_REQUIRED", recovery="correctable")
+    assert_envelope_shape(exc_info.value.data, "AUTH_INVALID", recovery="terminal")
 
 
 @pytest.mark.asyncio
@@ -767,7 +768,7 @@ async def test_explicit_skill_identity_guard_carries_the_envelope():
     with pytest.raises(InvalidRequestError) as exc_info:
         await handler._handle_explicit_skill("create_media_buy", {"buyer_ref": "b1"}, None)
 
-    assert_envelope_shape(exc_info.value.data, "AUTH_REQUIRED", recovery="correctable")
+    assert_envelope_shape(exc_info.value.data, "AUTH_MISSING", recovery="correctable")
 
 
 @pytest.mark.asyncio

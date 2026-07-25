@@ -10,6 +10,7 @@ Validates that:
 """
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -40,6 +41,31 @@ from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_
 # ---------------------------------------------------------------------------
 # MCP Boundary: extract_error_info
 # ---------------------------------------------------------------------------
+
+
+class TestAuthCodeConformance:
+    """The auth taxonomy follows tagged AdCP 3.1.1, not the SDK's older vocabulary."""
+
+    @pytest.mark.parametrize(
+        ("error_class", "code"),
+        [
+            pytest.param("AdCPAuthMissingError", "AUTH_MISSING", id="missing-credentials"),
+            pytest.param("AdCPAuthInvalidError", "AUTH_INVALID", id="rejected-credentials"),
+        ],
+    )
+    def test_split_auth_error_defaults_match_pinned_enum_metadata(self, error_class, code):
+        """Absent versus rejected credentials carry their spec code, recovery, and suggestion."""
+        from src.core import exceptions
+
+        enum_path = (
+            Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
+        )
+        metadata = json.loads(enum_path.read_text())["enumMetadata"][code]
+        error = getattr(exceptions, error_class)("test auth failure")
+
+        assert error.wire_error_code == code
+        assert error.recovery == metadata["recovery"]
+        assert error.suggestion == metadata["suggestion"]
 
 
 class TestExtractErrorInfoAdCPError:

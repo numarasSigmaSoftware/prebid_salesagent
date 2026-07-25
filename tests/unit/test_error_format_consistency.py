@@ -754,6 +754,8 @@ class TestErrorCodeVocabularyConsistency:
         "VALIDATION_ERROR",  # adcp-req: Generic Errors
         "INVALID_REQUEST",  # SDK standard: AdCPInvalidRequestError (semantically-invalid value)
         "AUTH_REQUIRED",  # SDK standard: auth failures (AdCPAuthenticationError + AdCPAuthorizationError)
+        "AUTH_MISSING",  # Spec supplement: absent Authorization credentials
+        "AUTH_INVALID",  # Spec supplement: presented credentials rejected
         "POLICY_VIOLATION",  # SDK standard: AdCPPolicyViolationError (content/advertising policy block)
         "NOT_FOUND",  # Base class for entity-specific codes (internal only)
         "ACCOUNT_NOT_FOUND",  # adcp-req: Account resolution (BR-RULE-080)
@@ -800,6 +802,8 @@ class TestErrorCodeVocabularyConsistency:
         from src.core.exceptions import (
             AdCPAdapterError,
             AdCPAuthenticationError,
+            AdCPAuthInvalidError,
+            AdCPAuthMissingError,
             AdCPAuthorizationError,
             AdCPBudgetExhaustedError,
             AdCPConflictError,
@@ -814,6 +818,8 @@ class TestErrorCodeVocabularyConsistency:
             AdCPError,
             AdCPValidationError,
             AdCPAuthenticationError,
+            AdCPAuthMissingError,
+            AdCPAuthInvalidError,
             AdCPAuthorizationError,
             AdCPNotFoundError,
             AdCPConflictError,
