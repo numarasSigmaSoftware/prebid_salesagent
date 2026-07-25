@@ -1372,6 +1372,41 @@ class Targeting(TargetingOverlay):
         return super().dict(**kwargs)
 
 
+def _validate_targeting_overlay_constraints(targeting: Targeting | None) -> None:
+    """Enforce AdCP 3.1.1 request targeting-overlay constraints.
+
+    Graded by the UC-002/UC-003 targeting-overlay partition and boundary
+    storyboards (BR-RULE-014): include/exclude sets must not overlap,
+    proximity entries select exactly one method, frequency caps with a maximum
+    require both ``per`` and ``window``, and keyword tuples are unique within a
+    request.
+
+    This validation belongs on request packages, not ``Targeting`` itself:
+    stored legacy targeting objects must remain readable during reconstruction.
+    """
+    if targeting is None:
+        return
+
+    device_overlap = set(targeting.device_type or []) & set(targeting.device_type_exclude or [])
+    if device_overlap:
+        raise ValueError(f"device_type and device_type_exclude overlap: {sorted(device_overlap)}")
+
+    for proximity in targeting.geo_proximity or []:
+        method_count = sum(
+            method is not None for method in (proximity.travel_time, proximity.radius, proximity.geometry)
+        )
+        if method_count != 1:
+            raise ValueError("each geo_proximity entry must specify exactly one targeting method")
+
+    if targeting.frequency_cap and targeting.frequency_cap.max_impressions is not None:
+        if targeting.frequency_cap.per is None or targeting.frequency_cap.window is None:
+            raise ValueError("frequency_cap per and window are required when max_impressions is set")
+
+    keyword_keys = [(target.keyword, target.match_type) for target in targeting.keyword_targets or []]
+    if len(keyword_keys) != len(set(keyword_keys)):
+        raise ValueError("keyword_targets must not contain duplicate (keyword, match_type) pairs")
+
+
 class Budget(SalesAgentBaseModel):
     """Budget object with multi-currency support (AdCP spec compliant)."""
 
@@ -1708,6 +1743,11 @@ class PackageRequest(LibraryPackageRequest):
     def upgrade_legacy_format_ids(cls, values: dict) -> dict:
         return _upgrade_legacy_format_ids(values)
 
+    @model_validator(mode="after")
+    def validate_targeting_overlay(self) -> "PackageRequest":
+        _validate_targeting_overlay_constraints(self.targeting_overlay)
+        return self
+
 
 class Package(LibraryPackage):
     """Package response schema (for CreateMediaBuySuccess and responses).
@@ -2011,6 +2051,11 @@ class AdCPPackageUpdate(LibraryPackageUpdate):
                     suggestion="Remove the immutable field(s) from the package update, or create a new media buy to change product, formats, or pricing.",
                 )
         return data
+
+    @model_validator(mode="after")
+    def validate_targeting_overlay(self) -> "AdCPPackageUpdate":
+        _validate_targeting_overlay_constraints(self.targeting_overlay)
+        return self
 
 
 # AdCP idempotency_key constraint (create- and update-media-buy-request.json):

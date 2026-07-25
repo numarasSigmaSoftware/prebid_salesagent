@@ -2199,14 +2199,18 @@ def then_no_sandbox_field(ctx: dict) -> None:
 def then_validation_error(ctx: dict) -> None:
     """Assert response indicates a validation error — wire-first.
 
-    On a wire transport the buyer-facing code must be exactly VALIDATION_ERROR
-    because an unsupported status is a semantic value failure. No-wire
-    fallback: either a raised exception with validation-related keywords, or
-    response.errors containing validation-related content.
+    MCP rejects the invalid enum at its request-schema boundary as
+    INVALID_REQUEST. REST/A2A reach the semantic status validator and return
+    VALIDATION_ERROR. No-wire fallback: either a raised exception with
+    validation-related keywords, or response.errors containing
+    validation-related content.
     """
     wire_code = _wire_code(ctx)
     if wire_code is not None:
-        assert wire_code == "VALIDATION_ERROR", f"Expected wire code VALIDATION_ERROR, got {wire_code!r}"
+        from tests.harness.transport import Transport
+
+        expected_code = "INVALID_REQUEST" if ctx.get("transport") is Transport.MCP else "VALIDATION_ERROR"
+        assert wire_code == expected_code, f"Expected wire code {expected_code}, got {wire_code!r}"
         return
 
     error = ctx.get("error")
@@ -2237,15 +2241,19 @@ def then_validation_error(ctx: dict) -> None:
 def then_real_validation_error(ctx: dict) -> None:
     """Assert error is a real validation error (not simulated sandbox response).
 
-    Wire-first: a "real" validation error is an actual wire REJECTION — a
-    two-layer error envelope carrying VALIDATION_ERROR with correctable
-    recovery (BR-RULE-209 INV-7: sandbox inputs are validated like production;
-    a simulated sandbox response would come back as a success payload instead).
-    No-wire fallback: the typed production exception.
+    Wire-first: a "real" validation error is an actual wire rejection with
+    correctable recovery (BR-RULE-209 INV-7: sandbox inputs are validated like
+    production; a simulated sandbox response would come back as a success
+    payload instead). MCP rejects at request-schema parsing as INVALID_REQUEST;
+    REST/A2A reach semantic validation and emit VALIDATION_ERROR. No-wire
+    fallback: the typed production exception.
     """
     result = ctx.get("result")
     if result is not None and result.wire_error_envelope is not None:
-        result.assert_wire_error("VALIDATION_ERROR")
+        from tests.harness.transport import Transport
+
+        expected_code = "INVALID_REQUEST" if ctx.get("transport") is Transport.MCP else "VALIDATION_ERROR"
+        result.assert_wire_error(expected_code)
         return
 
     error = ctx.get("error")

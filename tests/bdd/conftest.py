@@ -366,59 +366,9 @@ _XFAIL_TAGS: dict[str, str] = {
 # some examples exercise unimplemented features. Each entry: (tag, node_id
 # substrings that should xfail, reason).
 _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
-    # #1417 wiring surfaced pre-existing UC-003 targeting-overlay gaps
-    # (tracked separately). The geo include/exclude overlap partitions DO reach the
-    # converged update.py:444 raise and PASS (proving da07); these other partitions
-    # hit unrelated gaps: pydantic extra='forbid' on unknown/managed/device_platform
-    # fields raising a raw ValidationError before dispatch, GeoProximity requiring
-    # lat/lng (geometry/radius/travel_time-only modes + method-conflict unmodeled),
-    # frequency_cap field-combo validation, keyword-duplicate detection, and
-    # device_type include/exclude overlap validation.
-    (
-        "T-UC-003-partition-targeting-overlay",
-        {
-            "impl-unknown_field",
-            "mcp-unknown_field",
-            "[rest-unknown_field",
-            "impl-managed_only_dimension",
-            "mcp-managed_only_dimension",
-            "[rest-managed_only_dimension",
-            "multiple_dimensions",
-            "device_type_overlap",
-            "impl-proximity_method_conflict",
-            "mcp-proximity_method_conflict",
-            "[rest-proximity_method_conflict",
-            "proximity_geometry",
-            "proximity_radius",
-            "proximity_travel_time",
-            "frequency_cap_missing_fields",
-            "keyword_duplicate",
-        },
-        "Pre-existing UC-003 targeting-overlay validation gaps (not da07): pydantic "
-        "extra='forbid' / GeoProximity coordinate modes / frequency_cap / keyword-dup / device_type overlap",
-    ),
-    (
-        "T-UC-003-boundary-targeting-overlay",
-        {
-            "impl-unknown field name",
-            "mcp-unknown field name",
-            "[rest-unknown field name",
-            "impl-managed-only dimension",
-            "mcp-managed-only dimension",
-            "[rest-managed-only dimension",
-            "device_type include/exclude overlap",
-            "with travel_time only",
-            "with radius only",
-            "with geometry only",
-            "impl-geo_proximity with travel_time AND radius",
-            "mcp-geo_proximity with travel_time AND radius",
-            "[rest-geo_proximity with travel_time AND radius",
-            "frequency_cap max_impressions without per",
-            "keyword_targets with duplicate",
-        },
-        "Pre-existing UC-003 targeting-overlay validation gaps (not da07): pydantic "
-        "extra='forbid' / GeoProximity coordinate modes / frequency_cap / keyword-dup / device_type overlap",
-    ),
+    # UC-003 targeting-overlay partitions and boundaries are fully graduated:
+    # canonical AdCP 3.1.1 proximity shapes reach production and every cross-field
+    # constraint is enforced consistently across impl/A2A/MCP/REST.
     # Duplicate disclosure filter values are rejected by the local AdCP 3.1.1
     # uniqueItems override; invalid examples must not be selectively suppressed.
     # Graduated: T-UC-005-boundary-asset-types (all 4 transports pass — brief/catalog now in enum)
@@ -1677,27 +1627,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # _aw_partition_campaign leg is dropped; the row passes unmasked. (The old #1462
         # "request path drops post_click" framing was wrong for the wire transports; #1462 is
         # the in-process _impl path, which BDD does not parametrize.)
-        # The partition shape's error "INVALID_REQUEST" rows STILL fail on e2e_rest: the
-        # generic "with {request_params}" step shadows the specific "with attribution_window
-        # {value}" step and _parse_request_params drops the space-form window, so the window
-        # never reaches the live server (#1417). Marker kept for e2e_rest until the step-
-        # binding bug is fixed.
-        _aw_partition_error = "T-UC-004-partition-attribution" in marker_names and 'error "INVALID_REQUEST"' in nodeid
-        # #1545/x18x: the campaign partition row GRADUATED on a2a (the only transport
-        # parametrized for it) — INV-5 fires VALIDATION_ERROR with suggestion — so the
-        # former strict=True _aw_partition_campaign leg is dropped (no _aw_partition_campaign
-        # var remains). Only the error "INVALID_REQUEST" rows still fail on e2e_rest, where
-        # the generic "with {request_params}" step still shadows the specific partition step.
-        _partition_window_dropped = _aw_partition_error and is_e2e_rest
-        if _partition_window_dropped:
-            item.add_marker(
-                pytest.mark.xfail(
-                    reason="attribution_window partition: the generic 'with {request_params}' step "
-                    "shadows the specific partition step and drops the window (salesagent-50hl); "
-                    "validation never fires so the rejection assertion can't pass",
-                    strict=True,
-                )
-            )
+        # Attribution-window schema errors now reach and pass on every transport,
+        # including e2e_rest; the former strict xfail is retired.
 
         # Graduated: T-UC-004-boundary-account — transport-aware.
         # "account_id present"/"brand + operator" (valid): fail on mcp/rest only.
