@@ -245,6 +245,9 @@ class CreativeSyncEnv(IntegrationEnv):
             body["account"] = account.model_dump(mode="json") if hasattr(account, "model_dump") else account
         if "idempotency_key" in kwargs:
             body["idempotency_key"] = kwargs["idempotency_key"]
+        if "context" in kwargs:
+            context = kwargs["context"]
+            body["context"] = context.model_dump(mode="json") if hasattr(context, "model_dump") else context
         return body
 
     def parse_rest_response(self, data: dict[str, Any]) -> SyncCreativesResponse:

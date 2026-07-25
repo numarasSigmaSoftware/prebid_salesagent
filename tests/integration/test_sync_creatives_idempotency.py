@@ -24,6 +24,8 @@ import pytest
 
 from src.core.exceptions import AdCPIdempotencyConflictError, build_two_layer_error_envelope
 from tests.harness import CreativeSyncEnv
+from tests.harness.creative_sync import CreativeSyncIdempotencyWireEnv
+from tests.harness.transport import Transport
 from tests.helpers import assert_envelope_shape
 from tests.helpers.creative_test_helpers import creative_payload
 
@@ -124,3 +126,107 @@ class TestSyncCreativesIdempotency:
                         raw_wire_payload=raw,
                     )
             assert work.call_count == 2
+
+    def test_crash_before_cache_completion_does_not_duplicate_workflow(self, integration_db):
+        """A retry resumes deterministic internal upserts after the cache-write crash window."""
+        from src.core.database.repositories.uow import WorkflowUoW
+        from src.core.tools.creatives import _sync as sync_module
+
+        with CreativeSyncEnv(tenant_id="cre_crash_fence", principal_id="agent_cre_crash_fence") as env:
+            env.setup_default_data()
+            env._commit_factory_data()
+            env.identity.tenant["approval_mode"] = "require-human"
+            key = f"cre-crash-{uuid.uuid4().hex}"
+            payload = _creative(creative_id="creative-crash-fence")
+            raw = {"creatives": [payload], "idempotency_key": key}
+            original_complete = sync_module.complete_idempotent
+            calls = 0
+
+            def fail_first_completion(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("crash before cache completion")
+                return original_complete(*args, **kwargs)
+
+            with patch.object(sync_module, "complete_idempotent", side_effect=fail_first_completion):
+                with pytest.raises(RuntimeError, match="crash before cache completion"):
+                    sync_module._sync_creatives_impl(
+                        creatives=[payload],
+                        idempotency_key=key,
+                        identity=env.identity,
+                        raw_wire_payload=raw,
+                    )
+                retry = sync_module._sync_creatives_impl(
+                    creatives=[payload],
+                    idempotency_key=key,
+                    identity=env.identity,
+                    raw_wire_payload=raw,
+                )
+
+            assert retry.replayed is False
+            with WorkflowUoW(env._tenant_id) as uow:
+                assert uow.workflows is not None
+                assert (
+                    uow.workflows.count_by_tenant(
+                        object_type="creative",
+                        object_id="creative-crash-fence",
+                    )
+                    == 1
+                )
+
+
+@pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+def test_sync_creatives_wire_retry_replays_without_second_write(integration_db, transport: Transport) -> None:
+    """Every exposed boundary uses the durable cache and echoes the retry context."""
+    tenant_id = f"cre_wire_{transport.value}"
+    principal_id = f"agent_cre_wire_{transport.value}"
+    key = f"cre-wire-{transport.value}-{uuid.uuid4().hex}"
+    creative = _creative(creative_id=f"creative-wire-{transport.value}")
+
+    with CreativeSyncIdempotencyWireEnv(tenant_id=tenant_id, principal_id=principal_id) as env:
+        env.setup_default_data()
+        first = env.call_via(
+            transport,
+            creatives=[creative],
+            idempotency_key=key,
+            context={"correlation_id": "original"},
+        )
+        second = env.call_via(
+            transport,
+            creatives=[creative],
+            idempotency_key=key,
+            context={"correlation_id": "retry"},
+        )
+
+    assert first.is_success, first.error
+    assert second.is_success, second.error
+    assert first.payload.replayed is False
+    assert second.payload.replayed is True
+    assert _action(first.payload.creatives[0].action) == "created"
+    assert _action(second.payload.creatives[0].action) == "created"
+    assert second.payload.context.model_dump(exclude_none=True) == {"correlation_id": "retry"}
+
+
+@pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+def test_sync_creatives_wire_conflict_has_exact_envelope(integration_db, transport: Transport) -> None:
+    tenant_id = f"cre_conflict_wire_{transport.value}"
+    principal_id = f"agent_cre_conflict_wire_{transport.value}"
+    key = f"cre-conflict-wire-{transport.value}-{uuid.uuid4().hex}"
+
+    with CreativeSyncIdempotencyWireEnv(tenant_id=tenant_id, principal_id=principal_id) as env:
+        env.setup_default_data()
+        first = env.call_via(
+            transport,
+            creatives=[_creative(name="Original")],
+            idempotency_key=key,
+        )
+        second = env.call_via(
+            transport,
+            creatives=[_creative(name="Changed")],
+            idempotency_key=key,
+        )
+
+    assert first.is_success, first.error
+    assert second.is_error
+    assert_envelope_shape(second.wire_error_envelope, "IDEMPOTENCY_CONFLICT", recovery="correctable")

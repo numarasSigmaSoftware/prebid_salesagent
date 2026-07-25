@@ -179,6 +179,7 @@ class TransportResult:
         *,
         recovery: str | None = None,
         require_suggestion: bool = False,
+        exact_suggestion: str | None = None,
         message_substr: str | None = None,
         field: str | None = None,
     ) -> None:
@@ -209,9 +210,13 @@ class TransportResult:
             "succeeded or errored before reaching a transport."
         )
         assert_envelope_shape(envelope, code, recovery=expected_recovery, message_substr=message_substr)
-        if require_suggestion:
+        if require_suggestion or exact_suggestion is not None:
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, f"Expected a non-empty suggestion in the {code} wire envelope: {envelope}"
+            if exact_suggestion is not None:
+                assert suggestion == exact_suggestion, (
+                    f"Expected exact suggestion {exact_suggestion!r}, got {suggestion!r}: {envelope}"
+                )
         if field is not None:
             # Delegates to the one home for the two-layer field pin — step
             # modules that hand-rolled it had already drifted (one copy checked

@@ -44,7 +44,10 @@ def test_sync_creatives_core_mapping_matches_both_call_seams() -> None:
 
     assert set(values) == _CORE_KEYS
     assert set(signature(_sync_creatives_impl).parameters) == _CORE_KEYS | {"raw_wire_payload"}
-    assert set(signature(_sync_creatives_work).parameters) == _CORE_KEYS | {"deferred_notifications"}
+    assert set(signature(_sync_creatives_work).parameters) == _CORE_KEYS | {
+        "deferred_notifications",
+        "deferred_observability",
+    }
 
 
 def test_notification_failure_after_durable_completion_preserves_success(mocker) -> None:
@@ -80,6 +83,7 @@ def test_notification_failure_after_durable_completion_preserves_success(mocker)
     uow = MagicMock()
     uow.__enter__.return_value = uow
     mocker.patch("src.core.tools.creatives._sync.IdempotencyUoW", return_value=uow)
+    mocker.patch("src.core.tools.creatives._sync.CreativeUoW", return_value=uow)
 
     result = _sync_creatives_impl(
         creatives=[],

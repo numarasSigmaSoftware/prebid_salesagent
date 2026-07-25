@@ -20,25 +20,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 
 @pytest.mark.asyncio
-async def test_a2a_rejects_unsafe_context_before_recursive_wire_capture():
-    from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-    from src.core.exceptions import AdCPValidationError
+async def test_a2a_accepts_deep_acyclic_context_before_iterative_wire_capture():
+    from src.a2a_server.adcp_a2a_server import _validate_a2a_application_context
 
     deep = cursor = {}
     for _ in range(65):
         cursor["nested"] = {}
         cursor = cursor["nested"]
 
-    handler = AdCPRequestHandler.__new__(AdCPRequestHandler)
     with patch("src.a2a_server.adcp_a2a_server.record_boundary_error_for_identity"):
-        with pytest.raises(AdCPValidationError, match="maximum nesting depth") as exc_info:
-            await handler._handle_explicit_skill(
-                "get_products",
-                {"brief": "ads", "context": deep},
-                identity=None,
-            )
-
-    assert exc_info.value.field == "context"
+        _validate_a2a_application_context("get_products", {"brief": "ads", "context": deep}, None)
 
 
 class TestCoreToolImports:

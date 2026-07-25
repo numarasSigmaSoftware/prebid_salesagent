@@ -17,7 +17,7 @@ from starlette.testclient import TestClient
 
 from src.app import app
 from src.core.resolved_identity import ResolvedIdentity
-from tests.helpers import assert_envelope_field, assert_envelope_shape
+from tests.helpers import assert_envelope_shape
 
 client = TestClient(app)
 
@@ -101,23 +101,15 @@ class TestCapabilitiesProtocolsQuery:
             message_substr="idempotency_key is too short",
         )
 
-    def test_deeply_nested_context_is_rejected_before_dispatch_on_the_real_wire(self):
-        """A context unsafe for FastAPI's encoder becomes a typed 400, not a 500."""
+    def test_deeply_nested_context_is_accepted_without_an_arbitrary_depth_limit(self):
         deep = cursor = {}
         for _ in range(65):
             cursor["nested"] = {}
             cursor = cursor["nested"]
 
-        with patch("src.core.tools.products._get_products_impl") as mock_core:
-            response = client.post(
-                "/api/v1/products",
-                json={"brief": "ads", "adcp_version": "3.1", "context": deep},
-            )
+        from src.core.application_context_values import validate_context_value
 
-        assert response.status_code == 400, response.text
-        assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-        assert_envelope_field(response.json(), "context")
-        mock_core.assert_not_called()
+        assert validate_context_value(deep) is None
 
 
 _STANDARD_READ_REST_CASES = (
@@ -309,6 +301,33 @@ class TestCreateMediaBuyEndpoint:
             json={"packages": []},
         )
         assert response.status_code == 401
+
+    @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
+    def test_pause_on_create_is_explicitly_unsupported(self, mock_resolve):
+        response = client.post(
+            "/api/v1/media-buys",
+            json={
+                "brand": {"domain": "testbrand.com"},
+                "packages": [],
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-02-01T00:00:00Z",
+                "idempotency_key": "pause-create-rest-0001",
+                "paused": True,
+                "context": {"test_case": "pause-on-create"},
+            },
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+        assert response.status_code == 422
+        assert_envelope_shape(
+            response.json(),
+            "UNSUPPORTED_FEATURE",
+            recovery="correctable",
+        )
+        expected_suggestion = "Create the media buy, then call update_media_buy with paused=true."
+        assert response.json()["adcp_error"]["suggestion"] == expected_suggestion
+        assert response.json()["errors"][0]["suggestion"] == expected_suggestion
+        assert response.json()["context"] == {"test_case": "pause-on-create"}
 
 
 # ---------------------------------------------------------------------------

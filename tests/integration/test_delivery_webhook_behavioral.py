@@ -336,14 +336,14 @@ class TestWebhookRetrySucceedsOnSecondAttempt:
 
 
 @pytest.mark.requires_db
-class TestWebhook401ForbiddenNoRetry:
-    """Tests that 401 authentication errors are not retried.
+class TestWebhook401TransientRetry:
+    """Tests that 401 authentication errors follow the standard retry schedule.
 
     Covers: UC-004-EXT-G-05
     """
 
-    def test_401_response_is_not_retried_and_marked_failed(self, integration_db):
-        """A 401 Forbidden response must cause immediate failure with no retries.
+    def test_401_response_is_retried_and_marked_failed(self, integration_db):
+        """A persistent 401 is retried before the event is marked failed.
 
         Covers: UC-004-EXT-G-05
         """
@@ -365,25 +365,25 @@ class TestWebhook401ForbiddenNoRetry:
             assert success is False
             assert result["status"] == "failed"
             assert result["response_code"] == 401
-            assert env.mock["post"].call_count == 1
-            assert result["attempts"] == 1
+            assert env.mock["post"].call_count == 3
+            assert result["attempts"] == 3
             assert "401" in result["error"]
 
     def test_401_vs_500_retry_behavior_contrast(self, integration_db):
-        """Verify 401 does NOT retry while 500 DOES retry.
+        """Verify 401 and 500 both follow the transient retry schedule.
 
         Covers: UC-004-EXT-G-05
         """
         from tests.harness import WebhookEnv
 
-        # --- 401 case: should stop immediately ---
+        # --- 401 case: should retry all attempts ---
         with WebhookEnv() as env:
             env.set_http_status(401, "Unauthorized")
             success_401, result_401 = env.call_deliver(max_retries=3)
 
             assert success_401 is False
-            assert result_401["attempts"] == 1
-            assert env.mock["post"].call_count == 1
+            assert result_401["attempts"] == 3
+            assert env.mock["post"].call_count == 3
 
         # --- 500 case: should retry all attempts ---
         with WebhookEnv() as env:
@@ -402,14 +402,14 @@ class TestWebhook401ForbiddenNoRetry:
 
 @pytest.mark.requires_db
 class TestEXT_G_06_HmacAuthRejection:
-    """HMAC auth rejection: 401/403 logs rejection, no retry, marks failed.
+    """HMAC auth rejection follows AdCP's distinct 401/403 policy.
 
     Covers: UC-004-EXT-G-06
     """
 
-    @pytest.mark.parametrize("status_code", [401, 403])
-    def test_auth_rejection_no_retry_marks_failed(self, integration_db, status_code):
-        """401/403 from endpoint => single attempt, no retry, status=failed.
+    @pytest.mark.parametrize(("status_code", "expected_attempts"), [(401, 3), (403, 1)])
+    def test_auth_rejection_retry_policy_marks_failed(self, integration_db, status_code, expected_attempts):
+        """401 is transient while persistent 403 remains non-retryable.
 
         Covers: UC-004-EXT-G-06
         """
@@ -431,9 +431,9 @@ class TestEXT_G_06_HmacAuthRejection:
             assert success is False
             assert result["status"] == "failed"
             assert result["response_code"] == status_code
-            assert result["attempts"] == 1
-            assert env.mock["post"].call_count == 1
-            assert f"Client error {status_code}" in result["error"]
+            assert result["attempts"] == expected_attempts
+            assert env.mock["post"].call_count == expected_attempts
+            assert str(status_code) in result["error"]
 
     def test_hmac_headers_sent_before_rejection(self, integration_db):
         """When signing_secret is provided, HMAC signature headers are added.
@@ -460,7 +460,7 @@ class TestEXT_G_06_HmacAuthRejection:
             assert "X-Webhook-Timestamp" in sent_headers
 
     def test_auth_rejection_vs_server_error_retry_behavior(self, integration_db):
-        """Contrast: 401 does NOT retry, but 500 DOES retry.
+        """Contrast: 401 and 500 both retry.
 
         Covers: UC-004-EXT-G-06
         """
@@ -471,8 +471,8 @@ class TestEXT_G_06_HmacAuthRejection:
             env.set_http_status(401, "Unauthorized")
             success_401, result_401 = env.call_deliver(max_retries=3, event_type="delivery.report", tenant_id="t1")
             assert success_401 is False
-            assert result_401["attempts"] == 1
-            assert env.mock["post"].call_count == 1
+            assert result_401["attempts"] == 3
+            assert env.mock["post"].call_count == 3
 
         # 500 case
         with WebhookEnv() as env:

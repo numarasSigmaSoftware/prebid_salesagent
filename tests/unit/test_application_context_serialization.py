@@ -6,7 +6,6 @@ import pytest
 from adcp.types import ContextObject
 
 from src.core.application_context import (
-    MAX_APPLICATION_CONTEXT_DEPTH,
     dump_adcp_response,
     serialize_application_context,
     validate_application_context,
@@ -103,16 +102,8 @@ def test_deeply_nested_typed_context_survives_intact() -> None:
     assert serialize_application_context(context) == raw
 
 
-def test_application_context_accepts_the_transport_safe_depth_limit() -> None:
-    validate_application_context(_nested_context(MAX_APPLICATION_CONTEXT_DEPTH))
-
-
-def test_application_context_rejects_depth_before_business_logic_runs() -> None:
-    with pytest.raises(AdCPValidationError, match="maximum nesting depth") as exc_info:
-        validate_application_context(_nested_context(MAX_APPLICATION_CONTEXT_DEPTH + 1))
-
-    assert exc_info.value.field == "context"
-    assert exc_info.value.context is None
+def test_application_context_accepts_deep_schema_valid_opaque_data() -> None:
+    validate_application_context(_nested_context(5000))
 
 
 def test_response_dump_restores_lossless_context_and_omits_absence() -> None:

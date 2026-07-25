@@ -11,6 +11,7 @@ from src.admin.utils.audit_decorator import log_admin_action
 from src.core.audit_logger import AuditLogger
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuditLog, Context, Tenant, WorkflowStep
+from src.core.database.repositories.workflow import WorkflowRepository
 
 logger = logging.getLogger(__name__)
 
@@ -245,12 +246,19 @@ def review_task(tenant_id, task_id):
                     return "Task not found", 404
 
                 # Update status based on action
+                workflow_repo = WorkflowRepository(db_session, tenant_id)
                 if action == "approve":
-                    step.status = "completed"
-                    step.response_data = {"approved": True, "notes": notes}
+                    workflow_repo.update_status(
+                        step.step_id,
+                        status="completed",
+                        response_data={"approved": True, "notes": notes},
+                    )
                 elif action == "reject":
-                    step.status = "failed"
-                    step.response_data = {"approved": False, "notes": notes}
+                    workflow_repo.update_status(
+                        step.step_id,
+                        status="failed",
+                        response_data={"approved": False, "notes": notes},
+                    )
 
                 db_session.commit()
 

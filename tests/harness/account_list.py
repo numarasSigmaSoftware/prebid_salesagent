@@ -74,6 +74,11 @@ class AccountListEnv(IntegrationEnv):
 
     REST_ENDPOINT = "/api/v1/accounts"
 
+    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
+        """Serialize the full list-accounts read envelope."""
+        fields = ("status", "sandbox", "pagination", "idempotency_key", "context")
+        return {key: kwargs[key] for key in fields if key in kwargs and kwargs[key] is not None}
+
     def parse_rest_response(self, data: dict[str, Any]) -> ListAccountsResponse:
         """Parse REST JSON into ListAccountsResponse."""
         return ListAccountsResponse(**data)

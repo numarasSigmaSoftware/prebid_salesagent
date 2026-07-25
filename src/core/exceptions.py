@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import ValidationError
 
+from src.core.application_context_values import serialize_application_context
+
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
@@ -154,7 +156,7 @@ INTERNAL_CODES: frozenset[str] = frozenset(
 # VERSION_UNSUPPORTED and BILLING_NOT_SUPPORTED are pinned-spec codes missing
 # from the SDK constant (the spec is authoritative; see adcp-spec-version.md).
 # Auth failures use the canonical AUTH_REQUIRED (see AdCPAuthenticationError);
-# the former project-specific AUTH_TOKEN_INVALID was retired in the #1417
+# the former project-specific AUTH_TOKEN_INVALID was retired during
 # error-code reconciliation. The historical SPEC_CODES name is retained as the
 # public input to the error-code compliance guards. Both members pass through
 # translate_error_code() unchanged.
@@ -175,6 +177,11 @@ assert not _NON_STANDARD_TARGETS, f"ERROR_CODE_MAPPING contains non-standard tar
 # BILLING_NOT_SUPPORTED / VERSION_UNSUPPORTED through the helper would collapse a
 # legal spec code to SERVICE_UNAVAILABLE.
 _GUARANTEED_WIRE_CODES: frozenset[str] = frozenset(WIRE_STANDARD_CODES) | SPEC_CODES
+
+
+def is_guaranteed_wire_error_code(code: str) -> bool:
+    """Return whether ``code`` is legal on the pinned-spec wire."""
+    return code in _GUARANTEED_WIRE_CODES
 
 
 def translate_error_code(code: str) -> str:
@@ -225,8 +232,6 @@ def _serialize_context(
           the original exception and the boundary translator would fail open
           with no envelope. A malformed context drops to ``None`` instead.
     """
-    from src.core.application_context import serialize_application_context
-
     serialized = serialize_application_context(context)
     if context is not None and serialized is None:
         logger.warning(

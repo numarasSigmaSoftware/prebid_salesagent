@@ -9,7 +9,8 @@ After the identity-at-transport-boundary refactor (salesagent-anjp), handlers re
 a pre-resolved identity parameter rather than resolving auth internally.
 """
 
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -285,7 +286,6 @@ class TestAuthOptionalSkills:
         # relied on the helper degrading tenant_id to None).
         record_error.assert_not_called()
         assert self.handler.tasks == {}
-        assert self.handler._task_push_configs == {}
 
     @pytest.mark.asyncio
     async def test_invalid_token_error_echoes_unambiguous_application_context(self):
@@ -459,7 +459,7 @@ class TestAuthOptionalSkills:
             recovery="correctable",
         )
         validate_url.assert_called_once_with("https://buyer.example/webhook", allow_private=False)
-        assert self.handler._task_push_configs == {}
+        assert self.handler.tasks == {}
 
     def test_validate_push_callback_rejects_ssrf_url_for_authenticated_caller(self):
         """Even an authenticated caller cannot register an internal/metadata callback URL (#1512)."""
@@ -486,19 +486,39 @@ class TestAuthOptionalSkills:
     @pytest.mark.asyncio
     async def test_send_protocol_webhook_skips_ssrf_url_at_delivery(self):
         """Delivery re-validates the callback URL and skips an SSRF target (DNS-rebinding/TOCTOU, #1512)."""
-        from a2a.types import Task, TaskPushNotificationConfig, TaskState, TaskStatus
+        from a2a.types import Task, TaskState, TaskStatus
 
         task = Task(id="task_ssrf", context_id="ctx", status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED))
         # Simulate a callback that reached storage (e.g. via a non-on_message_send path,
         # or a hostname that only now resolves to a link-local address).
-        self.handler._task_push_configs["task_ssrf"] = TaskPushNotificationConfig(
-            url="https://169.254.169.254/latest/meta-data"
-        )
+        repository = MagicMock()
+        repository.list_active_for_task.return_value = [
+            SimpleNamespace(
+                id="pnc-1",
+                url="https://169.254.169.254/latest/meta-data",
+                authentication_type=None,
+                authentication_token=None,
+            )
+        ]
+        uow = MagicMock()
+        uow.__enter__.return_value = uow
+        uow.push_notification_configs = repository
 
-        with patch("src.a2a_server.adcp_a2a_server.get_protocol_webhook_service") as mock_service:
-            mock_service.return_value.send_notification = AsyncMock()
-            await self.handler._send_protocol_webhook(task, status="completed")
-            mock_service.return_value.send_notification.assert_not_awaited()
+        with patch(
+            "src.a2a_server.adcp_a2a_server.send_native_task_webhooks",
+            new_callable=AsyncMock,
+        ) as send_native:
+            await self.handler._send_protocol_webhook(
+                task,
+                status="completed",
+                identity=self.mock_identity,
+            )
+            send_native.assert_awaited_once_with(
+                task,
+                tenant_id=self.mock_identity.tenant_id,
+                principal_id=self.mock_identity.principal_id,
+                status="completed",
+            )
 
     # Derived from DISCOVERY_SKILLS below, so a skill added to the registry
     # without a mapping here fails the completeness test rather than silently

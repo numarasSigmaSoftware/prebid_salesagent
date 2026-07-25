@@ -161,10 +161,11 @@ async def test_a2a_push_config_endpoint_rejects_before_uow(url: str):
     handler._make_tool_context = MagicMock(
         return_value=SimpleNamespace(tenant_id="callback-tenant", principal_id="callback-principal")
     )
+    handler._require_owned_task = MagicMock()
     with patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW") as mock_uow:
         with pytest.raises(InvalidParamsError, match="Invalid callback url"):
             await handler.on_create_task_push_notification_config(
-                TaskPushNotificationConfig(url=url),
+                TaskPushNotificationConfig(task_id="task-1", url=url),
                 ServerCallContext(),
             )
 
@@ -191,3 +192,130 @@ def test_admin_push_config_registration_rejects_before_db(url: str):
 
     assert response.status_code == 302
     mock_get_db_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a2a_task_push_crud_uses_one_task_bound_durable_source() -> None:
+    from a2a.types import (
+        DeleteTaskPushNotificationConfigRequest,
+        GetTaskPushNotificationConfigRequest,
+        ListTaskPushNotificationConfigsRequest,
+        Task,
+        TaskState,
+        TaskStatus,
+    )
+
+    from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+    from src.core.database.repositories.push_notification_config import task_push_config_id
+
+    handler = AdCPRequestHandler()
+    handler.tasks["task-1"] = Task(
+        id="task-1",
+        context_id="context-1",
+        status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+    )
+    handler._require_owned_task = MagicMock(return_value=handler.tasks["task-1"])
+    handler._get_auth_token = MagicMock(return_value="callback-token")
+    handler._resolve_a2a_identity = MagicMock(return_value=_IDENTITY)
+    handler._make_tool_context = MagicMock(
+        return_value=SimpleNamespace(tenant_id="callback-tenant", principal_id="callback-principal")
+    )
+
+    server_config_id = task_push_config_id(
+        "callback-tenant",
+        "callback-principal",
+        "task-1",
+        "config-1",
+    )
+    stored = SimpleNamespace(
+        id=server_config_id,
+        session_id="task-1",
+        url="https://buyer.example/callback",
+        authentication_type=None,
+        authentication_token=None,
+        validation_token="validation-token",
+    )
+    repository = MagicMock()
+    repository.get_by_id.side_effect = [None, stored]
+    repository.upsert.side_effect = [(stored, True), (stored, False)]
+    repository.get_active_a2a_task_config.return_value = stored
+    repository.list_active_for_task.return_value = [stored]
+    repository.soft_delete_a2a_task_config.return_value = True
+    uow = MagicMock()
+    uow.__enter__.return_value = uow
+    uow.push_notification_configs = repository
+
+    with (
+        patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW", return_value=uow),
+        patch(
+            "src.core.webhook_validator._validate_callback_url_with_policy",
+            return_value=(True, ""),
+        ),
+    ):
+        created = await handler.on_create_task_push_notification_config(
+            TaskPushNotificationConfig(
+                id="config-1",
+                task_id="task-1",
+                url="https://buyer.example/callback",
+                token="validation-token",
+            ),
+            ServerCallContext(),
+        )
+        updated = await handler.on_create_task_push_notification_config(
+            TaskPushNotificationConfig(
+                id=created.id,
+                task_id="task-1",
+                url="https://buyer.example/updated",
+                token="validation-token",
+            ),
+            ServerCallContext(),
+        )
+        fetched = await handler.on_get_task_push_notification_config(
+            GetTaskPushNotificationConfigRequest(id=created.id, task_id="task-1"),
+            ServerCallContext(),
+        )
+        listed = await handler.on_list_task_push_notification_configs(
+            ListTaskPushNotificationConfigsRequest(task_id="task-1"),
+            ServerCallContext(),
+        )
+        await handler.on_delete_task_push_notification_config(
+            DeleteTaskPushNotificationConfigRequest(id=created.id, task_id="task-1"),
+            ServerCallContext(),
+        )
+
+    assert created.task_id == fetched.task_id == "task-1"
+    assert updated.id == created.id == server_config_id
+    assert [config.id for config in listed.configs] == [server_config_id]
+    assert repository.upsert.call_count == 2
+    repository.upsert.assert_any_call(
+        config_id=server_config_id,
+        principal_id="callback-principal",
+        url="https://buyer.example/callback",
+        authentication_type=None,
+        authentication_token=None,
+        validation_token="validation-token",
+        session_id="task-1",
+    )
+    repository.upsert.assert_any_call(
+        config_id=server_config_id,
+        principal_id="callback-principal",
+        url="https://buyer.example/updated",
+        authentication_type=None,
+        authentication_token=None,
+        validation_token="validation-token",
+        session_id="task-1",
+    )
+    repository.get_active_a2a_task_config.assert_called_once_with(
+        config_id=server_config_id,
+        principal_id="callback-principal",
+        task_id="task-1",
+    )
+    repository.list_active_for_task.assert_called_once_with(
+        principal_id="callback-principal",
+        task_id="task-1",
+    )
+    repository.soft_delete_a2a_task_config.assert_called_once_with(
+        config_id=server_config_id,
+        principal_id="callback-principal",
+        task_id="task-1",
+    )

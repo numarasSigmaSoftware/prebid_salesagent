@@ -77,6 +77,7 @@ These variables configure a **global** OAuth provider shared by all tenants. For
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | - | **Required.** Full PostgreSQL connection URL |
+| `COORDINATION_DATABASE_URL` | `DATABASE_URL` | Direct, session-affine PostgreSQL URL for provider-operation advisory locks. **Required when `DATABASE_URL` uses PgBouncer transaction pooling; it must bypass PgBouncer.** |
 
 Or use individual variables:
 
@@ -97,6 +98,8 @@ Or use individual variables:
 | `DATABASE_CONNECT_TIMEOUT` | `10` | Connection timeout in seconds |
 | `DATABASE_POOL_TIMEOUT` | `30` | Pool checkout timeout in seconds |
 | `USE_PGBOUNCER` | `false` | Enable PgBouncer connection pooling mode |
+| `DB_COORDINATION_POOL_SIZE` | `2` | Dedicated direct-PostgreSQL pool size for provider-operation fences |
+| `DB_COORDINATION_MAX_OVERFLOW` | `5` | Maximum overflow connections for the coordination pool |
 
 ### Migrations
 

@@ -130,7 +130,7 @@ class TestMiddlewareRejectsUnsupportedMajor:
         call_next.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unsafe_context_depth_is_typed_and_never_dispatched(self, middleware):
+    async def test_deep_acyclic_context_is_dispatched(self, middleware):
         deep = cursor = {}
         for _ in range(65):
             cursor["nested"] = {}
@@ -138,16 +138,8 @@ class TestMiddlewareRejectsUnsupportedMajor:
         ctx = _make_context("get_products", {"brief": "ads", "context": deep})
         call_next = AsyncMock()
 
-        with pytest.raises(AdCPToolError) as exc:
-            await middleware.on_call_tool(ctx, call_next)
-
-        assert_envelope_shape(
-            exc.value,
-            "VALIDATION_ERROR",
-            recovery="correctable",
-            check_mcp_tool_error=True,
-        )
-        call_next.assert_not_called()
+        await middleware.on_call_tool(ctx, call_next)
+        call_next.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_supported_major_dispatches(self, middleware):
@@ -221,6 +213,7 @@ class TestMiddlewareReadIdempotencyEnvelope:
         ctx.fastmcp_context.get_state = AsyncMock(
             return_value=MagicMock(tenant_id="tenant-1", principal_id="principal-1")
         )
+        ctx.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=MagicMock(fn=lambda: None))
         captured_ctx = None
 
         async def capturing_call_next(context):
@@ -233,6 +226,7 @@ class TestMiddlewareReadIdempotencyEnvelope:
         with (
             patch.object(middleware, "_get_known_params", AsyncMock(return_value=set())),
             patch("src.core.config.is_production", return_value=False),
+            patch("src.core.mcp_compat_middleware.validate_callable_arguments"),
             patch(
                 "src.services.idempotency_replay.execute_idempotent_read",
                 new=AsyncMock(side_effect=execute_without_persistence),

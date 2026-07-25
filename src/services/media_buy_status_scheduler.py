@@ -105,6 +105,24 @@ class MediaBuyStatusScheduler:
         except Exception as e:
             logger.error(f"Failed to update media buy statuses: {e}", exc_info=True)
 
+        from src.services.creative_unblock_recovery import recover_stale_creative_unblock_workflows
+
+        recovered_count = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
+        if recovered_count:
+            logger.info("Recovered %d stale creative-unblock workflow(s)", recovered_count)
+
+        from src.core.context_manager import publish_pending_workflow_notifications
+
+        published_count = await asyncio.to_thread(publish_pending_workflow_notifications)
+        if published_count:
+            logger.info("Published %d pending workflow notification(s)", published_count)
+
+        from src.services.a2a_task_lifecycle import publish_pending_task_notifications
+
+        published_task_count = await asyncio.to_thread(publish_pending_task_notifications)
+        if published_task_count:
+            logger.info("Published %d pending native task notification(s)", published_task_count)
+
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
         """Compute the new status for a media buy based on flight dates.
 

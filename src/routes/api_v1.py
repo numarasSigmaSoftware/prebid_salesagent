@@ -298,11 +298,6 @@ def _validate_rest_read_idempotency(tool_name: str, body: _VersionedBody) -> Non
         validate_standard_read_idempotency_key(tool_name, {"idempotency_key": body.idempotency_key})
 
 
-def _rest_read_wire_payload(body: _VersionedBody) -> dict[str, Any]:
-    """Recreate the submitted body without injecting omitted model defaults."""
-    return body.model_dump(mode="json", include=body.model_fields_set)
-
-
 async def _execute_rest_read[T: BaseModel | dict[str, Any]](
     *,
     tool_name: str,
@@ -328,7 +323,7 @@ class GetProductsBody(_VersionedBody):
     # dict BrandReference or string domain/URL shorthand (#1324)
     brand: dict[str, Any] | str | None = None
     filters: dict[str, Any] | None = None
-    context: dict[str, Any] | None = None  # adcp application-level context, echoed on the response (#1512)
+    context: dict[str, Any] | None = None  # AdCP application context, echoed on the response
 
 
 class CreateMediaBuyBody(_VersionedBody):
@@ -349,8 +344,8 @@ class CreateMediaBuyBody(_VersionedBody):
     # generic INVALID_REQUEST before require_idempotency_key can emit the same
     # VALIDATION_ERROR used by MCP and A2A.
     idempotency_key: RawIdempotencyKey
-    # AdCP 3.1.1 create-in-paused-state. Declared but NOT forwarded to the raw wrapper
-    # below, and not honored by _impl even if it were — see #1619.
+    # AdCP 3.1.1 compatibility; the shared implementation explicitly rejects
+    # paused=true until provider-safe pause-on-create is implemented.
     paused: bool | None = None
 
 
@@ -473,11 +468,26 @@ class SyncAccountsBody(_VersionedBody):
     push_notification_config: dict[str, Any] | None = None
     # Declared so the body model never drops a REST buyer's key (forbidden as an
     # undeclared extra in dev, silently ignored in prod) — REST must preserve it
-    # like the MCP/A2A siblings do (#1512), not be the transport that loses it.
+    # like the MCP/A2A siblings do, not be the transport that loses it.
     # Preserve the raw JSON type for cross-transport validation parity, while
     # leaving the field required in OpenAPI.
     idempotency_key: RawIdempotencyKey
     context: dict[str, Any] | None = None
+
+
+async def _raw_json_body(request: Request) -> dict[str, Any]:
+    """Return the pre-normalization JSON object used for idempotency hashing."""
+    raw = getattr(request.state, "raw_wire_payload", None)
+    try:
+        payload = json.loads(raw) if raw is not None else await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        logger.debug("REST raw-wire capture unavailable; body validation will reject")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# Module-level singleton, matching require_auth (ruff B008 forbids Depends() in defaults).
+raw_json_body = Depends(_raw_json_body)
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +500,7 @@ async def get_products(
     body: GetProductsBody,
     identity: ResolvedIdentity | None = resolve_auth,
     negotiated_version: str | None = Depends(_version_after_resolve),
+    raw_wire_payload: dict[str, Any] = raw_json_body,
 ):
     """Get available products matching the brief (auth-optional discovery skill).
 
@@ -504,7 +515,7 @@ async def get_products(
             filters=body.filters,
             # Forward the buyer's application context so _get_products_impl echoes it
             # back unchanged on the response — REST was the only transport missing this
-            # (MCP/A2A already forward it, the impl already echoes it) (#1512).
+            # (MCP/A2A already forward it and the implementation already echoes it).
             context=body.context,
         )
 
@@ -515,7 +526,7 @@ async def get_products(
         tool_name="get_products",
         idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
         identity=identity,
-        raw_wire_payload=_rest_read_wire_payload(body),
+        raw_wire_payload=raw_wire_payload,
         response_type=products_module.GetProductsResponse,
         work=load_products,
     )
@@ -624,7 +635,11 @@ async def get_capabilities(
 
 
 @router.post("/creative-formats", dependencies=[Depends(_version_after_resolve)])
-async def list_creative_formats(body: ListCreativeFormatsBody, identity: ResolvedIdentity | None = resolve_auth):
+async def list_creative_formats(
+    body: ListCreativeFormatsBody,
+    identity: ResolvedIdentity | None = resolve_auth,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+):
     """List available creative formats (auth-optional discovery skill)."""
     from src.core.schemas import ListCreativeFormatsRequest
 
@@ -640,7 +655,7 @@ async def list_creative_formats(body: ListCreativeFormatsBody, identity: Resolve
         tool_name="list_creative_formats",
         idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
         identity=identity,
-        raw_wire_payload=_rest_read_wire_payload(body),
+        raw_wire_payload=raw_wire_payload,
         response_type=creative_formats_module.ListCreativeFormatsResponse,
         work=load_formats,
     )
@@ -667,37 +682,6 @@ async def list_authorized_properties(
 # ---------------------------------------------------------------------------
 # Auth-required endpoints
 # ---------------------------------------------------------------------------
-
-
-async def _raw_json_body(request: Request) -> dict[str, Any]:
-    """The HTTP body as sent on the wire — the idempotency payload-hash input.
-
-    A dependency rather than a route ``request`` parameter, so route signatures
-    stay Depends-only (the rest-depends-auth guard). Prefers the pre-rewrite
-    bytes stashed by ``RestCompatMiddleware`` — when a deprecated-field
-    translation fires, ``request.json()`` would observe the NORMALIZED body,
-    not the bytes the buyer sent, and seller-side compat-table changes would
-    flip honest retries into conflicts mid-TTL. Starlette caches the body, so
-    the fallback read does not consume it before model parsing.
-
-    Never raises. A dependency that throws is resolved BEFORE the route's body
-    model, so a decode error here would surface as a bare ``VALIDATION_ERROR``
-    carrying the json module's own message instead of the typed
-    ``INVALID_REQUEST`` + suggestion the body model produces. An undecodable
-    body is not a hash input either — body validation rejects the request, so
-    the route never runs and this ``{}`` never reaches the idempotency hash.
-    """
-    raw = getattr(request.state, "raw_wire_payload", None)
-    try:
-        payload = json.loads(raw) if raw is not None else await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        logger.debug("REST raw-wire capture unavailable; body validation will reject", exc_info=True)
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-# Module-level singleton, matching require_auth (ruff B008 forbids Depends() in defaults).
-raw_json_body = Depends(_raw_json_body)
 
 
 @router.post("/media-buys", dependencies=[Depends(_version_after_require)])
@@ -736,6 +720,7 @@ async def create_media_buy(
         context=context,
         ext=body.ext,
         idempotency_key=body.idempotency_key,
+        paused=body.paused,
         identity=identity,
         raw_wire_payload=raw_wire_payload,
     )
@@ -791,7 +776,11 @@ async def update_media_buy(
 
 
 @router.post("/media-buys/delivery", dependencies=[Depends(_version_after_require)])
-async def get_media_buy_delivery(body: GetMediaBuyDeliveryBody, identity: ResolvedIdentity = require_auth):
+async def get_media_buy_delivery(
+    body: GetMediaBuyDeliveryBody,
+    identity: ResolvedIdentity = require_auth,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+):
     """Get delivery metrics for media buys (auth required)."""
     _validate_rest_read_idempotency("get_media_buy_delivery", body)
     if body.account is not None:
@@ -820,7 +809,7 @@ async def get_media_buy_delivery(body: GetMediaBuyDeliveryBody, identity: Resolv
         tool_name="get_media_buy_delivery",
         idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
         identity=identity,
-        raw_wire_payload=_rest_read_wire_payload(body),
+        raw_wire_payload=raw_wire_payload,
         response_type=media_buy_delivery_module.GetMediaBuyDeliveryResponse,
         work=load_delivery,
     )
@@ -866,7 +855,11 @@ async def sync_creatives(
 
 
 @router.post("/creatives", dependencies=[Depends(_version_after_require)])
-async def list_creatives(body: ListCreativesBody, identity: ResolvedIdentity = require_auth):
+async def list_creatives(
+    body: ListCreativesBody,
+    identity: ResolvedIdentity = require_auth,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+):
     """List creatives (auth required)."""
     _validate_rest_read_idempotency("list_creatives", body)
     # Coerce the raw wire filters dict into a typed CreativeFilters here (#1493): the
@@ -901,7 +894,7 @@ async def list_creatives(body: ListCreativesBody, identity: ResolvedIdentity = r
         tool_name="list_creatives",
         idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
         identity=identity,
-        raw_wire_payload=_rest_read_wire_payload(body),
+        raw_wire_payload=raw_wire_payload,
         response_type=creatives_listing_module.ListCreativesResponse,
         work=load_creatives,
     )
@@ -921,7 +914,11 @@ async def update_performance_index(body: UpdatePerformanceIndexBody, identity: R
 
 
 @router.post("/accounts", dependencies=[Depends(_version_after_require)])
-async def list_accounts(body: ListAccountsBody, identity: ResolvedIdentity = require_auth):
+async def list_accounts(
+    body: ListAccountsBody,
+    identity: ResolvedIdentity = require_auth,
+    raw_wire_payload: dict[str, Any] = raw_json_body,
+):
     """List accounts accessible to the authenticated agent (auth required)."""
     from src.core.schemas.account import ListAccountsRequest
 
@@ -936,7 +933,7 @@ async def list_accounts(body: ListAccountsBody, identity: ResolvedIdentity = req
         tool_name="list_accounts",
         idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
         identity=identity,
-        raw_wire_payload=_rest_read_wire_payload(body),
+        raw_wire_payload=raw_wire_payload,
         response_type=accounts_module.ListAccountsResponse,
         work=load_accounts,
     )

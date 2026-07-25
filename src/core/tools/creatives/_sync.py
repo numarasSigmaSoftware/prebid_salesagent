@@ -2,7 +2,7 @@
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from adcp import PushNotificationConfig
@@ -21,6 +21,7 @@ from src.core.schemas._base import validate_idempotency_key_shape
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
 from src.services.idempotency_replay import (
     complete_idempotent,
+    mark_idempotent_replay,
     release_reservation_on_error,
     reserve_idempotent,
 )
@@ -37,7 +38,11 @@ logger = logging.getLogger(__name__)
 _SYNC_CREATIVES_TOOL_NAME = "sync_creatives"
 
 
-def _decode_sync_creatives_replay(envelope: dict[str, Any]) -> SyncCreativesResponse | None:
+def _decode_sync_creatives_replay(
+    envelope: dict[str, Any],
+    *,
+    context: ContextObject | dict | None = None,
+) -> SyncCreativesResponse | None:
     """Reconstruct a cached sync_creatives success, marked replayed.
 
     Mirrors ``accounts._decode_sync_accounts_replay``: the cache stores
@@ -50,8 +55,7 @@ def _decode_sync_creatives_replay(envelope: dict[str, Any]) -> SyncCreativesResp
     except (KeyError, TypeError, ValidationError):
         logger.warning("Cached sync_creatives envelope failed validation - treating as a miss", exc_info=True)
         return None
-    response.replayed = True
-    return response
+    return mark_idempotent_replay(response, context=context)
 
 
 def _sync_creatives_request_hash(
@@ -112,6 +116,15 @@ def _send_deferred_notifications(
             )
         except Exception:
             logger.warning("Creative approval notification failed after durable completion", exc_info=True)
+
+
+def _run_deferred_observability(actions: list[Callable[[], None]]) -> None:
+    """Run non-protocol audit/activity effects after the cached success commits."""
+    for action in actions:
+        try:
+            action()
+        except Exception:
+            logger.warning("Creative sync observability failed after durable completion", exc_info=True)
 
 
 def _sync_creatives_core_kwargs(
@@ -182,7 +195,7 @@ def _sync_creatives_impl(
                 )
             ),
             lease=DEFAULT_IN_FLIGHT_LEASE,
-            decode=_decode_sync_creatives_replay,
+            decode=lambda envelope: _decode_sync_creatives_replay(envelope, context=context),
             enforce_ceiling=True,
         )
         if reservation.replay is not None:
@@ -197,29 +210,32 @@ def _sync_creatives_impl(
 
     with release_reservation_on_error(IdempotencyUoW, tenant["tenant_id"], reservation_attempt_id):
         deferred_notifications: list[dict[str, Any]] = []
-        response = _sync_creatives_work(
-            **_sync_creatives_core_kwargs(
-                creatives,
-                assignments,
-                creative_ids,
-                delete_missing,
-                dry_run,
-                validation_mode,
-                push_notification_config,
-                context,
-                idempotency_key,
-                resolved_identity,
-            ),
-            deferred_notifications=deferred_notifications,
-        )
-        if reservation_attempt_id is not None:
-            with IdempotencyUoW(tenant["tenant_id"]) as uow:
+        deferred_observability: list[Callable[[], None]] = []
+        with CreativeUoW(tenant["tenant_id"]) as orchestration_uow:
+            response = _sync_creatives_work(
+                **_sync_creatives_core_kwargs(
+                    creatives,
+                    assignments,
+                    creative_ids,
+                    delete_missing,
+                    dry_run,
+                    validation_mode,
+                    push_notification_config,
+                    context,
+                    idempotency_key,
+                    resolved_identity,
+                ),
+                deferred_notifications=deferred_notifications,
+                deferred_observability=deferred_observability,
+            )
+            if reservation_attempt_id is not None:
                 complete_idempotent(
-                    uow,
+                    orchestration_uow,
                     attempt_id=reservation_attempt_id,
                     response_model=response,
                     protocol_status="completed",
                 )
+        _run_deferred_observability(deferred_observability)
         _send_deferred_notifications(deferred_notifications, tenant, principal_id)
         return response
 
@@ -236,6 +252,7 @@ def _sync_creatives_work(
     idempotency_key: str | None = None,
     identity: ResolvedIdentity | None = None,
     deferred_notifications: list[dict[str, Any]] | None = None,
+    deferred_observability: list[Callable[[], None]] | None = None,
 ) -> SyncCreativesResponse:
     """Sync creative assets to centralized library (AdCP v2.5 spec compliant endpoint).
 
@@ -431,6 +448,8 @@ def _sync_creatives_work(
                             all_formats=all_formats,
                             registry=registry,
                             principal_id=principal_id,
+                            idempotency_key=idempotency_key,
+                            account_id=identity.account_id if identity is not None else None,
                         )
 
                         # Handle failed updates
@@ -491,6 +510,8 @@ def _sync_creatives_work(
                             all_formats=all_formats,
                             registry=registry,
                             principal_id=principal_id,
+                            idempotency_key=idempotency_key,
+                            account_id=identity.account_id if identity is not None else None,
                         )
 
                         # Handle failed creates
@@ -605,6 +626,7 @@ def _sync_creatives_work(
             push_notification_config=push_notification_config,
             context=context,
             identity=identity,
+            idempotency_key=idempotency_key,
         )
         if deferred_notifications is not None:
             deferred_notifications.append(
@@ -624,25 +646,28 @@ def _sync_creatives_work(
             except Exception:
                 logger.warning("Creative approval notification failed after durable workflow creation", exc_info=True)
 
-    # Audit logging
-    _audit_log_sync(
-        tenant=tenant,
-        principal_id=principal_id,
-        synced_creatives=synced_creatives,
-        failed_creatives=failed_creatives,
-        assignment_list=assignment_list,
-        creative_ids=creative_ids,
-        dry_run=dry_run,
-        created_count=created_count,
-        updated_count=updated_count,
-        unchanged_count=unchanged_count,
-        failed_count=failed_count,
-        creatives_needing_approval=creatives_needing_approval,
-    )
+    def record_observability() -> None:
+        _audit_log_sync(
+            tenant=tenant,
+            principal_id=principal_id,
+            synced_creatives=synced_creatives,
+            failed_creatives=failed_creatives,
+            assignment_list=assignment_list,
+            creative_ids=creative_ids,
+            dry_run=dry_run,
+            created_count=created_count,
+            updated_count=updated_count,
+            unchanged_count=unchanged_count,
+            failed_count=failed_count,
+            creatives_needing_approval=creatives_needing_approval,
+        )
+        if identity is not None:
+            log_tool_activity(identity, "sync_creatives", start_time)
 
-    # Log activity
-    if identity is not None:
-        log_tool_activity(identity, "sync_creatives", start_time)
+    if deferred_observability is None:
+        record_observability()
+    else:
+        deferred_observability.append(record_observability)
 
     # Build message
     message = f"Synced {created_count + updated_count} creatives"

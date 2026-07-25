@@ -14,6 +14,7 @@ from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import RawIdempotencyKey
 from src.core.schemas._base import require_idempotency_key
+from src.core.security.webhook_http import validate_webhook_config_auth
 from src.core.tool_context import ToolContext
 from src.core.transport_helpers import get_mcp_raw_wire_payload
 from src.core.webhook_validator import (
@@ -30,6 +31,8 @@ def _validate_sync_creatives_boundary(
 ) -> None:
     """Apply shared protocol and callback guards before entering the impl."""
     require_idempotency_key(idempotency_key)
+    if push_notification_config is not None:
+        validate_webhook_config_auth(push_notification_config)
     require_valid_callback_config_urls(
         push_notification_config=push_notification_config,
     )
@@ -137,8 +140,8 @@ def sync_creatives_raw(
         push_notification_config: Push notification config for status updates
         context: Application level context per adcp spec
         idempotency_key: Required client-generated request key. This seller
-            advertises idempotency support; dedupe is implemented on
-            create_media_buy today, so a retry here re-executes.
+            durably replays completed sync_creatives requests and rejects
+            concurrent duplicates with IDEMPOTENCY_IN_FLIGHT.
         ctx: FastMCP context (automatically provided)
         identity: ResolvedIdentity (transport-agnostic, preferred over ctx)
 

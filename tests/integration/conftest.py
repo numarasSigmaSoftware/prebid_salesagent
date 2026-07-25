@@ -513,6 +513,7 @@ def mcp_server(integration_db):
     import socket
     import subprocess
     import sys
+    import tempfile
     import time
 
     # Find an available port
@@ -564,13 +565,17 @@ from src.core.main import mcp
 mcp.run(transport='http', host='0.0.0.0', port={port})
 """
 
-    process = subprocess.Popen(
-        [sys.executable, "-c", server_script],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=1,  # Line buffered
-    )
+    # Seekable files preserve startup diagnostics without the deadlock risk of
+    # undrained PIPEs. The server emits periodic scheduler logs; once a PIPE's
+    # kernel buffer fills, the child blocks in write() and stops serving MCP.
+    stdout_log = tempfile.TemporaryFile()
+    stderr_log = tempfile.TemporaryFile()
+    process = subprocess.Popen([sys.executable, "-c", server_script], env=env, stdout=stdout_log, stderr=stderr_log)
+
+    def read_server_log(stream):
+        stream.flush()
+        stream.seek(0)
+        return stream.read().decode(errors="replace")
 
     # Wait for server to be ready.
     # Server startup is dominated by Python imports (fastmcp + adcp SDK + project)
@@ -593,28 +598,24 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
         except (ConnectionRefusedError, OSError):
             # Check if process has died
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
                 raise RuntimeError(
                     f"MCP server process died unexpectedly.\n"
-                    f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
-                    f"STDERR: {stderr.decode() if stderr else 'N/A'}"
+                    f"STDOUT: {read_server_log(stdout_log) or 'N/A'}\n"
+                    f"STDERR: {read_server_log(stderr_log) or 'N/A'}"
                 )
             time.sleep(0.3)
 
     if not server_ready:
-        # Capture output for debugging
+        process.terminate()
         try:
-            stdout, stderr = process.communicate(timeout=2)
+            process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
-            stdout, stderr = process.communicate()
-
-        process.terminate()
-        process.wait(timeout=5)
+            process.wait()
         raise RuntimeError(
             f"MCP server failed to start on port {port} within {max_wait}s.\n"
-            f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
-            f"STDERR: {stderr.decode() if stderr else 'N/A'}"
+            f"STDOUT: {read_server_log(stdout_log) or 'N/A'}\n"
+            f"STDERR: {read_server_log(stderr_log) or 'N/A'}"
         )
 
     # Return server info
@@ -635,10 +636,8 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
-    if process.stdout:
-        process.stdout.close()
-    if process.stderr:
-        process.stderr.close()
+    stdout_log.close()
+    stderr_log.close()
 
     # Don't remove db_name - the PostgreSQL database is managed by integration_db fixture
 

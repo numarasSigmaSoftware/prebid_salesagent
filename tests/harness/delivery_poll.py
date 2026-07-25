@@ -77,6 +77,8 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
             "attribution_window",
             "include_package_daily_breakdown",
             "account",
+            "idempotency_key",
+            "context",
         )
         return {k: kwargs[k] for k in _BODY_FIELDS if k in kwargs and kwargs[k] is not None}
 

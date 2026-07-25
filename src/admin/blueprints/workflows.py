@@ -9,11 +9,14 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.media_buy_approval import build_approved_media_buy_result
+from src.core.context_manager import publish_workflow_notifications
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Context
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.exceptions import AdCPAdapterError, AdCPPolicyViolationError, build_two_layer_error_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -162,13 +165,18 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             user_info = session.get("user", {})
             user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
 
-            step = workflow_repo.update_status(
+            existing_step = workflow_repo.get_by_step_and_context(step_id, workflow_id)
+            if existing_step is None:
+                return jsonify({"error": "Workflow step not found"}), 404
+
+            step = workflow_repo.transition_status(
                 step_id,
                 status="approved",
+                allowed_from={"pending", "pending_approval", "requires_approval", "submitted", "input-required"},
             )
 
             if not step:
-                return jsonify({"error": "Workflow step not found"}), 404
+                return jsonify({"error": "Workflow step is no longer actionable"}), 409
 
             db.commit()
 
@@ -223,7 +231,9 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                                 "info",
                             )
                             media_buy.status = "pending_creatives"
+                            workflow_repo.update_status(step_id, status="input-required")
                             db.commit()
+                            publish_workflow_notifications(step_id, "input-required", tenant_id)
                             return jsonify({"success": True}), 200
 
                     # Execute adapter creation
@@ -234,6 +244,17 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
 
                     if not success:
                         logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
+                        failure = build_two_layer_error_envelope(
+                            AdCPAdapterError(error_msg or "Adapter creation failed")
+                        )
+                        workflow_repo.update_status(
+                            step_id,
+                            status="failed",
+                            response_data=failure,
+                            error_message=error_msg,
+                        )
+                        db.commit()
+                        publish_workflow_notifications(step_id, "failed", tenant_id)
                         flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
                         return jsonify({"success": False, "error": error_msg}), 500
 
@@ -241,7 +262,18 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     media_buy.status = "scheduled"
                     media_buy.approved_at = datetime.now(UTC)
                     media_buy.approved_by = user_email
+                    result = build_approved_media_buy_result(
+                        media_buy_repo,
+                        media_buy_id,
+                        step.request_data if isinstance(step.request_data, dict) else {},
+                    )
+                    workflow_repo.update_status(
+                        step_id,
+                        status="completed",
+                        response_data=result.model_dump(mode="json"),
+                    )
                     db.commit()
+                    publish_workflow_notifications(step_id, "completed", tenant_id)
 
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")
                     flash("Workflow step approved and media buy created successfully", "success")
@@ -251,6 +283,13 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     )
                     flash("Workflow step approved successfully", "success")
             else:
+                workflow_repo.update_status(
+                    step_id,
+                    status="completed",
+                    response_data={"status": "approved"},
+                )
+                db.commit()
+                publish_workflow_notifications(step_id, "completed", tenant_id)
                 flash("Workflow step approved successfully", "success")
 
             return jsonify({"success": True}), 200
@@ -276,16 +315,23 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
             user_info = session.get("user", {})
             user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
 
-            step = workflow_repo.update_status(
+            existing_step = workflow_repo.get_by_step_and_context(step_id, workflow_id)
+            if existing_step is None:
+                return jsonify({"error": "Workflow step not found"}), 404
+
+            step = workflow_repo.transition_status(
                 step_id,
                 status="rejected",
+                allowed_from={"pending", "pending_approval", "requires_approval", "submitted", "input-required"},
                 error_message=reason,
+                response_data=build_two_layer_error_envelope(AdCPPolicyViolationError(reason)),
             )
 
             if not step:
-                return jsonify({"error": "Workflow step not found"}), 404
+                return jsonify({"error": "Workflow step is no longer actionable"}), 409
 
             db.commit()
+            publish_workflow_notifications(step_id, "rejected", tenant_id)
 
             flash("Workflow step rejected", "info")
             return jsonify({"success": True}), 200

@@ -7,9 +7,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-MAX_APPLICATION_CONTEXT_DEPTH = 64
-MAX_APPLICATION_CONTEXT_NODES = 10_000
-
 
 @dataclass(frozen=True)
 class ApplicationContextViolation(ValueError):
@@ -34,16 +31,15 @@ def context_mapping(context: Any) -> dict[Any, Any] | None:
 
 
 def validate_context_value(context: Any) -> None:
-    """Validate size, depth, and acyclicity without recursive Python calls."""
+    """Validate acyclicity without imposing non-spec depth or size limits."""
     root = context_mapping(context)
     if root is None:
         return
 
-    stack: list[tuple[str, dict[Any, Any] | list[Any], int]] = [("enter", root, 1)]
+    stack: list[tuple[str, dict[Any, Any] | list[Any]]] = [("enter", root)]
     active: set[int] = set()
-    nodes = 0
     while stack:
-        event, container, depth = stack.pop()
+        event, container = stack.pop()
         container_id = id(container)
         if event == "exit":
             active.remove(container_id)
@@ -54,22 +50,11 @@ def validate_context_value(context: Any) -> None:
                 "Remove cyclic references from context and retry.",
             )
         active.add(container_id)
-        stack.append(("exit", container, depth))
-        if depth > MAX_APPLICATION_CONTEXT_DEPTH:
-            raise ApplicationContextViolation(
-                f"context exceeds the maximum nesting depth of {MAX_APPLICATION_CONTEXT_DEPTH}",
-                "Flatten deeply nested context values or store the large object externally and pass a stable reference.",
-            )
+        stack.append(("exit", container))
         values = list(container.values()) if isinstance(container, dict) else container
         for value in reversed(values):
-            nodes += 1
-            if nodes > MAX_APPLICATION_CONTEXT_NODES:
-                raise ApplicationContextViolation(
-                    f"context exceeds the maximum size of {MAX_APPLICATION_CONTEXT_NODES} values",
-                    "Reduce context size or pass a stable external reference.",
-                )
             if isinstance(value, (dict, list)):
-                stack.append(("enter", value, depth + 1))
+                stack.append(("enter", value))
 
 
 def _empty_json_container(value: Any) -> dict[Any, Any] | list[Any] | None:
@@ -120,3 +105,30 @@ def detach_context_value(value: Any) -> Any:
         for child_source, child_dest in reversed(children):
             stack.append(("enter", child_source, child_dest))
     return root
+
+
+def serialize_application_context(context: Any) -> dict[str, Any] | None:
+    """Return a detached JSON object without masking an existing error path.
+
+    This is the transport-neutral serialization leaf used by both response and
+    exception formatting.  Invalid, cyclic, or non-object values are omitted;
+    callers that validate incoming requests translate
+    :class:`ApplicationContextViolation` at their transport boundary.
+    """
+    if context is None:
+        return None
+    try:
+        if isinstance(context, dict):
+            return detach_context_value(context)
+        if isinstance(context, BaseModel):
+            extra = context.model_extra or {}
+            declared = context.model_dump(
+                mode="json",
+                exclude=set(extra),
+                exclude_unset=True,
+                exclude_none=False,
+            )
+            return detach_context_value({**declared, **extra})
+    except (ApplicationContextViolation, ValueError, TypeError):
+        return None
+    return None

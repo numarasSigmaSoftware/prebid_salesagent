@@ -16,11 +16,19 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import requests
 from adcp import create_mcp_webhook_payload
 
 from src.services.protocol_webhook_service import ProtocolWebhookService, _canonical_body_bytes
-from tests.helpers.protocol_webhook import assert_protocol_webhook_post
+from src.services.webhook_verification import WebhookVerifier
+from tests.helpers.webhook_signing import webhook_signing_jwk_json
+
+
+@pytest.fixture(autouse=True)
+def _default_webhook_signing_key(monkeypatch):
+    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWK", webhook_signing_jwk_json())
+    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWKS_URI", "https://seller.example/.well-known/jwks.json")
 
 
 def _capture_service():
@@ -58,7 +66,7 @@ class TestLegacyHmacBytePinning:
     """Legacy HMAC-SHA256 profile: signature covers the exact transmitted bytes."""
 
     def test_signature_verifies_over_transmitted_body_bytes(self):
-        secret = "shared-webhook-secret"
+        secret = "shared-webhook-secret-at-least-32"
         config = SimpleNamespace(
             url="https://buyer.example.com/webhook",
             authentication_type="HMAC-SHA256",
@@ -85,12 +93,17 @@ class TestLegacyHmacBytePinning:
         signed_message = f"{ts}.{body.decode('utf-8')}".encode()
         expected = "sha256=" + hmac.new(secret.encode("utf-8"), signed_message, hashlib.sha256).hexdigest()
         assert headers["X-AdCP-Signature"] == expected
+        assert WebhookVerifier(secret).verify_webhook(
+            body.decode("utf-8"),
+            headers["X-AdCP-Signature"],
+            headers["X-AdCP-Timestamp"],
+        )
 
     def test_transmitted_body_is_compact_canonical(self):
         config = SimpleNamespace(
             url="https://buyer.example.com/webhook",
             authentication_type="HMAC-SHA256",
-            authentication_token="s",
+            authentication_token="s" * 32,
         )
         service, mock_session = _capture_service()
         _send(service, config)
@@ -100,6 +113,21 @@ class TestLegacyHmacBytePinning:
         assert b", " not in body
         assert b'": ' not in body
 
+    def test_legacy_webhook_secret_column_selects_hmac(self):
+        config = SimpleNamespace(
+            url="https://buyer.example.com/webhook",
+            authentication_type=None,
+            authentication_token=None,
+            webhook_secret="legacy-secret-" * 3,
+        )
+        service, mock_session = _capture_service()
+
+        assert _send(service, config) is True
+
+        headers = mock_session.post.call_args.kwargs["headers"]
+        assert headers["X-AdCP-Signature"].startswith("sha256=")
+        assert "Signature-Input" not in headers
+
 
 class TestBearerAndUnauthenticatedBytes:
     """Non-HMAC profiles still transmit canonical bytes via data= (never json=)."""
@@ -108,7 +136,7 @@ class TestBearerAndUnauthenticatedBytes:
         config = SimpleNamespace(
             url="https://buyer.example.com/webhook",
             authentication_type="Bearer",
-            authentication_token="tok",
+            authentication_token="t" * 32,
         )
         service, mock_session = _capture_service()
         _send(service, config)
@@ -116,11 +144,11 @@ class TestBearerAndUnauthenticatedBytes:
         kwargs = mock_session.post.call_args.kwargs
         assert "json" not in kwargs
         assert isinstance(kwargs["data"], bytes)
-        assert kwargs["headers"]["Authorization"] == "Bearer tok"
+        assert kwargs["headers"]["Authorization"] == f"Bearer {'t' * 32}"
         # Bearer is not a signature profile.
         assert "X-AdCP-Signature" not in kwargs["headers"]
 
-    def test_unauthenticated_transmits_canonical_bytes(self):
+    def test_default_profile_transmits_canonical_signed_bytes(self):
         config = SimpleNamespace(
             url="https://buyer.example.com/webhook",
             authentication_type=None,
@@ -133,6 +161,25 @@ class TestBearerAndUnauthenticatedBytes:
         assert "json" not in kwargs
         assert isinstance(kwargs["data"], bytes)
         assert b", " not in kwargs["data"]
+        assert "Signature" in kwargs["headers"]
+        assert "Signature-Input" in kwargs["headers"]
+        assert "Content-Digest" in kwargs["headers"]
+
+    def test_callback_query_and_credentials_are_absent_from_info_logs(self):
+        config = SimpleNamespace(
+            url="https://buyer.example.com/private/path?token=query-secret",
+            authentication_type="Bearer",
+            authentication_token="credential-secret-" * 2,
+        )
+        service, _ = _capture_service()
+
+        with patch("src.services.protocol_webhook_service.logger.info") as info:
+            assert _send(service, config) is True
+
+        rendered = " ".join(str(call) for call in info.call_args_list)
+        assert "query-secret" not in rendered
+        assert "credential-secret" not in rendered
+        assert "/private/path" not in rendered
 
 
 def test_client_error_from_shared_post_is_closed_and_not_retried():
@@ -160,12 +207,11 @@ def test_client_error_from_shared_post_is_closed_and_not_retried():
         is False
     )
 
-    assert_protocol_webhook_post(
-        mock_session.post,
-        url="https://buyer.example.com/webhook",
-        body=_canonical_body_bytes(payload.model_dump(mode="json", exclude_none=True)),
-        host="buyer.example.com",
-    )
+    call = mock_session.post.call_args
+    assert call.args == ("https://buyer.example.com/webhook",)
+    assert call.kwargs["data"] == _canonical_body_bytes(payload.model_dump(mode="json", exclude_none=True))
+    assert call.kwargs["headers"]["Host"] == "buyer.example.com"
+    assert "Signature" in call.kwargs["headers"]
     response.close.assert_called_once_with()
 
 

@@ -15,6 +15,7 @@ Usage:
         # auto-commits on clean exit, rolls back on exception
 """
 
+from src.core.database.repositories.a2a_task import A2ATaskRepository
 from src.core.database.repositories.account import AccountRepository
 from src.core.database.repositories.adapter_config import AdapterConfigRepository, TenantNotConfiguredError
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
@@ -25,11 +26,13 @@ from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.uow import (
+    A2ATaskUoW,
     AccountUoW,
     MediaBuyUoW,
     ProductUoW,
     PushNotificationConfigUoW,
     TenantConfigUoW,
+    WebhookDeliveryUoW,
     WorkflowUoW,
 )
 from src.core.database.repositories.workflow import WorkflowRepository
@@ -37,6 +40,8 @@ from src.core.database.repositories.workflow import WorkflowRepository
 __all__ = [
     "AccountRepository",
     "AccountUoW",
+    "A2ATaskRepository",
+    "A2ATaskUoW",
     "AdapterConfigRepository",
     "TenantNotConfiguredError",
     "CurrencyLimitRepository",
@@ -50,6 +55,7 @@ __all__ = [
     "PushNotificationConfigUoW",
     "TenantConfigRepository",
     "TenantConfigUoW",
+    "WebhookDeliveryUoW",
     "WorkflowRepository",
     "WorkflowUoW",
 ]

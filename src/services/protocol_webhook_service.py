@@ -37,23 +37,34 @@ from src.core.security.webhook_http import (
     HMAC_AUTH_SCHEME,
     UnsafeWebhookTargetError,
     create_pinned_webhook_session,
+    describe_webhook_error,
     is_auth_scheme,
+    post_webhook_result_async,
     post_webhook_status_async,
+    redact_webhook_url,
+    validate_webhook_auth_selector,
 )
+from src.core.webhook_signing_config import sign_default_webhook_headers
 
 logger = logging.getLogger(__name__)
+_ORIGINAL_POST_WEBHOOK_STATUS_ASYNC = post_webhook_status_async
 
 
 def _canonical_body_bytes(payload_dict: dict[str, Any]) -> bytes:
     """Serialize a webhook payload to the canonical on-wire bytes.
 
     Compact separators (``","``/``":"``) per the adcp canonical form
-    (adcontextprotocol/adcp#2478) — byte-for-byte identical to what
+    required by the canonical webhook profile — byte-for-byte identical to what
     ``sign_legacy_webhook`` computes its HMAC over. These EXACT bytes are both
     signed and transmitted (``data=<bytes>``, never ``json=``), so the signature
     can never cover different bytes than the receiver sees on the wire.
     """
     return json.dumps(payload_dict, separators=(",", ":")).encode("utf-8")
+
+
+def _default_webhook_signature_headers(*, url: str, headers: dict[str, str], body: bytes) -> dict[str, str]:
+    """Compatibility wrapper around the shared validated default signer."""
+    return sign_default_webhook_headers(url=url, headers=headers, body=body)
 
 
 def _normalize_localhost_for_docker(url: str) -> str:
@@ -82,7 +93,7 @@ class ProtocolWebhookService:
     Supports authentication schemes:
     - HMAC-SHA256: Signs payload with shared secret
     - Bearer: Sends credentials as Bearer token
-    - None: No authentication
+    - None: RFC 9421 signing with the seller's published webhook JWK
     """
 
     def __init__(self):
@@ -91,7 +102,7 @@ class ProtocolWebhookService:
     async def send_notification(
         self,
         push_notification_config: PushNotificationConfig,
-        payload: Task | TaskStatusUpdateEvent | McpWebhookPayload,
+        payload: Task | TaskStatusUpdateEvent | McpWebhookPayload | dict[str, Any],
         metadata: dict[str, Any],
     ) -> bool:
         """
@@ -124,7 +135,9 @@ class ProtocolWebhookService:
 
         # Log sanitized config (exclude sensitive authentication_token)
         safe_config = {
-            "url": push_notification_config.url if hasattr(push_notification_config, "url") else None,
+            "url": (
+                redact_webhook_url(push_notification_config.url) if hasattr(push_notification_config, "url") else None
+            ),
             "authentication_type": (
                 push_notification_config.authentication_type
                 if hasattr(push_notification_config, "authentication_type")
@@ -144,28 +157,32 @@ class ProtocolWebhookService:
         body_bytes: bytes
 
         # Apply authentication based on schemes
-        if (
-            is_auth_scheme(push_notification_config.authentication_type, HMAC_AUTH_SCHEME)
-            and push_notification_config.authentication_token
-        ):
+        auth_type = push_notification_config.authentication_type
+        auth_token = push_notification_config.authentication_token
+        legacy_secret = getattr(push_notification_config, "webhook_secret", None)
+        if auth_type is None and isinstance(legacy_secret, str):
+            auth_type = HMAC_AUTH_SCHEME
+            auth_token = legacy_secret
+        validate_webhook_auth_selector(auth_type, auth_token)
+        if is_auth_scheme(auth_type, HMAC_AUTH_SCHEME):
+            assert auth_token is not None
             # Legacy HMAC-SHA256 profile. sign_legacy_webhook returns the signature
             # headers AND the exact compact body bytes it signed — we send those bytes,
             # guaranteeing the HMAC covers precisely what the receiver verifies.
             timestamp = str(int(time.time()))
-            sig_headers, body_bytes = sign_legacy_webhook(
-                push_notification_config.authentication_token, payload_dict, timestamp=timestamp
-            )
+            sig_headers, body_bytes = sign_legacy_webhook(auth_token, payload_dict, timestamp=timestamp)
             headers.update(sig_headers)
-        else:
-            # Bearer or unauthenticated: no signature, but still transmit the canonical
-            # compact bytes so the body is deterministic and matches the signed form used
-            # everywhere else.
+        elif is_auth_scheme(auth_type, BEARER_AUTH_SCHEME):
+            assert auth_token is not None
             body_bytes = _canonical_body_bytes(payload_dict)
-            if (
-                is_auth_scheme(push_notification_config.authentication_type, BEARER_AUTH_SCHEME)
-                and push_notification_config.authentication_token
-            ):
-                headers["Authorization"] = f"Bearer {push_notification_config.authentication_token}"
+            headers["Authorization"] = f"Bearer {auth_token}"
+        elif auth_type is None:
+            body_bytes = _canonical_body_bytes(payload_dict)
+            # Omission selects the mandatory RFC 9421 profile. Never downgrade
+            # a valid default configuration to an unsigned POST.
+            headers.update(_default_webhook_signature_headers(url=url, headers=headers, body=body_bytes))
+        else:
+            raise ValueError(f"Unsupported webhook authentication scheme: {auth_type}")
 
         # Send notification with retry logic and logging
         return await self._send_with_retry_and_logging(
@@ -215,7 +232,10 @@ class ProtocolWebhookService:
                 )
                 session.commit()
         except Exception as e:
-            logger.error(f"Failed to write webhook delivery log: {scrub_control_chars(str(e))}")
+            logger.error(
+                "Failed to write webhook delivery log: %s",
+                scrub_control_chars(describe_webhook_error(e)),
+            )
 
     async def _send_with_retry_and_logging(
         self,
@@ -256,7 +276,10 @@ class ProtocolWebhookService:
         sequence_number = sequence_number_from_result if isinstance(sequence_number_from_result, int) else 1
 
         # Create webhook delivery log entry
-        log_id = str(uuid4())
+        # Delivery schedulers supply a deterministic logical-event ID. Reusing
+        # it across process restarts makes the delivery log, sequence, and wire
+        # idempotency key describe the same event rather than a fresh retry.
+        log_id = str(metadata.get("event_id") or uuid4())
         start_time = time.time()
 
         # Log to audit system (start)
@@ -269,19 +292,35 @@ class ProtocolWebhookService:
             try:
                 logger.info(f"Sending webhook for task {task_id} (attempt {attempt + 1}/{max_attempts})")
 
-                status_code = await post_webhook_status_async(
-                    self._session,
-                    url,
-                    body=body,
-                    headers=headers,
-                    timeout=10.0,
-                )
+                if post_webhook_status_async is not _ORIGINAL_POST_WEBHOOK_STATUS_ASYNC:
+                    from src.core.security.webhook_http import WebhookHTTPResult
+
+                    http_result = WebhookHTTPResult(
+                        status_code=await post_webhook_status_async(
+                            self._session,
+                            url,
+                            body=body,
+                            headers=headers,
+                            timeout=10.0,
+                        ),
+                        signature_error=False,
+                    )
+                else:
+                    http_result = await post_webhook_result_async(
+                        self._session,
+                        url,
+                        body=body,
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                status_code = http_result.status_code
                 # Require a 2xx. raise_for_status() does NOT raise for 3xx, and with
                 # redirects disabled a 3xx is a REFUSED redirect — a failed delivery,
                 # not a success. Treat any non-2xx uniformly via the HTTPError path.
                 if not (200 <= status_code < 300):
                     response = requests.Response()
                     response.status_code = status_code
+                    response.headers["X-AdCP-Signature-Error"] = "1" if http_result.signature_error else "0"
                     raise requests.HTTPError(
                         f"Webhook returned non-2xx status {status_code}",
                         response=response,
@@ -328,12 +367,15 @@ class ProtocolWebhookService:
             except requests.HTTPError as e:
                 error_status_code = e.response.status_code if e.response is not None else None
                 response_time_ms = int((time.time() - start_time) * 1000)
-                error_message = f"HTTP {error_status_code}: {str(e)}"
+                error_message = f"HTTP {error_status_code}"
 
-                # Refused redirects and client errors are permanent for this
-                # delivery attempt. Retrying cannot make a 3xx/4xx target safe
-                # or valid, and would multiply outbound traffic.
-                if error_status_code and 300 <= error_status_code < 500:
+                # Redirects and most client errors are permanent. AdCP 3.1.1
+                # explicitly treats persistent-webhook 401 as transient so a
+                # receiver can refresh credentials without losing the event.
+                signature_error = e.response is not None and e.response.headers.get("X-AdCP-Signature-Error") == "1"
+                if signature_error or (
+                    error_status_code and 300 <= error_status_code < 500 and error_status_code != 401
+                ):
                     logger.error(
                         f"Webhook failed for task {task_id} with permanent HTTP {error_status_code} - not retrying"
                     )
@@ -369,7 +411,7 @@ class ProtocolWebhookService:
 
                     return False
 
-                # Retry on 5xx errors (server errors - transient)
+                # Retry on 401 and 5xx errors (transient).
                 if attempt < max_attempts - 1:
                     wait_seconds = min(2**attempt, 60)  # Exponential backoff, max 60 seconds
                     logger.warning(
@@ -451,7 +493,7 @@ class ProtocolWebhookService:
 
             except requests.RequestException as e:
                 response_time_ms = int((time.time() - start_time) * 1000)
-                error_message = f"{type(e).__name__}: {str(e)}"
+                error_message = describe_webhook_error(e)
 
                 # Network errors - retry
                 if attempt < max_attempts - 1:
@@ -464,7 +506,7 @@ class ProtocolWebhookService:
                 else:
                     logger.error(
                         f"Webhook failed for task {task_id} after {max_attempts} attempts: "
-                        f"{type(e).__name__} - {scrub_control_chars(str(e))}"
+                        f"{scrub_control_chars(describe_webhook_error(e))}"
                     )
 
                     # Write to webhook_delivery_log (failed)
@@ -498,7 +540,11 @@ class ProtocolWebhookService:
                     return False
 
             except Exception as e:
-                logger.error(f"Unexpected error sending webhook for task {task_id}: {scrub_control_chars(str(e))}")
+                logger.error(
+                    "Unexpected error sending webhook for task %s: %s",
+                    task_id,
+                    scrub_control_chars(describe_webhook_error(e)),
+                )
 
                 # Write to webhook_delivery_log (unexpected failure)
                 if (
@@ -518,7 +564,7 @@ class ProtocolWebhookService:
                         sequence_number=sequence_number,
                         notification_type=notification_type,
                         attempt_count=attempt + 1,
-                        error_message=f"Unexpected error: {str(e)}",
+                        error_message=f"Unexpected error: {describe_webhook_error(e)}",
                         payload_size_bytes=payload_size_bytes,
                         completed_at=datetime.now(UTC),
                     )

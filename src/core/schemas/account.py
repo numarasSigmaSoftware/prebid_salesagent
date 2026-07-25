@@ -24,7 +24,12 @@ from adcp.types.generated_poc.core.brand_ref import BrandReference as LibraryBra
 from pydantic import ConfigDict
 
 from src.core.config import get_pydantic_extra_mode
-from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel, apply_replay_marker
+from src.core.schemas._base import (
+    NestedModelSerializerMixin,
+    ReplayableResponseMixin,
+    SalesAgentBaseModel,
+    apply_replay_marker,
+)
 
 # ---------------------------------------------------------------------------
 # Core domain Account (used in ListAccountsResponse.accounts)
@@ -84,7 +89,7 @@ class SyncAccountsRequest(LibrarySyncAccountsRequest):
 # ---------------------------------------------------------------------------
 
 
-class ListAccountsResponse(NestedModelSerializerMixin, LibraryListAccountsResponse):
+class ListAccountsResponse(ReplayableResponseMixin, NestedModelSerializerMixin, LibraryListAccountsResponse):
     """Extends library ListAccountsResponse.
 
     Library provides: accounts, errors, pagination, context, ext.

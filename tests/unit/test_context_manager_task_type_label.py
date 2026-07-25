@@ -76,8 +76,8 @@ def test_metadata_keeps_original_label_for_non_tasktype():
 
     # Wire value: coerced to the SDK-accepted fallback (not the original).
     # The SDK normalizes task_type to the TaskType enum, so compare by value.
-    assert str(payload.task_type.value) == "update_media_buy"
-    assert str(payload.task_type.value) != metadata["task_type"]
+    assert payload["task_type"] == "update_media_buy"
+    assert payload["task_type"] != metadata["task_type"]
 
 
 def test_valid_tasktype_label_passes_through_unchanged():
@@ -87,7 +87,39 @@ def test_valid_tasktype_label_passes_through_unchanged():
     payload, metadata = result
 
     assert metadata["task_type"] == "create_media_buy"
-    assert str(payload.task_type.value) == "create_media_buy"
+    assert payload["task_type"] == "create_media_buy"
+
+
+def test_unrelated_callback_rows_and_mappings_do_not_amplify_task_event():
+    """One workflow transition produces one callback for its originating config."""
+    mappings = [
+        SimpleNamespace(object_type="media_buy", object_id=f"mb_{index}", action="create") for index in range(3)
+    ]
+    context = SimpleNamespace(tenant_id="tenant_1", principal_id="principal_1")
+    session = session_returning(
+        mappings,
+        context,
+        [SimpleNamespace(id=f"unrelated_{index}") for index in range(4)],
+    )
+    deliveries: list[dict[str, object]] = []
+
+    async def record_delivery(**kwargs):
+        deliveries.append(kwargs)
+        return True
+
+    service = MagicMock()
+    service.send_notification = record_delivery
+
+    with patch.object(context_manager, "get_protocol_webhook_service", return_value=service):
+        context_manager.ContextManager()._send_push_notifications(
+            make_push_step("create_media_buy"),
+            "completed",
+            session,
+        )
+
+    assert len(deliveries) == 1
+    assert deliveries[0]["metadata"]["task_type"] == "create_media_buy"
+    assert deliveries[0]["payload"]["task_type"] == "create_media_buy"
 
 
 @pytest.mark.parametrize("tool_name", ["delivery_report", "totally_made_up"])
@@ -99,4 +131,4 @@ def test_invalid_labels_never_break_the_payload(tool_name):
 
     # metadata preserves the original; wire is the safe fallback.
     assert metadata["task_type"] == tool_name
-    assert str(payload.task_type.value) == "update_media_buy"
+    assert payload["task_type"] == "update_media_buy"

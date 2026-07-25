@@ -34,11 +34,13 @@ import logging
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 
+from src.core.application_context_values import serialize_application_context
 from src.core.database.repositories.idempotency_attempt import COMPLETED, EXPIRED, IN_FLIGHT, RESERVED
 from src.core.idempotency_logging import redact_idempotency_key
 
@@ -135,6 +137,22 @@ def lookup_cached_replay[T](
             idempotency_key=idempotency_key,
         )
         if cached is None:
+            previous = uow.idempotency_attempts.find_including_expired(
+                principal_id=principal_id,
+                account_id=account_id,
+                idempotency_key=idempotency_key,
+            )
+            previous_expires_at = getattr(previous, "expires_at", None)
+            if isinstance(previous_expires_at, datetime) and previous_expires_at <= datetime.now(UTC):
+                from src.core.exceptions import AdCPIdempotencyExpiredError
+
+                raise AdCPIdempotencyExpiredError(
+                    "idempotency_key was seen before, but its replay window has expired",
+                    suggestion=(
+                        "Perform a natural-key existence check to determine whether the original mutation succeeded, "
+                        "then accept that result or mint a fresh idempotency_key."
+                    ),
+                )
             if enforce_ceiling:
                 from src.services.idempotency_policy import enforce_insert_ceiling
 
@@ -228,6 +246,9 @@ def maybe_evict_expired(
         with uow_factory(tenant_id) as uow:
             assert uow.idempotency_attempts is not None
             uow.idempotency_attempts.expire_old()
+            claim_repo = getattr(uow, "downstream_mutation_claims", None)
+            if claim_repo is not None:
+                claim_repo.compact_expired()
     except Exception:
         logger.warning("Best-effort idempotency cache eviction failed for tenant %s", tenant_id, exc_info=True)
 
@@ -235,12 +256,9 @@ def maybe_evict_expired(
 # ---------------------------------------------------------------------------
 # Durable two-phase reservation façade (reserve -> work -> complete/release)
 # ---------------------------------------------------------------------------
-# The reservation model replaces the best-effort probe/record split for tools
-# that need first-insert-wins durability (sync/update tools have no dup-booking
-# backstop, so a concurrent same-key pair must be arbitrated by the reservation
-# row itself, not by an idempotent side effect). create_media_buy keeps the
-# best-effort lookup/record primitives above — its media_buys.idempotency_key
-# partial unique index is the real dup-booking enforcer.
+# The reservation model provides first-insert-wins durability for every keyed
+# protocol operation. Legacy probe/record helpers above remain only for direct
+# in-process compatibility callers; production transports reserve first.
 
 
 @dataclass(frozen=True)
@@ -368,7 +386,10 @@ def reserve_idempotent[T](
 
             raise AdCPIdempotencyExpiredError(
                 "idempotency_key was seen before, but its replay window has expired",
-                suggestion="Mint a fresh idempotency_key after checking whether the original mutation succeeded.",
+                suggestion=(
+                    "Perform a natural-key existence check to determine whether the original mutation succeeded, "
+                    "then accept that result or mint a fresh idempotency_key."
+                ),
             )
         # Check the canonical payload before classifying a live or completed
         # collision. A different-payload retry is CONFLICT even while the first
@@ -432,6 +453,7 @@ def release_idempotent(
     tenant_id: str,
     *,
     attempt_id: str,
+    on_release: Callable[..., None] | None = None,
 ) -> None:
     """Delete the reserved in_flight row in its OWN transaction (handler failed).
 
@@ -443,7 +465,9 @@ def release_idempotent(
     try:
         with uow_factory(tenant_id) as uow:
             assert uow.idempotency_attempts is not None
-            uow.idempotency_attempts.release(attempt_id)
+            released = uow.idempotency_attempts.release(attempt_id)
+            if released and on_release is not None:
+                on_release(uow=uow)
     except Exception:
         logger.warning(
             "Best-effort idempotency reservation release failed for attempt %s (tenant %s) — "
@@ -459,6 +483,8 @@ def release_reservation_on_error(
     uow_factory: Callable[[str], AbstractContextManager[_IdempotencyUoWLike]],
     tenant_id: str,
     attempt_id: str | None,
+    *,
+    on_release: Callable[..., None] | None = None,
 ) -> Iterator[None]:
     """Release a won reservation only when the guarded work raises.
 
@@ -471,7 +497,12 @@ def release_reservation_on_error(
         yield
     except Exception:
         if attempt_id is not None:
-            release_idempotent(uow_factory, tenant_id, attempt_id=attempt_id)
+            release_idempotent(
+                uow_factory,
+                tenant_id,
+                attempt_id=attempt_id,
+                on_release=on_release,
+            )
         raise
 
 
@@ -490,9 +521,82 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str | None, str
     return tenant_id, identity.principal_id if identity else None, identity.account_id if identity else None
 
 
+def _response_with_current_context(response: Any, context: Any) -> Any:
+    """Replace cached correlation context with the current retry's context."""
+    if isinstance(response, dict):
+        updated = dict(response)
+        updated.pop("context", None)
+        serialized = serialize_application_context(context)
+        if serialized is not None:
+            updated["context"] = serialized
+        return updated
+    if not isinstance(response, BaseModel):
+        return response
+
+    if "context" in type(response).model_fields:
+        return response.model_copy(update={"context": context})
+    nested = getattr(response, "response", None)
+    if isinstance(nested, BaseModel) and "context" in type(nested).model_fields:
+        return response.model_copy(update={"response": nested.model_copy(update={"context": context})})
+    return response
+
+
+def mark_idempotent_replay[T](response: T, *, context: Any) -> T:
+    """Overlay retry-local context and the replay marker on a cached response.
+
+    ``context`` is deliberately excluded from canonical idempotency hashing:
+    retries may carry a new correlation value, and the normative context echo
+    contract requires that current value rather than the value stored with the
+    original success. FastMCP ``ToolResult`` mirrors structured content in a
+    JSON text block, so both representations are updated together.
+    """
+    response = _response_with_current_context(response, context)
+    if isinstance(response, dict):
+        return cast(T, {**response, "replayed": True})
+    if not isinstance(response, BaseModel):
+        return response
+
+    structured = getattr(response, "structured_content", None)
+    if isinstance(structured, dict):
+        replayed_structured = cast(dict[str, Any], _response_with_current_context(structured, context))
+        replayed_structured["replayed"] = True
+        content = []
+        for block in getattr(response, "content", []):
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                try:
+                    decoded_text = json.loads(text)
+                except (TypeError, ValueError):
+                    decoded_text = None
+                if decoded_text == structured:
+                    block = block.model_copy(
+                        update={
+                            "text": json.dumps(
+                                replayed_structured,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        }
+                    )
+            content.append(block)
+        return cast(
+            T,
+            response.model_copy(
+                update={
+                    "content": content,
+                    "structured_content": replayed_structured,
+                }
+            ),
+        )
+    if "replayed" in type(response).model_fields:
+        return cast(T, response.model_copy(update={"replayed": True}))
+    return response
+
+
 def _decode_read_response(
     envelope: dict[str, Any],
     response_type: type[Any] | None,
+    context: Any = None,
 ) -> Any:
     """Reconstruct and mark a cached read response."""
     try:
@@ -500,7 +604,7 @@ def _decode_read_response(
         if response_type is None:
             if not isinstance(payload, dict):
                 return None
-            return {**payload, "replayed": True}
+            return mark_idempotent_replay(payload, context=context)
         model_fields = getattr(response_type, "model_fields", {})
         if {"content", "structured_content"}.issubset(model_fields) and isinstance(payload, dict):
             # FastMCP ToolResult's custom __init__ converts a serialized list of
@@ -514,35 +618,7 @@ def _decode_read_response(
             )
         else:
             response = response_type.model_validate(payload)
-        structured = getattr(response, "structured_content", None)
-        if isinstance(structured, dict):
-            replayed_structured = {**structured, "replayed": True}
-            content = []
-            for block in getattr(response, "content", []):
-                text = getattr(block, "text", None)
-                if isinstance(text, str):
-                    try:
-                        decoded_text = json.loads(text)
-                    except (TypeError, ValueError):
-                        decoded_text = None
-                    if decoded_text == structured:
-                        block = block.model_copy(
-                            update={
-                                "text": json.dumps(
-                                    replayed_structured,
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            }
-                        )
-                content.append(block)
-            return response.model_copy(
-                update={
-                    "content": content,
-                    "structured_content": replayed_structured,
-                }
-            )
-        return response.model_copy(update={"replayed": True})
+        return mark_idempotent_replay(response, context=context)
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
@@ -574,7 +650,7 @@ def execute_idempotent_read_sync[T: BaseModel | dict[str, Any]](
         idempotency_key=idempotency_key,
         request_hash=canonical_payload_hash(raw_wire_payload),
         lease=DEFAULT_IN_FLIGHT_LEASE,
-        decode=lambda envelope: _decode_read_response(envelope, response_type),
+        decode=lambda envelope: _decode_read_response(envelope, response_type, raw_wire_payload.get("context")),
         enforce_ceiling=True,
         operation_class="read",
     )
@@ -620,7 +696,7 @@ async def execute_idempotent_read[T: BaseModel | dict[str, Any]](
         idempotency_key=idempotency_key,
         request_hash=canonical_payload_hash(raw_wire_payload),
         lease=DEFAULT_IN_FLIGHT_LEASE,
-        decode=lambda envelope: _decode_read_response(envelope, response_type),
+        decode=lambda envelope: _decode_read_response(envelope, response_type, raw_wire_payload.get("context")),
         enforce_ceiling=True,
         operation_class="read",
     )
