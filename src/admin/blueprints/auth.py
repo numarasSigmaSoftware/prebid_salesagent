@@ -41,7 +41,7 @@ def _safe_redirect(url: str | None, fallback: str) -> str:
     """Return *url* only if it is a safe local path, otherwise *fallback*.
 
     Rejects anything with a scheme, a netloc, a leading // or \\,
-    a backslash anywhere, or anything that does not start with.
+    a backslash anywhere, or anything that does not start with ``/``.
     Also rejects after URL-decoding to defeat encoded bypass attempts.
     """
     if not url:
