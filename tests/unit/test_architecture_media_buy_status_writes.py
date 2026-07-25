@@ -374,6 +374,17 @@ def test_detector_flags_status_write_after_uow_repository_alias_get_by_id():
     assert ("row", "status") in _detect(ast.parse(src))
 
 
+def test_detector_flags_status_write_after_annotated_uow_repository_alias():
+    """Annotated UoW repository aliases must retain the same MediaBuy type flow."""
+    src = (
+        "def update(uow):\n"
+        "    repo: MediaBuyRepository = uow.media_buys\n"
+        "    row = repo.get_by_id('buy')\n"
+        "    row.status = 'active'\n"
+    )
+    assert ("row", "status") in _detect(ast.parse(src))
+
+
 # ---------------------------------------------------------------------------
 # Companion guard: no discarded returns from None-tolerant MediaBuy mutators.
 #
@@ -397,7 +408,7 @@ def _media_buy_repo_locals(tree: ast.AST) -> set[str]:
     """Local names bound from a ``MediaBuyRepository`` or UoW media-buy repository."""
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and (
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and (
             (
                 isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Name)
@@ -405,7 +416,8 @@ def _media_buy_repo_locals(tree: ast.AST) -> set[str]:
             )
             or _attr_chain_contains(node.value, "media_buys")
         ):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
     return names
 
 
@@ -545,6 +557,9 @@ def test_guard_detects_discarded_mutator_returns():
         "def f(session, tid, mb_id):\n"
         "    repo = MediaBuyRepository(session, tid)\n"
         "    repo.update_fields(mb_id, budget=1)\n"
+    )
+    assert ("repo", "update_status") in _discard_hits(
+        "def f(uow, mb_id):\n    repo: MediaBuyRepository = uow.media_buys\n    repo.update_status(mb_id, 'active')\n"
     )
     assert ("media_buys", "bump_revision") in _discard_hits(
         "def f(uow, mb_id):\n    uow.media_buys.bump_revision(mb_id)\n"

@@ -100,6 +100,26 @@ def _requests_method_aliases(tree: ast.AST, module_names: set[str]) -> set[str]:
     return aliases
 
 
+def _requests_session_aliases(tree: ast.AST, module_names: set[str], sessions_module_names: set[str]) -> set[str]:
+    """Local names assigned from a recognized ``requests.Session`` constructor."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if value is None:
+            continue
+        chain = _attribute_chain(value)
+        if not chain:
+            continue
+        direct_session = chain[0] in module_names and chain[-1] == "Session" and chain[1:-1] in ([], ["sessions"])
+        imported_sessions_module = len(chain) == 2 and chain[0] in sessions_module_names and chain[1] == "Session"
+        if direct_session or imported_sessions_module:
+            aliases.update(target.id for target in targets if isinstance(target, ast.Name))
+    return aliases
+
+
 def _attribute_chain(node: ast.expr) -> list[str] | None:
     """Flatten ``requests.sessions.Session``-style attribute chains."""
     parts: list[str] = []
@@ -130,10 +150,11 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
     direct_methods, direct_sessions = _requests_function_names(tree)
     sessions_module_names = _requests_sessions_module_names(tree)
     method_aliases = _requests_method_aliases(tree, module_names)
+    session_aliases = _requests_session_aliases(tree, module_names, sessions_module_names)
     hits: list[int] = []
     for node in iter_call_expressions(tree):
         if isinstance(node.func, ast.Name):
-            if node.func.id in direct_sessions:
+            if node.func.id in direct_sessions | session_aliases:
                 hits.append(node.lineno)
             elif node.func.id in direct_methods | method_aliases:
                 timeout_kw = next((kw for kw in node.keywords if kw.arg == "timeout"), None)
@@ -214,6 +235,16 @@ def test_guard_detects_aliased_requests_call():
 def test_guard_detects_locally_aliased_requests_method():
     """Known-bad: assigning ``requests.post`` to a local cannot hide an unbounded call."""
     assert _snippet_hits("import requests\n\n\ndef f(url):\n    send = requests.post\n    return send(url)\n") == [6]
+
+
+def test_guard_detects_locally_aliased_session_constructor():
+    """Known-bad: local aliases of either Session constructor form are escape hatches."""
+    assert _snippet_hits(
+        "import requests\n\n\ndef f():\n    make_session = requests.Session\n    return make_session()\n"
+    ) == [6]
+    assert _snippet_hits(
+        "from requests import sessions\n\n\ndef f():\n    make_session = sessions.Session\n    return make_session()\n"
+    ) == [6]
 
 
 def test_guard_detects_directly_imported_request_call():

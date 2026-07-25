@@ -105,7 +105,7 @@ class CustomProxyFix:
 
 def create_app(config=None):
     """Create and configure the Flask application."""
-    app = Flask(__name__, template_folder="././templates", static_folder="././static")
+    app = Flask(__name__, template_folder="../../templates", static_folder="../../static")
 
     # Configuration
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
