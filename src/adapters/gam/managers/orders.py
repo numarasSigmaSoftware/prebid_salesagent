@@ -713,10 +713,8 @@ class GAMOrdersManager:
             # If package has creatives, filter placeholders to match actual creative sizes
             # This prevents "X out of Y expected" issues and ensures one placeholder per unique size
             if package.creative_ids:
-                from sqlalchemy import select
-
                 from src.core.database.database_session import get_db_session
-                from src.core.database.models import Creative as DBCreative
+                from src.core.database.repositories.creative import CreativeRepository
 
                 # Collect unique creative sizes from uploaded creatives
                 creative_sizes = set()
@@ -724,11 +722,11 @@ class GAMOrdersManager:
                 # Get creative sizes from database if using creative_ids
                 if package.creative_ids:
                     with get_db_session() as session:
-                        creative_stmt = select(DBCreative).where(
-                            DBCreative.tenant_id == tenant_id,
-                            DBCreative.creative_id.in_(package.creative_ids),
+                        db_creatives = (
+                            CreativeRepository(session, tenant_id).admin_get_by_ids(package.creative_ids)
+                            if tenant_id
+                            else []
                         )
-                        db_creatives = session.scalars(creative_stmt).all()
 
                         for db_creative in db_creatives:
                             creative_data = db_creative.data or {}

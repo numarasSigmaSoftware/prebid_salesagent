@@ -37,12 +37,14 @@ from sqlalchemy.orm import Session
 
 from src.core.database.database_session import get_db_session
 from src.core.database.repositories.account import AccountRepository
+from src.core.database.repositories.agent_registry import SignalsAgentRepository
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
 from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
+from src.core.database.repositories.strategy import StrategyRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 
@@ -145,6 +147,7 @@ class MediaBuyUoW(BaseUoW):
     media_buys: MediaBuyRepository | None
     products: ProductRepository | None
     creatives: CreativeRepository | None
+    assignments: CreativeAssignmentRepository | None
     currency_limits: CurrencyLimitRepository | None
     idempotency_attempts: IdempotencyAttemptRepository | None
 
@@ -160,6 +163,7 @@ class MediaBuyUoW(BaseUoW):
         self.media_buys = MediaBuyRepository(self._session, self._tenant_id, now_fn=self._now_fn)
         self.products = ProductRepository(self._session, self._tenant_id)
         self.creatives = CreativeRepository(self._session, self._tenant_id)
+        self.assignments = CreativeAssignmentRepository(self._session, self._tenant_id)
         self.currency_limits = CurrencyLimitRepository(self._session, self._tenant_id)
         self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
 
@@ -167,6 +171,7 @@ class MediaBuyUoW(BaseUoW):
         self.media_buys = None
         self.products = None
         self.creatives = None
+        self.assignments = None
         self.currency_limits = None
         self.idempotency_attempts = None
 
@@ -251,6 +256,44 @@ class AccountUoW(BaseUoW):
 
     def _clear_repos(self) -> None:
         self.accounts = None
+
+
+class SignalsAgentUoW(BaseUoW):
+    """Unit of Work for tenant-scoped signals agent configuration lookups."""
+
+    agents: SignalsAgentRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.agents = SignalsAgentRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.agents = None
+
+
+class StrategyUoW(BaseUoW):
+    """Unit of Work for globally keyed strategies and simulation state."""
+
+    strategies: StrategyRepository | None
+
+    def __init__(self) -> None:
+        super().__init__("")
+
+    def __enter__(self) -> Self:
+        super().__enter__()
+        assert self._session is not None
+        # StrategyContext retains a strategy model after this UoW closes. Match
+        # the former explicit commit-and-refresh flow by keeping its loaded
+        # values available rather than expiring them at commit time.
+        self._session.expire_on_commit = False
+        return self
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.strategies = StrategyRepository(self._session)
+
+    def _clear_repos(self) -> None:
+        self.strategies = None
 
 
 class PushNotificationConfigUoW(BaseUoW):

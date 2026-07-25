@@ -41,6 +41,7 @@ from rich.console import Console
 
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
+from src.core.database.repositories.product import ProductRepository
 from src.core.exceptions import (
     AdCPAdapterError,
     AdCPAuthorizationError,
@@ -452,12 +453,7 @@ def _validate_creatives_before_adapter_call(
             product_ids_needed.add(package.product_id)
 
     if product_ids_needed:
-        from src.core.database.models import Product as DBProduct
-
-        product_stmt = select(DBProduct).where(
-            DBProduct.tenant_id == tenant_id, DBProduct.product_id.in_(list(product_ids_needed))
-        )
-        products_list = list(session.scalars(product_stmt).all())
+        products_list = ProductRepository(session, tenant_id).list_by_ids(list(product_ids_needed))
 
         # Build product_id -> set of accepted format id strings
         product_format_map: dict[str, set[str]] = {}

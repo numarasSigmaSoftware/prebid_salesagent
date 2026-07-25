@@ -73,19 +73,18 @@ class TestAuthUtilsTenantIsolation:
         Principal has composite PK (tenant_id, principal_id). Querying by
         principal_id alone can return a principal from a different tenant.
         """
-        selects = _extract_select_calls(
-            "src/core/auth.py",
-            "get_principal_object",
-        )
-
-        principal_selects = [s for s in selects if s["model"] == "Principal" or s["model"] == "ModelPrincipal"]
-        assert principal_selects, "Expected at least one Principal select() call"
-
-        for s in principal_selects:
-            assert s["has_tenant_filter"], (
-                f"Principal query at auth.py:{s['lineno']} is missing tenant_id filter. "
-                f"This is a cross-tenant data leak (salesagent-0kba)."
-            )
+        tree = ast.parse((ROOT / "src/core/auth.py").read_text())
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get_by_id"
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Name)
+            and node.func.value.func.id == "PrincipalRepository"
+        ]
+        assert calls, "get_principal_object must delegate to tenant-scoped PrincipalRepository.get_by_id()"
 
 
 class TestMediaBuyUpdateTenantIsolation:
@@ -163,7 +162,22 @@ class TestAdapterTenantIsolation:
     # the media_buy_id FK to MediaBuy (globally unique PK).
 
     def test_gam_create_line_items_scopes_by_tenant(self):
-        """GAMOrdersManager.create_line_items must filter Creative by tenant_id."""
+        """GAMOrdersManager.create_line_items must use a tenant-scoped CreativeRepository."""
+        source_path = ROOT / "src/adapters/gam/managers/orders.py"
+        tree = ast.parse(source_path.read_text())
+        class_node = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "GAMOrdersManager"
+        )
+        func_node = next(
+            node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == "create_line_items"
+        )
+        source_text = ast.get_source_segment(source_path.read_text(), func_node)
+
+        assert "CreativeRepository(session, tenant_id).admin_get_by_ids(package.creative_ids)" in source_text, (
+            "create_line_items() must load creatives through the tenant-scoped CreativeRepository. "
+            "This prevents cross-tenant creative lookups (salesagent-v7lw)."
+        )
+
         selects = _extract_select_calls(
             "src/adapters/gam/managers/orders.py",
             "create_line_items",
@@ -171,13 +185,7 @@ class TestAdapterTenantIsolation:
         )
 
         creative_selects = [s for s in selects if s["model"] in ("Creative", "DBCreative", "CreativeModel")]
-        assert creative_selects, "Expected at least one Creative select() call"
-
-        for s in creative_selects:
-            assert s["has_tenant_filter"], (
-                f"Creative query at gam/managers/orders.py:{s['lineno']} is missing tenant_id filter. "
-                f"This is a cross-tenant data leak (salesagent-v7lw)."
-            )
+        assert not creative_selects, "create_line_items() must not bypass CreativeRepository with raw select(Creative)."
 
 
 class TestAdminDeliveryTenantIsolation:

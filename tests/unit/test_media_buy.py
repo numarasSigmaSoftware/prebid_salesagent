@@ -982,12 +982,14 @@ class TestCreateMediaBuyCreativeValidation:
             ),
         ):
             session = MagicMock()
-            # First scalars call: creative lookup; second: product lookup
+            # CreativeRepository uses scalars(); ProductRepository uses execute()
+            # to de-duplicate its eager-loaded pricing relationship.
             creative_result = MagicMock()
             creative_result.all.return_value = [mock_creative]
             product_result = MagicMock()
             product_result.all.return_value = [mock_product]
-            session.scalars.side_effect = [creative_result, product_result]
+            session.scalars.return_value = creative_result
+            session.execute.return_value.unique.return_value.scalars.return_value = product_result
 
             with pytest.raises(AdCPCreativeRejectedError) as exc_info:
                 _validate_creatives_before_adapter_call([package], "test_tenant", "test_principal", session=session)
@@ -2461,10 +2463,7 @@ class TestUpdateMediaBuyCreativeIds:
             mock_uow.creatives.get_by_ids.return_value = [mock_c1, mock_c2]
             mock_uow.products.get_by_id.return_value = mock_product
 
-            # Existing-assignment lookup still goes through session.scalars.
-            assign_result = MagicMock()
-            assign_result.all.return_value = [mock_existing_assignment]
-            uow_session.scalars.side_effect = [assign_result]
+            mock_uow.assignments.get_by_media_buy_and_package.return_value = [mock_existing_assignment]
 
             result = _update_media_buy_impl(req=req, identity=identity)
 
@@ -2814,10 +2813,11 @@ class TestUpdateMediaBuyCreativeIds:
             mock_uow.creatives.get_by_ids.return_value = [mock_c2, mock_c4]
             mock_uow.products.get_by_id.return_value = mock_product
 
-            # Existing-assignment lookup still goes through session.scalars.
-            assign_result = MagicMock()
-            assign_result.all.return_value = [mock_assign_c1, mock_assign_c2, mock_assign_c3]
-            uow_session.scalars.side_effect = [assign_result]
+            mock_uow.assignments.get_by_media_buy_and_package.return_value = [
+                mock_assign_c1,
+                mock_assign_c2,
+                mock_assign_c3,
+            ]
 
             result = _update_media_buy_impl(req=req, identity=identity)
 

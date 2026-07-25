@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from src.core.resolved_identity import ResolvedIdentity
     from src.core.tool_context import ToolContext
 from fastmcp.server.dependencies import get_http_headers
-from sqlalchemy import select
 
 from src.core.auth_utils import get_principal_from_token
 from src.core.config_loader import (
@@ -27,7 +26,7 @@ from src.core.config_loader import (
     set_current_tenant,
 )
 from src.core.database.database_session import get_db_session
-from src.core.database.models import Principal as ModelPrincipal
+from src.core.database.repositories.principal import PrincipalRepository
 
 # Single buyer-facing correction hint for every AUTH_REQUIRED rejection (missing
 # identity in an _impl, or a missing/invalid token at the REST auth boundary), so
@@ -290,8 +289,7 @@ def get_principal_adapter_mapping(principal_id: str, tenant_id: str | None = Non
         tenant = get_current_tenant()
         tenant_id = tenant["tenant_id"]
     with get_db_session() as session:
-        stmt = select(ModelPrincipal).filter_by(principal_id=principal_id, tenant_id=tenant_id)
-        principal = session.scalars(stmt).first()
+        principal = PrincipalRepository(session, tenant_id).get_by_id(principal_id)
         return principal.platform_mappings if principal else {}
 
 
@@ -301,8 +299,7 @@ def get_principal_object(principal_id: str, tenant_id: str | None = None) -> Pri
         tenant = get_current_tenant()
         tenant_id = tenant["tenant_id"]
     with get_db_session() as session:
-        stmt = select(ModelPrincipal).filter_by(principal_id=principal_id, tenant_id=tenant_id)
-        principal = session.scalars(stmt).first()
+        principal = PrincipalRepository(session, tenant_id).get_by_id(principal_id)
 
         if principal:
             return Principal(

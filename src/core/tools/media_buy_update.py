@@ -23,7 +23,7 @@ from pydantic import Field
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
 
 if TYPE_CHECKING:
-    from src.core.database.models import MediaBuy
+    from src.core.database.models import MediaBuy, Product as DBProduct
 
 # ---------------------------------------------------------------------------
 # Financial policy constants (F-05)
@@ -39,7 +39,6 @@ from adcp.types import ContextObject, ReportingWebhook, TargetingOverlay
 from adcp.types import PackageUpdate as UpdatePackage
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
-from sqlalchemy import select
 
 from src.core.exceptions import (
     AdCPAdapterError,
@@ -73,9 +72,6 @@ from src.core.database.models import (
 from src.core.database.models import (
     MediaBuy,
     ObjectWorkflowMapping,
-)
-from src.core.database.models import (
-    Product as DBProduct,
 )
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.helpers.adapter_helpers import get_adapter
@@ -1066,12 +1062,10 @@ def _update_media_buy_impl(
                         )
 
                         # Get existing assignments for this package
-                        assignment_stmt = select(DBAssignment).where(
-                            DBAssignment.tenant_id == tenant["tenant_id"],
-                            DBAssignment.media_buy_id == actual_media_buy_id,
-                            DBAssignment.package_id == pkg_update.package_id,
+                        assert uow.assignments is not None
+                        existing_assignments = uow.assignments.get_by_media_buy_and_package(
+                            actual_media_buy_id, pkg_update.package_id
                         )
-                        existing_assignments = session.scalars(assignment_stmt).all()
                         existing_creative_ids = {a.creative_id for a in existing_assignments}
 
                         # Determine added and removed creative IDs
@@ -1237,11 +1231,7 @@ def _update_media_buy_impl(
 
                             if product_id:
                                 # Get product's placements
-                                prod_stmt = select(DBProduct).where(
-                                    DBProduct.tenant_id == tenant["tenant_id"],
-                                    DBProduct.product_id == product_id,
-                                )
-                                product_obj = session.scalars(prod_stmt).first()
+                                product_obj = uow.products.get_by_id(product_id)
 
                                 if product_obj and product_obj.placements:
                                     available_placement_ids: set[str] = {
@@ -1280,12 +1270,10 @@ def _update_media_buy_impl(
                         # assignments for this package. Delete existing assignments not
                         # in the new list, matching the creative_ids handler pattern.
                         requested_creative_ids = {ca.creative_id for ca in pkg_update.creative_assignments}
-                        existing_stmt = select(DBAssignment).where(
-                            DBAssignment.tenant_id == tenant["tenant_id"],
-                            DBAssignment.media_buy_id == actual_media_buy_id,
-                            DBAssignment.package_id == pkg_update.package_id,
+                        assert uow.assignments is not None
+                        existing_assignments = uow.assignments.get_by_media_buy_and_package(
+                            actual_media_buy_id, pkg_update.package_id
                         )
-                        existing_assignments = session.scalars(existing_stmt).all()
                         for existing in existing_assignments:
                             if existing.creative_id not in requested_creative_ids:
                                 session.delete(existing)
@@ -1300,14 +1288,12 @@ def _update_media_buy_impl(
                             # the match key: the same creative_id can exist under two
                             # principals (composite creatives PK), and the create branch
                             # below inserts under the requester's principal.
-                            assign_stmt = select(DBAssignment).where(
-                                DBAssignment.tenant_id == tenant["tenant_id"],
-                                DBAssignment.principal_id == principal_id,
-                                DBAssignment.media_buy_id == actual_media_buy_id,
-                                DBAssignment.package_id == pkg_update.package_id,
-                                DBAssignment.creative_id == creative_id,
+                            db_assignment = uow.assignments.get_existing(
+                                actual_media_buy_id,
+                                pkg_update.package_id,
+                                creative_id,
+                                principal_id,
                             )
-                            db_assignment = session.scalars(assign_stmt).first()
 
                             if db_assignment:
                                 # Update existing assignment

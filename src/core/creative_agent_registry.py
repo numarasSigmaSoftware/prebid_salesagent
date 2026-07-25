@@ -33,6 +33,7 @@ from adcp.types import AssetContentType as AssetType
 from adcp.types import Error as AdCPResponseError
 from pydantic import ValidationError
 
+from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.exceptions import (
     AdCPAdapterError,
     AdCPRateLimitError,
@@ -325,14 +326,9 @@ class CreativeAgentRegistry:
             return agents
 
         # Load tenant-specific agents from database
-        from sqlalchemy import select
-
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import CreativeAgent as CreativeAgentModel
-
-        with get_db_session() as session:
-            stmt = select(CreativeAgentModel).filter_by(tenant_id=tenant_id, enabled=True)
-            db_agents = session.scalars(stmt).all()
+        with TenantConfigUoW(tenant_id) as uow:
+            assert uow.tenant_config is not None
+            db_agents = uow.tenant_config.list_enabled_creative_agents()
 
             for db_agent in db_agents:
                 # Parse auth credentials if present

@@ -34,6 +34,7 @@ from typing import Any
 from adcp import ADCPMultiAgentClient
 from adcp.exceptions import ADCPAuthenticationError, ADCPConnectionError, ADCPError
 
+from src.core.database.repositories.uow import SignalsAgentUoW
 from src.core.exceptions import AdCPAdapterError
 from src.core.schemas import GetSignalsRequest
 
@@ -84,14 +85,9 @@ class SignalsAgentRegistry:
         agents = []
 
         # Load tenant-specific agents from database
-        from sqlalchemy import select
-
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import SignalsAgent as SignalsAgentModel
-
-        with get_db_session() as session:
-            stmt = select(SignalsAgentModel).filter_by(tenant_id=tenant_id, enabled=True)
-            db_agents = session.scalars(stmt).all()
+        with SignalsAgentUoW(tenant_id) as uow:
+            assert uow.agents is not None
+            db_agents = uow.agents.list_enabled_signals_agents()
 
             for db_agent in db_agents:
                 # Parse auth credentials if present

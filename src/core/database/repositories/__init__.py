@@ -17,18 +17,23 @@ Usage:
 
 from src.core.database.repositories.account import AccountRepository
 from src.core.database.repositories.adapter_config import AdapterConfigRepository, TenantNotConfiguredError
+from src.core.database.repositories.agent_registry import SignalsAgentRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
 from src.core.database.repositories.delivery_simulation import DeliverySimulationConfigRepository
 from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
+from src.core.database.repositories.principal import PrincipalRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
+from src.core.database.repositories.strategy import StrategyRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.uow import (
     AccountUoW,
     MediaBuyUoW,
     ProductUoW,
     PushNotificationConfigUoW,
+    SignalsAgentUoW,
+    StrategyUoW,
     TenantConfigUoW,
     WorkflowUoW,
 )
@@ -44,10 +49,15 @@ __all__ = [
     "IdempotencyAttemptRepository",
     "MediaBuyRepository",
     "MediaBuyUoW",
+    "PrincipalRepository",
     "ProductRepository",
     "ProductUoW",
     "PushNotificationConfigRepository",
     "PushNotificationConfigUoW",
+    "SignalsAgentRepository",
+    "SignalsAgentUoW",
+    "StrategyRepository",
+    "StrategyUoW",
     "TenantConfigRepository",
     "TenantConfigUoW",
     "WorkflowRepository",

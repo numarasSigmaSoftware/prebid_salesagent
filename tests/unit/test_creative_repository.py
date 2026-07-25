@@ -232,6 +232,21 @@ class TestCreativeAssignmentRepositoryGetByPackage:
         assert len(result) == 1
 
 
+class TestCreativeAssignmentRepositoryGetByMediaBuyAndPackage:
+    """get_by_media_buy_and_package scopes assignments by tenant, buy, and package."""
+
+    def test_returns_matching_assignments(self):
+        """The package-scoped lookup returns all matching assignments."""
+        session = MagicMock()
+        assignments = [MagicMock(), MagicMock()]
+        session.scalars.return_value.all.return_value = assignments
+
+        result = CreativeAssignmentRepository(session, "t1").get_by_media_buy_and_package("mb1", "pkg1")
+
+        assert result == assignments
+        session.scalars.assert_called_once()
+
+
 class TestCreativeAssignmentRepositoryGetExisting:
     """get_existing looks up by composite key."""
 

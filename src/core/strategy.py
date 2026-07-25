@@ -11,11 +11,8 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import delete, select
-
-from src.core.database.database_session import get_db_session
 from src.core.database.models import Strategy as StrategyModel
-from src.core.database.models import StrategyState
+from src.core.database.repositories.uow import StrategyUoW
 
 
 class StrategyError(Exception):
@@ -84,15 +81,13 @@ class StrategyManager:
 
     def get_or_create_strategy(self, strategy_id: str, create_if_missing: bool = True) -> "StrategyContext":
         """Get existing strategy or create new one."""
-        with get_db_session() as session:
-            stmt = select(StrategyModel).filter_by(strategy_id=strategy_id)
-            strategy = session.scalars(stmt).first()
+        with StrategyUoW() as uow:
+            assert uow.strategies is not None
+            strategy = uow.strategies.get_by_id(strategy_id)
 
             if not strategy and create_if_missing:
                 strategy = self._create_default_strategy(strategy_id)
-                session.add(strategy)
-                session.commit()
-                session.refresh(strategy)
+                uow.strategies.create(strategy)
 
             if not strategy:
                 raise StrategyError(f"Strategy not found: {strategy_id}")
@@ -258,10 +253,11 @@ class StrategyContext:
         self.strategy = strategy_model
         self.strategy_id = strategy_model.strategy_id
         self.is_simulation = strategy_model.is_simulation
+        self._config = dict(strategy_model.config or {})
 
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a configuration value."""
-        return self.strategy.config.get(key, default) if self.strategy.config else default
+        return self._config.get(key, default)
 
     def should_force_error(self, error_type: str) -> bool:
         """Check if this strategy should force a specific error."""
@@ -291,9 +287,9 @@ class SimulationContext:
 
     def _load_state(self):
         """Load persistent simulation state."""
-        with get_db_session() as session:
-            stmt = select(StrategyState).filter_by(strategy_id=self.strategy_id)
-            states = session.scalars(stmt).all()
+        with StrategyUoW() as uow:
+            assert uow.strategies is not None
+            states = uow.strategies.list_states(self.strategy_id)
 
             for state in states:
                 if state.state_key == "current_time":
@@ -305,29 +301,11 @@ class SimulationContext:
 
     def _save_state(self):
         """Save simulation state to database."""
-        with get_db_session() as session:
-            # Save current time
-            self._upsert_state(session, "current_time", {"time": self.current_time.isoformat()})
-
-            # Save triggered events
-            self._upsert_state(session, "events_triggered", {"events": self.events_triggered})
-
-            # Save media buy states
-            self._upsert_state(session, "media_buy_states", {"states": self.media_buy_states})
-
-            session.commit()
-
-    def _upsert_state(self, session, key: str, value: dict[str, Any]):
-        """Insert or update strategy state."""
-        stmt = select(StrategyState).filter_by(strategy_id=self.strategy_id, state_key=key)
-        existing = session.scalars(stmt).first()
-
-        if existing:
-            existing.state_value = value
-            existing.updated_at = datetime.now(UTC)
-        else:
-            state = StrategyState(strategy_id=self.strategy_id, state_key=key, state_value=value)
-            session.add(state)
+        with StrategyUoW() as uow:
+            assert uow.strategies is not None
+            uow.strategies.upsert_state(self.strategy_id, "current_time", {"time": self.current_time.isoformat()})
+            uow.strategies.upsert_state(self.strategy_id, "events_triggered", {"events": self.events_triggered})
+            uow.strategies.upsert_state(self.strategy_id, "media_buy_states", {"states": self.media_buy_states})
 
     def jump_to_event(self, event: str) -> dict[str, Any]:
         """Jump simulation to a specific event or time."""
@@ -426,10 +404,9 @@ class SimulationContext:
         self.media_buy_states = {}
 
         # Clear persistent state
-        with get_db_session() as session:
-            stmt = delete(StrategyState).where(StrategyState.strategy_id == self.strategy_id)
-            session.execute(stmt)
-            session.commit()
+        with StrategyUoW() as uow:
+            assert uow.strategies is not None
+            uow.strategies.clear_states(self.strategy_id)
 
         return {
             "status": "ok",
@@ -441,12 +418,9 @@ class SimulationContext:
     def set_scenario(self, scenario: str) -> dict[str, Any]:
         """Change simulation scenario."""
         # Update strategy config with new scenario
-        with get_db_session() as session:
-            stmt = select(StrategyModel).filter_by(strategy_id=self.strategy_id)
-            strategy = session.scalars(stmt).first()
-            if strategy:
-                strategy.config["scenario"] = scenario
-                session.commit()
+        with StrategyUoW() as uow:
+            assert uow.strategies is not None
+            uow.strategies.set_scenario(self.strategy_id, scenario)
 
         return {
             "status": "ok",

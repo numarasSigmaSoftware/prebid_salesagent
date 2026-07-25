@@ -4,7 +4,6 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.server.context import Context
 from rich.console import Console
-from sqlalchemy import select
 
 from src.adapters.mock_creative_engine import MockCreativeEngine
 from src.core.exceptions import AdCPAuthenticationError
@@ -21,11 +20,10 @@ from src.core.config_loader import (
     set_current_tenant,
 )
 from src.core.database.database import init_db
-from src.core.database.database_session import get_db_session
-from src.core.database.models import Product as ModelProduct
 from src.core.database.models import (
     WorkflowStep,
 )
+from src.core.database.repositories import ProductUoW
 
 # Schema models (explicit imports to avoid collisions)
 # Schema adapters (wrapping generated schemas)
@@ -254,17 +252,15 @@ def get_product_catalog(tenant_id: str | None = None) -> list[Product]:
     Uses shared convert_product_model_to_schema() to ensure consistent
     conversion logic across all product catalog providers.
     """
-    from sqlalchemy.orm import selectinload
-
     from src.core.product_conversion import convert_product_model_to_schema
 
     if tenant_id is None:
         tenant = get_current_tenant()
         tenant_id = tenant["tenant_id"]
 
-    with get_db_session() as session:
-        stmt = select(ModelProduct).filter_by(tenant_id=tenant_id).options(selectinload(ModelProduct.pricing_options))
-        products = session.scalars(stmt).all()
+    with ProductUoW(tenant_id) as uow:
+        assert uow.products is not None
+        products = uow.products.list_all_with_inventory()
 
         loaded_products = []
         for product in products:

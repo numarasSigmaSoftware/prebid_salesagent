@@ -285,11 +285,22 @@ def find_raw_select_violations(
         tree = safe_parse(py_file)
         if tree is None:
             continue
+        alias_map: dict[str, str] = {}
+        for import_node in ast.walk(tree):
+            if not isinstance(import_node, ast.ImportFrom):
+                continue
+            if import_node.module != "src.core.database.models":
+                continue
+            for import_alias in import_node.names:
+                if import_alias.asname:
+                    alias_map[import_alias.asname] = import_alias.name
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for call in iter_call_expressions(node):
                 model_name = select_call_model_name(call)
+                if model_name:
+                    model_name = alias_map.get(model_name, model_name)
                 if model_name and model_name in model_names:
                     violations.append((rel_path, node.name, model_name, call.lineno))
                     break  # One violation per function is enough

@@ -298,8 +298,6 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/core/database/queries.py", "get_creatives_needing_human_review"),
     ("src/core/database/queries.py", "get_recent_reviews"),
     # adapter_helpers.py removed — now uses AdapterConfigRepository (salesagent-zj9)
-    ("src/core/strategy.py", "_load_state"),
-    ("src/core/strategy.py", "_upsert_state"),
     ("src/core/tenant_status.py", "get_tenant_status"),
     ("src/core/tenant_status.py", "is_tenant_ad_server_configured"),
     # ── Core tools ──

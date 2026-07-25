@@ -412,6 +412,18 @@ class CreativeAssignmentRepository:
             ).all()
         )
 
+    def get_by_media_buy_and_package(self, media_buy_id: str, package_id: str) -> list[CreativeAssignment]:
+        """Get assignments for one package in a media buy within the tenant."""
+        return list(
+            self._session.scalars(
+                select(CreativeAssignment).where(
+                    CreativeAssignment.tenant_id == self._tenant_id,
+                    CreativeAssignment.media_buy_id == media_buy_id,
+                    CreativeAssignment.package_id == package_id,
+                )
+            ).all()
+        )
+
     def creative_readiness(self, media_buy_id: str) -> CreativeReadiness:
         """Tenant-scoped creative-approval readiness for ``media_buy_id``.
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.core.database.models import AdapterConfig, PublisherPartner, Tenant
+from src.core.database.models import AdapterConfig, CreativeAgent, PublisherPartner, Tenant
 
 
 class TenantConfigRepository:
@@ -40,6 +40,11 @@ class TenantConfigRepository:
         """Get the tenant record."""
         stmt = select(Tenant).filter_by(tenant_id=self._tenant_id)
         return self._session.scalars(stmt).first()
+
+    def list_enabled_creative_agents(self) -> list[CreativeAgent]:
+        """Get enabled creative agents for the tenant."""
+        stmt = select(CreativeAgent).filter_by(tenant_id=self._tenant_id, enabled=True)
+        return list(self._session.scalars(stmt).all())
 
     def list_publisher_partners(self) -> list[PublisherPartner]:
         """Get all publisher partners for the tenant."""
