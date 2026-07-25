@@ -85,7 +85,7 @@ from src.core.schemas import (
 # Set up logger
 logger = logging.getLogger(__name__)
 
-# Bounded post-failure recovery lookup (#1637). ``create_order`` can fail AMBIGUOUSLY —
+# Bounded post-failure recovery lookup. ``create_order`` can fail AMBIGUOUSLY —
 # createOrders may have committed remotely before a timeout severed the response — and GAM
 # createOrders is NOT read-your-writes consistent, so a just-committed order can be briefly
 # invisible to a name lookup. Retry the deterministic-name lookup a few times with short
@@ -426,7 +426,7 @@ class GoogleAdManager(AdServerAdapter):
                 Maps package_id → {pricing_model, rate, currency, is_fixed, bid_price}
             idempotency_key: Stable key used to derive a DETERMINISTIC GAM order name
                 so a retry searches for and reuses the same order rather than minting a
-                duplicate (#1637). The approval-replay path passes the persisted
+                duplicate. The approval-replay path passes the persisted
                 ``media_buy_id``; the initial-create path passes None and the name is
                 derived from a stable hash of ``(tenant_id, request.idempotency_key)``.
 
@@ -668,14 +668,14 @@ class GoogleAdManager(AdServerAdapter):
         except sqlalchemy.exc.SQLAlchemyError as e:
             logger.warning(f"Could not load tenant Gemini key: {e}")
 
-        # Derive a DETERMINISTIC id for the order name (#1637). The order name is the
+        # Derive a DETERMINISTIC id for the order name. The order name is the
         # idempotency anchor: create_order looks it up before creating, so a retry MUST
         # produce the byte-identical name to reuse the existing order instead of minting
         # a second one. A per-invocation uuid would defeat that — every attempt would
         # search for a different name. When the caller supplies an idempotency_key (the
         # persisted media_buy_id on the approval-replay path) use it directly; otherwise
         # (initial create, no persisted id yet) hash the client-stable AdCP anchor
-        # (tenant_id, request.idempotency_key). Spec-grounding (#1637): this repo PINS
+        # (tenant_id, request.idempotency_key). Spec-grounding: this repo PINS
         # adcp==6.6.0 -> AdCP 3.1.1 (the authoritative version here), in which
         # create-media-buy carries the required per-request idempotency_key (the field was
         # introduced in the 3.0.1 spec line and carries forward, byte-identical required str
@@ -685,7 +685,7 @@ class GoogleAdManager(AdServerAdapter):
         if idempotency_key:
             stable_order_id = idempotency_key
         else:
-            # Collision resistance (#1637): use 128 bits (32 hex chars) of the digest, NOT
+            # Collision resistance: use 128 bits (32 hex chars) of the digest, NOT
             # 32 bits. At 32 bits the birthday bound gives ~50% collision near 2^16 (~77k
             # buys/tenant), so two DISTINCT idempotency keys could hash to ONE order name
             # and the second buy would silently reuse the first's order. 128 bits pushes
@@ -709,7 +709,7 @@ class GoogleAdManager(AdServerAdapter):
         # Calculate total budget from package budgets (AdCP v2.2.0)
         total_budget_amount = request.get_total_budget()
 
-        # ── GAM MUTATION BOUNDARY starts AT create_order (#1637) ──────────────
+        # ── GAM MUTATION BOUNDARY starts AT create_order () ──────────────
         # create_order() is the actual remote-mutation point. A failure raised from
         # it is ambiguous: createOrders may have COMMITTED remotely before a timeout
         # severed the response. Wrapping it here (not only the later stages) is what
@@ -755,7 +755,7 @@ class GoogleAdManager(AdServerAdapter):
 
         self.log(f"✓ Created GAM Order ID: {order_id}")
 
-        # ── GAM MUTATION BOUNDARY (#1637) ─────────────────────────────────
+        # ── GAM MUTATION BOUNDARY () ─────────────────────────────────
         # The remote order now EXISTS. Any failure from here on (targeting build,
         # line items, activation workflow, response assembly) leaves a partial
         # remote graph — it must surface as AdapterPostMutationIncomplete so the
@@ -782,7 +782,7 @@ class GoogleAdManager(AdServerAdapter):
             ) from post_order_error
 
     def _recover_order_id_after_create_failure(self, order_name: str, create_error: Exception) -> str | None:
-        """Bounded recovery lookup by deterministic order name after a create failure (#1637).
+        """Bounded recovery lookup by deterministic order name after a create failure.
 
         ``orders_manager.create_order`` failed AMBIGUOUSLY — createOrders may have committed
         remotely before a timeout severed the response. GAM createOrders is NOT
@@ -827,7 +827,7 @@ class GoogleAdManager(AdServerAdapter):
         """Everything after the remote order exists — line items, activation, response.
 
         Runs strictly INSIDE the post-mutation boundary of ``create_media_buy``: any
-        exception escaping here is converted to ``AdapterPostMutationIncomplete``. #1637.
+        exception escaping here is converted to ``AdapterPostMutationIncomplete``.
         """
         # Build targeting for each package (per AdCP spec, targeting is at package level)
         package_targeting = {}

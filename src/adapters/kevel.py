@@ -325,7 +325,7 @@ class Kevel(AdServerAdapter):
             campaign_id = campaign_data["Id"]
             self.audit_logger.log_success(f"Created Kevel Campaign ID: {campaign_id}")
 
-            # ── POST-MUTATION BOUNDARY (#1637 parity with GAM) ──────────────────
+            # ── POST-MUTATION BOUNDARY ( parity with GAM) ──────────────────
             # The remote campaign now EXISTS. A failure creating any package's
             # flight from here on leaves a partial remote graph (campaign +
             # possibly some flights) — it must surface as

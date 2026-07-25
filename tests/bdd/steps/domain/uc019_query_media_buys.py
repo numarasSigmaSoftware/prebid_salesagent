@@ -21,7 +21,12 @@ from tests.bdd.steps.domain._media_buy_steps_shared import (
     resolve_media_buy_id,
 )
 from tests.bdd.steps.generic._dispatch import dispatch_request
-from tests.bdd.steps.generic.then_error import _wire_code, _wire_error_object, _wire_suggestion
+from tests.bdd.steps.generic.then_error import (
+    _wire_code,
+    _wire_error_object,
+    _wire_suggestion,
+    assert_actionable_suggestion,
+)
 from tests.factories import (
     CreativeAssignmentFactory,
     CreativeFactory,
@@ -2258,15 +2263,11 @@ def then_error_suggestion_for_fix(ctx: dict) -> None:
     """Assert error includes a suggestion with actionable fix guidance.
 
     Step text: 'suggestion for how to fix the issue' — the suggestion must be
-    a non-empty string with enough content to be actionable (at least 5 chars).
-    Wire-first, typed fallback (see _current_suggestion). No xfail escape —
-    if production omits suggestions, the test must fail.
+    a buyer instruction, not merely descriptive text. Reuse the generic
+    semantic oracle so every feature applies the same actionable vocabulary.
+    Wire-first, typed fallback (see _current_suggestion). No xfail escape.
     """
-    suggestion = _current_suggestion(ctx)
-    assert len(suggestion.strip()) >= 5, (
-        f"Expected actionable suggestion string (>= 5 chars), got {suggestion!r}. "
-        f"Step claims 'how to fix the issue' — suggestion must contain meaningful guidance."
-    )
+    assert_actionable_suggestion(_current_suggestion(ctx))
 
 
 @then(parsers.parse('only media buys with status "{status}" are returned'))

@@ -355,11 +355,15 @@ class TestAdminMediaBuyRejectWebhook:
             f"approved webhook must embed a completed Success, got status={embedded.get('status')!r}"
         )
         assert embedded.get("confirmed_at"), "approved (committed) buy must carry confirmed_at"
-        # The webhook echoes the PERSISTED optimistic-concurrency counter (#1544), not a
-        # hardcoded default: create is revision 1 and the seller approval's single-winner
-        # claim (MediaBuyRepository.claim_finalizing) advances the token once, so the
-        # committed buy is revision 2. Pinned by test_media_buy_revision.py.
-        assert embedded.get("revision") == 2, "approved buy must carry the persisted revision (create 1 -> approve 2)"
+        from src.core.database.repositories import MediaBuyUoW
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted_buy is not None, "approved media buy vanished"
+            assert embedded.get("revision") == persisted_buy.revision, (
+                "webhook must carry the persisted optimistic-concurrency revision"
+            )
         assert "workflow_step_id" not in embedded, "internal workflow_step_id must not leak onto the wire"
         # Absent-context branch pin (PR #1567 round-3): with no "context" key in
         # the workflow step's request_data, the echo path stays dormant and the

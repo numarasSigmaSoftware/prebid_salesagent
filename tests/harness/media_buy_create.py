@@ -352,6 +352,7 @@ class MediaBuyCreateEnv(IntegrationEnv):
 
         self._commit_factory_data()
         identity = kwargs.pop("identity", self.identity)
+        external_task_id = kwargs.pop("external_task_id", None)
 
         # Build request from kwargs if not provided directly
         req = kwargs.pop("req", None)
@@ -359,7 +360,7 @@ class MediaBuyCreateEnv(IntegrationEnv):
             req = CreateMediaBuyRequest(**_ensure_idempotency_key(kwargs))
 
         identity = enrich_identity_with_account(identity, req.account)
-        return asyncio.run(_create_media_buy_impl(req=req, identity=identity))
+        return asyncio.run(_create_media_buy_impl(req=req, identity=identity, external_task_id=external_task_id))
 
     def _call_impl_via_live_server(self, kwargs: dict[str, Any]) -> CreateMediaBuyResult:
         """Realize a create on the live e2e server; return the impl-shaped result.

@@ -159,7 +159,7 @@ class CreativeRepository:
         # Apply media_buy_ids filter via join. Creatives are keyed by
         # (tenant_id, principal_id, creative_id) — joining on creative_id alone
         # lets another tenant's/principal's assignment row satisfy the filter,
-        # so the join carries the full composite key. #1544.
+        # so the join carries the full composite key.
         if media_buy_ids:
             stmt = stmt.join(
                 CreativeAssignment,

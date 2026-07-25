@@ -29,6 +29,7 @@ import pytest
 from pydantic import BaseModel
 
 from src.core.schemas import ListCreativeFormatsResponse, UpdateMediaBuySuccess
+from tests.bdd.steps.generic.then_error import assert_actionable_suggestion
 from tests.bdd.steps.generic.then_payload import (
     then_boundary_handling_result,
     then_partition_filtering_result,
@@ -92,6 +93,13 @@ def test_outcome_requires_response_or_error() -> None:
 def test_boundary_unknown_field_fails_loudly() -> None:
     with pytest.raises(AssertionError):
         then_boundary_handling_result(_valid_uc005_ctx(), field="bogus_boundary", expected="valid")
+
+
+def test_actionable_suggestion_rejects_descriptive_text() -> None:
+    """A suggestion that only describes the error cannot satisfy a fix step."""
+    with pytest.raises(AssertionError):
+        assert_actionable_suggestion("error")
+    assert_actionable_suggestion("Provide a valid account identifier")
 
 
 def test_unknown_expected_word_still_rejected() -> None:

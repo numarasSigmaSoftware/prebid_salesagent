@@ -721,11 +721,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # Disclosure filtering is fully implemented in the shared production impl. Its
         # UC-005 scenarios must execute like every other filter scenario; no partial-xfail
         # escape hatch is permitted here.
-        for tag, substrings, reason in _SELECTIVE_XFAIL:
-            if tag in marker_names:
-                if any(s in item.nodeid for s in substrings):
-                    item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
-                break  # tag matched — skip remaining selective entries
+        # The live e2e_rest server now returns the expected wire rejections for
+        # these rows. Keep its passing coverage visible; this registry only
+        # documents the remaining in-process harness gaps.
+        if not is_e2e_rest:
+            for tag, substrings, reason in _SELECTIVE_XFAIL:
+                if tag in marker_names:
+                    if any(s in item.nodeid for s in substrings):
+                        item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
+                    break  # tag matched — skip remaining selective entries
 
         # Original rejection scenario missing webhook Given step.
         # Replaced by BR-UC-002-manual-overrides.feature with webhook config.

@@ -244,6 +244,10 @@ class TestUpdateOperationLease:
             # erase the manual-reconciliation fence set by the recovery claimant.
             assert not uow.media_buys.complete_update_lease(media_buy_id, lease_id)
 
+            # A stale worker must not renew its expired ownership and invoke the
+            # adapter again after the recovery claimant fenced the operation.
+            assert not uow.media_buys.mark_update_adapter_invoked(media_buy_id, lease_id, lease_ttl_seconds=1)
+
         with MediaBuyUoW(tenant_a) as uow:
             media_buy = uow.media_buys.get_by_id(media_buy_id)
             assert media_buy is not None
@@ -274,6 +278,10 @@ class TestUpdateOperationLease:
             # the worker transaction but must not be committed with the recovery
             # fence after ownership expires.
             worker_uow.media_buys.update_fields(media_buy_id, order_name="must_not_commit")
+            # A stale worker cannot renew an expired lease to make a second remote
+            # call.  Its failed pre-invocation check takes the same rollback and
+            # isolated-recovery path as the completion check below.
+            assert not worker_uow.media_buys.mark_update_adapter_invoked(media_buy_id, lease_id, lease_ttl_seconds=1)
             assert not worker_uow.media_buys.complete_update_lease(media_buy_id, lease_id)
             worker_uow.rollback()
 

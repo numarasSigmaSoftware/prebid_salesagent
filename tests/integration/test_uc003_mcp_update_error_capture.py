@@ -55,10 +55,14 @@ class TestUC003McpUpdateErrorCapture:
         adcp_error = env.get("adcp_error", {}) if isinstance(env, dict) else {}
         return adcp_error.get("suggestion")
 
-    def test_update_request_validation_error_carries_top_level_suggestion(self, env_with_media_buy):
-        """A request that fails Pydantic validation at the update boundary
+    def test_malformed_update_request_carries_top_level_suggestion(self, env_with_media_buy):
+        """A malformed request rejected at the update boundary
         (_build_update_request) must carry the buyer-facing correction hint in the
         SPEC top-level ``suggestion`` field, not leave it empty (#1417 / 3rqe fix B).
+
+        The pinned AdCP 3.1.1 error-code contract classifies malformed requests and
+        schema-constraint failures as INVALID_REQUEST; VALIDATION_ERROR is reserved
+        for invalid field values or business rules beyond schema validation.
 
         Fails before the fix: _build_update_request raised AdCPValidationError with
         no ``suggestion=`` so the wire ``suggestion`` field is empty. Passing a
@@ -76,9 +80,9 @@ class TestUC003McpUpdateErrorCapture:
             packages=[{"package_id": "pkg_001", "budget": "notanumber"}],
         )
 
-        assert result.is_error, "expected a validation error"
+        assert result.is_error, "expected a malformed-request error"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
-        assert_envelope_shape(result.wire_error_envelope, "VALIDATION_ERROR", recovery="correctable")
+        assert_envelope_shape(result.wire_error_envelope, "INVALID_REQUEST", recovery="correctable")
         suggestion = self._top_level_suggestion(result.wire_error_envelope)
         assert suggestion, (
             f"update request-validation error must carry a non-empty TOP-LEVEL "

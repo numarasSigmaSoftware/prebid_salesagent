@@ -539,7 +539,7 @@ class XandrAdapter(AdServerAdapter):
             io_response = self._make_request("POST", "/insertion-order", io_data)
             io_id = io_response["response"]["insertion-order"]["id"]
 
-            # ── POST-MUTATION BOUNDARY (#1637 parity with GAM) ──────────────────
+            # ── POST-MUTATION BOUNDARY ( parity with GAM) ──────────────────
             # The remote insertion order now EXISTS. A failure creating any
             # package's line item from here on leaves a partial remote graph (IO +
             # possibly some line items) — it must surface as

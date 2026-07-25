@@ -148,7 +148,7 @@ class AdapterCapabilities:
     supports_webhooks: bool = False  # Supports webhook notifications
     supports_realtime_reporting: bool = False  # Supports real-time delivery reporting
 
-    # Crash-recovery contract (#1637): True ONLY if the adapter's ENTIRE create
+    # Crash-recovery contract: True ONLY if the adapter's ENTIRE create
     # workflow — order creation, per-package line items, creative associations,
     # AND order approval — is idempotent / safely re-invocable after a crash at
     # any point. Order-name dedup alone does NOT qualify (a crash mid-graph would
@@ -166,7 +166,7 @@ class AdapterCapabilities:
 
 
 class AdapterIdempotencyUncertain(Exception):
-    """The adapter could not determine whether remote state already exists (#1637).
+    """The adapter could not determine whether remote state already exists.
 
     STRICT CONTRACT: an adapter may raise this ONLY while it is still certain that
     NO remote mutation has occurred (e.g. a pre-create existence lookup failed).
@@ -178,7 +178,7 @@ class AdapterIdempotencyUncertain(Exception):
 
 
 class AdapterPostMutationIncomplete(Exception):
-    """Remote mutations HAVE occurred but the create workflow did not complete (#1637).
+    """Remote mutations HAVE occurred but the create workflow did not complete.
 
     The inverse contract of :class:`AdapterIdempotencyUncertain`: raised when the
     remote order was created (and possibly persisted) but a LATER stage failed —
@@ -455,7 +455,7 @@ class AdServerAdapter(ABC):
                 Maps package_id → {pricing_model, rate, currency, is_fixed, bid_price}
             idempotency_key: Optional stable key that lets an adapter derive a
                 deterministic remote resource name so a retry reuses (rather than
-                duplicates) an already-created remote object (#1637). Callers pass
+                duplicates) an already-created remote object. Callers pass
                 the persisted ``media_buy_id`` on the approval-replay path; adapters
                 that do not need it may ignore it.
 
@@ -533,7 +533,7 @@ class AdServerAdapter(ABC):
     ) -> UpdateMediaBuyResponse:
         """Updates a media buy with a specific action.
 
-        Bounded-execution contract (#1544): ``update_media_buy`` runs inside the
+        Bounded-execution contract: ``update_media_buy`` runs inside the
         update tool's Unit of Work while a ``FOR UPDATE`` row lock is held, so an
         unbounded ad-server call would pin that lock (and its DB connection) until
         the TCP stack gives up. Implementations MUST bound every outbound network

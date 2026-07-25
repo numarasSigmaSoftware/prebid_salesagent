@@ -1,4 +1,4 @@
-"""B6 (#1544): durable A2A tasks/get correlation via the persisted outer task id.
+"""Durable A2A tasks/get correlation via the persisted outer task ID.
 
 The A2A boundary persists its outer ``task_*`` id on the create step's
 ``request_data.external_task_id``. These tests verify the two halves of the durable
@@ -14,6 +14,7 @@ path against a real DB:
 
 import asyncio
 import json
+from threading import Event, Thread, current_thread
 from unittest.mock import patch
 
 import pytest
@@ -77,6 +78,89 @@ class TestA2ATaskCorrelation:
             assert step.step_id == step_id
             assert step.status == "completed"
 
+    def test_replayed_a2a_task_alias_resolves_to_original_step(
+        self, integration_db, sample_tenant, sample_principal, context_manager
+    ):
+        """A second outer task from an idempotent submitted retry remains pollable.
+
+        The replay deliberately reuses the original submitted response and must
+        not create a second workflow step.  Its freshly allocated A2A task ID is
+        therefore persisted as an alias of that original step.
+        """
+        tenant_id = sample_tenant["tenant_id"]
+        principal_id = sample_principal["principal_id"]
+        step_id = _make_completed_step(context_manager, tenant_id, principal_id)
+        replay_task_id = "task_replayed_outer_456"
+
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            assert uow.workflows.register_external_task_alias(step_id, replay_task_id, principal_id=principal_id)
+
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            replayed_step = uow.workflows.get_by_external_task_id(replay_task_id, principal_id=principal_id)
+            assert replayed_step is not None
+            assert replayed_step.step_id == step_id
+
+    def test_concurrent_replayed_task_aliases_are_not_lost(
+        self, integration_db, sample_tenant, sample_principal, context_manager
+    ):
+        """Independent replay transactions preserve every buyer-visible task ID."""
+        tenant_id = sample_tenant["tenant_id"]
+        principal_id = sample_principal["principal_id"]
+        step_id = _make_completed_step(context_manager, tenant_id, principal_id)
+        first_task_id = "task_replayed_outer_a"
+        second_task_id = "task_replayed_outer_b"
+        second_lock_query_started = Event()
+        second_finished = Event()
+
+        from sqlalchemy import event
+
+        from src.core.database.database_session import get_engine
+
+        def observe_second_lock_query(conn, cursor, statement, parameters, context, executemany):
+            if (
+                current_thread().name == "a2a-alias-retry"
+                and "workflow_steps" in statement
+                and "FOR UPDATE" in statement
+            ):
+                second_lock_query_started.set()
+
+        engine = get_engine()
+        event.listen(engine, "before_cursor_execute", observe_second_lock_query)
+        worker: Thread | None = None
+
+        def register_second_alias() -> None:
+            with WorkflowUoW(tenant_id) as uow:
+                assert uow.workflows is not None
+                assert uow.workflows.register_external_task_alias(step_id, second_task_id, principal_id=principal_id)
+            second_finished.set()
+
+        try:
+            with WorkflowUoW(tenant_id) as first_uow:
+                assert first_uow.workflows is not None
+                assert first_uow.workflows.register_external_task_alias(
+                    step_id, first_task_id, principal_id=principal_id
+                )
+                worker = Thread(target=register_second_alias, name="a2a-alias-retry")
+                worker.start()
+                assert second_lock_query_started.wait(timeout=1), "second transaction must reach the row-lock query"
+                assert not second_finished.wait(timeout=0.1), (
+                    "second alias must wait for the first transaction's row lock"
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", observe_second_lock_query)
+            if worker is not None:
+                worker.join(timeout=3)
+
+        assert worker is not None
+        assert not worker.is_alive()
+        assert second_finished.is_set()
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            assert uow.workflows.get_by_external_task_id(first_task_id, principal_id=principal_id) is not None
+            assert uow.workflows.get_by_external_task_id(second_task_id, principal_id=principal_id) is not None
+
     def test_get_by_external_task_id_is_tenant_scoped(
         self, integration_db, sample_tenant, sample_principal, context_manager
     ):
@@ -100,7 +184,7 @@ class TestA2ATaskCorrelation:
         ``DBContext.principal_id`` filter in ``get_by_external_task_id`` makes the
         sibling's lookup resolve the owner's step, and this assertion fails. The
         owner's own lookup is asserted alongside it so the filter cannot be
-        "passed" by rejecting everyone. #1544 B6.
+        "passed" by rejecting everyone.
         """
         tenant_id = sample_tenant["tenant_id"]
         step_id = _make_completed_step(context_manager, tenant_id, sample_principal["principal_id"])
@@ -291,6 +375,44 @@ class TestA2ATaskCorrelation:
 
         assert cancelled.status.state == TaskState.TASK_STATE_CANCELED
 
+    def test_on_cancel_task_rejects_a_persisted_task_without_mutating_its_memory_copy(
+        self, integration_db, sample_tenant, sample_principal, context_manager
+    ):
+        """A persisted task cannot acquire a false in-memory cancellation state."""
+        from a2a.types import CancelTaskRequest, Task, TaskStatus
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        tenant_id = sample_tenant["tenant_id"]
+        principal_id = sample_principal["principal_id"]
+        task_id = "task_persisted_cannot_cancel"
+        _make_step(
+            context_manager,
+            tenant_id,
+            principal_id,
+            status="requires_approval",
+            external_task_id=task_id,
+        )
+        handler = AdCPRequestHandler.__new__(AdCPRequestHandler)
+        submitted = Task(id=task_id, status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
+        handler.tasks = {task_id: submitted}
+        handler._task_owners = {task_id: (tenant_id, principal_id)}
+        owner = PrincipalFactory.make_identity(principal_id=principal_id, tenant_id=tenant_id, protocol="a2a")
+
+        with (
+            patch.object(handler, "_get_auth_token", return_value="tok"),
+            patch.object(handler, "_resolve_a2a_identity", return_value=owner),
+            pytest.raises(TaskNotFoundError),
+        ):
+            asyncio.run(handler.on_cancel_task(CancelTaskRequest(id=task_id), context=None))
+
+        assert submitted.status.state == TaskState.TASK_STATE_SUBMITTED
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            persisted = uow.workflows.get_by_external_task_id(task_id, principal_id=principal_id)
+            assert persisted is not None
+            assert persisted.status == "requires_approval"
+
     def _poll_with_stale_in_memory(self, handler, tenant_id, principal_id, external_task_id):
         """Seed a SUBMITTED in-memory task OWNED by (tenant_id, principal_id), then poll on_get_task."""
         from a2a.types import Task, TaskStatus
@@ -317,8 +439,7 @@ class TestA2ATaskCorrelation:
     def test_stale_submitted_in_memory_yields_to_persisted_terminal(
         self, integration_db, sample_tenant, sample_principal, context_manager, step_status, expected_state
     ):
-        """The reviewer's combined-state case: a stale in-memory SUBMITTED task must NOT mask a
-        persisted terminal step — the poll returns the out-of-band decision. #1544 (P1)."""
+        """A stale in-memory SUBMITTED task must not mask a persisted terminal decision."""
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         tenant_id = sample_tenant["tenant_id"]
@@ -349,11 +470,11 @@ class TestA2ATaskCorrelation:
     def test_approval_adapter_failure_stores_buyer_facing_error_artifact(
         self, integration_db, sample_tenant, sample_principal, context_manager
     ):
-        """P1 (#1544): an adapter failure during async approval must store a two-layer
+        """An adapter failure during async approval must store a two-layer
         error envelope on the step, so a durable tasks/get poll returns a FAILED task
         WITH the failure details — not a bare FAILED task with no artifact.
 
-        SECURITY (#1544 review #1): the envelope served to the BUYER via durable
+        SECURITY: the envelope served to the BUYER via durable
         on_get_task must carry a STABLE generic message, never the raw adapter
         ``str(e)`` — that text can embed internal state (here a fake secret). The
         raw text is retained ONLY in the internal ``error_message`` column. This

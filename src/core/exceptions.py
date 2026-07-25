@@ -586,7 +586,7 @@ class AdCPConflictError(AdCPError):
     # ``transient`` ("re-read the resource and retry with current state"). The
     # installed SDK's STANDARD_ERROR_CODES table says ``correctable``, but the SDK
     # is a cross-check, not the authority, and diverges here. Subclasses whose
-    # pinned recovery differs (ACCOUNT_AMBIGUOUS → correctable) override below (#1417, #1544).
+    # pinned recovery differs (ACCOUNT_AMBIGUOUS → correctable) override below.
     _default_recovery: ClassVar[RecoveryHint] = "transient"
 
 
@@ -596,7 +596,7 @@ class AdCPAccountAmbiguousError(AdCPConflictError):
     _default_error_code: ClassVar[str] = "ACCOUNT_AMBIGUOUS"
     # Pinned 3.1.1 error-code.json enumMetadata: ACCOUNT_AMBIGUOUS → correctable (the buyer
     # disambiguates by supplying the exact account), unlike the CONFLICT base which
-    # is transient. Explicit override so the base change does not leak here (#1417, #1544).
+    # is transient. Explicit override so the base change does not leak here.
     _default_recovery: ClassVar[RecoveryHint] = "correctable"
 
 
@@ -839,19 +839,19 @@ class AdCPCapabilityNotSupportedError(AdCPError):
     """Requested capability is not supported by this seller (422, UNSUPPORTED_FEATURE).
 
     .. note::
-        **Spec-conformant.** The pinned AdCP error-code enum classifies
-        ``UNSUPPORTED_FEATURE`` as ``correctable`` ("check
-        get_adcp_capabilities and remove unsupported fields"), and we emit
-        ``correctable`` — so this matches the spec, it is not a divergence.
-        The buyer holds the recovery lever: they can fix the request by
-        dropping the unsupported feature (e.g. removing ``property_list``
-        targeting against an adapter that doesn't compile it).
+    **Spec-conformant.** The pinned AdCP error-code enum classifies
+    ``UNSUPPORTED_FEATURE`` as ``correctable`` ("check
+    get_adcp_capabilities and remove unsupported fields"), and we emit
+    ``correctable`` — so this matches the spec, it is not a divergence.
+    The buyer holds the recovery lever: they can fix the request by
+    dropping the unsupported feature (e.g. removing ``property_list``
+    targeting against an adapter that doesn't compile it).
 
-        Only the adcp SDK's ``STANDARD_ERROR_CODES`` table classifies it
-        ``terminal``; the SDK is not authoritative (the pinned spec enum is),
-        so its table diverges from the spec here. If the SDK runtime ever
-        starts enforcing ``terminal`` at the wire (rejecting our spec-correct
-        ``correctable`` hint), reconcile with the SDK then.
+    Only the adcp SDK's ``STANDARD_ERROR_CODES`` table classifies it
+    ``terminal``; the SDK is not authoritative (the pinned spec enum is),
+    so its table diverges from the spec here. If the SDK runtime ever
+    starts enforcing ``terminal`` at the wire (rejecting our spec-correct
+    ``correctable`` hint), reconcile with the SDK then.
     """
 
     _default_status_code: ClassVar[int] = 422

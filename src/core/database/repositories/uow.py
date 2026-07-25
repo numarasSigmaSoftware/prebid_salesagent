@@ -149,7 +149,7 @@ class MediaBuyUoW(BaseUoW):
     idempotency_attempts: IdempotencyAttemptRepository | None
 
     def __init__(self, tenant_id: str, now_fn: Callable[[], datetime.datetime] | None = None) -> None:
-        # now_fn injects a clock into MediaBuyRepository's lease/guard logic (#1637):
+        # now_fn injects a clock into MediaBuyRepository's lease/guard logic:
         # production leaves it None (wall-clock UTC); tests advance a fake clock so the
         # lease heartbeat and the ownership fences observe the same time.
         super().__init__(tenant_id)

@@ -4,7 +4,7 @@ Transport-neutral read of the persisted workflow step behind an async task id
 (``tasks/get``-style polls). The transport layer (A2A handler) resolves the
 caller's identity and frames the outcome into its own Task/Artifact types; this
 service owns the session and the step lookup, so the handler performs no DB
-access itself. #1544.
+access itself.
 """
 
 from __future__ import annotations

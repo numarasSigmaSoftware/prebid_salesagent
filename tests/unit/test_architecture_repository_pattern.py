@@ -534,22 +534,21 @@ def _is_get_db_session_call(func: ast.expr) -> bool:
     return isinstance(func, ast.Attribute) and func.attr == "get_db_session"
 
 
-# Session-like variable names the raw-``.add()`` scan recognizes. A name that is
-# NOT listed here is an escape hatch: the same raw write becomes invisible to the
-# guard just by renaming the variable, so this set is widened whenever a new
-# session-carrying name enters the test tree (``factory_session`` did exactly
-# that — it reached the tree unseen before being added here).
-_SESSION_VAR_NAMES = ("session", "db_session", "mock_session", "factory_session", "s")
+# ``.add()`` is a raw persistence write unless its receiver is one of the
+# explicitly-audited in-memory collections below. Matching every other named
+# receiver prevents a variable rename from bypassing the repository guard.
+_NON_SESSION_ADD_RECEIVERS = frozenset({"error_fields", "ids", "routes"})
 
 
 def _is_session_add_call(func: ast.expr) -> bool:
-    """Match ``session.add(...)`` on a session-like variable."""
-    return (
-        isinstance(func, ast.Attribute)
-        and func.attr == "add"
-        and isinstance(func.value, ast.Name)
-        and func.value.id in _SESSION_VAR_NAMES
-    )
+    """Match raw named ``.add()`` calls, except audited collection receivers."""
+    if not isinstance(func, ast.Attribute) or func.attr != "add":
+        return False
+    if isinstance(func.value, ast.Name):
+        return func.value.id not in _NON_SESSION_ADD_RECEIVERS
+    if isinstance(func.value, ast.Attribute):
+        return func.value.attr in {"session", "_session", "db_session", "factory_session"}
+    return False
 
 
 def _assert_no_new_violations(
@@ -591,6 +590,28 @@ def _find_impl_functions_with_db_session(file_path: str) -> list[tuple[str, str,
 def _find_session_add_in_tests(file_path: str) -> list[tuple[str, str, int]]:
     """Find test functions/fixtures that call session.add() directly."""
     return _find_matching_calls(file_path, _is_session_add_call)
+
+
+def test_session_add_detector_rejects_arbitrary_receiver_alias() -> None:
+    """A raw session write cannot bypass the guard by renaming its variable."""
+    expression = ast.parse("writer.add(model)").body[0].value
+    assert isinstance(expression, ast.Call)
+    assert _is_session_add_call(expression.func)
+
+
+def test_session_add_detector_rejects_session_attribute_receiver() -> None:
+    """A session stored on a fixture or helper object is still a raw DB write."""
+    expression = ast.parse("fixture.db_session.add(model)").body[0].value
+    assert isinstance(expression, ast.Call)
+    assert _is_session_add_call(expression.func)
+
+
+@pytest.mark.parametrize("receiver", sorted(_NON_SESSION_ADD_RECEIVERS))
+def test_session_add_detector_allows_audited_collection_receivers(receiver: str) -> None:
+    """Known in-memory collection mutations remain outside the DB-write guard."""
+    expression = ast.parse(f"{receiver}.add(value)").body[0].value
+    assert isinstance(expression, ast.Call)
+    assert not _is_session_add_call(expression.func)
 
 
 class TestImplNoDirectDbSession:

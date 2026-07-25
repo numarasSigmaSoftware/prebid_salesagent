@@ -116,7 +116,7 @@ class GAMOrdersManager:
             return f"dry_run_order_{int(datetime.now(UTC).timestamp())}"
         else:
             order_service = self.client_manager.get_service("OrderService")
-            # createOrders-level dedup (#1637): order names are deterministic (the
+            # createOrders-level dedup: order names are deterministic (the
             # default template keys on media_buy_id), so an operator-driven
             # re-approval reuses an existing non-archived order instead of creating
             # a duplicate. NOTE this dedups ONLY the order object — line items /
@@ -143,7 +143,7 @@ class GAMOrdersManager:
         advertiser, or None if verifiably absent.
 
         Raises the underlying exception on RPC failure — callers decide how to
-        classify an uncertain lookup (pre-mutation vs post-mutation, #1637).
+        classify an uncertain lookup (pre-mutation vs post-mutation).
         """
         if not self.advertiser_id:
             return None
@@ -170,7 +170,7 @@ class GAMOrdersManager:
         """PRE-create lookup. Return the id of an existing non-archived order with this
         exact name, or None if verifiably absent.
 
-        FAIL CLOSED (#1637): a lookup failure raises ``AdapterIdempotencyUncertain``
+        FAIL CLOSED: a lookup failure raises ``AdapterIdempotencyUncertain``
         — creation must NOT proceed when we cannot verify whether the order already
         exists, or a transient GAM error could mint a duplicate remote order. The
         exception's contract holds here: it is raised strictly BEFORE any remote
@@ -187,7 +187,7 @@ class GAMOrdersManager:
             ) from e
 
     def find_order_by_name(self, order_name: str) -> str | None:
-        """POST-failure recovery lookup by deterministic order name (#1637).
+        """POST-failure recovery lookup by deterministic order name.
 
         Used AFTER a create_order() failure to disambiguate whether createOrders
         actually committed remotely. Unlike :meth:`_find_existing_order_id`, an RPC

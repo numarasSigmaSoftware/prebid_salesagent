@@ -92,6 +92,10 @@ EXPECTED_XFAIL_ROUTES: tuple[str, ...] = (
     "is_e2e_rest and any((t.startswith('T-UC-019') for t in marker_names))",
     "is_e2e_rest and marker_names & _UC004_E2E_WEBHOOK_INTERNAL_TAGS",
     "is_e2e_rest and marker_names & _UC005_E2E_FIXTURE_INJECTION_TAGS",
+    # UC-003 selective targeting rows are still an in-process harness gap, but
+    # the live REST server now emits the expected wire rejections. Preserve the
+    # passing live coverage instead of converting it into a strict XPASS.
+    "not is_e2e_rest",
     "not is_e2e_rest",
 )
 

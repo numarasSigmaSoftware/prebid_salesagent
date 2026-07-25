@@ -389,7 +389,7 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # CreateMediaBuyError (errors[].code POLICY_VIOLATION via the AdCPMediaBuyRejectedError
     # cascade), not a success body with a rejection_reason. Authority: dist/compliance/3.1.1/
     # domains/media-buy/scenarios/governance_denied.yaml (create_media_buy_denied, Case-2).
-    # The rejection_reason field #1544 previously carried here was dropped in this merge.
+    # The rejection_reason field previously carried here was dropped in this merge.
 
     # Internal fields (excluded from AdCP responses)
     workflow_step_id: str | None = None
@@ -459,7 +459,7 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
         # the key. The ``"confirmed_at" not in data`` guard means a real committed
         # instant (a non-null datetime already in ``data``) is never clobbered. revision
         # already serializes as a non-null int (>=1) and is not re-injected here.
-        # See PR #1544.
+        #
         if "confirmed_at" not in data:
             data["confirmed_at"] = None
 
@@ -2822,7 +2822,7 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # the seller has committed to the buy. Because the inherited exclude_none=True
     # would DROP a null confirmed_at, leaving the body missing a REQUIRED key, the
     # serializer below re-injects it as null whenever it is absent (mirroring the
-    # CreateMediaBuySuccess.model_dump success-arm invariant). See PR #1544.
+    # CreateMediaBuySuccess.model_dump success-arm invariant).
     confirmed_at: datetime | None = Field(
         default=None, description="When this media buy was committed by the seller (stable after set)"
     )
@@ -2830,7 +2830,7 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # on every returned buy, and the sole populating site (media_buy_list) always
     # passes the persisted counter. Making it required (no default) means a
     # constructor that forgets it fails loudly at validation instead of silently
-    # emitting revision=1. #1544.
+    # emitting revision=1.
     revision: int = Field(..., ge=1, description="Current revision number for optimistic-concurrency updates")
 
     def model_dump(self, **kwargs):

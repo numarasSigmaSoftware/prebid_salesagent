@@ -82,7 +82,7 @@ def _cleanup_completed_tasks():
 
 # The flight-window→status decision for creative-unblock finalization now lives in
 # the admin service (media_buy_completion.finalize_unblocked_media_buy), computed
-# UNDER THE ROW LOCK. See #1544.
+# UNDER THE ROW LOCK.
 
 
 async def _call_webhook_for_creative_status(
@@ -215,7 +215,7 @@ async def _call_webhook_for_creative_status(
         # construction (protocol detection, buyer-facing task-id correlation,
         # untrusted tool_name validation) the media-buy approval routes use.
         # This path already runs inside an event loop, so it awaits the async
-        # core directly instead of the asyncio.run wrapper. #1544.
+        # core directly instead of the asyncio.run wrapper.
         step_data = {
             "step_id": step_step_id,
             "context_id": step_context_id,
@@ -575,7 +575,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 )
 
                 if media_buy.status in {"pending_creatives", "draft"}:
-                    # Shared tenant-scoped readiness query (#1544) — same home as the
+                    # Shared tenant-scoped readiness query () — same home as the
                     # admin approve gates; this buy has >= 1 assignment (the creative
                     # just approved), so ready_for_finalize == all assigned approved.
                     readiness = uow.assignments.creative_readiness(media_buy_id)
@@ -615,7 +615,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
         # completion artifact, so async buyers who had been waiting on creative
         # approval never learned their buy went live. approved_at/approved_by are NOT
         # re-stamped here — confirmed_at was recorded at the earlier pending_creatives
-        # hold (write-once); this system unblock is not a new approval instant. #1544.
+        # hold (write-once); this system unblock is not a new approval instant.
         for action in media_buy_actions:
             media_buy_id = action["media_buy_id"]
             logger.info(
@@ -624,7 +624,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             )
             # Session ownership + step lookup + finalize live in the admin service
             # (this blueprint is a scanned business-logic module that must route DB
-            # access through repositories, not open get_db_session itself). #1544.
+            # access through repositories, not open get_db_session itself).
             outcome, error_msg = finalize_unblocked_media_buy(tenant_id, media_buy_id)
             if outcome is FinalizeOutcome.APPLIED:
                 logger.info(
@@ -637,7 +637,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     sanitize_log_value(media_buy_id),
                 )
             elif outcome is FinalizeOutcome.RETRYING:
-                # #1637: claimed; the reconciler completes it automatically.
+                #: claimed; the reconciler completes it automatically.
                 logger.info(
                     "[CREATIVE APPROVAL] Media buy %s finalization deferred: %s",
                     sanitize_log_value(media_buy_id),
@@ -652,7 +652,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             else:
                 # A FinalizeOutcome member with no branch above. Naming it keeps this
                 # ladder exhaustive instead of filing an unknown member under the
-                # adapter-failure message. #1544.
+                # adapter-failure message.
                 logger.error(
                     "[CREATIVE APPROVAL] Unhandled FinalizeOutcome %s for media buy %s: %s",
                     sanitize_log_value(outcome),
@@ -683,7 +683,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             if not push_success:
                 # push_err is adapter-returned text — sanitize like every other
                 # adapter value in this function (same convention as the finalize
-                # arm above). #1544.
+                # arm above).
                 logger.error(
                     "[CREATIVE APPROVAL] Retroactive push failed for creative %s → buy %s: %s",
                     sanitize_log_value(creative_id),
@@ -700,7 +700,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
     except Exception as e:
         # Detail stays in the server log (sanitized, with traceback); the client
         # gets a generic message — same information-exposure discipline as the
-        # admin approve routes. #1544.
+        # admin approve routes.
         logger.error("Error approving creative: %s", sanitize_log_value(e), exc_info=True)
         return jsonify({"error": "Creative approval failed — see server logs for details"}), 500
 
@@ -802,7 +802,7 @@ def reject_creative(tenant_id, creative_id, **kwargs):
 
     except Exception as e:
         # Same discipline as approve_creative: detail in the sanitized server log,
-        # generic message to the client. #1544.
+        # generic message to the client.
         logger.error("Error rejecting creative: %s", sanitize_log_value(e), exc_info=True)
         return jsonify({"error": "Creative rejection failed — see server logs for details"}), 500
 

@@ -150,7 +150,7 @@ def _adcp_status_and_actions(
     + the delivery-only ``failed`` -> ``rejected`` mapping) so the update-response
     ``media_buy_status`` agrees with ``get_media_buys`` for the same buy and reference
     date — the two surfaces must describe one buy identically (status-parity
-    agreement, PR #1544). A past-end serving buy therefore reports ``completed`` on both,
+    agreement). A past-end serving buy therefore reports ``completed`` on both,
     not the un-refined persisted ``active`` (the status scheduler that transitions the
     column may lag behind the flight window).
 
@@ -453,7 +453,7 @@ def _update_media_buy_impl(
             # side effect. The lock is held by this UoW until commit, so two
             # same-token requests cannot both reach the adapter. lock_timeout
             # bounds the WAITER; durable update leases below make the remote-call
-            # phase safe without relying on this transaction's lifetime. #1544.
+            # phase safe without relying on this transaction's lifetime.
             _current_mb = uow.media_buys.get_by_id(
                 media_buy_id_to_use,
                 for_update=True,
@@ -475,7 +475,6 @@ def _update_media_buy_impl(
             #     the buyer already implements — it then sees the terminal state and
             #     stops for the right reason. Running the terminal gate first would
             #     mask the stale write as INVALID_STATE and drop the version detail.
-            #     #1544.
             if req.revision is not None and _current_mb is not None:
                 _persisted_revision = _current_mb.revision
                 if req.revision != _persisted_revision:
@@ -717,6 +716,12 @@ def _update_media_buy_impl(
                     update_lease_id,
                     lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS,
                 ):
+                    # An expired, invoked lease is ambiguous: discard all local
+                    # work, then fence it from an isolated recovery UoW.  This
+                    # mirrors completion handling and prevents a stale owner from
+                    # reviving its lease to make another remote call.
+                    uow.rollback()
+                    _persist_expired_update_lease_reconciliation(tenant["tenant_id"], req.media_buy_id, update_lease_id)
                     raise AdCPConflictError(
                         "Update ownership was lost before the adapter call.",
                         field="media_buy_id",
@@ -908,7 +913,7 @@ def _update_media_buy_impl(
             # revision is a per-resource version token). Intra-update status
             # transitions (draft → pending_creatives on creative assignment)
             # stage into this dict rather than writing ``.status`` directly —
-            # see #1544 and the guard test_architecture_media_buy_status_writes.
+            # see the guard test_architecture_media_buy_status_writes.
             pending_field_updates: dict[str, Any] = {}
 
             # Handle package-level updates
@@ -1541,7 +1546,6 @@ def _update_media_buy_impl(
             # update_fields() bumps once and covers any concurrent package-level
             # change; if ONLY package-level changes occurred (no column updates),
             # bump once directly. Exactly one increment per accepted update — see
-            # #1544.
             if pending_field_updates:
                 uow.media_buys.update_fields_or_raise(
                     req.media_buy_id, expected_revision=req.revision, context=req.context, **pending_field_updates

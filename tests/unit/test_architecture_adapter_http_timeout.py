@@ -1,9 +1,9 @@
 """Guard: every adapter ``requests`` HTTP call must pass a bounded ``timeout``.
 
-Bounded-execution contract (#1544): ``update_media_buy`` runs under a ``FOR UPDATE``
-row lock, so an unbounded ad-server call would pin that lock (and its DB
-connection) until the TCP stack gives up. A ``requests`` call without a
-connect+read ``timeout`` defaults to blocking forever. This AST guard fails the
+Bounded-execution contract: adapter calls must release worker resources in a
+bounded time. An unbounded ad-server call can otherwise leave an update lease
+and its worker occupied until the TCP stack gives up. A ``requests`` call without
+a connect+read ``timeout`` defaults to blocking forever. This AST guard fails the
 build on any ``requests.<method>(...)`` in ``src/adapters`` that omits ``timeout=``
 — use :data:`src.adapters.constants.ADAPTER_HTTP_TIMEOUT`.
 

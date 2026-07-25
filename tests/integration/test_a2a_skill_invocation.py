@@ -11,7 +11,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
-from a2a.types import Artifact, Message, Part, Role, SendMessageRequest, Task, TaskState, TaskStatus
+from a2a.types import Artifact, GetTaskRequest, Message, Part, Role, SendMessageRequest, Task, TaskState, TaskStatus
 from adcp.types import AccountReference as LibraryAccountReference
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
@@ -458,6 +458,54 @@ class TestA2ASkillInvocation:
             # Per A2A spec, tasks requiring approval should not have artifacts until approved
             # (protobuf uses empty repeated field [] instead of None)
             assert not result.artifacts
+
+    @pytest.mark.asyncio
+    async def test_submitted_create_replay_alias_survives_a_handler_restart(
+        self, handler, sample_tenant, sample_principal, sample_products, mock_identity
+    ):
+        """Every idempotent A2A replay task ID resolves to the original submitted step."""
+        from datetime import UTC, datetime, timedelta
+
+        from src.core.database.repositories import TenantConfigUoW
+        from tests.a2a_helpers import make_a2a_context
+
+        with TenantConfigUoW(sample_tenant["tenant_id"]) as uow:
+            assert uow.tenant_config is not None
+            tenant = uow.tenant_config.get_tenant()
+            assert tenant is not None
+            tenant.human_review_required = True
+
+        handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
+        retry_handler = AdCPRequestHandler()
+        retry_handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
+        restarted_handler = AdCPRequestHandler()
+        restarted_handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
+        start_date = datetime.now(UTC) + timedelta(days=1)
+        skill_params = {
+            "brand": {"domain": "replay-alias.example.com"},
+            "idempotency_key": f"a2a-replay-{uuid.uuid4().hex}",
+            "packages": [{"product_id": sample_products[0], "budget": 10000.0, "pricing_option_id": "cpm_usd_fixed"}],
+            "start_time": start_date.isoformat(),
+            "end_time": (start_date + timedelta(days=30)).isoformat(),
+        }
+        context = make_a2a_context(headers={"host": f"{sample_tenant['subdomain']}.example.com"})
+
+        with patch("src.core.resolved_identity.resolve_identity", return_value=mock_identity):
+            first = await handler.on_message_send(
+                SendMessageRequest(message=create_a2a_message_with_skill("create_media_buy", skill_params)),
+                context=context,
+            )
+            replay = await retry_handler.on_message_send(
+                SendMessageRequest(message=create_a2a_message_with_skill("create_media_buy", skill_params)),
+                context=context,
+            )
+            recovered = await restarted_handler.on_get_task(GetTaskRequest(id=replay.id), context=context)
+
+        assert first.status.state == TaskState.TASK_STATE_SUBMITTED
+        assert replay.status.state == TaskState.TASK_STATE_SUBMITTED
+        assert replay.id != first.id
+        assert recovered.id == replay.id
+        assert recovered.status.state == TaskState.TASK_STATE_SUBMITTED
 
     @pytest.mark.asyncio
     async def test_hybrid_invocation(

@@ -8,7 +8,7 @@ Standard constants for AdCP adapter implementations.
 # caller — critically, ``update_media_buy`` runs under a FOR UPDATE row lock, and
 # an unbounded adapter call would hold that lock (and its DB connection) until the
 # TCP stack gives up. A bounded client timeout makes the call raise in-thread, so
-# the update's Unit of Work rolls back and releases the lock cleanly. See #1544.
+# the update's Unit of Work rolls back and releases the lock cleanly.
 ADAPTER_HTTP_CONNECT_TIMEOUT = 30  # seconds to establish the connection
 ADAPTER_HTTP_READ_TIMEOUT = 60  # seconds to receive the response to a write op
 ADAPTER_HTTP_TIMEOUT = (ADAPTER_HTTP_CONNECT_TIMEOUT, ADAPTER_HTTP_READ_TIMEOUT)

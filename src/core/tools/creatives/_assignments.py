@@ -45,7 +45,7 @@ def _process_assignments(
     media_buys_with_new_assignments: dict[str, Any] = {}  # media_buy_id -> MediaBuy object
     # Buys whose creative set ACTUALLY changed this pass (new assignment created OR a
     # weight actually changed) — excludes idempotent no-op re-assigns. Each gets a
-    # single revision bump below. #1544 (B3).
+    # single revision bump below.
     media_buys_actually_mutated: set[str] = set()
 
     # AdCP v3 spec defines assignments as list[{creative_id, package_id, ...}];
@@ -299,7 +299,6 @@ def _process_assignments(
             #     changed (new assignment or a real weight change) bumps via
             #     apply_revision_bump. Idempotent no-op re-assigns are excluded, so
             #     they leave the revision untouched.
-            # See #1544 (B3).
             for mb_id, mb_obj in media_buys_with_new_assignments.items():
                 if mb_obj.status == "draft" and mb_obj.approved_at is not None:
                     MediaBuyRepository.apply_status_transition(mb_obj, "pending_creatives")

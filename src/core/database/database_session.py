@@ -34,7 +34,7 @@ _is_healthy = True
 
 # PostgreSQL SQLSTATE for lock_timeout expiry (lock_not_available). Expected
 # contention (e.g. a second writer waiting on a FOR UPDATE row lock), not an
-# outage — must not trip the circuit breaker. #1544.
+# outage — must not trip the circuit breaker.
 LOCK_NOT_AVAILABLE = "55P03"
 
 
@@ -238,7 +238,7 @@ def get_db_session() -> Generator[Session, None, None]:
         # database outage. Tripping the process-wide circuit breaker for it would
         # let one contended row fail-fast unrelated requests for 10s. Roll back
         # and re-raise so the caller can translate it to a typed protocol error,
-        # but leave the connection and health state intact. #1544.
+        # but leave the connection and health state intact.
         if getattr(getattr(e, "orig", None), "pgcode", None) == LOCK_NOT_AVAILABLE:
             raise
         logger.error("Database connection error: %s", sanitize_log_value(e))

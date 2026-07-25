@@ -14,11 +14,12 @@ from src.core.json_validators import (
     ensure_json_array,
     ensure_json_object,
 )
+from tests.factories import PrincipalFactory, TenantFactory
 from tests.integration.conftest import (
     add_required_setup_data,
     create_test_product_with_pricing,
 )
-from tests.utils.database_helpers import create_tenant_with_timestamps
+from tests.utils.database_helpers import _bind_factories_to_session, create_tenant_with_timestamps
 
 
 # Test fixtures
@@ -63,18 +64,14 @@ class TestSessionManagement:
 
         class TestManager(DatabaseManager):
             def create_tenant(self, tenant_id: str, name: str) -> Tenant:
-                now = datetime.now(UTC)
-                tenant = Tenant(
-                    tenant_id=tenant_id,
-                    name=name,
-                    subdomain=tenant_id.lower(),
-                    authorized_emails=[],
-                    policy_settings={},
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.session.add(tenant)
-                return tenant
+                with _bind_factories_to_session(self.session):
+                    return TenantFactory(
+                        tenant_id=tenant_id,
+                        name=name,
+                        subdomain=tenant_id.lower(),
+                        authorized_emails=[],
+                        policy_settings={},
+                    )
 
         # Use as context manager
         with TestManager() as manager:
@@ -302,53 +299,51 @@ class TestIntegration:
             def setup_tenant_with_products(self):
                 # Create tenant with validated JSON fields
                 now = datetime.now(UTC)
-                tenant = Tenant(
-                    tenant_id="workflow_test",
-                    name="Workflow Test",
-                    subdomain="workflow",
-                    authorized_emails=["admin@workflow.com"],
-                    authorized_domains=["workflow.com"],
-                    auto_approve_format_ids=["display_300x250", "video_16x9"],
-                    policy_settings={"enabled": True, "require_approval": False, "max_daily_budget": 10000.0},
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.session.add(tenant)
+                with _bind_factories_to_session(self.session):
+                    tenant = TenantFactory(
+                        tenant_id="workflow_test",
+                        name="Workflow Test",
+                        subdomain="workflow",
+                        authorized_emails=["admin@workflow.com"],
+                        authorized_domains=["workflow.com"],
+                        auto_approve_format_ids=["display_300x250", "video_16x9"],
+                        policy_settings={"enabled": True, "require_approval": False, "max_daily_budget": 10000.0},
+                    )
 
-                # Add required setup data before creating products
-                add_required_setup_data(self.session, "workflow_test")
+                    # Add required setup data before creating products
+                    add_required_setup_data(self.session, "workflow_test")
 
-                # Create product with validated formats using new pricing model
-                product = create_test_product_with_pricing(
-                    session=self.session,
-                    tenant_id="workflow_test",
-                    product_id="prod_1",
-                    name="Test Product",
-                    description="Test product description",
-                    pricing_model="CPM",
-                    rate="10.0",
-                    is_fixed=True,
-                    format_ids=[
-                        {
-                            "agent_url": "https://creative.adcontextprotocol.org",
-                            "id": "display_300x250",
-                        }
-                    ],
-                    targeting_template={"geo_targets": ["US", "CA"], "device_targets": ["desktop", "mobile"]},
-                    delivery_type="guaranteed",
-                    countries=["US", "CA"],
-                )
+                    # Create product with validated formats using new pricing model
+                    product = create_test_product_with_pricing(
+                        session=self.session,
+                        tenant_id="workflow_test",
+                        product_id="prod_1",
+                        name="Test Product",
+                        description="Test product description",
+                        pricing_model="CPM",
+                        rate="10.0",
+                        is_fixed=True,
+                        format_ids=[
+                            {
+                                "agent_url": "https://creative.adcontextprotocol.org",
+                                "id": "display_300x250",
+                            }
+                        ],
+                        targeting_template={"geo_targets": ["US", "CA"], "device_targets": ["desktop", "mobile"]},
+                        delivery_type="guaranteed",
+                        countries=["US", "CA"],
+                    )
 
-                # Create principal
-                principal = Principal(
-                    tenant_id="workflow_test",
-                    principal_id="buyer_1",
-                    name="Test Buyer",
-                    access_token="buyer_token_123",
-                    platform_mappings={"google_ad_manager": {"advertiser_id": "12345"}, "mock": {"test_mode": True}},
-                    created_at=now,
-                )
-                self.session.add(principal)
+                    principal = PrincipalFactory(
+                        tenant=tenant,
+                        principal_id="buyer_1",
+                        name="Test Buyer",
+                        access_token="buyer_token_123",
+                        platform_mappings={
+                            "google_ad_manager": {"advertiser_id": "12345"},
+                            "mock": {"test_mode": True},
+                        },
+                    )
 
                 return tenant, product, principal
 

@@ -562,7 +562,7 @@ def _execute_adapter_media_buy_creation(
         testing_ctx: Optional testing context for dry-run mode
         idempotency_key: Stable key forwarded to the adapter so it can derive a
             deterministic remote resource name and make a retry reuse (not duplicate)
-            an already-created remote object (#1637). The approval-replay path passes
+            an already-created remote object. The approval-replay path passes
             the persisted ``media_buy_id``; the initial-create path passes None.
 
     Returns:
@@ -742,7 +742,7 @@ def enrich_uploaded_creatives(asset_statuses, creative_map, creatives_repo) -> l
     ``MediaBuyUoW`` and, if the returned list is non-empty, raises
     :class:`AdapterPostMutationIncomplete` AFTER the UoW commits — otherwise the in-block
     raise would roll back the very enrichment writebacks this function performs (the
-    exact bug this split fixes). #1637.
+    exact bug this split fixes).
 
     Returns the ``"<creative_id>: <message>"`` descriptions of assets that failed to
     upload (empty when all succeeded).
@@ -796,7 +796,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
     # True once adapter.create_media_buy has SUCCEEDED — from that point every
     # failure must surface as AdapterPostMutationIncomplete (a partial remote
     # graph exists), never a plain (False, msg) that the finalizer would map to a
-    # terminal ``failed`` erasing the reconciliation signal. #1637.
+    # terminal ``failed`` erasing the reconciliation signal.
     remote_mutated = False
 
     try:
@@ -1088,7 +1088,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         # Execute adapter creation (outside session to avoid conflicts).
         # Forward the persisted media_buy_id as the idempotency key so the adapter derives
         # a deterministic remote order name — a re-approval/retry then reuses the existing
-        # remote order instead of minting a duplicate (#1637).
+        # remote order instead of minting a duplicate.
         response = _execute_adapter_media_buy_creation(
             request,
             packages,
@@ -1133,7 +1133,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         # Upload and associate inline creatives if any exist
         # This handles inline creatives that were uploaded during initial media buy creation.
         # Failed per-asset uploads are collected here and raised AFTER uow2 commits, so the
-        # successful assets' enrichment writebacks are not rolled back by an in-block raise. #1637.
+        # successful assets' enrichment writebacks are not rolled back by an in-block raise.
         failed_creative_uploads: list[str] = []
         with MediaBuyUoW(tenant_id) as uow2:
             # FIXME(salesagent-9f2): creative handling should use repository methods
@@ -1238,7 +1238,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                             # COLLECT any per-asset failures. The approval fails on a failed
                             # upload (continuing would approve + publish the buy with creatives
                             # missing from the remote order), but the raise is HOISTED below —
-                            # AFTER uow2 commits — so the successful enrichments persist. #1637.
+                            # AFTER uow2 commits — so the successful enrichments persist.
                             failed_creative_uploads = enrich_uploaded_creatives(
                                 asset_statuses, creative_map, CreativeRepository(session, tenant_id)
                             )
@@ -1248,7 +1248,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         raise
                     except Exception as creative_error:
                         # Creative upload failed AFTER the remote order was created —
-                        # a partial graph exists; must not become terminal failed. #1637.
+                        # a partial graph exists; must not become terminal failed.
                         error_msg = f"Failed to upload creatives to adapter: {str(creative_error)}"
                         logger.error(f"[APPROVAL] {error_msg}", exc_info=True)
                         raise AdapterPostMutationIncomplete(error_msg) from creative_error
@@ -1257,7 +1257,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
         # uow2 has now committed the successful creative enrichments. If any asset FAILED
         # to upload, fail the approval here — OUTSIDE the UoW, so the committed enrichments
-        # survive — with the post-mutation type (order exists, missing creatives). #1637.
+        # survive — with the post-mutation type (order exists, missing creatives).
         if failed_creative_uploads:
             raise AdapterPostMutationIncomplete(
                 f"{len(failed_creative_uploads)} creative(s) failed to upload to the remote order: "
@@ -1289,7 +1289,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         except AdapterPostMutationIncomplete:
             raise
         except Exception as approval_error:
-            # Approval failed AFTER the remote order was created — partial graph. #1637.
+            # Approval failed AFTER the remote order was created — partial graph.
             error_msg = f"Failed to approve order {response.media_buy_id}: {str(approval_error)}"
             logger.error(f"[APPROVAL] {error_msg}", exc_info=True)
             raise AdapterPostMutationIncomplete(error_msg) from approval_error
@@ -1300,17 +1300,17 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         # write-once confirmed_at records the approval instant. This function used to
         # force status="active" here — which overwrote the caller's flight-derived
         # status, double-bumped revision, and (when it ran before approved_at was
-        # stamped) recorded confirmed_at=created_at. See #1544.
+        # stamped) recorded confirmed_at=created_at.
         return True, None
 
     except AdapterIdempotencyUncertain:
-        # #1637: the adapter could not verify remote state and guarantees NO remote
+        # The adapter could not verify remote state and guarantees NO remote
         # mutation happened. This must NOT collapse into the (False, msg) handled
         # failure below — that would mark the buy permanently ``failed``. Re-raise so
         # the finalizer keeps the claim in ``finalizing`` for automatic retry.
         raise
     except AdapterPostMutationIncomplete:
-        # #1637: remote mutations exist but the workflow did not complete — the
+        # Remote mutations exist but the workflow did not complete — the
         # finalizer preserves the manual-reconciliation state instead of failing.
         raise
     except Exception as e:
@@ -1321,13 +1321,13 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         logger.error(f"[APPROVAL] {error_msg}\n{error_traceback}")
         if remote_mutated:
             # The remote order was already created (e.g. id persistence or a later
-            # stage blew up unexpectedly) — same partial-graph situation. #1637.
+            # stage blew up unexpectedly) — same partial-graph situation.
             raise AdapterPostMutationIncomplete(error_msg) from e
         return False, error_msg
 
 
 def adapter_supports_full_create_replay(media_buy_id: str, tenant_id: str) -> bool:
-    """True if this buy's adapter may safely RE-RUN its entire create workflow (#1637).
+    """True if this buy's adapter may safely RE-RUN its entire create workflow.
 
     The reconciler's disposition check for a buy stranded in ``finalizing`` AFTER the
     adapter-invoked marker was committed: only adapters whose whole create graph is
@@ -1948,6 +1948,28 @@ def _submitted_approval_result(step, req: CreateMediaBuyRequest, adapter) -> Cre
     )
 
 
+def _register_replayed_a2a_task_alias(
+    tenant_id: str,
+    principal_id: str,
+    result: CreateMediaBuyResult,
+    external_task_id: str | None,
+) -> None:
+    """Make an A2A replay's fresh outer task ID poll the original submitted step."""
+    if external_task_id is None or not isinstance(result.response, CreateMediaBuySubmitted):
+        return
+
+    from src.core.database.repositories import WorkflowUoW
+
+    with WorkflowUoW(tenant_id) as uow:
+        assert uow.workflows is not None
+        if not uow.workflows.register_external_task_alias(
+            result.response.task_id,
+            external_task_id,
+            principal_id=principal_id,
+        ):
+            raise RuntimeError("Idempotency replay refers to a missing or inaccessible workflow step")
+
+
 def _cache_and_return(
     result: CreateMediaBuyResult,
     req: CreateMediaBuyRequest,
@@ -2079,6 +2101,7 @@ def _resolve_idempotency_race_or_raise(
     account_id: str | None,
     request_hash: str | None,
     media_buy_id: str | None = None,
+    external_task_id: str | None = None,
 ) -> CreateMediaBuyResult:
     """Shared handler for the unique-index ``IntegrityError`` on both booking paths.
 
@@ -2098,7 +2121,7 @@ def _resolve_idempotency_race_or_raise(
         idempotency_key,
         f" ({media_buy_id})" if media_buy_id else "",
     )
-    return _replay_after_race(
+    replay = _replay_after_race(
         tenant_id,
         # Non-null whenever the backstop index fired; `or ""` only narrows the type.
         idempotency_key=idempotency_key or "",
@@ -2106,6 +2129,8 @@ def _resolve_idempotency_race_or_raise(
         account_id=account_id,
         request_hash=request_hash,
     )
+    _register_replayed_a2a_task_alias(tenant_id, principal_id, replay, external_task_id)
+    return replay
 
 
 async def _create_media_buy_impl(
@@ -2205,6 +2230,12 @@ async def _create_media_buy_impl(
             enforce_ceiling=True,
         )
         if replay is not None:
+            _register_replayed_a2a_task_alias(
+                tenant["tenant_id"],
+                principal_id,
+                replay,
+                external_task_id,
+            )
             logger.info("Idempotency replay: returning cached success for key %s", req.idempotency_key)
             return replay
         # Miss or unusable cached envelope — proceed as a fresh execution; the
@@ -2236,7 +2267,7 @@ async def _create_media_buy_impl(
         # Persist the transport's outer async task id (opaque here — set only by the
         # A2A boundary from the Task returned to the buyer) so the completion webhook
         # and tasks/get can correlate to the id the BUYER holds, not the internal
-        # step_id. Durable so a poll survives a server restart. See #1544 (B6).
+        # step_id. Durable so a poll survives a server restart.
         if external_task_id:
             workflow_metadata["external_task_id"] = external_task_id
 
@@ -3009,6 +3040,7 @@ async def _create_media_buy_impl(
                     account_id=identity.account_id,
                     request_hash=request_hash,
                     media_buy_id=media_buy_id,
+                    external_task_id=external_task_id,
                 )
 
             # Log to activity feed for manual approval case
@@ -3709,7 +3741,7 @@ async def _create_media_buy_impl(
                 #                    (_base.py) re-emits confirmed_at as null for a
                 #                    sandbox success so exclude_none does not drop the
                 #                    required key — the wire body carries
-                #                    "confirmed_at": null. See #1544.
+                #                    "confirmed_at": null.
                 confirmed_at=None,
                 revision=1,
             )
@@ -3815,6 +3847,7 @@ async def _create_media_buy_impl(
                 account_id=identity.account_id,
                 request_hash=request_hash,
                 media_buy_id=response.media_buy_id,
+                external_task_id=external_task_id,
             )
 
         # Populate media_packages table for structured querying
@@ -4695,7 +4728,7 @@ async def create_media_buy_raw(
             params / REST JSON body) — the idempotency payload-hash input
         external_task_id: The transport's outer async task id (the A2A ``task_*``
             returned to the buyer), persisted on the workflow step so the
-            completion webhook and tasks/get correlate to the buyer's id. #1544 B6.
+            completion webhook and tasks/get correlate to the buyer's id.
 
     Returns:
         Dict with status and CreateMediaBuyResponse data

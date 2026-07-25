@@ -1,4 +1,4 @@
-"""Add ownership-independent finalize reconcile-incident marker to media_buys (#1637 Hole A).
+"""Add ownership-independent finalize reconcile-incident marker to media_buys (failure mode A).
 
 Two nullable columns that durably record a POSSIBLE DUPLICATE remote order when a worker's
 adapter ran but the worker could not assert single ownership of the finalization (it lost the

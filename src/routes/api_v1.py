@@ -402,7 +402,7 @@ async def get_media_buys(body: GetMediaBuysBody, identity: ResolvedIdentity = re
     """Query media buys (auth required).
 
     REST binding for get_media_buys — previously the tool was reachable only
-    over MCP/A2A, breaking transport parity (#1544).
+    over MCP/A2A, breaking transport parity.
     """
     response = media_buy_list_module.get_media_buys_raw(
         media_buy_ids=body.media_buy_ids,

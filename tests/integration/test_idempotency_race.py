@@ -10,8 +10,9 @@ nothing, never a fabricated body.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -400,6 +401,53 @@ class TestRaceSeamThroughEntrypoint:
             existing = verify_uow.media_buys.find_by_idempotency_key(idem_key, principal_id)
             assert existing is not None
             assert existing.media_buy_id == winner_id
+
+    @pytest.mark.parametrize("manual_approval", [False, True], ids=["automatic", "manual"])
+    def test_create_paths_forward_outer_a2a_task_id_to_race_alias_registration(self, integration_db, manual_approval):
+        """Both production booking paths preserve a replay task's durable outer ID."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from src.core.schemas import CreateMediaBuyResult, CreateMediaBuySubmitted
+        from tests.harness.media_buy_create import MediaBuyCreateEnv
+
+        outer_task_id = f"task_race_{uuid.uuid4().hex}"
+        replay = CreateMediaBuyResult(
+            response=CreateMediaBuySubmitted(task_id="step_original"),
+            status="submitted",
+        )
+        collision = IntegrityError("insert", {}, Exception("idempotency_key"))
+
+        with MediaBuyCreateEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            if manual_approval:
+                tenant, _principal = env.setup_default_data(human_review_required=True)
+                tenant.human_review_required = True
+                env._commit_factory_data()
+                adapter = env.mock["adapter"].return_value
+                adapter.manual_approval_operations = ["create_media_buy"]
+
+            with (
+                patch.object(MediaBuyRepository, "create_from_request", side_effect=collision),
+                patch("src.core.tools.media_buy_create._replay_after_race", return_value=replay),
+                patch("src.core.tools.media_buy_create._register_replayed_a2a_task_alias") as register_alias,
+            ):
+                result = env.call_impl(
+                    brand={"domain": "outer-task-race.example.com"},
+                    idempotency_key=f"path-{uuid.uuid4().hex}",
+                    packages=[
+                        {
+                            "product_id": product.product_id,
+                            "budget": 5000.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                    start_time=(datetime.now(UTC) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    end_time=(datetime.now(UTC) + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    po_number="OUTER-TASK",
+                    external_task_id=outer_task_id,
+                )
+
+            assert result is replay
+            register_alias.assert_called_once_with(env._tenant_id, env._principal_id, replay, outer_task_id)
 
 
 class TestDegradedFallbackScopeRules:

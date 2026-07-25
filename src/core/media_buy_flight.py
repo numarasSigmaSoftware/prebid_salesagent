@@ -28,7 +28,7 @@ Two deliberate divergences do NOT route through here, and are called out so the
 
 Otherwise, three divergent copies of the resolution (or the mapping) is a latent
 bug (one gets a tz/boundary fix, the others don't), so each lives here once.
-See #1544.
+
 """
 
 from __future__ import annotations

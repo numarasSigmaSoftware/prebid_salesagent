@@ -1,4 +1,4 @@
-"""B6 (#1544): the A2A create_media_buy skill forwards the outer task id to core.
+"""The A2A create_media_buy skill forwards the outer task ID to core.
 
 on_message_send mints the outer ``task_*`` id and threads it down so
 ``_create_media_buy_impl`` can persist it on the workflow step. This pins the A2A-specific
@@ -9,6 +9,7 @@ hop — ``_handle_create_media_buy_skill(a2a_task_id=...)`` must forward it to c
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.core.schemas import CreateMediaBuyResult, CreateMediaBuySubmitted
 from tests.factories import PrincipalFactory
 
 _MOCK_IDENTITY = PrincipalFactory.make_identity(principal_id="principal_123", tenant_id="tenant_123", protocol="a2a")
@@ -59,3 +60,51 @@ class TestA2ACreateExternalTaskId:
     def test_absent_task_id_forwards_none(self):
         """A direct handler call without an outer task id forwards None (MCP/REST parity)."""
         assert _external_task_id_forwarded_to_core(None) is None
+
+    def test_submitted_replay_registers_outer_task_as_durable_alias(self):
+        """A retry's new A2A task ID remains a durable handle for the original step."""
+        from src.core.tools.media_buy_create import _register_replayed_a2a_task_alias
+
+        response = CreateMediaBuyResult(response=CreateMediaBuySubmitted(task_id="step_original"), status="submitted")
+        uow = MagicMock()
+        uow.__enter__.return_value = uow
+        uow.workflows.register_external_task_alias.return_value = True
+
+        with patch("src.core.database.repositories.WorkflowUoW", return_value=uow):
+            _register_replayed_a2a_task_alias("tenant_123", "principal_123", response, "task_retry")
+
+        uow.workflows.register_external_task_alias.assert_called_once_with(
+            "step_original", "task_retry", principal_id="principal_123"
+        )
+
+    def test_idempotency_race_replay_registers_outer_task_as_durable_alias(self):
+        """The uniqueness-race replay path applies the same A2A alias rule as a cache hit."""
+        from sqlalchemy.exc import IntegrityError
+
+        from src.core.tools.media_buy_create import _resolve_idempotency_race_or_raise
+
+        response = CreateMediaBuyResult(response=CreateMediaBuySubmitted(task_id="step_original"), status="submitted")
+        uow = MagicMock()
+        uow.__enter__.return_value = uow
+        uow.workflows.register_external_task_alias.return_value = True
+        error = IntegrityError("insert", {}, Exception("idempotency_key"))
+
+        with (
+            patch("src.core.tools.media_buy_create._is_idempotency_backstop_violation", return_value=True),
+            patch("src.core.tools.media_buy_create._replay_after_race", return_value=response),
+            patch("src.core.database.repositories.WorkflowUoW", return_value=uow),
+        ):
+            result = _resolve_idempotency_race_or_raise(
+                error,
+                "tenant_123",
+                idempotency_key="key_123",
+                principal_id="principal_123",
+                account_id=None,
+                request_hash="hash_123",
+                external_task_id="task_retry",
+            )
+
+        assert result is response
+        uow.workflows.register_external_task_alias.assert_called_once_with(
+            "step_original", "task_retry", principal_id="principal_123"
+        )

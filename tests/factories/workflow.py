@@ -19,7 +19,7 @@ class ContextFactory(factory.alchemy.SQLAlchemyModelFactory):
         sqlalchemy_session_persistence = "commit"
 
     tenant = SubFactory(TenantFactory)
-    principal = SubFactory(PrincipalFactory, tenant=factory.SelfAttribute("..tenant"))
+    principal = SubFactory(PrincipalFactory, tenant=factory.SelfAttribute(".tenant"))
 
     context_id = Sequence(lambda n: f"ctx_{n:08x}")
     tenant_id = LazyAttribute(lambda o: o.tenant.tenant_id)

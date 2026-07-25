@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.core.database.models import Context as DBContext
@@ -72,7 +72,7 @@ class WorkflowRepository:
         Tenant-scoped via the Context join like every other read; pass the
         polling buyer's ``principal_id`` to ALSO scope by principal — a
         same-tenant sibling buyer must not read another principal's buy outcome
-        on task-id knowledge alone. #1544 B6.
+        on task-id knowledge alone.
 
         ``principal_id`` is keyword-only with NO default: a caller wanting the
         tenant-wide read has to pass ``None`` explicitly, so the principal scope
@@ -83,13 +83,49 @@ class WorkflowRepository:
             select(WorkflowStep)
             .join(DBContext)
             .where(
-                WorkflowStep.request_data["external_task_id"].as_string() == external_task_id,
+                or_(
+                    WorkflowStep.request_data["external_task_id"].as_string() == external_task_id,
+                    WorkflowStep.request_data["external_task_ids"].contains([external_task_id]),
+                ),
                 DBContext.tenant_id == self._tenant_id,
             )
         )
         if principal_id is not None:
             stmt = stmt.where(DBContext.principal_id == principal_id)
         return self._session.scalars(stmt).first()
+
+    def register_external_task_alias(self, step_id: str, external_task_id: str, *, principal_id: str) -> bool:
+        """Persist another buyer-visible A2A task ID for an existing create step.
+
+        An idempotent replay returns the original submitted response and must not
+        create another workflow step.  A2A nevertheless allocates a fresh outer
+        task for each message, so every such ID must resolve to that one durable
+        step after a server restart.
+        """
+        step = self._session.scalars(
+            select(WorkflowStep)
+            .join(DBContext)
+            .where(
+                WorkflowStep.step_id == step_id,
+                DBContext.tenant_id == self._tenant_id,
+                DBContext.principal_id == principal_id,
+            )
+            .with_for_update()
+        ).first()
+        if step is None:
+            return False
+
+        request_data = dict(step.request_data or {})
+        aliases = list(request_data.get("external_task_ids", []))
+        original_task_id = request_data.get("external_task_id")
+        if isinstance(original_task_id, str) and original_task_id not in aliases:
+            aliases.append(original_task_id)
+        if external_task_id not in aliases:
+            aliases.append(external_task_id)
+        request_data["external_task_ids"] = aliases
+        step.request_data = request_data
+        self._session.flush()
+        return True
 
     def get_by_step_id_or_raise(self, step_id: str) -> WorkflowStep:
         """Get a workflow step by ID or raise ``AdCPTaskNotFoundError``.
@@ -210,7 +246,7 @@ class WorkflowRepository:
         statuses: tuple[str, ...],
         limit: int = 5,
     ) -> list[WorkflowStep]:
-        """Non-terminal steps of ``tool_name`` mapped to an object, NEWEST first (#1637).
+        """Non-terminal steps of ``tool_name`` mapped to an object, NEWEST first.
 
         Tenant-scoped via the Context join. Constraining to ``tool_name`` is what makes the
         approve/reject route's step selection authoritative — it must act on the media-buy

@@ -243,7 +243,7 @@ class TritonDigital(AdServerAdapter):
             campaign_data = response.json()
             campaign_id = campaign_data["id"]
 
-            # ── POST-MUTATION BOUNDARY (#1637 parity with GAM) ──────────────────
+            # ── POST-MUTATION BOUNDARY ( parity with GAM) ──────────────────
             # The remote campaign now EXISTS. A failure creating any package's
             # flight from here on leaves a partial remote graph (campaign +
             # possibly some flights) — it must surface as

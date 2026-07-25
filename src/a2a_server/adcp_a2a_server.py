@@ -1051,10 +1051,11 @@ class AdCPRequestHandler(RequestHandler):
         # result is already Task | Message — yield it directly
         yield result
 
-    # Terminal persisted workflow-step status → A2A TaskState, for the durable
-    # tasks/get fallback. Non-terminal steps (in_progress, approved, …) surface as
-    # WORKING. #1544 B6.
+    # Persisted workflow-step status → A2A TaskState for the durable tasks/get
+    # fallback. A step awaiting human approval stays SUBMITTED after a restart;
+    # other non-terminal states surface as WORKING.
     _STEP_STATUS_TO_TASK_STATE = {
+        "requires_approval": TaskState.TASK_STATE_SUBMITTED,
         "completed": TaskState.TASK_STATE_COMPLETED,
         "rejected": TaskState.TASK_STATE_REJECTED,
         "failed": TaskState.TASK_STATE_FAILED,
@@ -1129,7 +1130,7 @@ class AdCPRequestHandler(RequestHandler):
 
         This handler owns only the transport concerns — A2A Task/Artifact framing; the
         DB read (session + tenant-scoped step lookup + error/result classification)
-        lives in the transport-neutral ``resolve_durable_task_outcome`` service. #1544.
+        lives in the transport-neutral ``resolve_durable_task_outcome`` service.
         """
         outcome = resolve_durable_task_outcome(tenant_id, task_id, principal_id=principal_id)
         if outcome is None:
@@ -1140,7 +1141,7 @@ class AdCPRequestHandler(RequestHandler):
             # A failed step stores a two-layer error envelope. A completed step
             # stores CreateMediaBuySuccess; a rejected one stores
             # CreateMediaBuyError — the artifact name media_buy_result covers
-            # both, TaskState signals the outcome. #1544.
+            # both, TaskState signals the outcome.
             task.artifacts.append(
                 Artifact(
                     artifact_id=f"{task_id}_{'error' if outcome.is_error else 'result'}",
@@ -1163,6 +1164,8 @@ class AdCPRequestHandler(RequestHandler):
         """
         task_id = params.id
         identity = self._resolve_task_identity_or_raise(task_id, context)
+        if resolve_durable_task_outcome(identity.tenant_id, task_id, principal_id=identity.principal_id) is not None:
+            self._raise_task_not_found(task_id)
         task = self.tasks.get(task_id)
         owner = getattr(self, "_task_owners", {}).get(task_id)
         if task is None or owner != (identity.tenant_id, identity.principal_id):
@@ -1741,7 +1744,7 @@ class AdCPRequestHandler(RequestHandler):
             # fallback only for direct handler callers.
             raw_wire_payload=raw_wire_payload if raw_wire_payload is not None else params,
             # Persist the outer A2A task id on the workflow step so the completion
-            # webhook / tasks/get correlate to the id the buyer holds. #1544 B6.
+            # webhook / tasks/get correlate to the id the buyer holds.
             external_task_id=a2a_task_id,
         )
 
@@ -2282,7 +2285,7 @@ class AdCPRequestHandler(RequestHandler):
 #     this card. Release-precision here (normalize_to_release_precision("3.1.1")
 #     == "3.1") drops the patch component that registries key on.
 # Normative v3 version negotiation/discovery is get_adcp_capabilities +
-# envelope-root ``adcp_version`` — not this card. See #1544 review.
+# envelope-root ``adcp_version`` — not this card.
 
 
 def create_agent_card() -> AgentCard:
@@ -2303,7 +2306,7 @@ def create_agent_card() -> AgentCard:
     sales_agent_version = get_version()
 
     # Stable extension URI + patch-precision v2-convention ``adcp_version`` per the
-    # pinned A2A guide (see the module comment above create_agent_card / #1544).
+    # pinned A2A guide (see the module comment above create_agent_card).
     protocol_version = get_adcp_spec_version()
     adcp_extension = AgentExtension(
         uri="https://adcontextprotocol.org/extensions/adcp",

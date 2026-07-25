@@ -64,7 +64,7 @@ class MediaBuyRepository:
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
-        # Injectable clock for lease/guard logic (#1637). Production uses wall-clock UTC;
+        # Injectable clock for lease/guard logic. Production uses wall-clock UTC;
         # tests advance a fake clock instead of UPDATE-ing lease rows, so the heartbeat
         # renewer and the ownership-fence guards observe the SAME advancing time.
         self._now_fn: Callable[[], datetime.datetime] = now_fn or (lambda: datetime.datetime.now(datetime.UTC))
@@ -112,7 +112,7 @@ class MediaBuyRepository:
         ``lock_timeout`` bounds only the WAITER. ``idle_in_transaction_timeout_seconds``
         bounds the HOLDER for legacy callers. Durable update operations must use
         a lease instead of relying on a fixed holder timeout. ``context`` is
-        echoed into the CONFLICT envelope. #1544.
+        echoed into the CONFLICT envelope.
         """
         stmt = select(MediaBuy).where(
             MediaBuy.tenant_id == self._tenant_id,
@@ -565,7 +565,7 @@ class MediaBuyRepository:
         ``status``), and :meth:`apply_status_transition` (scheduler sweep,
         creative-sync). Keeping it in one place is what stops the create and get
         paths from drifting — a buy that reached a committed state on any seam
-        carries ``confirmed_at`` on the wire. See #1544.
+        carries ``confirmed_at`` on the wire.
 
         Returns True when the buy first entered a seller-confirmed status here,
         so a caller that must persist the stamp immediately (the create path,
@@ -623,7 +623,7 @@ class MediaBuyRepository:
         claim is a normal race outcome (a competing approve/reject already moved
         the buy out of the eligible state), not a buyer-visible CONFLICT. The
         ``FOR UPDATE`` load serializes concurrent claimants, so the loser sees the
-        winner's committed status and bails; exactly one caller proceeds. #1544.
+        winner's committed status and bails; exactly one caller proceeds.
         """
         media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
         if media_buy is None:
@@ -632,14 +632,14 @@ class MediaBuyRepository:
             allowed = (expected_status,) if isinstance(expected_status, str) else expected_status
             if media_buy.status not in allowed:
                 return None
-        # Phase-2 OWNERSHIP check (#1637): like ``expected_status``, a lost lease is a
+        # Phase-2 ownership check: like ``expected_status``, a lost lease is a
         # normal race outcome — a reconciler (or a competing worker) took over the
         # finalization, so this caller must do NOTHING (no publish/fail/terminalize).
         if expected_lease_id is not None and media_buy.finalize_lease_id != expected_lease_id:
             return None
         # Post-lock predicate for claims whose eligibility depends on more than the
         # status (e.g. re-approving a ``finalizing`` buy only when it is flagged
-        # manual_required). A failed guard is a lost claim, not an error. #1637.
+        # manual_required). A failed guard is a lost claim, not an error.
         if claim_guard is not None and not claim_guard(media_buy):
             return None
         if expected_revision is not None:
@@ -719,21 +719,12 @@ class MediaBuyRepository:
         For approval routes whose target is a window→status decision
         (``scheduled``/``active``/``completed``) or ``pending_creatives``: the
         target depends on the buy's own flight window, so it must be derived from
-        the committed row, not a stale pre-lock read (same lost-update race the
-        scheduler hits — see :meth:`apply_computed_status_transition`).
-        :meth:`_locked_mutate_and_bump` loads ``FOR UPDATE`` with
-        ``populate_existing=True`` (every column refreshed to the committed
-        value), so ``compute_target`` runs against the live window. A ``None``
-        return from ``compute_target`` leaves the status unchanged
-        (``approved_at``/``approved_by`` still stamped); the shared skeleton
-        stamps ``confirmed_at`` and bumps revision.
+        the committed row, not a stale pre-lock read. The shared lock-and-mutate
+        skeleton refreshes every column before ``compute_target`` runs.
 
-        ``expected_status`` makes this a single-winner CLAIM (approval
-        orchestration): the transition applies ONLY if the committed status is
-        among it, else the method returns ``None`` untouched — so exactly one of
-        several concurrent approve/reject requests wins the decision and proceeds
-        to the adapter. Returns None if the buy is not found OR the claim was lost.
-        #1544.
+        ``expected_status`` makes this a single-winner claim: the transition
+        applies only if the committed status is eligible. Returns None if the
+        buy is missing or the claim was lost.
         """
 
         def _apply(media_buy: MediaBuy) -> None:
@@ -745,7 +736,7 @@ class MediaBuyRepository:
             if approved_by is not None:
                 media_buy.approved_by = approved_by
             if clear_finalize_state:
-                # Successful publish (#1637): the finalization operation is over —
+                # Successful publish: the finalization operation is over —
                 # drop the lease, the adapter-invoked marker, and any
                 # manual_required disposition set while this (slow) owner was
                 # still running (self-heal).
@@ -806,6 +797,13 @@ class MediaBuyRepository:
         if media_buy is None or media_buy.update_lease_id != lease_id:
             return False
         now = self._now()
+        if (
+            media_buy.update_lease_expires_at is None
+            or media_buy.update_lease_expires_at <= now
+            or media_buy.update_recovery_mode is not None
+            or media_buy.update_reconcile_incident_at is not None
+        ):
+            return False
         media_buy.update_adapter_invoked_at = media_buy.update_adapter_invoked_at or now
         media_buy.update_lease_expires_at = now + datetime.timedelta(seconds=lease_ttl_seconds)
         self._session.flush()
@@ -873,7 +871,7 @@ class MediaBuyRepository:
         operator re-approval after manual reconciliation) starts with a clean
         operation state. Bumps revision for the buyer-visible approval claim;
         publishing the later serving/confirmed state advances it again.
-        Returns ``(row, lease_id)`` for phase 2, or ``None`` on a lost claim. #1637.
+        Returns ``(row, lease_id)`` for phase 2, or ``None`` on a lost claim.
         """
         lease_id = self._new_finalize_lease()
 
@@ -889,7 +887,7 @@ class MediaBuyRepository:
                 media_buy.approved_by = approved_by
 
         def _reapproval_guard(mb: MediaBuy) -> bool:
-            # Operator RE-APPROVAL gate (#1637): a buy already in ``finalizing`` may
+            # Operator re-approval gate: a buy already in ``finalizing`` may
             # be re-claimed ONLY when it is parked manual_required AND its previous
             # owner is provably done or ABANDONED. A reconciler-flagged row keeps
             # the expired lease of a possibly-still-alive worker; re-claiming it
@@ -926,7 +924,7 @@ class MediaBuyRepository:
         disposition is automatic (NULL), and the current lease is absent or expired —
         an unexpired lease means a live worker owns phase 2. No revision bump (lease
         churn is not a buyer-visible mutation). Returns the new lease id, or ``None``
-        (someone owns it / disposition is manual / buy moved on). #1637.
+        (someone owns it / disposition is manual / buy moved on).
         """
         lease_id = self._new_finalize_lease()
         now = self._now()
@@ -947,7 +945,7 @@ class MediaBuyRepository:
         return lease_id
 
     def renew_finalize_lease(self, media_buy_id: str, lease_id: str, *, lease_ttl_seconds: int) -> bool:
-        """Heartbeat CAS: extend the current owner's phase-2 lease expiry (#1637).
+        """Heartbeat CAS: extend the current owner's phase-2 lease expiry.
 
         Called periodically (~TTL/3) by the owner's heartbeat thread WHILE its adapter
         call is in flight, so a worker that is blocked-but-ALIVE keeps its lease
@@ -975,7 +973,7 @@ class MediaBuyRepository:
         return True
 
     def set_finalize_adapter_invoked(self, media_buy_id: str, lease_id: str) -> bool:
-        """CAS-set the adapter-invoked marker (still owner + still finalizing). #1637.
+        """CAS-set the adapter-invoked marker (still owner + still finalizing).
 
         Committed by the caller IMMEDIATELY BEFORE ``run_adapter``: presence means
         "remote mutations may exist", gating which adapters may auto-resume past it.
@@ -994,7 +992,7 @@ class MediaBuyRepository:
         return marked is not None
 
     def clear_stale_platform_order_ids(self, media_buy_id: str) -> None:
-        """Drop persisted per-package platform ids before a fresh full adapter run (#1637).
+        """Drop persisted per-package platform ids before a fresh full adapter run.
 
         A replay re-creates the ENTIRE remote graph and may mint a different order id;
         ``_persist_adapter_package_ids``' mismatch guard (which protects against
@@ -1016,7 +1014,7 @@ class MediaBuyRepository:
     def set_finalize_recovery_manual(
         self, media_buy_id: str, *, lease_id: str | None = None, cooldown_seconds: int | None = None
     ) -> bool:
-        """Mark a ``finalizing`` buy ``manual_required`` (fail-closed disposition). #1637.
+        """Mark a ``finalizing`` buy ``manual_required`` (fail-closed disposition).
 
         Two callers, one invariant (the buy stays ``finalizing`` with the invoked
         marker intact so the partial remote graph keeps its reconciliation signal):
@@ -1031,7 +1029,7 @@ class MediaBuyRepository:
 
           * ``None`` (default): RELEASES the lease — the operation is over until an
             operator acts (owner is provably done, e.g. ownership was already lost).
-          * given (the AMBIGUOUS ``AdapterPostMutationIncomplete`` path, #1637 Hole B):
+          * given (the AMBIGUOUS ``AdapterPostMutationIncomplete`` path, Hole B):
             RETAINS the lease and resets its expiry to ``now + cooldown_seconds`` so
             :meth:`claim_finalizing`'s re-approval guard ("manual_required + lease
             expired beyond the abandoned-owner grace") WITHHOLDS re-approval until a
@@ -1075,9 +1073,9 @@ class MediaBuyRepository:
         return True
 
     def record_finalize_reconcile_incident(self, media_buy_id: str, reason: str) -> bool:
-        """Durably record a POSSIBLE-DUPLICATE remote-order incident, WITHOUT lease ownership. #1637.
+        """Durably record a POSSIBLE-DUPLICATE remote-order incident, WITHOUT lease ownership.
 
-        The crux of the ownership-independent fail-safe (#1637 Hole A): a worker whose adapter
+        The crux of the ownership-independent fail-safe (failure mode A): a worker whose adapter
         RAN but which cannot assert it still owns the finalization — it lost the lease to a
         newer owner mid-run, or a post-mutation ambiguity left a partial/duplicate remote graph
         — must still leave a durable trace, so the possible duplicate is never silently
@@ -1120,7 +1118,7 @@ class MediaBuyRepository:
         Excludes buys with an UNEXPIRED lease (a live worker owns phase 2) and buys
         flagged ``manual_required`` (hot-loop prevention — the reconciler never
         re-touches those). The per-buy ``acquire_finalize_lease`` CAS remains the
-        authoritative single-winner gate; this filter is noise reduction. #1637.
+        authoritative single-winner gate; this filter is noise reduction.
         """
         return list(
             session.scalars(
@@ -1364,7 +1362,7 @@ class MediaBuyRepository:
     # (re)computed: the flight window AND the current status/confirmation. A
     # target derived from any of these on a STALE unlocked read can lose a race
     # (e.g. a concurrent end_time extension), so the compute must see the
-    # committed values. See :meth:`apply_computed_status_transition` / #1544.
+    # committed values. See :meth:`apply_computed_status_transition`.
     #
     # GUARD: ``revision`` is deliberately EXCLUDED. The counter is bumped by a
     # server-side ``coalesce(revision, 0) + 1`` expression (see :meth:`_bump_revision`);
@@ -1415,7 +1413,7 @@ class MediaBuyRepository:
         lock is held until the caller commits, serializing concurrent transitions
         of the same buy. ``revision`` needs no refresh — it bumps via a
         server-side expression that serializes at the write-lock. Returns the same
-        (mutated) row. See #1544.
+        (mutated) row.
         """
         session = object_session(media_buy)
         if session is not None:
@@ -1451,7 +1449,7 @@ class MediaBuyRepository:
         mutators use, so no path can leave a committed buy without a confirmation
         instant. Returns the same (mutated) row so the seam matches the
         ``MediaBuy | None`` shape of every sibling mutator — the return is never
-        None here because the caller supplies a loaded row. See #1544.
+        None here because the caller supplies a loaded row.
 
         Unlike the tenant-scoped mutators, callers here loaded the row WITHOUT a
         row lock (the scheduler sweep via :meth:`get_all_by_statuses`, creative-
@@ -1519,7 +1517,7 @@ class MediaBuyRepository:
         already at target) — this method ALWAYS bumps, and must not be called for a
         buy that also transitions status this pass (``apply_status_transition``
         already bumps once; calling both would double-count). Returns the same
-        (mutated) row. See #1544 (B3).
+        (mutated) row.
         """
         MediaBuyRepository._bump_revision(media_buy)
         return media_buy

@@ -1,4 +1,4 @@
-"""Add durable lease and reconciliation state for remote media-buy updates (#1544).
+"""Add durable lease and reconciliation state for remote media-buy updates.
 
 Revision ID: c1544a2b7d9e
 Revises: 9d2f1a7c4b8e

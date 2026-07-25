@@ -191,7 +191,7 @@ def _hold_for_unapproved_creatives(db, tenant_id: str, media_buy_id: str, user_e
     means "approved by the seller and has no creatives assigned — the buyer
     must attach creatives via sync_creatives", so creatives legitimately arrive
     after approval — finalizing a creative-less buy into the ad server was the
-    previous divergence between the two routes. #1544.
+    previous divergence between the two routes.
     """
     readiness = creatives_ready_for_finalize(db, tenant_id, media_buy_id=media_buy_id)
     if readiness.ready_for_finalize:
@@ -216,7 +216,7 @@ def _hold_for_unapproved_creatives(db, tenant_id: str, media_buy_id: str, user_e
     # Shared single-winner CLAIM on pending_approval → pending_creatives, so a
     # concurrent approve/reject that already decided the buy is not overwritten.
     # The flash is queued ONLY after the claim is won — a lost claim must not
-    # tell the operator the buy was approved. #1544.
+    # tell the operator the buy was approved.
     if not claim_pending_creatives_hold(db, tenant_id, media_buy_id=media_buy_id, approved_by=user_email):
         return jsonify({"success": False, "error": MEDIA_BUY_ALREADY_DECIDED_MESSAGE}), 409
     flash(waiting_msg, "info")
@@ -237,7 +237,7 @@ def _finalize_and_render(db, tenant_id: str, *, media_buy_id: str, step_data: di
     # workflow-step terminal + response artifact, and the completion webhook. The
     # prior code stamped approved_at AFTER the adapter (so confirmed_at recorded
     # adapter-completion) and left the step at "approved" with no artifact — the
-    # finalizer fixes both. See #1544.
+    # finalizer fixes both.
     logger.info("[APPROVAL] Finalizing approved media buy %s", sanitize_log_value(media_buy_id))
     outcome, error_msg = finalize_pending_media_buy_approval(
         db,
@@ -257,7 +257,7 @@ def _finalize_and_render(db, tenant_id: str, *, media_buy_id: str, step_data: di
     if outcome is FinalizeOutcome.ADAPTER_FAILED:
         # The raw adapter error may embed internal state — keep it in the logs only
         # (sanitized above), never in the operator-facing flash/response body
-        # (CodeQL information-exposure alert, #1544).
+        # (CodeQL information-exposure alert).
         logger.error(
             "[APPROVAL] Adapter creation failed for %s: %s",
             sanitize_log_value(media_buy_id),
@@ -266,7 +266,7 @@ def _finalize_and_render(db, tenant_id: str, *, media_buy_id: str, step_data: di
         flash("Workflow approved but media buy creation failed — see server logs for details", "error")
         return jsonify({"success": False, "error": "Media buy creation failed — see server logs for details"}), 500
     if outcome is FinalizeOutcome.RETRYING:
-        # #1637: approval claimed; the ad-server order completes automatically
+        #: approval claimed; the ad-server order completes automatically
         # via the reconciler.
         logger.info(
             "[APPROVAL] Media buy %s finalization deferred: %s",
@@ -298,13 +298,13 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             # a decision record owned by the single-winner claim: for a media-buy step it
             # is terminalized to "completed" ONLY by the claim winner (finalizer). A
             # premature "approved" write would revert a step already decided by a
-            # competing approve/reject and make durable tasks/get report WORKING. #1544.
+            # competing approve/reject and make durable tasks/get report WORKING.
             step = workflow_repo.get_by_step_id(step_id)
             if not step:
                 return jsonify({"error": "Workflow step not found"}), 404
 
             # A DECIDED (terminal) step is immutable — a replayed approve after a prior
-            # rejection/completion must not revert it. #1544.
+            # rejection/completion must not revert it.
             if step.status in WORKFLOW_STEP_TERMINAL_STATUSES:
                 return jsonify({"success": False, "error": WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE}), 409
 
@@ -366,7 +366,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 elif media_buy is not None and media_buy.status == MEDIA_BUY_FINALIZING_STATUS:
                     # Plain in-flight ``finalizing`` (a live lease owner is completing the
                     # decision) — NOT approvable, NOT terminal. Do not claim success:
-                    # report the in-progress state (same 202 vocabulary as RETRYING). #1544.
+                    # report the in-progress state (same 202 vocabulary as RETRYING).
                     logger.info(
                         "[APPROVAL] Media buy %s finalization already in flight",
                         sanitize_log_value(media_buy_id),
@@ -375,7 +375,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 else:
                     # The mapped buy is no longer pending_approval (already decided, or
                     # gone). Do NOT write the step — the step follows the buy decision and
-                    # must not be reverted. Idempotent success. #1544.
+                    # must not be reverted. Idempotent success.
                     logger.warning(
                         "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
                         media_buy is not None,
@@ -416,7 +416,7 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 return jsonify({"error": "Workflow step not found"}), 404
 
             # A DECIDED (terminal) step is immutable — a replayed reject after a prior
-            # completion/rejection must not overwrite it. #1544.
+            # completion/rejection must not overwrite it.
             if step.status in WORKFLOW_STEP_TERMINAL_STATUSES:
                 return jsonify({"success": False, "error": WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE}), 409
 
@@ -432,7 +432,7 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 # single-winner claim, asserting the OBSERVED source status. If the buy
                 # is no longer in a rejectable state (a concurrent approve won, or it was
                 # already decided) the claim loses → 409 and the step is left untouched,
-                # so we never pair an active/decided buy with a rejected task. #1544.
+                # so we never pair an active/decided buy with a rejected task.
                 media_buy = MediaBuyRepository(db, tenant_id).get_by_id(mapping.object_id)
                 if media_buy is None or media_buy.status not in ("pending_approval", "pending_creatives"):
                     return jsonify({"success": False, "error": MEDIA_BUY_ALREADY_DECIDED_MESSAGE}), 409

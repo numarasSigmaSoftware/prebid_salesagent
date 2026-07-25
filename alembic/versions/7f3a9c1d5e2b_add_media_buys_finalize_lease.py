@@ -1,4 +1,4 @@
-"""Add crash-recoverable approval finalization state to media_buys (#1637).
+"""Add crash-recoverable approval finalization state to media buys.
 
 Four nullable columns backing the exactly-once phase-2 protocol:
 

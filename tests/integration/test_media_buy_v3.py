@@ -26,6 +26,7 @@ from src.core.database.models import MediaPackage as DBMediaPackage
 from src.core.exceptions import (
     AdCPAuthenticationError,
     AdCPAuthorizationError,
+    AdCPBudgetTooLowError,
     AdCPCapabilityNotSupportedError,
     AdCPValidationError,
 )
@@ -242,7 +243,7 @@ class TestCreateMediaBuyCurrencyValidation:
 
 
 class TestCreateMediaBuyManualApproval:
-    """UC-002-MA01..MA03: manual approval / HITL workflow."""
+    """UC-002-MA01.MA03: manual approval / HITL workflow."""
 
     @pytest.mark.asyncio
     async def test_manual_approval_creates_pending_workflow_step(
@@ -476,7 +477,7 @@ class TestCreateMediaBuyAdapterAtomicity:
 
 
 class TestUpdateMediaBuyCreativeAssignments:
-    """UC-003-CA01..CA02: creative assignment updates requiring DB."""
+    """UC-003-CA01.CA02: creative assignment updates requiring DB."""
 
     @pytest.mark.asyncio
     async def test_creative_assignments_with_weights(
@@ -561,6 +562,50 @@ class TestUpdateMediaBuyCreativeAssignments:
         with pytest.raises(AdCPValidationError, match="placement"):
             _update_media_buy_impl(req=update_req, identity=mb_identity)
 
+    @pytest.mark.asyncio
+    async def test_pre_adapter_budget_rejection_leaves_no_update_lease(
+        self, mb_tenant, mb_principal, mb_products, mb_identity
+    ):
+        """A corrected retry is not blocked by a rejected pre-adapter update."""
+        from src.core.database.repositories import MediaBuyUoW
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.core.tools.media_buy_update import _update_media_buy_impl
+
+        create_result = await _create_media_buy_impl(req=_make_create_request(), identity=mb_identity)
+        media_buy_id = create_result.response.media_buy_id
+        package_id = create_result.response.packages[0].package_id
+        with MediaBuyUoW(mb_tenant["tenant_id"]) as uow:
+            assert uow.currency_limits is not None
+            currency_limit = uow.currency_limits.get_for_currency("USD")
+            assert currency_limit is not None
+            currency_limit.min_package_budget = 100
+
+        with pytest.raises(AdCPBudgetTooLowError):
+            _update_media_buy_impl(
+                req=UpdateMediaBuyRequest(
+                    media_buy_id=media_buy_id,
+                    packages=[{"package_id": package_id, "budget": 50}],
+                ),
+                identity=mb_identity,
+            )
+
+        with MediaBuyUoW(mb_tenant["tenant_id"]) as uow:
+            assert uow.media_buys is not None
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            assert media_buy.update_lease_id is None
+            assert media_buy.update_lease_expires_at is None
+            assert media_buy.update_adapter_invoked_at is None
+
+        corrected = _update_media_buy_impl(
+            req=UpdateMediaBuyRequest(
+                media_buy_id=media_buy_id,
+                packages=[{"package_id": package_id, "budget": 200}],
+            ),
+            identity=mb_identity,
+        )
+        assert corrected.status == "completed"
+
 
 # ---------------------------------------------------------------------------
 # Bucket A: Get Media Buys (from xfails)
@@ -568,7 +613,7 @@ class TestUpdateMediaBuyCreativeAssignments:
 
 
 class TestGetMediaBuysResponseFields:
-    """GMB-RS03..RS04: response population requiring DB."""
+    """GMB-RS03.RS04: response population requiring DB."""
 
     @pytest.mark.asyncio
     async def test_snapshot_populated_when_requested(self, mb_tenant, mb_principal, mb_products, mb_identity):

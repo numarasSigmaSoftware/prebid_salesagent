@@ -68,7 +68,7 @@ class MediaBuyStatusScheduler:
         while self.is_running:
             try:
                 await self._update_statuses()
-                # Resume any approval stranded mid-finalize by a crash (#1637). Runs
+                # Resume any approval stranded mid-finalize by a crash. Runs
                 # after the flight-window sweep; its own errors never abort the loop.
                 await self._reconcile_finalizing_buys()
             except asyncio.CancelledError:
@@ -103,7 +103,7 @@ class MediaBuyStatusScheduler:
                     # race where a concurrent end_time extension (status still
                     # active) would let a pre-lock "completed" decision win. The
                     # seam bumps the AdCP 3.1.1 revision + stamps
-                    # confirmed_at on any real transition. #1544.
+                    # confirmed_at on any real transition.
                     MediaBuyRepository.apply_computed_status_transition(
                         media_buy, lambda mb: self._compute_new_status(mb, now, session)
                     )
@@ -127,7 +127,7 @@ class MediaBuyStatusScheduler:
         """Re-drive media buys stranded in ``finalizing`` by a mid-finalize crash.
 
         The approval finalizer claims a buy into ``finalizing`` (with a phase-2 lease)
-        and commits BEFORE the external adapter runs (#1637). If the process dies (or
+        and commits BEFORE the external adapter runs. If the process dies (or
         the adapter raises unexpectedly) before the serving-status transition + step
         terminalization, the buy is left in ``finalizing``. This pass scans for
         RECOVERABLE strandings only — lease absent/expired (an unexpired lease means
@@ -190,7 +190,7 @@ class MediaBuyStatusScheduler:
             New status string if change needed, None otherwise.
         """
         # Resolve the effective UTC flight window (shared with the admin approve
-        # route and creative-review path — see resolve_flight_window_utc / #1544).
+        # route and creative-review path — see resolve_flight_window_utc().
         start_time, end_time = resolve_flight_window_utc(media_buy)
 
         if start_time is None:
@@ -228,7 +228,7 @@ class MediaBuyStatusScheduler:
             True if no creatives assigned OR all assigned creatives are approved.
 
         Shares the tenant-scoped readiness query with the admin approve gate
-        (``CreativeAssignmentRepository.creative_readiness``, #1544) but applies
+        (``CreativeAssignmentRepository.creative_readiness``,) but applies
         the ACTIVATION policy (``all_assigned_approved``): a zero-assignment buy
         can activate — some campaigns run without creatives initially. This is a
         DELIBERATE divergence from the approve gate's ``ready_for_finalize``

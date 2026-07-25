@@ -126,7 +126,7 @@ class MediaBuyReadinessService:
             # a creative_id is buyer-assignable and unique only per principal, so
             # a tenant-only IN could pull in a colliding creative_id owned by
             # ANOTHER principal and count its status. Same derivation as
-            # CreativeAssignmentRepository.creative_readiness. #1544.
+            # CreativeAssignmentRepository.creative_readiness.
             creatives: list[Creative] = []
             creative_keys = {(a.principal_id, a.creative_id) for a in assignments}
             if creative_keys:
@@ -275,7 +275,7 @@ class MediaBuyReadinessService:
 
         # Resolve the effective UTC flight window (shared helper — same
         # start_time/end_time-preferred, date-fallback resolution used by the
-        # scheduler, admin approve route, and creative-review path). See #1544.
+        # scheduler, admin approve route, and creative-review path).
         # start_date/end_date are NOT NULL, so the window is always fully
         # resolved for a persisted media buy; None here is an internal
         # invariant violation (raise, don't assert — assert is stripped

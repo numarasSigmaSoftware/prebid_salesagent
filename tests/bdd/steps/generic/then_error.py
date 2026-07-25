@@ -14,6 +14,35 @@ from pytest_bdd import parsers, then
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
+_ACTIONABLE_SUGGESTION_VERBS = frozenset(
+    {
+        "use",
+        "try",
+        "check",
+        "provide",
+        "include",
+        "ensure",
+        "remove",
+        "specify",
+        "set",
+        "omit",
+        "add",
+        "verify",
+    }
+)
+
+
+def assert_actionable_suggestion(suggestion: str) -> None:
+    """Assert that a buyer-facing suggestion tells the caller what to do."""
+    assert suggestion.strip(), "Expected non-empty suggestion"
+    words = set(suggestion.lower().split())
+    found = words & _ACTIONABLE_SUGGESTION_VERBS
+    assert found, (
+        "Expected actionable fix suggestion with a verb "
+        f"({', '.join(sorted(_ACTIONABLE_SUGGESTION_VERBS))}), got: {suggestion}"
+    )
+
+
 def _wire_code(ctx: dict) -> str | None:
     """Return the authoritative wire error code when a wire envelope was captured.
 
@@ -586,30 +615,7 @@ def then_error_has_fix_suggestion(ctx: dict) -> None:
             return
 
         suggestion = _get_error_dict(error).get("suggestion")
-    assert suggestion, "Expected non-empty suggestion"
-    # A fix suggestion must contain actionable guidance — a verb telling the
-    # caller what to DO, not just describing the problem.
-    suggestion_lower = suggestion.lower()
-    # Split into words to avoid substring matches (e.g., "reset" matching "set")
-    words = set(suggestion_lower.split())
-    action_verbs = {
-        "use",
-        "try",
-        "check",
-        "provide",
-        "include",
-        "ensure",
-        "remove",
-        "specify",
-        "set",
-        "omit",
-        "add",
-        "verify",
-    }
-    found = words & action_verbs
-    assert found, (
-        f"Expected actionable fix suggestion with a verb ({', '.join(sorted(action_verbs))}), got: {suggestion}"
-    )
+    assert_actionable_suggestion(suggestion)
 
 
 # ── Suggestion content ───────────────────────────────────────────────

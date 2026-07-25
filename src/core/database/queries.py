@@ -202,7 +202,7 @@ def get_creatives_needing_human_review(
     # Get pending creatives with their latest AI review. Reviews are keyed by
     # (tenant_id, principal_id, creative_id) like the creative itself, so the join
     # carries the full composite key — matching on creative_id alone would let
-    # another tenant's/principal's review attach to this tenant's creative. #1544.
+    # another tenant's/principal's review attach to this tenant's creative.
     stmt = (
         select(Creative, CreativeReview)
         .join(

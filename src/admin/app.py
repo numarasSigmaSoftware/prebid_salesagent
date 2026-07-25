@@ -105,7 +105,7 @@ class CustomProxyFix:
 
 def create_app(config=None):
     """Create and configure the Flask application."""
-    app = Flask(__name__, template_folder="../../templates", static_folder="../../static")
+    app = Flask(__name__, template_folder="././templates", static_folder="././static")
 
     # Configuration
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
@@ -316,7 +316,7 @@ def create_app(config=None):
         # fallback cannot drift from what the 409/202 response body would have said.
         # These fallbacks fire exactly when the response body fails to parse — the one
         # case where the operator has no server text — so a hand-copied literal there
-        # reported a different entity/wording than the server. #1544.
+        # reported a different entity/wording than the server.
         from src.admin.services.media_buy_completion import (
             MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
             WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE,

@@ -104,7 +104,7 @@ def _get_media_buys_impl(
             get-media-buys-request schema, but the installed ``adcp`` library's
             ``GetMediaBuysRequest`` type does not surface it. As an implementation
             decision (not a spec fact), the transport wrappers thread it as a
-            separate parameter alongside ``req`` rather than as a ``req`` field. #1544.
+            separate parameter alongside ``req`` rather than as a ``req`` field.
 
     Returns:
         GetMediaBuysResponse with matching media buys

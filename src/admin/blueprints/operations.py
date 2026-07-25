@@ -189,7 +189,7 @@ def media_buy_detail(tenant_id, media_buy_id):
             # actually act), and gate the approve form on the buy being (re)approvable.
             # This includes a ``finalizing`` buy parked ``manual_required`` — its create
             # step is deliberately left ``in_progress`` so the operator RE-APPROVAL can
-            # find it, which the old requires_approval/pending_approval filter missed. #1544.
+            # find it, which the old requires_approval/pending_approval filter missed.
             media_buy_approvable = is_media_buy_approvable(media_buy)
             pending_approval_step = (
                 _select_actionable_create_step(db_session, tenant_id, media_buy_id) if media_buy_approvable else None
@@ -311,7 +311,7 @@ def media_buy_detail(tenant_id, media_buy_id):
 
 
 def _select_actionable_create_step(db_session, tenant_id: str, media_buy_id: str):
-    """Return the newest actionable media-buy CREATION approval step, or ``None`` (#1637).
+    """Return the newest actionable media-buy CREATION approval step, or ``None``.
 
     The approve/reject route finalizes a CREATE (it runs ``execute_approved_media_buy`` /
     the create-reject cascade), so it must act on the create-approval step —
@@ -388,7 +388,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 # decision record OWNED by the single-winner claim below (terminalized to
                 # "completed" only by the claim winner's finalizer). The step query above
                 # already excludes terminal steps, so a replay after completion/rejection
-                # finds nothing rather than reverting a decided step. #1544.
+                # finds nothing rather than reverting a decided step.
                 step.updated_at = datetime.now(UTC)
 
                 if not step.comments:
@@ -405,7 +405,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 from src.core.database.models import MEDIA_BUY_FINALIZING_STATUS, is_media_buy_approvable
 
                 if media_buy and is_media_buy_approvable(media_buy):
-                    # Shared tenant-scoped readiness gate (#1544): this route and the
+                    # Shared tenant-scoped readiness gate: this route and the
                     # workflow approve route decide finalize-vs-hold identically
                     # (empty assignments → hold at pending_creatives).
                     readiness = creatives_ready_for_finalize(db_session, tenant_id, media_buy_id=media_buy_id)
@@ -414,7 +414,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # Creatives ready → finalize in one atomic, single-winner seam
                         # (shared with the workflow approve route): CLAIM pending_approval
                         # under the row lock, stamp the approval instant + flight-derived
-                        # status, run the adapter, terminalize the step + emit. See #1544.
+                        # status, run the adapter, terminalize the step + emit.
                         logger.info(
                             "[APPROVAL] Finalizing approved media buy %s",
                             sanitize_log_value(media_buy_id),
@@ -435,7 +435,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         if outcome is FinalizeOutcome.ADAPTER_FAILED:
                             # The raw adapter error may embed internal state — keep it in the
                             # logs only (sanitized), never in the operator-facing flash
-                            # (CodeQL information-exposure alert, #1544).
+                            # (CodeQL information-exposure alert).
                             logger.error(
                                 "[APPROVAL] Adapter creation failed for %s: %s",
                                 sanitize_log_value(media_buy_id),
@@ -448,7 +448,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                                 url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                             )
                         if outcome is FinalizeOutcome.RETRYING:
-                            # #1637: the ad server could not be safely reached right now;
+                            #: the ad server could not be safely reached right now;
                             # the approval is claimed and completes automatically.
                             flash(MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE, "info")
                             return redirect(
@@ -459,7 +459,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # Creatives not yet approved (or none assigned yet) → hold at
                     # pending_creatives (a SELLER-CONFIRMED status so confirmed_at
                     # records THIS admin decision) via the shared single-winner CLAIM.
-                    # Using 'draft' here would leave the buy unconfirmed. See #1544.
+                    # Using 'draft' here would leave the buy unconfirmed.
                     elif claim_pending_creatives_hold(
                         db_session, tenant_id, media_buy_id=media_buy_id, approved_by=user_email
                     ):
@@ -476,7 +476,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # Plain in-flight ``finalizing`` (a live lease owner is completing
                     # the decision) — NOT approvable, NOT terminal. No claim was won, so
                     # discard the pre-claim "Approved by" comment and report the
-                    # in-progress state instead of claiming success. #1544.
+                    # in-progress state instead of claiming success.
                     db_session.rollback()
                     flash(MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE, "info")
                 else:
@@ -484,7 +484,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # discard the pre-claim "Approved by" comment rather than committing
                     # an approval comment nobody acted on. A replay of an already-approved
                     # buy is an idempotent success; a VANISHED buy is not, so it must not
-                    # be reported as one. #1544.
+                    # be reported as one.
                     db_session.rollback()
                     if media_buy is None:
                         flash("Media buy no longer exists — nothing was approved", "warning")
@@ -515,7 +515,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # governance_denied.yaml).
                     # expected_status is the OBSERVED buy status, so a reject that raced an
                     # approve-hold and observed pending_approval loses (rather than also
-                    # succeeding). Same finalizer the workflow reject route uses. #1544.
+                    # succeeding). Same finalizer the workflow reject route uses.
                     outcome = finalize_media_buy_rejection(
                         db_session,
                         tenant_id,

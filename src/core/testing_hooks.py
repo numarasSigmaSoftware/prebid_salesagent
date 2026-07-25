@@ -31,7 +31,7 @@ _TEST_HOOKS_DEV_ENVIRONMENTS = frozenset({"development", "test"})
 
 
 def test_hooks_enabled() -> bool:
-    """Report whether internal test-hook diagnostics are enabled (#1544).
+    """Report whether internal test-hook diagnostics are enabled.
 
     This compatibility flag no longer controls protocol-header parsing:
     ``AdCPTestContext.from_headers`` always ignores proprietary X-* headers.
