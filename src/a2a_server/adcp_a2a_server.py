@@ -590,13 +590,13 @@ class AdCPRequestHandler(RequestHandler):
     def _require_owned_task(self, task_id: str, identity: ResolvedIdentity) -> Task:
         """Load a task only within its durable tenant/principal scope."""
         if not task_id or not identity.tenant_id or not identity.principal_id:
-            raise TaskNotFoundError(message=f"Task not found: {task_id}")
+            raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
         with A2ATaskUoW(identity.tenant_id) as uow:
             assert uow.tasks is not None
             record = uow.tasks.get_owned(task_id, identity.principal_id)
             payload = dict(record.task_payload) if record is not None else None
         if payload is None:
-            raise TaskNotFoundError(message=f"Task not found: {task_id}")
+            raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
         task = self._task_from_dict(payload)
         self.tasks[task_id] = task
         return task
@@ -1358,15 +1358,11 @@ class AdCPRequestHandler(RequestHandler):
         self,
         params: GetTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/get' method to retrieve task status.
 
-        Args:
-            params: Parameters specifying the task ID
-            context: Server call context
-
-        Returns:
-            Task object if found, otherwise None
+        The durable lookup is tenant/principal scoped and raises
+        ``TaskNotFoundError`` with the requested id for an absent or unowned task.
         """
         identity = self._resolve_a2a_identity(self._get_auth_token(context), context=context)
         return self._require_owned_task(params.id, identity)
@@ -1375,15 +1371,11 @@ class AdCPRequestHandler(RequestHandler):
         self,
         params: CancelTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/cancel' method to cancel a task.
 
-        Args:
-            params: Parameters specifying the task ID
-            context: Server call context
-
-        Returns:
-            Task object with canceled status, or None if not found
+        The durable lookup is tenant/principal scoped and raises
+        ``TaskNotFoundError`` with the requested id for an absent or unowned task.
         """
         identity = self._resolve_a2a_identity(self._get_auth_token(context), context=context)
         assert identity.tenant_id is not None and identity.principal_id is not None
@@ -1392,7 +1384,7 @@ class AdCPRequestHandler(RequestHandler):
             assert uow.tasks is not None and uow.workflows is not None
             record = uow.tasks.get_owned_for_update(params.id, identity.principal_id)
             if record is None:
-                raise TaskNotFoundError(message=f"Task not found: {params.id}")
+                raise TaskNotFoundError(message=f"Task not found: {params.id}", data={"task_id": params.id})
             task = self._task_from_dict(dict(record.task_payload))
             workflow_step_id = record.workflow_step_id
             if task.status.state in {
