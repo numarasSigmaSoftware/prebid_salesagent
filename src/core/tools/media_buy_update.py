@@ -375,7 +375,9 @@ def _update_media_buy_impl(
     Callers construct the validated UpdateMediaBuyRequest at their boundary
     (MCP wrapper from typed FastMCP params, A2A raw from dict params).
 
-    Uses a single MediaBuyUoW for the entire operation — one session, one transaction.
+    Uses a single MediaBuyUoW for the entire operation. The update-lease protocol
+    commits short claim, adapter-invocation, and completion transactions so no
+    external adapter call holds a database transaction or row lock open.
 
     Args:
         req: Validated UpdateMediaBuyRequest with all protocol fields
@@ -408,7 +410,7 @@ def _update_media_buy_impl(
     step = None
 
     with ctx_manager.audit_workflow_step_failure_ctx(lambda: step):
-        # Single UoW for entire update operation — one session, one transaction
+        # Single UoW for the update operation; lease durability uses short commits.
         with MediaBuyUoW(tenant["tenant_id"]) as uow:
             assert uow.media_buys is not None
             # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
@@ -677,24 +679,27 @@ def _update_media_buy_impl(
                 # transport serializes the spec-correct submitted envelope.
                 return approval_response
 
-            update_lease_id = uow.media_buys.claim_update_lease(
-                req.media_buy_id, lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
-            )
+            update_lease_id: str | None = None
             media_buy_repo = uow.media_buys
-            # The claim is a short, durable transaction. Remote calls never run
-            # while this UoW holds a row lock or idle DB transaction.
-            uow.commit()
-            if update_lease_id is None:
-                raise AdCPConflictError(
-                    "A previous update is still running or requires reconciliation.",
-                    field="media_buy_id",
-                    suggestion="Re-read the media buy and retry later; contact the seller if it remains unavailable.",
-                    details={"resource_id": req.media_buy_id},
-                    recovery="transient",
-                    context=req.context,
-                )
 
             def prepare_adapter_call() -> None:
+                nonlocal update_lease_id
+                if update_lease_id is None:
+                    update_lease_id = media_buy_repo.claim_update_lease(
+                        req.media_buy_id, lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
+                    )
+                    # The claim is a short, durable transaction. Remote calls never run
+                    # while this UoW holds a row lock or idle DB transaction.
+                    uow.commit()
+                    if update_lease_id is None:
+                        raise AdCPConflictError(
+                            "A previous update is still running or requires reconciliation.",
+                            field="media_buy_id",
+                            suggestion="Re-read the media buy and retry later; contact the seller if it remains unavailable.",
+                            details={"resource_id": req.media_buy_id},
+                            recovery="transient",
+                            context=req.context,
+                        )
                 if not media_buy_repo.mark_update_adapter_invoked(
                     req.media_buy_id,
                     update_lease_id,
@@ -711,6 +716,8 @@ def _update_media_buy_impl(
                 uow.commit()
 
             def release_update_lease() -> None:
+                if update_lease_id is None:
+                    return
                 if not media_buy_repo.complete_update_lease(req.media_buy_id, update_lease_id):
                     raise AdCPConflictError(
                         "Update ownership was lost before completion.",

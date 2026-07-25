@@ -240,12 +240,37 @@ class TestUpdateOperationLease:
             # A replay could duplicate a partially applied remote change, so the
             # claim is denied and a durable operator-visible incident is stored.
             assert uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1) is None
+            # The original worker may return after the lease expires. It must not
+            # erase the manual-reconciliation fence set by the recovery claimant.
+            assert not uow.media_buys.complete_update_lease(media_buy_id, lease_id)
 
         with MediaBuyUoW(tenant_a) as uow:
             media_buy = uow.media_buys.get_by_id(media_buy_id)
             assert media_buy is not None
+            assert media_buy.update_lease_id == lease_id
+            assert media_buy.update_adapter_invoked_at is not None
             assert media_buy.update_recovery_mode == "manual_required"
             assert media_buy.update_reconcile_incident_at is not None
+
+    def test_unexpired_invoked_lease_completes_and_clears_operation_state(self, tenant_a, principal_a):
+        media_buy_id = "mb_update_lease_complete"
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, media_buy_id))
+
+        clock = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock) as uow:
+            lease_id = uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=60)
+            assert lease_id is not None
+            assert uow.media_buys.mark_update_adapter_invoked(media_buy_id, lease_id, lease_ttl_seconds=60)
+            assert uow.media_buys.complete_update_lease(media_buy_id, lease_id)
+
+        with MediaBuyUoW(tenant_a) as uow:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            assert media_buy.update_lease_id is None
+            assert media_buy.update_lease_expires_at is None
+            assert media_buy.update_adapter_invoked_at is None
+            assert media_buy.update_recovery_mode is None
 
     def test_update_status_nonexistent_returns_none(self, tenant_a, principal_a):
         """Updating status of nonexistent media buy returns None."""

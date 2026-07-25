@@ -6,7 +6,7 @@ the harness (``result.wire_error_envelope`` + ``assert_envelope_shape``):
 
 - below-minimum revision (0): an ``int`` on every transport, so it reaches the
   Pydantic ``ge=1`` constraint at the shared ``adcp_validation_boundary``
-  everywhere -> ``VALIDATION_ERROR`` on A2A, MCP, and REST alike.
+  everywhere -> ``INVALID_REQUEST`` on A2A, MCP, and REST alike.
 - wrong-type revisions (including numeric string ``"7"``): every transport
   emits ``INVALID_REQUEST`` at the shared request-schema boundary.
 """
@@ -47,7 +47,7 @@ class TestUpdateRevisionValidationWire:
     def test_wrong_type_revision_emits_invalid_request_on_every_transport(
         self, env_with_media_buy, transport, revision
     ):
-        """A non-integer revision emits VALIDATION_ERROR/correctable on the wire for
+        """A non-integer revision emits INVALID_REQUEST/correctable on the wire for
         all transports."""
         env, media_buy = env_with_media_buy
         result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=revision)

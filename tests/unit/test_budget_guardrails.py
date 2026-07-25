@@ -10,8 +10,8 @@ from decimal import Decimal
 import pytest
 
 from src.core.exceptions import AdCPBudgetExceededError, AdCPBudgetTooLowError
-from src.core.schemas import Budget
-from src.core.tools.media_buy_update import MAX_CAMPAIGN_BUDGET
+from src.core.schemas import Budget, UpdateMediaBuySuccess
+from src.core.tools.media_buy_update import MAX_CAMPAIGN_BUDGET, MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
 from tests.harness.media_buy_update import MediaBuyUpdateEnv
 
 # ---------------------------------------------------------------------------
@@ -65,3 +65,31 @@ def test_package_budget_uses_currency_limit_repository() -> None:
 
         env.mock["uow"].return_value.currency_limits.get_for_currency.assert_called_with("EUR")
         env.mock["uow"].return_value.session.scalars.assert_not_called()
+
+
+def test_invalid_update_does_not_claim_lease_and_a_corrected_retry_proceeds() -> None:
+    """Validation before an adapter call must not leave a durable retry lockout."""
+    with MediaBuyUpdateEnv() as env:
+        media_buy = env.set_media_buy(currency="EUR")
+        media_buy.revision = 1
+        env.set_currency_limit(min_package_budget=Decimal("100"))
+
+        with pytest.raises(AdCPBudgetTooLowError):
+            env.call_impl(packages=[{"package_id": "pkg-1", "budget": 50.0}])
+
+        media_buy_repo = env.mock["uow"].return_value.media_buys
+        media_buy_repo.claim_update_lease.assert_not_called()
+
+        env.mock["adapter"].return_value.update_media_buy.return_value = UpdateMediaBuySuccess(
+            media_buy_id="mb-001", affected_packages=[]
+        )
+        media_buy_repo.claim_update_lease.return_value = "lease_retry"
+        media_buy_repo.mark_update_adapter_invoked.return_value = True
+        media_buy_repo.complete_update_lease.return_value = True
+
+        result = env.call_impl(paused=True)
+
+        assert isinstance(result.response, UpdateMediaBuySuccess)
+        media_buy_repo.claim_update_lease.assert_called_once_with(
+            "mb-001", lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
+        )

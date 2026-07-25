@@ -319,12 +319,9 @@ class TestA2ARequestHandler:
         error a bare None return produces — cancel is the same not-found condition
         as get, and both route through the shared authenticated ownership check.
 
-        Fast smoke check on the raise only. It does NOT prove the wire code: the
-        exception carries no code, and the client actually sees -32603 — see
-        ``_resolve_task_identity_or_raise`` (src/a2a_server/adcp_a2a_server.py) and #1670 for
-        why, plus the xfail'd live-server test in TestA2AServerIntegration that
-        grades the code on the wire. Assert on str(exc), not exc.code — there is
-        none.
+        Fast smoke check on the raise only. It does NOT prove the wire code; the
+        live-server test in TestA2AServerIntegration grades the client-visible
+        JSON-RPC response. Assert on str(exc), not exc.code — there is none.
 
         Parametrized over both entry points so the shared assertion cannot drift
         between two byte-identical copies.
@@ -372,10 +369,6 @@ class TestA2AServerIntegration:
     """Integration tests for complete A2A server setup."""
 
     @pytest.mark.integration
-    @pytest.mark.xfail(
-        reason="v0.3 compat adapter maps A2AError to -32603; see #1670",
-        strict=True,
-    )
     @pytest.mark.parametrize("method", ["tasks/get", "tasks/cancel"])
     def test_unknown_task_id_returns_task_not_found_code_on_the_wire(self, method, live_server):
         """The deliverable of the TaskNotFoundError change is what an A2A client
@@ -395,17 +388,8 @@ class TestA2AServerIntegration:
         same wire tripwire as `tasks/get` — otherwise only half the contract gets
         locked in when #1670 lands.
 
-        STRICT xfail against #1670: the code is -32603 today, not the spec's
-        -32001 — see ``_resolve_task_identity_or_raise`` (src/a2a_server/adcp_a2a_server.py) and
-        #1670 for the enable_v0_3_compat dispatch path that flattens it. Both
-        `tasks/get` and `tasks/cancel` reach that path, so both are -32603 today
-        whether they raise TaskNotFoundError or return None.
-
-        Strict on purpose: an a2a-sdk bump that closes the gap makes this XPASS,
-        which strict turns into a loud failure so the xfail is removed and -32001
-        is locked in. A non-strict xfail would let the fix land silently and rot
-        the marker — the same "green suite lies" shape the tripwire exists to
-        prevent.
+        The application v0.3 compatibility adapter preserves TaskNotFoundError as
+        the protocol's -32001 response instead of flattening it to -32603.
         """
         response = requests.post(
             f"{live_server['a2a']}/a2a",

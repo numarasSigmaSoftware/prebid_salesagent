@@ -13,7 +13,6 @@ import re
 from contextlib import asynccontextmanager
 
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
-from a2a.server.routes import create_jsonrpc_routes
 from a2a.server.routes.agent_card_routes import create_agent_card_routes
 from a2a.types import AgentCard as A2AAgentCard
 from a2wsgi import WSGIMiddleware
@@ -30,6 +29,7 @@ from src.a2a_server.adcp_a2a_server import (
     create_agent_card,
 )
 from src.a2a_server.context_builder import AdCPCallContextBuilder
+from src.a2a_server.v03_compat import create_compatible_jsonrpc_routes
 from src.admin.app import create_app
 from src.core.auth_middleware import UnifiedAuthMiddleware
 from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain
@@ -299,7 +299,7 @@ _agent_card = create_agent_card()
 _request_handler = AdCPRequestHandler()
 
 # Build A2A routes using a2a-sdk 1.0 route factories
-_a2a_rpc_routes = create_jsonrpc_routes(
+_a2a_rpc_routes = create_compatible_jsonrpc_routes(
     request_handler=_request_handler,
     rpc_url="/a2a",
     context_builder=AdCPCallContextBuilder(),
