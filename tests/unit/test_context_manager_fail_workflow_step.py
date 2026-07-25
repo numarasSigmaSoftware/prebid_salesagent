@@ -152,7 +152,7 @@ class TestFailWorkflowStepForExceptionWebhookPayload:
         """Untyped ``ValueError``/``PermissionError`` on the webhook path: message scrubbed, but the
         SEMANTIC code matches what the synchronous boundary emits (webhook↔sync parity).
 
-        Two properties, both from the reviewer's finding:
+        Two properties are required:
         1. Message trust — the raw ``str(exc)`` (a connection string / token / SQL) is scrubbed,
            because these are raw built-ins (untrusted provenance).
         2. Semantic parity — the persisted wire code is VALIDATION_ERROR / AUTH_REQUIRED (the code

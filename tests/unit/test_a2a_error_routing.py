@@ -138,7 +138,7 @@ async def test_explicit_skill_untyped_crash_scrubs_secret_from_failed_task():
     ``normalize_to_adcp_error`` → ``AdCPError(str(exc))``) while the outer/NL path was
     already sanitized. Both paths now share the single ``safe_adcp_error`` policy, so an
     untyped crash becomes a generic internal error regardless of which path caught it.
-    Mirrors the reviewer's repro: patch ``_handle_explicit_skill`` to raise a
+    Reproduces the failure by patching ``_handle_explicit_skill`` to raise a
     secret-shaped exception and inspect the returned failed Task.
     """
     handler, ctx = _make_handler()
@@ -710,7 +710,7 @@ async def test_every_auth_guarded_method_carries_the_auth_missing_envelope(handl
     body = build_error_response("req-auth", err)
     assert_envelope_shape(body["error"]["data"], "AUTH_MISSING", recovery="correctable")
     # Both wire layers must carry the SAME sanitized message (per _enveloped_invalid_request's
-    # contract), and the suggestion must be the graded AUTH_MISSING hint — neither property was
+    # contract), and the suggestion must be the pinned-spec AUTH_MISSING hint — neither property was
     # pinned above, so a regression that desynced ``error.message`` from the envelope's message, or
     # dropped/replaced the suggestion, would have gone undetected.
     assert body["error"]["message"] == body["error"]["data"]["adcp_error"]["message"]

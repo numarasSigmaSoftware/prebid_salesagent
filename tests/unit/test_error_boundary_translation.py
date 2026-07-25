@@ -814,7 +814,7 @@ class TestA2ADispatcherFailedSkillResult:
         assert "internal error" in env["errors"][0]["message"].lower()
 
     def test_internal_error_for_scrubs_full_jsonrpc_wire(self):
-        """[Round-12 B1] Helper-level: a typed internal-bucket error must not leak through the
+        """A typed internal-bucket error must not leak through the
         JSON-RPC ``error.message`` even while ``error.data`` is scrubbed.
 
         ``_internal_error_for`` previously built the top-level JSON-RPC message from the
@@ -839,7 +839,7 @@ class TestA2ADispatcherFailedSkillResult:
 
     @pytest.mark.asyncio
     async def test_push_config_handler_scrubs_secret_on_full_wire(self):
-        """[Round-14 SHOULD-FIX] REACHABLE-path + SERIALIZED-WIRE proof: a real push-config
+        """Reachable-path and serialized-wire proof: a real push-config
         handler whose backing store raises a secret-bearing internal error produces a
         JSON-RPC error whose full serialized wire (``{jsonrpc, id, error:{code,message,data}}``)
         leaks nothing.
@@ -925,7 +925,7 @@ class TestA2ADispatcherFailedSkillResult:
         assert wire_dict["error"]["data"]["adcp_error"]["code"] == "SERVICE_UNAVAILABLE"
 
     def test_internal_error_for_preserves_correctable_message(self):
-        """[Round-12 B1] The JSON-RPC message keeps the controlled text of a
+        """The JSON-RPC message keeps the controlled text of a
         client-correctable typed error — the fix must not over-sanitize."""
         from src.a2a_server.adcp_a2a_server import _internal_error_for
 

@@ -422,7 +422,7 @@ class TestA2ASkillInvocation:
     async def test_get_in_memory_task_is_principal_isolated(
         self, handler, sample_tenant, sample_principal, mock_identity
     ):
-        """[Round-13 B1] A same-tenant sibling principal must not read another principal's
+        """A same-tenant sibling principal must not read another principal's
         in-memory task via the public on_get_task — for BOTH a terminal and a nonterminal
         victim task present in memory (task ids are bearer-ish; the map key alone is not authz).
         Surfaced as TaskNotFoundError, the same not-found signal an unknown id gets."""
@@ -445,7 +445,7 @@ class TestA2ASkillInvocation:
     async def test_cancel_in_memory_task_is_principal_isolated(
         self, handler, sample_tenant, sample_principal, mock_identity
     ):
-        """[Round-13 B1] A same-tenant sibling principal must not cancel another principal's
+        """A same-tenant sibling principal must not cancel another principal's
         in-memory task via the public on_cancel_task; the victim task stays untouched. Covers
         both a nonterminal victim (must not be mutated to CANCELED) and a terminal victim (must
         not even be observable → TaskNotFoundError, the same not-found signal an unknown id
@@ -478,7 +478,7 @@ class TestA2ASkillInvocation:
         assert handler.tasks[terminal_id].status.state == TaskState.TASK_STATE_COMPLETED
 
     def _same_tenant_other_identity(self, sample_tenant):
-        """A DIFFERENT principal in the SAME tenant (round-12 B2 adversary)."""
+        """A different principal in the same tenant for isolation tests."""
         from tests.factories import PrincipalFactory
 
         return PrincipalFactory.make_identity(
@@ -487,7 +487,7 @@ class TestA2ASkillInvocation:
 
     @pytest.mark.asyncio
     async def test_durable_get_is_principal_isolated(self, handler, sample_tenant, sample_principal):
-        """[Round-12 B2] A DIFFERENT principal in the SAME tenant who learns a task id
+        """A different principal in the same tenant who learns a task id
         must not read its stored response_data through the durable ``_durable_task_from_step`` helper."""
         external_task_id = "task_prin_iso_get"
         self._persist_a2a_step(
@@ -506,7 +506,7 @@ class TestA2ASkillInvocation:
 
     @pytest.mark.asyncio
     async def test_durable_cancel_is_principal_isolated(self, handler, sample_tenant, sample_principal, mock_identity):
-        """[Round-12 B2] A DIFFERENT principal in the SAME tenant must not be able to
+        """A different principal in the same tenant must not be able to
         cancel another principal's workflow via its task id — surfaced as TaskNotFoundError,
         the same not-found signal an unknown id gets."""
         external_task_id = "task_prin_iso_cancel"
@@ -538,7 +538,7 @@ class TestA2ASkillInvocation:
     async def test_get_task_reconciles_stale_in_memory_with_terminal_step(
         self, handler, sample_tenant, sample_principal, mock_identity
     ):
-        """[Round-12 B3] The persisted workflow step is the source of truth: a poll of a
+        """The persisted workflow step is the source of truth: a poll of a
         task whose in-memory entry is still WORKING but whose workflow was terminalized
         in another process must return the terminal outcome, not the stale memory."""
         external_task_id = "task_stale_memory"
@@ -572,7 +572,7 @@ class TestA2ASkillInvocation:
 
     @pytest.mark.asyncio
     async def test_get_task_without_step_returns_in_memory_task(self, handler, mock_identity):
-        """[Round-12 B3] A non-terminal in-memory task with NO persisted step (sync/simple
+        """A non-terminal in-memory task with no persisted step (sync/simple
         skills) is still served from memory TO ITS OWNER — reconciliation must not lose it."""
         from a2a.types import GetTaskRequest
 
@@ -602,7 +602,7 @@ class TestA2ASkillInvocation:
     async def test_cancel_and_approval_race_preserves_terminal_decision_both_orderings(
         self, handler, sample_tenant, sample_principal
     ):
-        """[Round-13 B4] The terminal-transition policy is two-sided: whichever of a buyer
+        """The terminal-transition policy is two-sided: whichever of a buyer
         cancel (WorkflowRepository.cancel_if_cancellable) and an approval
         (WorkflowRepository.transition_if_nonterminal) COMMITS FIRST wins,
         and the loser's conditional UPDATE refuses. Verified against REAL separate
@@ -663,7 +663,7 @@ class TestA2ASkillInvocation:
     async def test_context_manager_update_workflow_step_is_atomically_terminal_safe(
         self, handler, sample_tenant, sample_principal
     ):
-        """[Round-14 B1] ContextManager.update_workflow_step routes the status write through
+        """ContextManager.update_workflow_step routes the status write through
         the ATOMIC conditional-UPDATE primitive (transition_if_nonterminal), so an
         auto-approval that completes a step the buyer just canceled is refused with NO
         partial write and NO webhook — closing the async TOCTOU that
@@ -691,7 +691,7 @@ class TestA2ASkillInvocation:
         )
 
     async def test_cancel_if_cancellable_refuses_approved_step(self, handler, sample_tenant, sample_principal):
-        """[Round-15 B3] cancel_if_cancellable refuses an `approved` step (the point where
+        """cancel_if_cancellable refuses an `approved` step (the point where
         irreversible ad-server order creation begins) but accepts `requires_approval` — so a
         cancel can never strand a real order behind a canceled task."""
         from datetime import UTC, datetime
@@ -732,7 +732,7 @@ class TestA2ASkillInvocation:
     async def test_a2a_cancel_of_approved_task_is_not_cancelable(
         self, handler, sample_tenant, sample_principal, mock_identity
     ):
-        """[Round-15 B3] The public A2A tasks/cancel of an `approved` task raises
+        """The public A2A tasks/cancel of an `approved` task raises
         TaskNotCancelableError and leaves the step approved — no orphaned ad-server order."""
         tenant_id = sample_tenant["tenant_id"]
         external_task_id = "task_appr_cancel"
@@ -748,7 +748,7 @@ class TestA2ASkillInvocation:
         assert self._step_status(tenant_id, step_id) == "approved"
 
     async def test_cancel_if_cancellable_refuses_in_progress_step(self, handler, sample_tenant, sample_principal):
-        """[Round-16 B2] `in_progress` marks active external work (create/update persist it
+        """`in_progress` marks active external work (create/update persist it
         BEFORE adapter side-effects; the approval worker claims it before approve_order), so
         it must NOT be cancellable — otherwise a cancel orphans a real ad-server order behind
         a canceled task. `requires_approval` (no side effects yet) stays cancellable."""

@@ -77,7 +77,7 @@ RESOLVED_IDENTITY_PER_FILE_CAP: dict[str, int] = {
     "tests/unit/test_delivery.py": 2,
     "tests/unit/test_delivery_poll_behavioral.py": 3,
     "tests/unit/test_dry_run_no_persistence.py": 1,
-    "tests/unit/test_error_format_consistency.py": 9,
+    "tests/unit/test_error_format_consistency.py": 8,
     "tests/unit/test_gam_placement_targeting.py": 2,
     "tests/unit/test_get_media_buys_architecture.py": 2,
     "tests/unit/test_get_products_impl_coverage.py": 1,

@@ -395,8 +395,8 @@ def _find_raw_selects() -> list[tuple[str, str, str, int]]:
 class TestColumnSelectDetection:
     """Known-bad case: a column-select of an ORM model is a raw model query too.
 
-    Documents (and locks) the blind spot that let round-14's
-    ``select(DBContext.tenant_id)`` in ContextManager slip the guard: the bare
+    Documents and locks the detector gap that let
+    ``select(DBContext.tenant_id)`` in ContextManager slip through: the bare
     ``select_call_model_name`` resolves ``select(Model.column)`` to the column name,
     so matching against ORM model names misses it. ``select_target_model_name``
     closes that gap. (The actual violation was removed by moving tenant resolution

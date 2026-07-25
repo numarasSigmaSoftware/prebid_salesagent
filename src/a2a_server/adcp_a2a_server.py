@@ -199,10 +199,10 @@ def _enveloped_invalid_request(exc: AdCPError) -> InvalidRequestError:
     return InvalidRequestError(message=sanitized.message, data=envelope)
 
 
-def _a2a_auth_headers(context: ServerCallContext | None) -> Mapping[str, str]:
-    """Return the request headers captured by the A2A auth middleware."""
+def _a2a_auth_headers(context: ServerCallContext | None) -> dict[str, str]:
+    """Return a mutable copy of the headers captured by the A2A auth middleware."""
     auth_ctx = context.state.get(AUTH_CONTEXT_STATE_KEY) if context is not None else None
-    return auth_ctx.headers if auth_ctx else {}
+    return dict(auth_ctx.headers) if auth_ctx else {}
 
 
 def _no_usable_credentials_error(
@@ -217,6 +217,17 @@ def _no_usable_credentials_error(
     if any(name.lower() == "authorization" for name in headers):
         return AdCPAuthInvalidError("Authentication credentials were rejected.")
     return AdCPAuthMissingError(missing_message)
+
+
+def _no_usable_identity_error(
+    identity: ResolvedIdentity | None,
+) -> AdCPAuthMissingError | AdCPAuthInvalidError | None:
+    """Classify a missing identity separately from rejected credentials."""
+    if identity is None:
+        return AdCPAuthMissingError("Authentication required for skill invocation")
+    if not identity.principal_id:
+        return AdCPAuthInvalidError("Authentication credentials were rejected.")
+    return None
 
 
 def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequestError:
@@ -1957,8 +1968,8 @@ class AdCPRequestHandler(RequestHandler):
         logger.info("Handling explicit skill: %s with parameters: %s", skill_name, list(parameters.keys()))
 
         # Validate identity for non-discovery skills
-        if skill_name not in DISCOVERY_SKILLS and (identity is None or not identity.principal_id):
-            raise _enveloped_auth_error(AdCPAuthMissingError("Authentication required for skill invocation"))
+        if skill_name not in DISCOVERY_SKILLS and (auth_error := _no_usable_identity_error(identity)) is not None:
+            raise _enveloped_auth_error(auth_error)
 
         skill_handlers = self._skill_handler_map()
 

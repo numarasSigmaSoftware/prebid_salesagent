@@ -279,7 +279,7 @@ class TestCompleteTaskTool:
     async def test_complete_task_conflict_when_concurrently_finalized(
         self, mock_uow, mock_workflow_repo, sample_tenant, sample_pending_step
     ):
-        """[Round-14 B2] A lost transition must NOT be reported as success.
+        """A lost transition must not be reported as success.
 
         ``transition_if_nonterminal`` is an atomic conditional transition that returns None when the
         step was concurrently terminalized (e.g. a buyer cancel committed between the

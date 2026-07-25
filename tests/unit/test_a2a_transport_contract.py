@@ -15,7 +15,7 @@ beads: salesagent-b61l.17
 import json
 import uuid
 from contextlib import nullcontext
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -28,6 +28,11 @@ from tests.helpers import assert_envelope_shape
 from tests.utils.a2a_helpers import make_test_a2a_identity
 
 _TEST_IDENTITY = make_test_a2a_identity()
+_AUTH_MISSING_SUGGESTION = "provide credentials via the auth header and retry"
+_AUTH_INVALID_SUGGESTION = (
+    "do NOT auto-retry — credentials were rejected; rotate keys, refresh OAuth tokens once if applicable, "
+    "otherwise escalate to a human"
+)
 
 # ---------------------------------------------------------------------------
 # Explicit per-skill contract. Every registered skill MUST have an entry here
@@ -68,8 +73,8 @@ SKILL_METADATA: dict[str, dict] = {
     },
     "sync_creatives": {"classification": "implemented", "advertised": True, "discovery": False, "params": {}},
     "list_creatives": {"classification": "implemented", "advertised": True, "discovery": False, "params": {}},
-    # Unsupported + NOT advertised (round-9 SF-B): handlers raise UNSUPPORTED_FEATURE,
-    # so they are hidden from the agent card but stay reachable-but-unsupported by name.
+    # Unsupported + NOT advertised: handlers raise UNSUPPORTED_FEATURE, so they
+    # are hidden from the agent card but stay reachable-but-unsupported by name.
     "approve_creative": {"classification": "unsupported", "advertised": False, "discovery": False, "params": {}},
     "get_media_buy_status": {"classification": "unsupported", "advertised": False, "discovery": False, "params": {}},
     "optimize_media_buy": {"classification": "unsupported", "advertised": False, "discovery": False, "params": {}},
@@ -248,9 +253,15 @@ class TestA2AAuthContract:
         )
 
     @pytest.mark.parametrize(
-        ("headers", "resolver_error", "expected_code", "expected_recovery"),
+        ("headers", "resolver_error", "expected_code", "expected_recovery", "expected_suggestion"),
         [
-            ({"Content-Type": "application/json", "A2A-Version": "1.0"}, None, "AUTH_MISSING", "correctable"),
+            (
+                {"Content-Type": "application/json", "A2A-Version": "1.0"},
+                None,
+                "AUTH_MISSING",
+                "correctable",
+                _AUTH_MISSING_SUGGESTION,
+            ),
             (
                 {
                     "Authorization": "Basic malformed",
@@ -260,6 +271,7 @@ class TestA2AAuthContract:
                 None,
                 "AUTH_INVALID",
                 "terminal",
+                _AUTH_INVALID_SUGGESTION,
             ),
             (
                 {
@@ -270,6 +282,7 @@ class TestA2AAuthContract:
                 None,
                 "AUTH_INVALID",
                 "terminal",
+                _AUTH_INVALID_SUGGESTION,
             ),
             (
                 {
@@ -280,13 +293,21 @@ class TestA2AAuthContract:
                 "Authentication token is invalid or expired.",
                 "AUTH_INVALID",
                 "terminal",
+                _AUTH_INVALID_SUGGESTION,
             ),
         ],
         ids=["missing-token", "malformed-authorization", "empty-bearer", "invalid-token"],
     )
     @pytest.mark.parametrize("method", ["GetTask", "CancelTask"])
     def test_task_management_auth_errors_use_json_rpc_dispatcher(
-        self, client, method, headers, resolver_error, expected_code, expected_recovery
+        self,
+        client,
+        method,
+        headers,
+        resolver_error,
+        expected_code,
+        expected_recovery,
+        expected_suggestion,
     ):
         """The real dispatcher must serialize task auth failures as JSON-RPC errors carrying the
         full two-layer auth envelope in ``error.data`` — not just a bare message.
@@ -326,9 +347,9 @@ class TestA2AAuthContract:
         # a buyer branches on error.data.adcp_error.code, and this is what previously required a
         # separate unit test calling the handler directly (which cannot prove the real dispatcher
         # actually places the envelope in the serialized HTTP response body).
+        assert_envelope_shape(body["error"]["data"], expected_code, recovery=expected_recovery)
         adcp_error = body["error"]["data"]["adcp_error"]
-        assert adcp_error["code"] == expected_code
-        assert adcp_error["recovery"] == expected_recovery
+        assert adcp_error["suggestion"] == expected_suggestion
         assert body["error"]["message"] == adcp_error["message"]
 
     @pytest.mark.parametrize("authorization", ["Basic malformed", "Bearer "], ids=["basic", "empty-bearer"])
@@ -347,6 +368,59 @@ class TestA2AAuthContract:
         body = response.json()
         assert body["error"]["code"] == -32600
         assert_envelope_shape(body["error"]["data"], "AUTH_INVALID", recovery="terminal")
+        assert body["error"]["data"]["adcp_error"]["suggestion"] == _AUTH_INVALID_SUGGESTION
+
+    @patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY)
+    def test_x_adcp_auth_precedes_malformed_authorization(self, mock_resolve, client):
+        """The A2A middleware resolves the x-adcp-auth credential when both headers are present."""
+        response = client.post(
+            "/a2a",
+            json=_build_jsonrpc("create_media_buy"),
+            headers={
+                "x-adcp-auth": "valid-x-adcp-token",
+                "Authorization": "Basic malformed",
+                "Content-Type": "application/json",
+                "A2A-Version": "1.0",
+            },
+        )
+
+        assert response.json().get("result") is not None
+        mock_resolve.assert_called_once_with(
+            headers=ANY,
+            auth_token="valid-x-adcp-token",
+            require_valid_token=True,
+            protocol="a2a",
+            testing_context=ANY,
+        )
+
+    @patch(
+        "src.core.resolved_identity.resolve_identity",
+        side_effect=AdCPAuthenticationError("Authentication token is invalid or expired."),
+    )
+    def test_invalid_x_adcp_auth_does_not_fall_back_to_valid_bearer(self, mock_resolve, client):
+        """A rejected x-adcp-auth credential cannot be bypassed by a valid-looking Bearer token."""
+        response = client.post(
+            "/a2a",
+            json=_build_jsonrpc("create_media_buy"),
+            headers={
+                "x-adcp-auth": "rejected-x-adcp-token",
+                "Authorization": "Bearer valid-looking-fallback",
+                "Content-Type": "application/json",
+                "A2A-Version": "1.0",
+            },
+        )
+
+        body = response.json()
+        assert body["error"]["code"] == -32600
+        assert_envelope_shape(body["error"]["data"], "AUTH_INVALID", recovery="terminal")
+        assert body["error"]["data"]["adcp_error"]["suggestion"] == _AUTH_INVALID_SUGGESTION
+        mock_resolve.assert_called_once_with(
+            headers=ANY,
+            auth_token="rejected-x-adcp-token",
+            require_valid_token=True,
+            protocol="a2a",
+            testing_context=ANY,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +712,7 @@ class TestA2AStubHandlers:
         """A skill classified 'implemented' must NOT surface UNSUPPORTED_FEATURE.
 
         This is the non-tautological half: a skill mis-routed to an unsupported
-        handler (the reviewer's mutation) would return a UNSUPPORTED_FEATURE failed
+        handler would return a UNSUPPORTED_FEATURE failed
         Task and fail here, even without a DB (empty params yield VALIDATION_ERROR or
         a JSON-RPC error, never UNSUPPORTED_FEATURE, for a genuinely-implemented skill).
         """
@@ -735,8 +809,8 @@ class TestAgentCardContract:
         """The agent card's advertised skills must EXACTLY equal ``ADVERTISED_SKILLS``.
 
         Exact set equality (not ``⊇``) catches both a dispatchable skill that stops
-        being advertised AND an arbitrary extra skill advertised by accident (the
-        reviewer's mutation), because the expected set is the independently-authored
+        being advertised and an arbitrary extra skill advertised by accident,
+        because the expected set is the independently-authored
         metadata, not something derived from the card itself.
         """
         response = client.get("/.well-known/agent-card.json")

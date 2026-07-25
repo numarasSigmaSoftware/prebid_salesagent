@@ -1,4 +1,4 @@
-"""Admin approve/reject routes use the atomic terminal-transition primitive (round-15 B1).
+"""Admin approve/reject routes use the atomic terminal-transition primitive.
 
 operations.py (media-buy approve/reject) and policy.py (review_task) previously wrote
 ``step.status = "..."`` with raw ORM after a pending read, bypassing
@@ -99,7 +99,7 @@ def _authed_media_buy_awaiting_approval(client, step_status: str = "requires_app
 
 class TestPolicyReviewAtomicity:
     def test_review_approve_of_canceled_step_is_conflict(self, client, sample_tenant, sample_principal):
-        """[Round-15 B1] policy review of an already-canceled step is refused (409), not
+        """Policy review of an already-canceled step is refused (409), not
         overwritten to completed."""
         tenant_id = sample_tenant["tenant_id"]
         _auth(client, tenant_id)
@@ -110,7 +110,7 @@ class TestPolicyReviewAtomicity:
         assert _status(tenant_id, step_id) == "canceled"
 
     def test_review_approve_of_pending_step_completes(self, client, sample_tenant, sample_principal):
-        """[Round-15 B1] positive control: a pending review approves to completed."""
+        """Positive control: a pending review approves to completed."""
         tenant_id = sample_tenant["tenant_id"]
         _auth(client, tenant_id)
         step_id = _make_step(
@@ -171,7 +171,7 @@ class TestPolicyReviewAtomicity:
 
 class TestOperationsApproveAtomicity:
     def test_media_buy_approve_refused_claim_skips_adapter(self, client, sample_tenant, sample_principal):
-        """[Round-19] When the approval claim is refused (a concurrent approve/cancel won the
+        """When the approval claim is refused (a concurrent approve/cancel won the
         race), the media-buy approve route must NOT run the irreversible execute_approved_media_buy
         and must surface a conflict (redirect) — the step is not overwritten. The route uses the
         source-state-guarded ``claim_approval`` (NOT the broad transition_if_nonterminal, which
@@ -245,7 +245,7 @@ class TestOperationsApproveAtomicity:
         assert _status(tenant_id, step_id) == "approved", "a successful approve must claim the step"
 
     def test_media_buy_detail_approves_legacy_approval_status_step(self, client, sample_tenant, sample_principal):
-        """[Round-21] The media-buy detail approve route finds and approves a legacy ``approval``
+        """The media-buy detail approve route finds and approves a legacy ``approval``
         step — its lookup previously prefiltered on {requires_approval, pending_approval} only and
         returned 'No pending approval found' before reaching the canonical claim."""
         tenant_id = sample_tenant["tenant_id"]
@@ -265,7 +265,7 @@ class TestOperationsApproveAtomicity:
         )
 
     def test_media_buy_detail_rejects_legacy_approval_status_step(self, client, sample_tenant, sample_principal):
-        """[Round-21] The media-buy detail reject action (same route, action=reject) rejects a
+        """The media-buy detail reject action (same route, action=reject) rejects a
         legacy ``approval`` step through the canonical reject_if_approvable."""
         tenant_id = sample_tenant["tenant_id"]
         _auth(client, tenant_id)
@@ -285,7 +285,7 @@ class TestOperationsApproveAtomicity:
 
 
 class TestApprovalClaimCompareAndSet:
-    """[Round-19] claim_approval / reject_if_approvable are source-state-guarded compare-and-sets.
+    """claim_approval / reject_if_approvable are source-state-guarded compare-and-sets.
 
     Because ``approved`` is (deliberately) non-terminal, the broad ``transition_if_nonterminal``
     guard would admit an ``approved → approved`` no-op — a second concurrent approver that also
@@ -332,9 +332,9 @@ class TestApprovalClaimCompareAndSet:
         assert _status(tenant_id, pending) == "rejected"
 
     def test_legacy_approval_status_is_claimable_and_rejectable(self, sample_tenant, sample_principal):
-        """[Round-20] Regression guard: the legacy adapter-emitted ``approval`` status (GAM /
+        """Regression guard: the legacy adapter-emitted ``approval`` status (GAM /
         Broadstreet / base_workflow default) is awaiting-decision and MUST be approvable and
-        rejectable — the round-19 guard wrongly excluded it, 409-ing live human workflows."""
+        rejectable; excluding it would return 409 for live human workflows."""
         tenant_id = sample_tenant["tenant_id"]
         principal_id = sample_principal["principal_id"]
 
@@ -349,7 +349,7 @@ class TestApprovalClaimCompareAndSet:
         assert _status(tenant_id, to_reject) == "rejected"
 
     def test_get_approvable_step_for_object_uses_canonical_set(self, sample_tenant, sample_principal):
-        """[Round-21] get_approvable_step_for_object finds a mapped step in ANY canonical
+        """get_approvable_step_for_object finds a mapped step in any canonical
         approvable status — including the legacy ``approval`` alias — and returns None once the
         step is no longer approvable (so the admin media-buy detail lookup matches the CAS guard)."""
         tenant_id = sample_tenant["tenant_id"]
@@ -429,7 +429,7 @@ class TestApprovalClaimCompareAndSet:
 
 
 class TestWorkflowsRouteConflict:
-    """[Round-19] The generic workflow approve/reject JSON route distinguishes a genuine
+    """The generic workflow approve/reject JSON route distinguishes a genuine
     concurrency conflict (409) from a missing step (404), and never double-executes."""
 
     def test_approve_of_already_approved_step_returns_409(self, client, sample_tenant, sample_principal):
@@ -461,8 +461,8 @@ class TestWorkflowsRouteConflict:
         assert _status(tenant_id, step_id) == "approved"
 
     def test_route_approves_legacy_approval_status_step(self, client, sample_tenant, sample_principal):
-        """[Round-20] The generic approve route actions a legacy ``approval``-status step (200),
-        not a spurious 409 — the round-19 regression."""
+        """The generic approve route actions a legacy ``approval``-status step (200),
+        not a spurious 409."""
         tenant_id = sample_tenant["tenant_id"]
         _auth(client, tenant_id)
         step_id = _make_step(tenant_id, sample_principal["principal_id"], "approval")
@@ -474,10 +474,11 @@ class TestWorkflowsRouteConflict:
 
 
 class TestMediaBuyDetailApprovalUI:
-    """[Round-22] The media-buy detail PAGE (GET) must RENDER the approve/reject controls for a
-    legacy ``approval``-status step. Round-21's tests exercised the repository lookup and the POST
-    approve/reject routes, but nothing rendered the GET page — so reverting only the GET-side
-    canonical lookup (hiding the UI again) would leave all tests green. This closes that gap."""
+    """The media-buy detail page must render controls for a legacy ``approval`` step.
+
+    Repository and POST-route tests do not prove the GET page renders the
+    controls, so this separately guards the template-facing lookup.
+    """
 
     def test_detail_page_renders_approval_controls_for_legacy_approval_step(self, client, factory_session):
         tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(client, "approval")

@@ -1,21 +1,15 @@
-"""Auth AUTH_REQUIRED raises must carry error.json's top-level suggestion (#1417 round-8 review, items 3-4).
+"""Authentication rejections must carry the pinned error-code suggestion on the wire.
 
-Core Invariant: every AUTH_REQUIRED rejection carries a non-empty TOP-LEVEL
-``suggestion`` in the two-layer wire envelope (AdCP 3.1, pinned ref
-v3.1-04f59d2d5, static/schemas/source/core/error.json — "Suggested action to
-resolve the error"). ``require_identity`` already passes
-``suggestion=AUTH_REQUIRED_SUGGESTION``; its four siblings in
-``src/core/auth.py`` (invalid-token, ``resolve_principal_or_raise``,
-``require_principal_id``, ``require_tenant``) raised with the hint only in
-message text, leaving the graded top-level ``suggestion`` field EMPTY
-(PR #1417 review round 8, item 4 → #1417 round-8 review item 4).
+Core invariant: every authentication rejection carries a non-empty top-level
+``suggestion`` in the two-layer wire envelope. The A2A boundary uses the
+``AUTH_MISSING``/``AUTH_INVALID`` split from the pinned AdCP 3.1.1 enum, while
+legacy shared auth helpers still emit the deprecated ``AUTH_REQUIRED`` alias.
 
 Wire-first per tests/CLAUDE.md § Error Verification Policy: the
-``require_principal_id`` case drives the REAL A2A wire (it is the
-account-resolution boundary the PR newly routes onto); the remaining helpers
-are graded on the envelope the production boundary translator builds for
-their raise (``build_two_layer_error_envelope`` — the same builder every
-transport dispatcher calls).
+missing-principal case drives the real A2A wire; the remaining helpers are
+checked on the envelope the production boundary translator builds for their
+raise (``build_two_layer_error_envelope`` — the same builder every transport
+dispatcher calls).
 """
 
 import pytest
@@ -38,12 +32,13 @@ def _assert_auth_required_with_suggestion(envelope: dict) -> None:
 
 
 class TestRequirePrincipalIdA2ASuggestion:
-    """require_principal_id rejection on the real A2A wire carries a suggestion."""
+    """A rejected A2A identity on the real wire carries the AUTH_INVALID suggestion."""
 
     def test_missing_principal_a2a_envelope_carries_suggestion(self, integration_db):
-        """An identity with no principal_id rejected on the A2A wire must
-        produce the AUTH_REQUIRED envelope WITH a top-level ``suggestion`` —
-        parity with ``require_identity``.
+        """A resolved identity with no principal_id represents rejected credentials.
+
+        The A2A wire must therefore carry AUTH_INVALID with terminal recovery
+        and the pinned no-retry suggestion.
         """
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness.media_buy_list import MediaBuyListEnv
@@ -59,8 +54,8 @@ class TestRequirePrincipalIdA2ASuggestion:
                 f"A missing principal_id must be rejected on the A2A wire, got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "AUTH_REQUIRED",
-                recovery="correctable",
+                "AUTH_INVALID",
+                recovery="terminal",
                 require_suggestion=True,
             )
 

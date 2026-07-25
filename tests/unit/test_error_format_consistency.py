@@ -25,6 +25,8 @@ from src.core.exceptions import (
     AdCPValidationError,
 )
 from src.core.resolved_identity import ResolvedIdentity
+from tests.factories import PrincipalFactory
+from tests.helpers import assert_envelope_shape
 
 
 class TestMCPErrorShapes:
@@ -161,7 +163,12 @@ class TestA2AErrorShapes:
 
         error = exc_info.value
         assert isinstance(error, A2AError)
-        assert "Authentication required" in str(error)
+        assert_envelope_shape(
+            error.data,
+            "AUTH_MISSING",
+            recovery="correctable",
+            message_substr="Authentication required",
+        )
 
     @pytest.mark.asyncio
     async def test_unknown_skill_raises_capability_not_supported(self):
@@ -189,10 +196,12 @@ class TestA2AErrorShapes:
 
     @pytest.mark.asyncio
     async def test_invalid_auth_identity_raises_server_error(self):
-        """A2A raises A2AError when identity has no principal (auth required skill)."""
-        # Identity with no principal_id simulates invalid auth
-        invalid_identity = ResolvedIdentity(
-            principal_id=None, tenant_id="default", tenant={"tenant_id": "default"}, protocol="a2a"
+        """A rejected A2A identity emits the terminal AUTH_INVALID wire envelope."""
+        invalid_identity = PrincipalFactory.make_identity(
+            principal_id=None,
+            tenant_id="default",
+            tenant={"tenant_id": "default"},
+            protocol="a2a",
         )
 
         with pytest.raises(A2AError) as exc_info:
@@ -202,7 +211,12 @@ class TestA2AErrorShapes:
                 identity=invalid_identity,
             )
 
-        assert "Authentication required" in str(exc_info.value)
+        assert_envelope_shape(
+            exc_info.value.data,
+            "AUTH_INVALID",
+            recovery="terminal",
+            message_substr="credentials were rejected",
+        )
 
     @pytest.mark.asyncio
     async def test_missing_params_raises_typed_validation_error(self):
@@ -601,8 +615,6 @@ class TestMCPRecoveryInErrorResponses:
 
         with pytest.raises(ToolError) as exc_info:
             wrapped()
-
-        from tests.helpers import assert_envelope_shape
 
         assert_envelope_shape(
             exc_info.value,

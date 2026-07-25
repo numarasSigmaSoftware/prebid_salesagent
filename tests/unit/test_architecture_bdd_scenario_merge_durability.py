@@ -147,7 +147,7 @@ def _untracked_scenarios(compile_bdd):
 
     A scenario present in a feature file but absent from ``bdd-traceability.yaml`` has
     no adcp-req (or hand-edit) provenance, so ``compile_bdd.py --merge`` classifies it
-    ``LEGACY-DELETE``. This closes the reviewer's blind spot: a scenario missing its
+    ``LEGACY-DELETE``. This closes the unguarded case where a scenario missing its
     marker, registry entry, AND traceability row is invisible to any check that starts
     from markers or from traceability — but it IS visible here, by comparing the
     compiled feature files against the traceability inventory."""
@@ -243,7 +243,7 @@ def test_is_spec_artifact_ref_discriminates_source_from_requirement_id():
 
 def test_source_less_predicate_catches_empty_and_unmodeled_refs():
     """The candidate predicate keys on ABSENCE of an adcp-req id, so an empty or unmodeled
-    ``upstream_refs`` (the reviewer's blind spot) is discovered, not only recognized spec-artifact
+    ``upstream_refs`` is discovered, not only recognized spec-artifact
     extensions. Known-bad/good self-test so a degraded predicate can't empty the candidate set."""
     # adcp-req-sourced rows are NOT source-less (BR-*/SR- present anywhere in the list).
     assert _row_has_adcp_req_source(["BR-UC-004-MAIN-01"]) is True
@@ -284,7 +284,7 @@ def test_source_less_scenarios_are_marked_and_registered():
       * untracked — a compiled scenario with NO traceability row at all.
 
     Both are ``LEGACY-DELETE`` risks, so the union must equal the registry. This closes
-    the reviewer's adversarial case: an unmarked scenario with no registry entry AND no
+    the adversarial case where an unmarked scenario has no registry entry and no
     traceability row is invisible to marker- or traceability-only scans, but appears here
     as an untracked candidate.
     """

@@ -602,7 +602,7 @@ def echo_context(request_data: dict) -> ContextObject | None:
     extra=allow passthrough and the dict was already validated at request time.
     Returns ``None`` when no context was stored (absent/None/non-dict), so
     ``exclude_none`` keeps the field off the wire. Shared by the media-buy
-    approve and creative approval webhook paths (PR #1567 round-3 DRY).
+    approve and creative approval webhook paths.
     """
     context_data = request_data.get("context")
     if context_data and isinstance(context_data, dict):
