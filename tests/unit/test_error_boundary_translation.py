@@ -10,7 +10,7 @@ Validates that:
 """
 
 import json
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +29,7 @@ from src.core.exceptions import (
 # the envelope is now a one-place update.
 # ---------------------------------------------------------------------------
 from tests.helpers import assert_envelope_shape  # noqa: E402
+from tests.helpers.pinned_schema import pinned_error_code_metadata
 from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
 
 # Per-boundary assertion wrappers were removed in favor of the canonical
@@ -36,6 +37,79 @@ from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_
 #   MCP:  assert_envelope_shape(exc, code, check_mcp_tool_error=True, ...)
 #   A2A:  assert_envelope_shape(data, code, recovery=...)
 #   REST: assert_envelope_shape(body, code, recovery=..., message_substr=...)
+
+
+class TestBestEffortBoundaryIdentity:
+    """Observability scope resolution must enrich when possible and fail closed."""
+
+    def test_returns_resolved_tenant_and_principal(self):
+        from src.core.tool_error_logging import best_effort_boundary_identity
+
+        identity = SimpleNamespace(tenant_id="tenant-observed", principal_id="principal-observed")
+
+        assert best_effort_boundary_identity(lambda: identity, transport="mcp") == (
+            "tenant-observed",
+            "principal-observed",
+        )
+
+    def test_resolution_failure_degrades_to_unscoped_record(self):
+        from src.core.tool_error_logging import best_effort_boundary_identity
+
+        def fail_resolution():
+            raise RuntimeError("identity backend unavailable")
+
+        assert best_effort_boundary_identity(fail_resolution, transport="a2a") == (None, None)
+
+    def test_tenant_hint_without_principal_is_unscoped(self):
+        """Anonymous resolution cannot authorize tenant-visible sink writes."""
+        from src.core.tool_error_logging import best_effort_boundary_identity
+
+        identity = SimpleNamespace(tenant_id="header-selected-tenant", principal_id=None)
+
+        assert best_effort_boundary_identity(lambda: identity, transport="rest") == (None, None)
+
+
+class TestBoundaryObservabilitySanitization:
+    """Tenant-visible and persistent sinks must never receive raw internal details."""
+
+    def test_typed_internal_error_is_scrubbed_before_activity_and_audit_sinks(self):
+        from src.core.tool_error_logging import record_boundary_error
+
+        feed_records: list[dict[str, object]] = []
+        audit_records: list[dict[str, object]] = []
+        audit_logger = SimpleNamespace(log_operation=lambda **kwargs: audit_records.append(kwargs))
+
+        with (
+            patch(
+                "src.services.activity_feed.activity_feed.log_error",
+                side_effect=lambda **kwargs: feed_records.append(kwargs),
+            ),
+            patch(
+                "src.core.audit_logger.get_audit_logger",
+                return_value=audit_logger,
+            ),
+        ):
+            record_boundary_error(
+                "a2a",
+                "create_media_buy",
+                AdCPAdapterError(SECRET_BEARING_MESSAGE),
+                tenant_id="tenant-safe",
+                principal_id="principal-safe",
+            )
+
+        assert len(feed_records) == 1
+        assert len(audit_records) == 1
+        feed_payload = feed_records[0]
+        audit_payload = audit_records[0]
+        assert feed_payload["tenant_id"] == "tenant-safe"
+        assert feed_payload["error_code"] == "SERVICE_UNAVAILABLE"
+        feed_message = feed_payload["error_message"]
+        audit_error = audit_payload["error"]
+        assert isinstance(feed_message, str)
+        assert isinstance(audit_error, str)
+        assert feed_message.endswith(audit_error)
+        assert_no_secret_leak(feed_payload, context="tenant activity error payload")
+        assert_no_secret_leak(audit_payload, context="persistent audit error payload")
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +131,76 @@ class TestAuthCodeConformance:
         """Absent versus rejected credentials carry their spec code, recovery, and suggestion."""
         from src.core import exceptions
 
-        enum_path = (
-            Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
-        )
-        metadata = json.loads(enum_path.read_text())["enumMetadata"][code]
+        metadata = pinned_error_code_metadata()[code]
         error = getattr(exceptions, error_class)("test auth failure")
 
         assert error.wire_error_code == code
         assert error.recovery == metadata["recovery"]
         assert error.suggestion == metadata["suggestion"]
+
+
+class TestAuthContractOracle:
+    """The shared transport oracle grades exact codes and both suggestion mirrors."""
+
+    @pytest.mark.parametrize(
+        ("transport", "credential_state", "expected_code"),
+        [
+            pytest.param("a2a", "missing", "AUTH_MISSING", id="a2a-missing"),
+            pytest.param("a2a", "invalid", "AUTH_INVALID", id="a2a-invalid"),
+            pytest.param("e2e_a2a", "missing", "AUTH_MISSING", id="e2e-a2a-missing"),
+            pytest.param("mcp", "invalid", "AUTH_INVALID", id="mcp-invalid"),
+            pytest.param("rest", "missing", "AUTH_MISSING", id="rest-missing"),
+            pytest.param("e2e_mcp", "missing", "AUTH_MISSING", id="e2e-mcp-missing"),
+            pytest.param("e2e_rest", "invalid", "AUTH_INVALID", id="e2e-rest-invalid"),
+            pytest.param("impl", "invalid", "AUTH_REQUIRED", id="impl-invalid"),
+        ],
+    )
+    def test_expected_auth_contract_is_transport_aware(self, transport, credential_state, expected_code):
+        from tests.helpers.auth_contract import expected_auth_contract
+
+        code, recovery, suggestion = expected_auth_contract(transport, credential_state)
+        metadata = pinned_error_code_metadata()[expected_code]
+
+        assert code == expected_code
+        assert recovery == metadata["recovery"]
+        assert suggestion == metadata["suggestion"]
+
+    @pytest.mark.parametrize("unknown_transport", [None, "a22", "future_transport"])
+    def test_expected_auth_contract_rejects_unknown_transport(self, unknown_transport):
+        from tests.helpers.auth_contract import expected_auth_contract
+
+        with pytest.raises(AssertionError, match="Unknown auth-contract transport"):
+            expected_auth_contract(unknown_transport, "missing")
+
+    def test_expected_auth_contract_rejects_unknown_credential_state(self):
+        from tests.helpers.auth_contract import expected_auth_contract
+
+        with pytest.raises(AssertionError, match="Unknown credential state"):
+            expected_auth_contract("a2a", "invalidd")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("mutated_layer", ["errors", "adcp_error"])
+    def test_two_layer_auth_contract_rejects_suggestion_drift(self, mutated_layer):
+        from tests.helpers.auth_contract import assert_two_layer_auth_contract, expected_auth_contract
+
+        code, recovery, suggestion = expected_auth_contract("a2a", "missing")
+        envelope = {
+            "errors": [
+                {"code": code, "message": "Credentials required", "recovery": recovery, "suggestion": suggestion}
+            ],
+            "adcp_error": {
+                "code": code,
+                "message": "Credentials required",
+                "recovery": recovery,
+                "suggestion": suggestion,
+            },
+        }
+        if mutated_layer == "errors":
+            envelope["errors"][0]["suggestion"] = "drifted guidance"
+        else:
+            envelope["adcp_error"]["suggestion"] = "drifted guidance"
+
+        with pytest.raises(AssertionError, match=r"suggestion must match pinned AUTH_MISSING guidance"):
+            assert_two_layer_auth_contract(envelope, "a2a", "missing")
 
 
 class TestExtractErrorInfoAdCPError:
@@ -238,7 +373,7 @@ class TestMCPBoundaryAdCPErrorTranslation:
         assert_envelope_shape(exc_info.value, "VALIDATION_ERROR", check_mcp_tool_error=True, recovery="correctable")
 
     def test_adcp_adapter_tool_error_carries_transient_recovery(self):
-        """AdCPAdapterError → ToolError envelope carries 'transient' recovery."""
+        """AdCPAdapterError → scrubbed ToolError envelope carries canonical recovery."""
         from fastmcp.exceptions import ToolError
 
         from src.core.tool_error_logging import with_error_logging
@@ -256,8 +391,8 @@ class TestMCPBoundaryAdCPErrorTranslation:
             "SERVICE_UNAVAILABLE",
             check_mcp_tool_error=True,
             recovery="transient",
-            message_substr="GAM down",
         )
+        assert "GAM down" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_async_adcp_validation_becomes_tool_error(self):
@@ -293,41 +428,49 @@ class TestMCPBoundaryAdCPErrorTranslation:
         # Should be the same ToolError, not wrapped
         assert exc_info.value.args[0] == "EXISTING_CODE"
 
-    def test_valueerror_becomes_tool_error(self):
-        """ValueError from tool → ToolError with VALIDATION_ERROR code."""
+    def test_valueerror_becomes_scrubbed_tool_error(self):
+        """ValueError from tool → scrubbed ToolError with VALIDATION_ERROR code."""
         from fastmcp.exceptions import ToolError
 
         from src.core.tool_error_logging import with_error_logging
 
         def failing_tool():
-            raise ValueError("invalid input")
+            raise ValueError(SECRET_BEARING_MESSAGE)
 
         wrapped = with_error_logging(failing_tool)
 
         with pytest.raises(ToolError) as exc_info:
             wrapped()
 
-        assert "VALIDATION_ERROR" in str(exc_info.value) or (
-            exc_info.value.args and exc_info.value.args[0] == "VALIDATION_ERROR"
+        assert_envelope_shape(
+            exc_info.value,
+            "VALIDATION_ERROR",
+            check_mcp_tool_error=True,
+            recovery="correctable",
         )
+        assert_no_secret_leak(str(exc_info.value), context="MCP ValueError envelope")
 
-    def test_permission_error_becomes_tool_error(self):
-        """PermissionError from tool → ToolError with AUTH_REQUIRED code."""
+    def test_permission_error_becomes_scrubbed_tool_error(self):
+        """PermissionError from tool → scrubbed ToolError with AUTH_REQUIRED code."""
         from fastmcp.exceptions import ToolError
 
         from src.core.tool_error_logging import with_error_logging
 
         def failing_tool():
-            raise PermissionError("access denied")
+            raise PermissionError(SECRET_BEARING_MESSAGE)
 
         wrapped = with_error_logging(failing_tool)
 
         with pytest.raises(ToolError) as exc_info:
             wrapped()
 
-        assert "AUTH_REQUIRED" in str(exc_info.value) or (
-            exc_info.value.args and exc_info.value.args[0] == "AUTH_REQUIRED"
+        assert_envelope_shape(
+            exc_info.value,
+            "AUTH_REQUIRED",
+            check_mcp_tool_error=True,
+            recovery="correctable",
         )
+        assert_no_secret_leak(str(exc_info.value), context="MCP PermissionError envelope")
 
 
 def _uncovered_correctable_targets(registry, sanitized_by_code, internal_codes, standard_codes):
@@ -458,12 +601,9 @@ class TestSafeAdcpErrorSuggestionMatchesRecovery:
         here. This is the oracle that caught the AUTH_REQUIRED suggestion advising retry while
         the spec enum says "do NOT auto-retry rejected credentials".
         """
-        from pathlib import Path
-
         from src.core.exceptions import _SANITIZED_BY_WIRE_CODE, safe_adcp_error
 
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
-        enum_meta = json.loads(fixture.read_text())["enumMetadata"]
+        enum_meta = pinned_error_code_metadata()
 
         for wire_code, (_message, suggestion) in _SANITIZED_BY_WIRE_CODE.items():
             assert suggestion == enum_meta[wire_code]["suggestion"], (
@@ -1006,6 +1146,71 @@ class TestA2ADispatcherFailedSkillResult:
 class TestRESTBoundaryAdCPErrorTranslation:
     """REST endpoints propagate AdCPError to the app-level exception handler with recovery."""
 
+    def test_auth_error_observability_ignores_client_selected_tenant_scope(self):
+        """REST auth rejection stays unscoped and performs no second identity lookup."""
+        from starlette.requests import Request
+
+        from src.app import _envelope_response
+        from src.core.exceptions import AdCPAuthenticationError
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/v1/capabilities",
+                "headers": [(b"x-adcp-tenant", b"tenant-rest")],
+            }
+        )
+        error = AdCPAuthenticationError("rejected")
+
+        with (
+            patch("src.app._best_effort_rest_identity") as mock_identity,
+            patch("src.app.record_boundary_error") as mock_record,
+        ):
+            response = _envelope_response(request, error)
+
+        mock_identity.assert_not_called()
+        mock_record.assert_called_once_with(
+            "rest",
+            "/api/v1/capabilities",
+            error,
+            tenant_id=None,
+            principal_id=None,
+        )
+        assert response.status_code == error.status_code
+
+    def test_anonymous_validation_error_cannot_write_to_header_selected_tenant(self):
+        """Pre-auth validation failures remain unscoped despite tenant hints."""
+        from starlette.requests import Request
+
+        from src.app import _envelope_response
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/media-buys",
+                "headers": [(b"x-adcp-tenant", b"victim-tenant")],
+            }
+        )
+        error = AdCPValidationError("malformed request")
+        anonymous = SimpleNamespace(tenant_id="victim-tenant", principal_id=None)
+
+        with (
+            patch("src.app.resolve_identity", return_value=anonymous),
+            patch("src.app.record_boundary_error") as mock_record,
+        ):
+            response = _envelope_response(request, error)
+
+        mock_record.assert_called_once_with(
+            "rest",
+            "/api/v1/media-buys",
+            error,
+            tenant_id=None,
+            principal_id=None,
+        )
+        assert response.status_code == error.status_code
+
     def test_adcp_validation_from_impl_returns_400(self):
         """AdCPValidationError raised in _impl → REST returns 400 with correctable recovery."""
         from starlette.testclient import TestClient
@@ -1149,25 +1354,32 @@ class TestRESTSymmetricValueErrorAndPermissionError:
     same wire shape.
     """
 
-    def test_value_error_returns_400_with_validation_envelope(self):
-        """Raw ValueError → 400 with VALIDATION_ERROR envelope (mirrors MCP wrapper)."""
+    @pytest.mark.parametrize(
+        ("exception", "expected_code", "expected_status"),
+        [
+            pytest.param(ValueError(SECRET_BEARING_MESSAGE), "VALIDATION_ERROR", 400, id="value-error"),
+            pytest.param(PermissionError(SECRET_BEARING_MESSAGE), "AUTH_REQUIRED", 403, id="permission-error"),
+        ],
+    )
+    def test_raw_error_returns_scrubbed_envelope(self, exception, expected_code, expected_status):
+        """Raw built-ins retain their semantic code without exposing their message."""
         from starlette.testclient import TestClient
 
         from src.app import app
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
-            side_effect=ValueError("invalid input shape"),
+            side_effect=exception,
         ):
             client = TestClient(app, raise_server_exceptions=False)
             response = client.get("/api/v1/capabilities")
-            assert response.status_code == 400
+            assert response.status_code == expected_status
             assert_envelope_shape(
                 response.json(),
-                "VALIDATION_ERROR",
+                expected_code,
                 recovery="correctable",
-                message_substr="invalid input shape",
             )
+            assert_no_secret_leak(response.json(), context=f"REST {type(exception).__name__} envelope")
 
     def test_request_validation_error_unaffected(self):
         """FastAPI's RequestValidationError handler is NOT overridden by our ValueError handler.
@@ -1426,11 +1638,11 @@ class TestCustomRecoveryOverrideA2ABoundary:
             assert exc_info.value.recovery == "transient"
 
 
-class TestCustomRecoveryOverrideRESTBoundary:
-    """Custom recovery= override must propagate through REST boundary (exception handler)."""
+class TestInternalRecoveryCanonicalizationRESTBoundary:
+    """Internal errors use the pinned recovery at the REST wire boundary."""
 
-    def test_custom_recovery_propagates_through_rest_boundary(self):
-        """AdCPAdapterError(recovery='terminal') -> REST JSON body has 'terminal'."""
+    def test_custom_internal_recovery_is_canonicalized_at_rest_boundary(self):
+        """AdCPAdapterError(recovery='terminal') emits scrubbed canonical SERVICE_UNAVAILABLE."""
         from starlette.testclient import TestClient
 
         from src.app import app
@@ -1443,7 +1655,8 @@ class TestCustomRecoveryOverrideRESTBoundary:
             client = TestClient(app, raise_server_exceptions=False)
             response = client.get("/api/v1/capabilities")
             assert response.status_code == 502
-            assert_envelope_shape(response.json(), "SERVICE_UNAVAILABLE", recovery="terminal")
+            assert_envelope_shape(response.json(), "SERVICE_UNAVAILABLE", recovery="transient")
+            assert "permanent failure" not in response.text
 
 
 # ---------------------------------------------------------------------------

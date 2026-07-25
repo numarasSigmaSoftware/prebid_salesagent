@@ -17,20 +17,16 @@ be graded against an enum that does not contain them; they are reported by
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from src.core.exceptions import ERROR_CODE_MAPPING, AdCPError, translate_error_code
-
-_PINNED_ENUM_PATH = Path(__file__).parent.parent / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
+from tests.helpers.pinned_schema import pinned_error_code_metadata
 
 
 def _pinned_recovery_by_code() -> dict[str, str]:
     """Return ``{error_code: recovery}`` from the pinned enumMetadata block."""
-    meta = json.loads(_PINNED_ENUM_PATH.read_text())["enumMetadata"]
-    return {code: entry["recovery"] for code, entry in meta.items() if isinstance(entry, dict) and "recovery" in entry}
+    meta = pinned_error_code_metadata()
+    return {code: entry["recovery"] for code, entry in meta.items() if "recovery" in entry}
 
 
 _RECOVERY_BY_CODE = _pinned_recovery_by_code()

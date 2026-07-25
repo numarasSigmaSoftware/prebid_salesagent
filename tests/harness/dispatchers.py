@@ -247,6 +247,7 @@ class RestE2EDispatcher:
         if not env.e2e_config:
             return TransportResult(error=RuntimeError("E2E dispatch requires env.e2e_config (pass e2e_config= to env)"))
 
+        presented_auth_token = env._pop_presented_auth_token(kwargs)
         identity = kwargs.pop("identity", None)
         base_url = env.e2e_config.base_url
 
@@ -255,7 +256,10 @@ class RestE2EDispatcher:
         # but auth_token is None (principal_id=None boundary tests), omit the header
         # so the server rejects gracefully instead of httpx raising on a None header.
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if identity is not None:
+        if presented_auth_token is not None:
+            headers["x-adcp-auth"] = presented_auth_token
+            headers["x-adcp-tenant"] = env._tenant_id
+        elif identity is not None:
             if identity.auth_token is not None:
                 headers["x-adcp-auth"] = identity.auth_token
             tenant = getattr(identity, "tenant", None)

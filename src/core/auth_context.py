@@ -97,18 +97,19 @@ def _resolve_auth_dep(auth_ctx: AuthContext = get_auth_context) -> "ResolvedIden
 
 
 def _require_auth_dep(auth_ctx: AuthContext = get_auth_context) -> "ResolvedIdentity":
-    """FastAPI dependency: resolve identity (auth-required, raises 401 if missing).
+    """FastAPI dependency: resolve identity (auth-required, raises 401 if rejected).
 
-    Returns ResolvedIdentity on success. Raises AdCPAuthRequiredError if
-    no token is present or the token is invalid. The error carries the shared
-    AUTH_REQUIRED suggestion so the REST 401 envelope tells the buyer how to
-    recover (parity with require_identity on the _impl path; AdCP POST-F3).
+    Returns ResolvedIdentity on success. AdCP 3.1.1 requires the REST wire to
+    distinguish absent credentials (AUTH_MISSING) from rejected credentials
+    (AUTH_INVALID).
     """
-    from src.core.auth import AUTH_REQUIRED_SUGGESTION
-    from src.core.exceptions import AdCPAuthRequiredError
+    from src.core.exceptions import AdCPAuthInvalidError, classify_auth_credentials_error
 
     if not auth_ctx.auth_token:
-        raise AdCPAuthRequiredError("Authentication required", suggestion=AUTH_REQUIRED_SUGGESTION)
+        raise classify_auth_credentials_error(
+            auth_ctx.headers,
+            missing_message="Authentication required",
+        )
 
     from src.core.resolved_identity import resolve_identity
 
@@ -120,7 +121,7 @@ def _require_auth_dep(auth_ctx: AuthContext = get_auth_context) -> "ResolvedIden
     )
 
     if not identity.principal_id:
-        raise AdCPAuthRequiredError("Authentication required", suggestion=AUTH_REQUIRED_SUGGESTION)
+        raise AdCPAuthInvalidError("Authentication credentials were rejected.")
 
     # Set tenant ContextVar at the REST transport boundary
     if identity.tenant:

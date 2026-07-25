@@ -31,6 +31,7 @@ import pytest
 from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_package_request_dict
+from tests.helpers.auth_contract import assert_two_layer_auth_contract
 from tests.helpers.mcp_envelope_capture import call_mcp_tool_capturing_envelope
 from tests.integration.conftest import seed_error_test_tenant
 
@@ -240,16 +241,13 @@ class TestMcpWireErrorEnvelope:
         )
 
     def test_get_media_buy_delivery_missing_identity_emits_auth_envelope_on_wire(self, integration_db):
-        """Missing identity in get_media_buy_delivery surfaces AUTH_REQUIRED on the MCP wire.
+        """Missing identity in get_media_buy_delivery surfaces AUTH_MISSING on the MCP wire.
 
         Flow:
             Client(mcp).call_tool("get_media_buy_delivery", {...}) with identity=None
-              → MCP wrapper resolve_identity returns None
-              → _get_media_buy_delivery_impl raises AdCPAuthRequiredError("Authentication required...")
-              → AdCPAuthRequiredError carries error_code="AUTH_REQUIRED" (passthrough STANDARD code)
-              → with_error_logging → _translate_to_tool_error → wire envelope
-
-        AUTH_REQUIRED is a STANDARD spec code — passes through unchanged.
+              → middleware classifies absent transport credentials
+              → AdCPAuthMissingError carries error_code="AUTH_MISSING"
+              → _translate_to_tool_error emits the two-layer wire envelope
         """
         is_error, envelope = call_mcp_tool_capturing_envelope(
             "get_media_buy_delivery",
@@ -260,9 +258,8 @@ class TestMcpWireErrorEnvelope:
         assert is_error, "Missing identity must produce a tool error"
         assert envelope is not None, "Error must include content text carrying the envelope"
 
-        # AdCPAuthRequiredError -> AUTH_REQUIRED (AdCP 3.1 spec code, passed through unchanged).
-        # Recovery is correctable per the pinned error-code enum (#1417).
-        assert_envelope_shape(envelope, "AUTH_REQUIRED", recovery="correctable")
+        # AdCPAuthMissingError -> AUTH_MISSING with correctable recovery (#1417).
+        assert_two_layer_auth_contract(envelope, "mcp", "missing")
         assert "identity" in envelope["adcp_error"]["message"].lower() or (
             "auth" in envelope["adcp_error"]["message"].lower()
         ), f"Envelope message must mention identity/auth, got: {envelope['adcp_error']['message']}"

@@ -931,16 +931,16 @@ Then an empty accounts array is returned (not an error)
 ### BR-RULE-055: Account Operation Authentication Policy
 **Obligation ID** BR-RULE-055-01
 **Layer** behavioral
-**Invariant:** sync_accounts requires valid auth. list_accounts works without auth but scopes results. Unauthenticated list returns empty array.
+**Invariant:** sync_accounts and list_accounts require valid auth. list_accounts scopes results to accounts visible to the authenticated agent.
 **Scenario:**
 ```gherkin
-Given no valid authentication
-When sync_accounts is called
-Then AUTH_REQUIRED error is returned
-
 Given no authentication
-When list_accounts is called
-Then an empty accounts array is returned (not an error)
+When sync_accounts or list_accounts is called
+Then every wire transport returns AUTH_MISSING
+
+Given rejected authentication credentials
+When sync_accounts or list_accounts is called
+Then every wire transport returns AUTH_INVALID
 ```
 **Priority:** P0
 **Affected by 3.6:** Yes -- accounts domain is new in v3

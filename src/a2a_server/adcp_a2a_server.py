@@ -8,7 +8,7 @@ import copy
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 
 # Import core functions for direct calls (raw functions without FastMCP decorators)
@@ -56,6 +56,7 @@ from pydantic import BaseModel
 
 from src.core.audit_logger import get_audit_logger
 from src.core.auth_context import AUTH_CONTEXT_STATE_KEY
+from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
 from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
 from src.core.database.repositories import PushNotificationConfigUoW
 from src.core.database.repositories.workflow import TERMINAL_STEP_STATUSES, WorkflowRepository
@@ -69,7 +70,7 @@ from src.core.exceptions import (
     AdCPError,
     AdCPValidationError,
     build_two_layer_error_envelope,
-    normalize_to_adcp_error,
+    classify_auth_credentials_error,
     safe_adcp_error,
 )
 from src.core.resolved_identity import ResolvedIdentity
@@ -140,23 +141,15 @@ def _dict_to_struct(d: dict) -> struct_pb2.Struct:
     return s
 
 
-# ADCP Discovery Skills: Skills that don't require authentication
+# AdCP discovery skills that don't require authentication.
 # Per AdCP spec section 3.2, these endpoints allow optional authentication for public discovery.
-# IMPORTANT: This is the single source of truth for auth-optional skills in A2A.
-# Add new skills here ONLY if they meet AdCP discovery endpoint requirements:
+# The transport-neutral set in auth_policy is the single source of truth.
+# Add new skills there ONLY if they meet AdCP discovery endpoint requirements:
 #   1. Return only public/non-sensitive data
 #   2. Support tenant-level access control (e.g., brand_manifest_policy)
 #   3. Never expose user-specific or transactional data
 #   4. Must be safe to call without authentication
-DISCOVERY_SKILLS = frozenset(
-    {
-        "get_adcp_capabilities",  # Agent capabilities (always public per AdCP spec)
-        "list_accounts",  # Account discovery (public, returns empty for unauthed per BR-RULE-055)
-        "list_creative_formats",  # Creative specifications (always public)
-        "list_authorized_properties",  # Property catalog (always public)
-        "get_products",  # Conditional: depends on tenant brand_manifest_policy setting
-    }
-)
+DISCOVERY_SKILLS = AUTH_OPTIONAL_SKILLS
 
 
 def _sanitized_envelope(exc: Exception) -> tuple[AdCPError, dict[str, Any]]:
@@ -205,20 +198,6 @@ def _a2a_auth_headers(context: ServerCallContext | None) -> dict[str, str]:
     return dict(auth_ctx.headers) if auth_ctx else {}
 
 
-def _no_usable_credentials_error(
-    headers: Mapping[str, str], *, missing_message: str
-) -> AdCPAuthMissingError | AdCPAuthInvalidError:
-    """Classify absent credentials separately from a presented unusable Authorization header.
-
-    The auth middleware keeps the raw headers even when it cannot extract a Bearer
-    token. AdCP 3.1.1 requires ``AUTH_INVALID`` for that supplied-but-malformed
-    case; only a request with no Authorization header is ``AUTH_MISSING``.
-    """
-    if any(name.lower() == "authorization" for name in headers):
-        return AdCPAuthInvalidError("Authentication credentials were rejected.")
-    return AdCPAuthMissingError(missing_message)
-
-
 def _no_usable_identity_error(
     identity: ResolvedIdentity | None,
 ) -> AdCPAuthMissingError | AdCPAuthInvalidError | None:
@@ -230,8 +209,10 @@ def _no_usable_identity_error(
     return None
 
 
-def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequestError:
-    """THE single source for every A2A auth rejection's two-layer envelope.
+def _enveloped_auth_error(
+    auth_error: AdCPAuthenticationError,
+) -> InvalidRequestError:
+    """THE single source for every A2A auth rejection's observability and envelope.
 
     Covers five auth raises: the missing-token, resolution-failure, and invalid-principal arms of
     ``_resolve_a2a_identity`` (inherited by tasks/get, tasks/cancel and the four
@@ -250,7 +231,30 @@ def _enveloped_auth_error(auth_error: AdCPAuthenticationError) -> InvalidRequest
     adopted by a function documented as the authentication-envelope source — that would emit a different wire
     code from here. Non-auth rejections use ``_enveloped_invalid_request`` directly.
     """
-    return _enveloped_invalid_request(auth_error)
+    return _recorded_a2a_auth_rejection(auth_error)
+
+
+def _recorded_a2a_auth_rejection(
+    error: AdCPError,
+    *,
+    principal_id: str | None = None,
+) -> InvalidRequestError:
+    """Record one pre-handler A2A auth rejection, then build its wire envelope.
+
+    Authentication failures remain tenant-unscoped because client-controlled
+    routing headers do not attest tenant ownership. The helper accepts
+    ``AdCPError`` because the tenant-resolution failure is a seller-side
+    ``AdCPConfigurationError`` rather than a buyer auth error; that path may
+    retain its already-authenticated principal for the privileged server log.
+    """
+    record_boundary_error(
+        "a2a",
+        "authentication",
+        error,
+        tenant_id=None,
+        principal_id=principal_id,
+    )
+    return _enveloped_invalid_request(error)
 
 
 def _internal_error_for(operation: str, exc: Exception) -> InternalError:
@@ -489,11 +493,12 @@ class AdCPRequestHandler(RequestHandler):
         require_valid_token: bool = True,
         context: ServerCallContext | None = None,
     ) -> ResolvedIdentity:
-        """Resolve identity at the A2A transport boundary — called ONCE per request.
+        """Make the authoritative A2A authentication decision for a request.
 
         This is the A2A equivalent of REST's _resolve_auth(). It calls
-        resolve_identity() once and returns the result. All downstream handlers
-        receive the pre-resolved identity instead of re-resolving from auth_token.
+        resolve_identity() once and returns the result. Auth-error observability
+        stays tenant-unscoped and never validates the token again. All
+        downstream handlers receive the pre-resolved identity.
 
         Args:
             auth_token: Bearer token from Authorization header (None for unauthenticated)
@@ -513,7 +518,7 @@ class AdCPRequestHandler(RequestHandler):
 
         if require_valid_token and not auth_token:
             raise _enveloped_auth_error(
-                _no_usable_credentials_error(headers, missing_message="Missing authentication token")
+                classify_auth_credentials_error(headers, missing_message="Missing authentication token"),
             )
 
         # Extract testing context from A2A request headers (same as MCP does)
@@ -530,11 +535,15 @@ class AdCPRequestHandler(RequestHandler):
         except AdCPAuthenticationError as e:
             # A presented token was rejected. Preserve the cause server-side but emit the
             # AUTH_INVALID contract consistently for every A2A method.
-            raise _enveloped_auth_error(AdCPAuthInvalidError("Authentication credentials were rejected.")) from e
+            raise _enveloped_auth_error(
+                AdCPAuthInvalidError("Authentication credentials were rejected."),
+            ) from e
 
         if require_valid_token:
             if not identity.principal_id:
-                raise _enveloped_auth_error(AdCPAuthInvalidError("Authentication token is invalid or expired."))
+                raise _enveloped_auth_error(
+                    AdCPAuthInvalidError("Authentication token is invalid or expired."),
+                )
 
             if not identity.tenant:
                 # The credentials were VALID — the principal authenticated and only the tenant
@@ -547,8 +556,9 @@ class AdCPRequestHandler(RequestHandler):
                     "[A2A AUTH] authenticated principal has no resolvable tenant: principal=%s",
                     identity.principal_id,
                 )
-                raise _enveloped_invalid_request(
-                    AdCPConfigurationError("Unable to determine tenant for the authenticated principal.")
+                raise _recorded_a2a_auth_rejection(
+                    AdCPConfigurationError("Unable to determine tenant for the authenticated principal."),
+                    principal_id=identity.principal_id,
                 )
 
             tenant_id = identity.tenant_id or identity.tenant.get("tenant_id", "unknown")
@@ -906,15 +916,16 @@ class AdCPRequestHandler(RequestHandler):
             # cannot drift between message/send and the rest.
             if requires_auth and not auth_token:
                 raise _enveloped_auth_error(
-                    _no_usable_credentials_error(
+                    classify_auth_credentials_error(
                         _a2a_auth_headers(context),
                         missing_message="Authentication required - Bearer token required in Authorization header",
-                    )
+                    ),
                 )
 
-            # ── Transport boundary: resolve identity ONCE ──
-            # Like REST's _resolve_auth(), identity is resolved here and passed
-            # to all downstream handlers. No handler should call resolve_identity().
+            # ── Transport boundary: make one authoritative auth decision ──
+            # Like REST's _resolve_auth(), identity is resolved here and passed to
+            # all downstream handlers. Auth-error recording stays unscoped, and
+            # no handler validates the credential a second time.
             if auth_token:
                 identity = self._resolve_a2a_identity(auth_token, require_valid_token=requires_auth, context=context)
             elif not requires_auth:
@@ -2007,13 +2018,14 @@ class AdCPRequestHandler(RequestHandler):
             # AUTH_REQUIRED, native ``AdCPError`` unchanged — but SCRUBS a raw built-in's untrusted
             # ``str(e)`` (a connection string / token), because re-raising the *normalized* typed
             # error here would hand the outer sanitizer a trusted ``AdCPValidationError`` and let
-            # the secret survive. ``record_boundary_error`` gets the un-sanitized semantic error so
-            # server-side observability still sees the raw message.
+            # the secret survive. ``record_boundary_error`` receives the ORIGINAL exception so
+            # the same provenance rule applies there: raw diagnostics stay in the privileged
+            # server log while tenant activity, persistent audit, and notification sinks receive
+            # a scrubbed semantic copy.
             #
             # Defensive about identity shape — test fixtures sometimes pass a string or
             # partially-built identity; the canonical recorder handles None internally.
-            normalized = normalize_to_adcp_error(e)
-            _record_a2a_boundary_error(skill_name, identity, normalized)
+            _record_a2a_boundary_error(skill_name, identity, e)
 
             sanitized = safe_adcp_error(e)
             if sanitized is not e:
@@ -2381,8 +2393,8 @@ class AdCPRequestHandler(RequestHandler):
     async def _handle_list_accounts_skill(self, parameters: dict, identity: ResolvedIdentity | None) -> Any:
         """Handle explicit list_accounts skill invocation.
 
-        Authentication is OPTIONAL per BR-RULE-055 — unauthenticated calls
-        return an empty account list.
+        Authentication is REQUIRED per BR-RULE-055 because account visibility
+        is scoped to the authenticated principal.
         """
         from src.core.schemas.account import ListAccountsRequest
 

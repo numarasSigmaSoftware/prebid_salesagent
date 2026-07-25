@@ -1635,11 +1635,14 @@ Then status=pending_approval with setup.message
 ### account_auth_policy: Account Authentication Policy
 **Obligation ID** CONSTR-ACCOUNT-AUTH-POLICY-01
 **Layer** behavioral
-**Requirement:** sync_accounts requires valid auth. list_accounts allows anonymous (empty results).
+**Requirement:** sync_accounts and list_accounts require valid authentication.
 **Scenario:**
 ```gherkin
-Given no auth on sync_accounts
-Then AUTH_REQUIRED error
+Given no auth on sync_accounts or list_accounts
+Then every wire transport returns AUTH_MISSING
+
+Given rejected auth on sync_accounts or list_accounts
+Then every wire transport returns AUTH_INVALID
 ```
 **Priority:** P0
 **Affected by 3.6:** Yes -- accounts domain is new in v3

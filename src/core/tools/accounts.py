@@ -2,7 +2,7 @@
 
 Handles account management per AdCP spec (UC-011):
 - Agent-scoped results (BR-RULE-054)
-- Auth-optional list with empty fallback (BR-RULE-055)
+- Authentication required for list and sync operations (BR-RULE-055)
 - Upsert by natural key (BR-RULE-056)
 - Atomic XOR response (BR-RULE-057)
 - Brand echo (BR-RULE-058)
@@ -116,7 +116,9 @@ def _list_accounts_impl(
 ) -> ListAccountsResponse:
     """List accounts accessible to the authenticated agent.
 
-    Per BR-RULE-055: requires authentication, raises AUTH_REQUIRED if missing.
+    Per BR-RULE-055: requires authentication. This shared implementation raises
+    legacy AUTH_REQUIRED; transports may reject earlier with their canonical
+    missing/invalid credential code.
     Per BR-RULE-054: returns only accounts accessible to the agent.
 
     Args:

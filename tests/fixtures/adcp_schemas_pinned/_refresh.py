@@ -2,7 +2,7 @@
 """Refresh the pinned AdCP JSON-schema fixtures used by test_pydantic_schema_alignment.
 
 Source of truth: adcontextprotocol/adcp @ commit
-    04f59d2d56d3d77033162c310e99a1188e4eb419  (tag v3.1-04f59d2d5, 2026-05-13)
+    467fd93d77112baf9e094e18980119edcd3a4d07  (tag v3.1.1)
 
 This commit is an INTENTIONAL, frozen reference point for AdCP 3.1 semantics. The
 upstream adcp repo ships constantly and `/schemas/latest` drifts; we deliberately do
@@ -28,7 +28,7 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
-PINNED_SHA = "04f59d2d56d3d77033162c310e99a1188e4eb419"
+PINNED_SHA = "467fd93d77112baf9e094e18980119edcd3a4d07"
 REPO = "adcontextprotocol/adcp"
 SRC_PREFIX = "static/schemas/source"  # repo path that backs the `/schemas/...` namespace
 LOCAL_CLONE = Path.home() / "projects" / "adcp"

@@ -251,23 +251,12 @@ def given_natural_key_partial_access(ctx: dict, total: int, accessible: int) -> 
 
 @given("the Buyer Agent's token resolves no principal")
 def given_unauthenticated_principal(ctx: dict) -> None:
-    """Force the dispatch identity to an unauthenticated one: a tenant is resolved
-    (from the host header, as MCP middleware does) but principal_id is None.
+    """Present a token that the real transport auth chain cannot resolve.
 
-    This is the exact shape an unauthenticated MCP caller presents — MCP resolves
-    a tenant from the host but no principal from a missing/invalid token, so account
-    resolution at the transport boundary runs with principal_id=None. A2A/REST raise
-    on the missing token before this point; forcing the identity here exercises the
-    shared ``enrich_identity_with_account`` boundary guard uniformly on every wire
-    transport. See #1417.
+    No identity is injected: A2A, MCP, and REST must all reject the credential
+    before account lookup can disclose a tenant-wide match count. See #1417.
     """
-    from tests.factories.principal import PrincipalFactory
-
-    env = ctx["env"]
-    ctx["dispatch_identity"] = PrincipalFactory.make_identity(
-        principal_id=None,
-        tenant_id=env._tenant_id,
-    )
+    ctx["presented_auth_token"] = "rejected-account-access-token"
 
 
 @given(parsers.parse('the account "{account_id}" exists and is active'))
@@ -822,9 +811,11 @@ def _dispatch_full_create(ctx: dict) -> None:
         ctx["error"] = e
         return
 
-    # No-auth scenarios (#1417) stash an unauthenticated identity so the
-    # transport-boundary account-resolution guard is exercised on the wire.
-    if "dispatch_identity" in ctx:
+    # Credential scenarios must run the production auth resolver; missing-auth
+    # scenarios deliberately pass identity=None through the harness.
+    if "presented_auth_token" in ctx:
+        dispatch_request(ctx, req=req, presented_auth_token=ctx["presented_auth_token"])
+    elif "dispatch_identity" in ctx:
         dispatch_request(ctx, req=req, identity=ctx["dispatch_identity"])
     else:
         dispatch_request(ctx, req=req)

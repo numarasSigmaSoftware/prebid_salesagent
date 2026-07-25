@@ -1,8 +1,9 @@
 """Tests for MCPAuthMiddleware — centralized identity resolution for MCP tools.
 
-Core Invariant: Identity resolution happens exactly once per MCP request in the
-middleware; tool functions read the pre-resolved identity from FastMCP context
-state and never call resolve_identity_from_context() directly.
+Core Invariant: The middleware makes exactly one authentication/identity
+resolution call per MCP request; an auth failure may inspect tenant headers for
+observability, but never performs a second credential validation. Tool
+functions read the pre-resolved identity from FastMCP context state.
 
 These tests verify:
 1. MCPAuthMiddleware class exists and inherits from Middleware
@@ -59,9 +60,7 @@ class TestMCPAuthMiddlewareExists:
             "list_creative_formats",
             "list_authorized_properties",
         }
-        assert expected_discovery.issubset(AUTH_OPTIONAL_TOOLS), (
-            f"AUTH_OPTIONAL_TOOLS missing discovery tools: {expected_discovery - AUTH_OPTIONAL_TOOLS}"
-        )
+        assert AUTH_OPTIONAL_TOOLS == expected_discovery
 
 
 class TestMCPAuthMiddlewareBehavior:
@@ -100,6 +99,7 @@ class TestMCPAuthMiddlewareBehavior:
         mock_context.message.name = "create_media_buy"  # auth-required
 
         mock_identity = MagicMock(spec=ResolvedIdentity)
+        mock_identity.principal_id = "principal-1"
         call_next = AsyncMock(return_value=MagicMock())
 
         with patch(
@@ -127,6 +127,7 @@ class TestMCPAuthMiddlewareBehavior:
         mock_context.message.name = "get_products"  # discovery/auth-optional
 
         mock_identity = MagicMock(spec=ResolvedIdentity)
+        mock_identity.principal_id = "principal-1"
         call_next = AsyncMock(return_value=MagicMock())
 
         with patch(
@@ -144,22 +145,112 @@ class TestMCPAuthMiddlewareBehavior:
 
     @pytest.mark.asyncio
     async def test_auth_failure_raises_before_tool_runs(self, middleware, mock_context):
-        """Auth-required tool with invalid token: error before tool body."""
+        """Auth-required tool with no credentials fails before the tool body."""
+        from fastmcp.exceptions import ToolError
+
         from src.core.exceptions import AdCPAuthenticationError
+        from tests.helpers import assert_envelope_shape
 
         mock_context.message = MagicMock()
         mock_context.message.name = "create_media_buy"
 
         call_next = AsyncMock()
+        auth_error = AdCPAuthenticationError("Invalid token")
 
-        with patch(
-            "src.core.mcp_auth_middleware.resolve_identity_from_context",
-            side_effect=AdCPAuthenticationError("Invalid token"),
+        with (
+            patch(
+                "src.core.mcp_auth_middleware.resolve_identity_from_context",
+                side_effect=auth_error,
+            ) as mock_resolve,
+            patch("src.core.tool_error_logging.record_boundary_error") as mock_record,
         ):
-            with pytest.raises(AdCPAuthenticationError):
+            with pytest.raises(ToolError) as exc_info:
                 await middleware.on_call_tool(mock_context, call_next)
 
+        mock_resolve.assert_called_once_with(
+            mock_context.fastmcp_context,
+            require_valid_token=True,
+        )
+        mock_record.assert_called_once_with(
+            "mcp",
+            "create_media_buy",
+            auth_error,
+            tenant_id=None,
+            principal_id=None,
+        )
+        assert_envelope_shape(
+            exc_info.value,
+            "AUTH_MISSING",
+            check_mcp_tool_error=True,
+            recovery="correctable",
+        )
         # Tool was NOT called
+        call_next.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_presented_rejected_credentials_emit_auth_invalid(self, middleware, mock_context):
+        """A legacy resolver error is classified from credential presence."""
+        from fastmcp.exceptions import ToolError
+
+        from src.core.exceptions import AdCPAuthenticationError
+        from tests.helpers import assert_envelope_shape
+
+        mock_context.message = MagicMock()
+        mock_context.message.name = "create_media_buy"
+        call_next = AsyncMock()
+
+        with (
+            patch(
+                "src.core.mcp_auth_middleware.extract_headers_from_context",
+                return_value={"authorization": "Bearer rejected-token"},
+            ),
+            patch(
+                "src.core.mcp_auth_middleware.resolve_identity_from_context",
+                side_effect=AdCPAuthenticationError("Invalid token"),
+            ),
+            patch("src.core.tool_error_logging.record_boundary_error"),
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await middleware.on_call_tool(mock_context, call_next)
+
+        assert_envelope_shape(
+            exc_info.value,
+            "AUTH_INVALID",
+            check_mcp_tool_error=True,
+            recovery="terminal",
+        )
+        call_next.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_existing_tenant_header_auth_failure_never_reaches_tenant_sinks(self, middleware, mock_context):
+        """A known client-selected tenant cannot receive unauthenticated observability."""
+        from fastmcp.exceptions import ToolError
+
+        from src.core.exceptions import AdCPAuthenticationError
+
+        mock_context.message = MagicMock()
+        mock_context.message.name = "create_media_buy"
+        mock_context.fastmcp_context.headers = {"x-adcp-tenant": "known-existing-tenant"}
+        call_next = AsyncMock()
+        auth_error = AdCPAuthenticationError("Invalid token")
+
+        with (
+            patch(
+                "src.core.mcp_auth_middleware.resolve_identity_from_context",
+                side_effect=auth_error,
+            ) as mock_resolve,
+            patch("src.services.activity_feed.activity_feed.log_error") as mock_feed,
+            patch("src.core.audit_logger.get_audit_logger") as mock_audit,
+        ):
+            with pytest.raises(ToolError):
+                await middleware.on_call_tool(mock_context, call_next)
+
+        mock_resolve.assert_called_once_with(
+            mock_context.fastmcp_context,
+            require_valid_token=True,
+        )
+        mock_feed.assert_not_called()
+        mock_audit.assert_not_called()
         call_next.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -169,6 +260,7 @@ class TestMCPAuthMiddlewareBehavior:
         mock_context.message.name = "create_media_buy"
 
         mock_identity = MagicMock(spec=ResolvedIdentity)
+        mock_identity.principal_id = "principal-1"
         call_next = AsyncMock(return_value=MagicMock())
 
         with (

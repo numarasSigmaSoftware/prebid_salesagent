@@ -13,6 +13,26 @@ import inspect
 
 from fastapi.params import Depends
 
+from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
+
+_REST_HANDLER_BY_SKILL = {
+    "get_adcp_capabilities": "get_capabilities",
+    "get_products": "get_products",
+    "list_authorized_properties": "list_authorized_properties",
+    "list_creative_formats": "list_creative_formats",
+}
+_REST_REQUIRED_HANDLERS = {
+    "create_media_buy",
+    "get_media_buy_delivery",
+    "list_accounts",
+    "list_creatives",
+    "sync_accounts",
+    "sync_creatives",
+    "update_media_buy",
+    "update_performance_index",
+}
+_ALL_REST_HANDLERS = set(_REST_HANDLER_BY_SKILL.values()) | _REST_REQUIRED_HANDLERS
+
 
 class TestResolveAuthDependencyExists:
     """auth_context.py should export resolve_auth and require_auth Depends."""
@@ -127,24 +147,46 @@ class TestRouteSignaturesUseDependsForIdentity:
         """No route handler should take a raw Request parameter anymore."""
         import src.routes.api_v1 as api_v1_mod
 
-        route_names = [
-            "get_products",
-            "get_capabilities",
-            "list_creative_formats",
-            "list_authorized_properties",
-            "create_media_buy",
-            "update_media_buy",
-            "get_media_buy_delivery",
-            "sync_creatives",
-            "list_creatives",
-            "update_performance_index",
-        ]
-        for name in route_names:
+        actual_route_names = {route.endpoint.__name__ for route in api_v1_mod.router.routes}
+        assert actual_route_names == _ALL_REST_HANDLERS
+
+        for name in actual_route_names:
             func = getattr(api_v1_mod, name)
             sig = inspect.signature(func)
             assert "request" not in sig.parameters, (
                 f"{name} still takes 'request' parameter — should use Depends for auth"
             )
+
+
+class TestRestAuthOptionalPolicyParity:
+    """REST route signatures must implement the shared cross-transport policy."""
+
+    def test_optional_handler_oracle_covers_exactly_the_shared_policy(self):
+        assert set(_REST_HANDLER_BY_SKILL) == set(AUTH_OPTIONAL_SKILLS)
+
+    def test_optional_handlers_use_the_dependency_derived_from_shared_policy(self):
+        import src.routes.api_v1 as api_v1_mod
+        from src.core.auth_context import resolve_auth
+
+        dependencies = api_v1_mod.REST_AUTH_OPTIONAL_DEPENDENCIES
+        assert set(dependencies) == set(AUTH_OPTIONAL_SKILLS)
+        assert all(dependency is resolve_auth for dependency in dependencies.values())
+
+        for skill_name, handler_name in _REST_HANDLER_BY_SKILL.items():
+            handler = getattr(api_v1_mod, handler_name)
+            identity = inspect.signature(handler).parameters["identity"]
+            assert identity.default is dependencies[skill_name], (
+                f"{handler_name} does not use the shared auth-optional dependency for {skill_name}"
+            )
+
+    def test_every_non_optional_handler_remains_auth_required(self):
+        import src.routes.api_v1 as api_v1_mod
+        from src.core.auth_context import require_auth
+
+        for handler_name in _REST_REQUIRED_HANDLERS:
+            handler = getattr(api_v1_mod, handler_name)
+            identity = inspect.signature(handler).parameters["identity"]
+            assert identity.default is require_auth, f"{handler_name} must require authentication"
 
 
 class TestResolveAuthDepBehavior:
@@ -194,15 +236,46 @@ class TestRequireAuthDepBehavior:
     """Test the require_auth dependency function behavior directly."""
 
     def test_raises_without_token(self):
-        """require_auth dep should raise AdCPAuthenticationError without token."""
+        """require_auth dep should raise AUTH_MISSING without a credential header."""
         import pytest
 
         from src.core.auth_context import AuthContext, _require_auth_dep
-        from src.core.exceptions import AdCPAuthenticationError
+        from src.core.exceptions import AdCPAuthMissingError
 
         auth_ctx = AuthContext.unauthenticated()
-        with pytest.raises(AdCPAuthenticationError, match="Authentication required"):
+        with pytest.raises(AdCPAuthMissingError, match="Authentication required") as exc_info:
             _require_auth_dep(auth_ctx)
+
+        assert exc_info.value.error_code == "AUTH_MISSING"
+        assert exc_info.value.recovery == "correctable"
+
+    def test_rejects_malformed_presented_credentials_as_auth_invalid(self):
+        """A credential header that yields no token is rejected, not treated as absent."""
+        import pytest
+
+        from src.core.auth_context import AuthContext, _require_auth_dep
+        from src.core.exceptions import AdCPAuthInvalidError
+
+        auth_ctx = AuthContext.unauthenticated(headers={"Authorization": "not-bearer"})
+        with pytest.raises(AdCPAuthInvalidError) as exc_info:
+            _require_auth_dep(auth_ctx)
+
+        assert exc_info.value.error_code == "AUTH_INVALID"
+        assert exc_info.value.recovery == "terminal"
+
+    def test_empty_legacy_header_without_authorization_is_auth_missing(self):
+        """The spec split is defined by the standard Authorization header."""
+        import pytest
+
+        from src.core.auth_context import AuthContext, _require_auth_dep
+        from src.core.exceptions import AdCPAuthMissingError
+
+        auth_ctx = AuthContext.unauthenticated(headers={"x-adcp-auth": ""})
+        with pytest.raises(AdCPAuthMissingError) as exc_info:
+            _require_auth_dep(auth_ctx)
+
+        assert exc_info.value.error_code == "AUTH_MISSING"
+        assert exc_info.value.recovery == "correctable"
 
     def test_returns_identity_with_valid_token(self):
         """require_auth dep should return ResolvedIdentity with valid token."""

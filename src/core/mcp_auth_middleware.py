@@ -1,6 +1,7 @@
 """FastMCP middleware for centralized MCP identity resolution.
 
-Resolves identity once per tool call and stores it on FastMCP context state.
+Makes one authoritative authentication decision per tool call and stores the
+resolved identity on FastMCP context state.
 Tool functions read the pre-resolved identity via ctx.get_state('identity')
 instead of calling resolve_identity_from_context() directly.
 """
@@ -11,21 +12,14 @@ from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 
-from src.core.transport_helpers import resolve_identity_from_context
+from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
+from src.core.transport_helpers import extract_headers_from_context, resolve_identity_from_context
 
 logger = logging.getLogger(__name__)
 
-# Discovery tools that work without authentication.
-# All other tools require a valid auth token.
-AUTH_OPTIONAL_TOOLS = frozenset(
-    {
-        "get_adcp_capabilities",
-        "get_products",
-        "list_accounts",
-        "list_creative_formats",
-        "list_authorized_properties",
-    }
-)
+# Compatibility alias for callers/tests that import the middleware policy.
+# The transport-neutral object is the single source of truth.
+AUTH_OPTIONAL_TOOLS = AUTH_OPTIONAL_SKILLS
 
 
 class MCPAuthMiddleware(Middleware):
@@ -43,11 +37,58 @@ class MCPAuthMiddleware(Middleware):
     ) -> ToolResult:
         tool_name = context.message.name
         require_auth = tool_name not in AUTH_OPTIONAL_TOOLS
+        headers = extract_headers_from_context(context.fastmcp_context)
 
-        identity = resolve_identity_from_context(
-            context.fastmcp_context,
-            require_valid_token=require_auth,
-        )
+        try:
+            identity = resolve_identity_from_context(
+                context.fastmcp_context,
+                require_valid_token=require_auth,
+            )
+            if require_auth and (identity is None or not identity.principal_id):
+                from src.core.exceptions import classify_auth_credentials_error
+
+                raise classify_auth_credentials_error(
+                    headers,
+                    missing_message="Authentication required for tool invocation",
+                )
+        except Exception as error:
+            # Identity resolution runs before the decorated tool body, so its
+            # failures cannot reach with_error_logging. Reuse both halves of the
+            # shared boundary path: record exactly once, then preserve the
+            # two-layer MCP wire contract.
+            from src.core.exceptions import (
+                AdCPAuthenticationError,
+                AdCPAuthInvalidError,
+                AdCPAuthMissingError,
+                classify_auth_credentials_error,
+            )
+            from src.core.tool_error_logging import (
+                _translate_to_tool_error,
+                record_boundary_error,
+            )
+
+            wire_error = error
+            if (
+                require_auth
+                and isinstance(error, AdCPAuthenticationError)
+                and not isinstance(error, (AdCPAuthMissingError, AdCPAuthInvalidError))
+            ):
+                wire_error = classify_auth_credentials_error(
+                    headers,
+                    missing_message="Authentication required for tool invocation",
+                )
+
+            # A rejected request has no trusted principal. Client-controlled
+            # host/x-adcp-tenant headers are routing hints, not proof that the
+            # caller may write into that tenant's activity or audit sinks.
+            record_boundary_error(
+                "mcp",
+                tool_name,
+                error,
+                tenant_id=None,
+                principal_id=None,
+            )
+            _translate_to_tool_error(wire_error)
 
         if context.fastmcp_context:
             await context.fastmcp_context.set_state("identity", identity, serializable=False)

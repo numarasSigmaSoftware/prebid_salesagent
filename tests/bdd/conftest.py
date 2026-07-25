@@ -658,12 +658,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # code doesn't implement the expected validation.
         _UC003_EXT_XFAILS: dict[str, str] = {
             # Error code mismatches (production uses different codes than spec)
-            # Graduated (#1417/gh8p.10): both auth error paths now carry a buyer-facing
-            # suggestion. The REST auth boundary (_require_auth_dep) raises
-            # AdCPAuthRequiredError with AUTH_REQUIRED_SUGGESTION (REST no-identity envelope
-            # no longer drops it), and the unknown-principal ownership check
-            # (AdCPAuthorizationError) carries a "verify your x-adcp-auth token" suggestion.
-            # T-UC-003-ext-a / -ext-a-unknown pass on a2a/mcp/rest.
+            # Graduated (#1417/gh8p.10): both auth error paths now carry pinned
+            # buyer-facing guidance. Every wire boundary uses the pinned
+            # AUTH_MISSING/AUTH_INVALID split. The BDD assertion grades each
+            # transport's exact code, recovery, and suggestion.
             "T-UC-003-ext-c": "production returns AUTHORIZATION_ERROR, spec expects ACCOUNT_NOT_FOUND",
             # Graduated: T-UC-003-ext-d, T-UC-003-ext-d-negative (production now returns BUDGET_TOO_LOW)
             # Production doesn't validate these cases at all
@@ -2684,10 +2682,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # Graduated: T-UC-011-list-status-filter payment_required (all 4 transports pass — status now mapped)
         # Graduated: T-UC-011-ext-g-echo list_accounts (all 4 transports pass — context echo implemented)
 
-        # Graduated: no-token/no-principal scenarios now pass after Gherkin
-        # correction to AUTH_REQUIRED (commit 13b4ca8d). Production returns
-        # AUTH_REQUIRED on rest/e2e_rest, matching the corrected Gherkin.
-        # Graduated: expired-token also passes — AUTH_REQUIRED matches.
+        # Graduated: no-token/no-principal and expired-token scenarios grade the
+        # pinned auth contract. Every wire transport uses
+        # AUTH_MISSING/AUTH_INVALID.
 
         # T-UC-011-ext-g-echo-error: impl passes (AdCPError carries context=req.context);
         # a2a/mcp/rest xfail+note via the context-echo Then step (pytest.xfail) because the

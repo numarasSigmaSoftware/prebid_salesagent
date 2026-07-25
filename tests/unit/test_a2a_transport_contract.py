@@ -23,16 +23,16 @@ from starlette.testclient import TestClient
 from src.a2a_server.adcp_a2a_server import DISCOVERY_SKILLS as _PROD_DISCOVERY_SKILLS
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.app import app
+from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
 from src.core.exceptions import AdCPAuthenticationError
+from src.core.mcp_auth_middleware import AUTH_OPTIONAL_TOOLS
 from tests.helpers import assert_envelope_shape
+from tests.helpers.pinned_schema import pinned_error_code_suggestion
 from tests.utils.a2a_helpers import make_test_a2a_identity
 
 _TEST_IDENTITY = make_test_a2a_identity()
-_AUTH_MISSING_SUGGESTION = "provide credentials via the auth header and retry"
-_AUTH_INVALID_SUGGESTION = (
-    "do NOT auto-retry — credentials were rejected; rotate keys, refresh OAuth tokens once if applicable, "
-    "otherwise escalate to a human"
-)
+_AUTH_MISSING_SUGGESTION = pinned_error_code_suggestion("AUTH_MISSING")
+_AUTH_INVALID_SUGGESTION = pinned_error_code_suggestion("AUTH_INVALID")
 
 # ---------------------------------------------------------------------------
 # Explicit per-skill contract. Every registered skill MUST have an entry here
@@ -54,7 +54,7 @@ SKILL_METADATA: dict[str, dict] = {
     "get_products": {"classification": "implemented", "advertised": True, "discovery": True, "params": {}},
     "create_media_buy": {"classification": "implemented", "advertised": True, "discovery": False, "params": {}},
     "list_creative_formats": {"classification": "implemented", "advertised": True, "discovery": True, "params": {}},
-    "list_accounts": {"classification": "implemented", "advertised": True, "discovery": True, "params": {}},
+    "list_accounts": {"classification": "implemented", "advertised": True, "discovery": False, "params": {}},
     "sync_accounts": {"classification": "implemented", "advertised": True, "discovery": False, "params": {}},
     "list_authorized_properties": {
         "classification": "implemented",
@@ -251,6 +251,8 @@ class TestA2AAuthContract:
         assert "auth" in error_msg or "token" in error_msg, (
             f"Error for '{skill}' should mention auth/token: {body['error']['message']}"
         )
+        assert_envelope_shape(body["error"]["data"], "AUTH_MISSING", recovery="correctable")
+        assert body["error"]["data"]["adcp_error"]["suggestion"] == _AUTH_MISSING_SUGGESTION
 
     @pytest.mark.parametrize(
         ("headers", "resolver_error", "expected_code", "expected_recovery", "expected_suggestion"),
@@ -333,9 +335,16 @@ class TestA2AAuthContract:
             else nullcontext()
         )
 
-        with resolver_patch:
+        with resolver_patch as mock_resolve:
             response = client.post("/a2a", json=payload, headers=headers)
 
+        if resolver_error:
+            assert mock_resolve is not None
+            assert len(mock_resolve.call_args_list) == 1
+            resolve_call = mock_resolve.call_args_list[0]
+            assert resolve_call.kwargs["auth_token"] == "invalid-task-token"
+            assert resolve_call.kwargs["require_valid_token"] is True
+            assert resolve_call.kwargs["protocol"] == "a2a"
         body = response.json()
         assert body["jsonrpc"] == "2.0"
         assert body["id"] == "task-auth-request"
@@ -352,12 +361,13 @@ class TestA2AAuthContract:
         assert adcp_error["suggestion"] == expected_suggestion
         assert body["error"]["message"] == adcp_error["message"]
 
+    @pytest.mark.parametrize("skill", ["create_media_buy", "list_accounts"])
     @pytest.mark.parametrize("authorization", ["Basic malformed", "Bearer "], ids=["basic", "empty-bearer"])
-    def test_non_discovery_skill_rejects_presented_unusable_credentials(self, client, authorization):
+    def test_non_discovery_skill_rejects_presented_unusable_credentials(self, client, authorization, skill):
         """The message/send auth guard classifies malformed presented credentials as AUTH_INVALID."""
         response = client.post(
             "/a2a",
-            json=_build_jsonrpc("create_media_buy"),
+            json=_build_jsonrpc(skill),
             headers={
                 "Authorization": authorization,
                 "Content-Type": "application/json",
@@ -393,15 +403,14 @@ class TestA2AAuthContract:
             testing_context=ANY,
         )
 
-    @patch(
-        "src.core.resolved_identity.resolve_identity",
-        side_effect=AdCPAuthenticationError("Authentication token is invalid or expired."),
-    )
-    def test_invalid_x_adcp_auth_does_not_fall_back_to_valid_bearer(self, mock_resolve, client):
+    @patch("src.core.resolved_identity.resolve_identity")
+    @pytest.mark.parametrize("skill", ["create_media_buy", "list_accounts"])
+    def test_invalid_x_adcp_auth_does_not_fall_back_to_valid_bearer(self, mock_resolve, client, skill):
         """A rejected x-adcp-auth credential cannot be bypassed by a valid-looking Bearer token."""
+        mock_resolve.side_effect = AdCPAuthenticationError("Authentication token is invalid or expired.")
         response = client.post(
             "/a2a",
-            json=_build_jsonrpc("create_media_buy"),
+            json=_build_jsonrpc(skill),
             headers={
                 "x-adcp-auth": "rejected-x-adcp-token",
                 "Authorization": "Bearer valid-looking-fallback",
@@ -414,13 +423,11 @@ class TestA2AAuthContract:
         assert body["error"]["code"] == -32600
         assert_envelope_shape(body["error"]["data"], "AUTH_INVALID", recovery="terminal")
         assert body["error"]["data"]["adcp_error"]["suggestion"] == _AUTH_INVALID_SUGGESTION
-        mock_resolve.assert_called_once_with(
-            headers=ANY,
-            auth_token="rejected-x-adcp-token",
-            require_valid_token=True,
-            protocol="a2a",
-            testing_context=ANY,
-        )
+        calls = mock_resolve.call_args_list
+        assert len(calls) == 1
+        assert calls[0].kwargs["require_valid_token"] is True
+        assert calls[0].kwargs["auth_token"] == "rejected-x-adcp-token"
+        assert calls[0].kwargs["protocol"] == "a2a"
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +768,11 @@ class TestA2ARegistryContract:
             f"discovery classification drift — production-only: {set(_PROD_DISCOVERY_SKILLS) - hand_authored}, "
             f"oracle-only: {hand_authored - set(_PROD_DISCOVERY_SKILLS)}"
         )
+
+    def test_transports_share_the_canonical_auth_optional_policy(self):
+        """A2A and MCP must import, not copy, the transport-neutral auth policy."""
+        assert _PROD_DISCOVERY_SKILLS is AUTH_OPTIONAL_SKILLS
+        assert AUTH_OPTIONAL_TOOLS is AUTH_OPTIONAL_SKILLS
 
 
 # ---------------------------------------------------------------------------

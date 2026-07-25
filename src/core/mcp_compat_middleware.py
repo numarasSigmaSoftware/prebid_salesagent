@@ -16,7 +16,6 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
-from src.core.exceptions import normalize_to_adcp_error
 from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params
 from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
 
@@ -118,10 +117,10 @@ class RequestCompatMiddleware(Middleware):
                                 raise
                             exc = retry_exc
 
-            # Normalize once for the audit record, then pass the raw exception to
-            # _translate_to_tool_error so the emitted AdCPToolError keeps it as
-            # __cause__. The translator intentionally normalizes it a second time.
-            typed = normalize_to_adcp_error(exc)
+            # Preserve raw exception provenance for both observability and wire
+            # translation. Each boundary derives the semantic VALIDATION_ERROR
+            # independently while scrubbing validator messages that may include
+            # rejected secret values.
             tenant_id = None
             principal_id = None
             if context.fastmcp_context is not None:
@@ -135,7 +134,7 @@ class RequestCompatMiddleware(Middleware):
             record_boundary_error(
                 "mcp",
                 tool_name,
-                typed,
+                exc,
                 tenant_id=tenant_id,
                 principal_id=principal_id,
             )

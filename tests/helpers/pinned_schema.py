@@ -3,7 +3,7 @@
 Single source of truth for schema-shape assertions in tests (e.g. the BDD step
 "the response should be schema-valid against <file>"). Reads the committed
 fixtures under ``tests/fixtures/adcp_schemas_pinned/``, pinned at
-adcontextprotocol/adcp@04f59d2d5 (tag ``v3.1-04f59d2d5``). It never fetches the
+adcontextprotocol/adcp@467fd93d (tag ``v3.1.1``). It never fetches the
 network — ``/schemas/latest`` drifts and would make tests non-deterministic.
 
 ``$ref`` resolution (e.g. ``/schemas/core/format-id.json``) is wired through a
@@ -17,6 +17,7 @@ a HARD FAILURE, never a silent skip — mirroring ``load_json_schema`` in
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,34 @@ from jsonschema.validators import Draft7Validator
 from referencing.jsonschema import DRAFT7
 
 _PINNED_SCHEMA_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "adcp_schemas_pinned"
+
+
+@lru_cache(maxsize=1)
+def pinned_error_code_metadata() -> dict[str, dict[str, str]]:
+    """Return error-code metadata from the vendored AdCP schema pin."""
+    schema = _load_by_ref("/schemas/enums/error-code.json")
+    metadata = schema.get("enumMetadata")
+    if not isinstance(metadata, dict):
+        raise AssertionError("Pinned error-code.json has no enumMetadata object")
+
+    entries: dict[str, dict[str, str]] = {}
+    for code, entry in metadata.items():
+        if code.startswith("$"):
+            continue
+        if not isinstance(entry, dict):
+            raise AssertionError(f"Pinned error code {code!r} metadata is not an object")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in entry.items()):
+            raise AssertionError(f"Pinned error code {code!r} metadata contains non-string fields")
+        entries[code] = entry
+    return entries
+
+
+def pinned_error_code_suggestion(code: str) -> str:
+    """Return the authoritative buyer suggestion for a pinned error code."""
+    suggestion = pinned_error_code_metadata().get(code, {}).get("suggestion")
+    if not isinstance(suggestion, str) or not suggestion:
+        raise AssertionError(f"Pinned error code {code!r} has no non-empty suggestion")
+    return suggestion
 
 
 def _load_by_ref(schema_ref: str) -> dict[str, Any]:

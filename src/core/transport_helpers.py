@@ -34,6 +34,23 @@ def _make_lazy_tenant(tenant_id: str) -> LazyTenantContext:
     return LazyTenantContext(tenant_id)
 
 
+def extract_headers_from_context(ctx: Context | ToolContext | None) -> dict:
+    """Read request headers once from FastMCP dependencies or context fallback."""
+    headers = None
+    try:
+        headers = get_http_headers(include_all=True)
+    except Exception:
+        logger.debug("get_http_headers() unavailable, trying fallback", exc_info=True)
+
+    if not headers and ctx is not None:
+        if hasattr(ctx, "meta") and ctx.meta and "headers" in ctx.meta:
+            headers = ctx.meta["headers"]
+        elif hasattr(ctx, "headers"):
+            headers = ctx.headers
+
+    return dict(headers or {})
+
+
 def resolve_identity_from_context(
     ctx: Context | ToolContext | None,
     require_valid_token: bool = True,
@@ -66,18 +83,7 @@ def resolve_identity_from_context(
         )
 
     # Handle FastMCP Context — extract headers and resolve
-    headers = None
-    try:
-        headers = get_http_headers(include_all=True)
-    except Exception:
-        logger.debug("get_http_headers() unavailable, trying fallback", exc_info=True)
-
-    # Fallback to context.meta if available
-    if not headers and ctx is not None:
-        if hasattr(ctx, "meta") and ctx.meta and "headers" in ctx.meta:
-            headers = ctx.meta["headers"]
-        elif hasattr(ctx, "headers"):
-            headers = ctx.headers
+    headers = extract_headers_from_context(ctx)
 
     if not headers:
         if ctx is None:

@@ -11,13 +11,14 @@ to help buyer agents decide whether to retry, fix, or abandon a request.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from adcp.types import ContextObject
 
@@ -435,25 +436,22 @@ class AdCPInvalidRequestError(AdCPValidationError):
     _default_error_code: ClassVar[str] = "INVALID_REQUEST"
 
 
-AUTH_REQUIRED_SUGGESTION = "Provide valid credentials (x-adcp-auth token)."
+AUTH_REQUIRED_CANONICAL_SUGGESTION = (
+    "provide credentials when missing; do NOT auto-retry rejected credentials — escalate for rotation"
+)
+# Backward-compatible name used by legacy AUTH_REQUIRED raise sites. The value
+# remains the pinned enumMetadata suggestion so those paths cannot advise an
+# unsafe retry for rejected credentials.
+AUTH_REQUIRED_SUGGESTION = AUTH_REQUIRED_CANONICAL_SUGGESTION
 
 
 class AdCPAuthenticationError(AdCPError):
-    """Missing or invalid authentication credentials (401).
+    """Legacy missing-or-invalid authentication failure (401).
 
-    Emits the standard ``AUTH_REQUIRED`` wire code — the sole authentication
-    error code in the AdCP 3.1 error-code enum and adcp 5.7
-    ``STANDARD_ERROR_CODES``. Its enum description explicitly covers both
-    "credentials missing" and "credentials presented but rejected", so it is
-    the canonical code for every authentication failure.
-
-    Recovery is ``correctable`` per the pinned AdCP error-code enum
-    (``AUTH_REQUIRED.recovery == "correctable"``; released 3.1.0 agrees) —
-    not the ``terminal`` base default. The enum carries operationally distinct
-    sub-cases (missing credentials → retry; presented-but-rejected → escalate),
-    but its single canonical ``recovery`` classification is ``correctable``,
-    and the wire contract is graded against that enum (#1417,
-    superseding the earlier "storyboards grade only the code" judgment).
+    Emits deprecated ``AUTH_REQUIRED`` only where lower-layer business helpers
+    lack the wire credential state needed to select AdCP 3.1.1
+    ``AUTH_MISSING`` or ``AUTH_INVALID``. Its pinned recovery remains
+    ``correctable`` and its suggestion preserves both sub-cases.
     """
 
     _default_status_code: ClassVar[int] = 401
@@ -490,6 +488,23 @@ class AdCPAuthInvalidError(AdCPAuthenticationError):
         "do NOT auto-retry — credentials were rejected; rotate keys, refresh OAuth tokens once if applicable, "
         "otherwise escalate to a human"
     )
+
+
+def classify_auth_credentials_error(
+    headers: Mapping[str, str],
+    *,
+    missing_message: str = "Authentication credentials are required.",
+    invalid_message: str = "Authentication credentials were rejected.",
+) -> AdCPAuthMissingError | AdCPAuthInvalidError:
+    """Classify absent credentials separately from presented unusable credentials.
+
+    AdCP 3.1.1 defines the split by presence of the standard Authorization
+    header. The seller may still accept legacy ``x-adcp-auth`` credentials,
+    but that extension does not change the standard wire classifier.
+    """
+    if any(name.lower() == "authorization" for name in headers):
+        return AdCPAuthInvalidError(invalid_message)
+    return AdCPAuthMissingError(missing_message)
 
 
 class AdCPAuthorizationError(AdCPError):
@@ -1044,16 +1059,10 @@ def build_two_layer_error_envelope(exc: AdCPError) -> dict[str, Any]:
 
 # Canonical buyer-facing suggestions from error-code.json enumMetadata (AdCP 3.1.1):
 # each code carries its own default hint, so a VALIDATION_ERROR must not borrow
-# INVALID_REQUEST's text. Text is byte-identical to the pinned enum — graded by
-# the pinned-fixture oracle in test_error_boundary_translation. NOTE the deliberate
-# split from ``AUTH_REQUIRED_SUGGESTION`` above: that one is the TYPED auth error's
-# server-specific hint (names the x-adcp-auth token, graded by BDD); this one is the
-# spec enum's canonical text, used where no server-specific context exists (the scrub).
+# INVALID_REQUEST's text. Text is byte-identical to the pinned enum and graded
+# by the pinned-fixture oracle in test_error_boundary_translation.
 INVALID_REQUEST_SUGGESTION = "check request parameters and fix"
 VALIDATION_ERROR_SUGGESTION = "review error details and fix field values"
-AUTH_REQUIRED_CANONICAL_SUGGESTION = (
-    "provide credentials when missing; do NOT auto-retry rejected credentials — escalate for rotation"
-)
 
 
 def first_validation_error_field(validation_error: ValidationError) -> str | None:
@@ -1283,13 +1292,21 @@ _SANITIZED_BY_WIRE_CODE: dict[str, tuple[str, str]] = {
 
 
 def _scrubbed_error(
-    *, error_code: str, wire_code: str, recovery: RecoveryHint, status_code: int, context: Any
+    *,
+    error_code: str,
+    wire_code: str,
+    recovery: RecoveryHint,
+    status_code: int,
+    context: Any,
+    field: str | None = None,
 ) -> AdCPError:
     """A wire-safe ``AdCPError`` carrying the given code/recovery but a SANITIZED, secret-free
     message + suggestion selected by the BUYER-FACING ``wire_code`` (so the human text matches the
-    machine code), with ``details``/``field`` dropped. The single scrub constructor for
-    ``safe_adcp_error`` so message replacement can't drift between call sites. Codes without a
-    category entry fall back to the generic internal message + a recovery-matched suggestion."""
+    machine code), with ``details`` dropped. A caller may preserve a field path derived from a
+    structured validator; raw messages and input values are never retained. The single scrub
+    constructor for ``safe_adcp_error`` so message replacement can't drift between call sites.
+    Codes without a category entry fall back to the generic internal message + a
+    recovery-matched suggestion."""
     message, suggestion = _SANITIZED_BY_WIRE_CODE.get(
         wire_code, (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(recovery))
     )
@@ -1298,20 +1315,20 @@ def _scrubbed_error(
         error_code=error_code,
         status_code=status_code,
         recovery=recovery,
+        field=field,
         suggestion=suggestion,
         context=context,
     )
 
 
 def safe_adcp_error(exc: Exception) -> AdCPError:
-    """Return a wire-safe ``AdCPError`` — THE sanitization policy for the boundaries that have
-    ADOPTED it: the A2A failed-Task / JSON-RPC ``InternalError`` paths, and the webhook push path
-    via ``ContextManager.audit_workflow_step_failure``.
+    """Return a wire-safe ``AdCPError`` — THE sanitization policy for MCP, A2A, REST, and the
+    webhook push path via ``ContextManager.audit_workflow_step_failure``.
 
-    Adoption is NOT universal, so this is not a claim that every buyer-facing emission is
-    scrubbed: the MCP/REST boundaries and the approval-service webhook still build their own
-    messages and depend on source-site scrubbing. Route any NEW buyer-facing error surface
-    through here instead of adding a second policy.
+    Buyer-facing boundaries route exceptions through this helper so raw built-in messages cannot
+    expose secrets. The approval-service webhook still builds its own message and depends on
+    source-site scrubbing; route any NEW buyer-facing error surface through this policy instead of
+    adding a second one.
 
     Two ORTHOGONAL decisions, deliberately kept separate — conflating them is what leaked secrets
     (a raw ``ValueError`` pre-normalized to a *trusted* ``AdCPValidationError`` whose raw message
@@ -1374,4 +1391,5 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         recovery=normalized.recovery,
         status_code=normalized.status_code,
         context=normalized.context,
+        field=normalized.field,
     )

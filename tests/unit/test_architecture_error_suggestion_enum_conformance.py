@@ -16,22 +16,16 @@ between the constant and the spec — this oracle grounds it in the pinned enum.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from src.core import exceptions
-
-_PINNED_ENUM_PATH = Path(__file__).parent.parent / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
+from tests.helpers.pinned_schema import pinned_error_code_metadata
 
 
 def _pinned_suggestion_by_code() -> dict[str, str]:
     """Return ``{error_code: suggestion}`` from the pinned enumMetadata block."""
-    meta = json.loads(_PINNED_ENUM_PATH.read_text())["enumMetadata"]
-    return {
-        code: entry["suggestion"] for code, entry in meta.items() if isinstance(entry, dict) and entry.get("suggestion")
-    }
+    meta = pinned_error_code_metadata()
+    return {code: entry["suggestion"] for code, entry in meta.items() if entry.get("suggestion")}
 
 
 _SUGGESTION_BY_CODE = _pinned_suggestion_by_code()
@@ -40,6 +34,8 @@ _SUGGESTION_BY_CODE = _pinned_suggestion_by_code()
 # canonical buyer-facing suggestion. Add a row when a new canonical-suggestion
 # constant is introduced so it is pinned to the spec from birth.
 _CANONICAL_SUGGESTION_CONSTANTS = [
+    ("AUTH_REQUIRED_CANONICAL_SUGGESTION", "AUTH_REQUIRED"),
+    ("AUTH_REQUIRED_SUGGESTION", "AUTH_REQUIRED"),
     ("INVALID_REQUEST_SUGGESTION", "INVALID_REQUEST"),
     ("VALIDATION_ERROR_SUGGESTION", "VALIDATION_ERROR"),
 ]
@@ -50,6 +46,9 @@ def test_pinned_enum_suggestions_loaded() -> None:
     parametrized oracle below can never silently degrade to zero graded cases."""
     assert len(_SUGGESTION_BY_CODE) >= 50, (
         f"Expected the pinned enumMetadata to define suggestions for many codes, got {len(_SUGGESTION_BY_CODE)}"
+    )
+    assert "$comment" not in pinned_error_code_metadata(), (
+        "Schema annotations must not leak through the typed error-code metadata accessor"
     )
 
 

@@ -43,17 +43,10 @@ this document.
 
 ## Behavior target vs SDK pin
 
-The SDK **pin** (3.1.0-beta.3) fixes the request/response *type shapes* we
-build against. It does **not** always fix the graded *behavior*. One field
-diverges deliberately: the `media_buy_status` dual-emit on
-create-/update-media-buy responses.
-
-- **beta.3 storyboard** (`dist/compliance/3.1.0-beta.3/.../pending_creatives_to_start.yaml`,
-  ~L131-134) grades the body `status` as `field_value_or_absent` that MUST equal
-  `media_buy_status` — the deprecated "both identical" model (#4908).
-- **Target GA** — graded by the published **3.1.0** compliance
-  (`dist/compliance/3.1.0/.../pending_creatives_to_start.yaml`, ~L146-153;
-  `3.1.1` is byte-identical for this storyboard) — grades `media_buy_status`
+The SDK **pin** (3.1.1) fixes the request/response *type shapes* we
+build against. It does not replace the authoritative prose and compliance
+storyboards for protocol behavior. For example, the published **3.1.1**
+`pending_creatives_to_start.yaml` storyboard grades `media_buy_status`
   as `field_value` (the DOMAIN status) and the top-level `status` as
   `field_value` `'completed'` (the PROTOCOL `TaskStatus`, protocol envelope).
   The two are DIFFERENT namespaces and are NOT identical.
@@ -66,7 +59,7 @@ validator only backfills the deprecated **body** `status` from the domain
 `media_buy_status` for the deprecation window; it does not touch the wire
 top-level `status`.
 
-**Known SDK type defect (SDK not authoritative):** adcp 5.7 types the response
+**Historical SDK type defect (SDK not authoritative):** adcp 5.7 typed the response
 `status` as `MediaBuyStatus | None`, but the wire top-level `status` carries a
 protocol `TaskStatus` (`submitted` / `completed`). This is fine because that
 protocol value lives on `TaskResultEnvelope.status` (typed `str`), never on the
@@ -76,6 +69,30 @@ SDK-typed body field. Grounding for the divergent behavior is the value-pinned
 `then_dual_emit_media_buy_status` step in
 `tests/bdd/steps/domain/uc002_create_media_buy.py` (see PR #1417).
 `tests/unit/test_adcp_spec_version.py` only guards the SDK pin, not this behavior.
+
+## Authentication error classification
+
+The immutable AdCP **v3.1.1** source is tag `v3.1.1`, commit
+`467fd93d77112baf9e094e18980119edcd3a4d07`. Its
+`static/schemas/source/enums/error-code.json` metadata requires sellers to
+return:
+
+- `AUTH_MISSING` when no standard `Authorization` header was included
+  (`correctable`: provide credentials and retry).
+- `AUTH_INVALID` when an `Authorization` header was present but rejected
+  (`terminal`, except the spec's one-time OAuth refresh allowance).
+
+Prebid Sales Agent applies that split at every A2A, MCP, and REST wire
+boundary. The legacy `x-adcp-auth` extension remains accepted as an input
+channel, but it does not change the standard header-presence classifier.
+Direct `_impl` helpers retain deprecated `AUTH_REQUIRED` only where no wire
+credential-presence information exists.
+
+This behavior is **ungraded** by the official conformance storyboards:
+`dist/compliance/3.1.1/universal/error-compliance.yaml` contains no
+`AUTH_*` scenario. The normative enum mandate is covered by the repository's
+cross-transport wire tests and the pinned fixture at
+`tests/fixtures/adcp_schemas_pinned/enums/error-code.json`.
 
 ## Wire negotiation
 

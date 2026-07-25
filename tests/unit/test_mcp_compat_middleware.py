@@ -4,15 +4,16 @@ Tests that the middleware calls normalize_request_params and replaces
 the context message when translations are applied.
 """
 
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.exceptions import AdCPValidationError
 from src.core.mcp_compat_middleware import RequestCompatMiddleware
 from src.core.request_compat import NormalizationResult
 from src.core.tool_error_logging import AdCPToolError
 from tests.helpers import assert_envelope_shape, assert_no_raw_validation_leak
+from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
 
 
 @pytest.fixture()
@@ -50,16 +51,6 @@ def _typeadapter_validation_error(tool_name: str, line_error: dict):
         title=f"call[{tool_name}]",
         line_errors=[line_error],
     )
-
-
-class _ValidationErrorRecord:
-    """Matcher that pins the typed boundary error passed to the recorder."""
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, AdCPValidationError) and other.error_code == "VALIDATION_ERROR"
-
-    def __repr__(self) -> str:
-        return "AdCPValidationError(error_code='VALIDATION_ERROR')"
 
 
 class TestMiddlewareCallsNormalizer:
@@ -228,11 +219,11 @@ class TestTypeAdapterValidationEnvelope:
             exc_info.value,
             "VALIDATION_ERROR",
             recovery="correctable",
-            message_substr=message,
             check_mcp_tool_error=True,
         )
         assert exc_info.value.envelope["errors"][0]["field"] == field
         wire_message = exc_info.value.envelope["errors"][0]["message"]
+        assert message not in wire_message
         assert_no_raw_validation_leak(wire_message)
 
     @pytest.mark.asyncio
@@ -262,10 +253,46 @@ class TestTypeAdapterValidationEnvelope:
         record_error.assert_called_once_with(
             "mcp",
             "list_creatives",
-            _ValidationErrorRecord(),
+            validation_error,
             tenant_id="tenant-1",
             principal_id="buyer-1",
         )
+
+    @pytest.mark.asyncio
+    async def test_typeadapter_secret_is_scrubbed_from_activity_and_audit_sinks(self, middleware):
+        """Raw validator provenance reaches the recorder so tenant sinks receive safe text."""
+        ctx = _make_context("sync_creatives", {"creatives": [SECRET_BEARING_MESSAGE]})
+        identity = MagicMock(tenant_id="tenant-1", principal_id="buyer-1")
+        ctx.fastmcp_context = MagicMock()
+        ctx.fastmcp_context.get_state = AsyncMock(return_value=identity)
+        validation_error = _typeadapter_validation_error(
+            "sync_creatives",
+            {
+                "type": "value_error",
+                "loc": ("creatives", 0),
+                "input": SECRET_BEARING_MESSAGE,
+                "ctx": {"error": ValueError(SECRET_BEARING_MESSAGE)},
+            },
+        )
+        feed_records: list[dict[str, object]] = []
+        audit_records: list[dict[str, object]] = []
+        audit_logger = SimpleNamespace(log_operation=lambda **kwargs: audit_records.append(kwargs))
+
+        with (
+            patch("src.core.config.is_production", return_value=False),
+            patch(
+                "src.services.activity_feed.activity_feed.log_error",
+                side_effect=lambda **kwargs: feed_records.append(kwargs),
+            ),
+            patch("src.core.audit_logger.get_audit_logger", return_value=audit_logger),
+            pytest.raises(AdCPToolError),
+        ):
+            await middleware.on_call_tool(ctx, AsyncMock(side_effect=validation_error))
+
+        assert len(feed_records) == 1
+        assert len(audit_records) == 1
+        assert_no_secret_leak(feed_records[0], context="MCP validation activity payload")
+        assert_no_secret_leak(audit_records[0], context="MCP validation audit payload")
 
 
 class TestMiddlewareEdgeCases:

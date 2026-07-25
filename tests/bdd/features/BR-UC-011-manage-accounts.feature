@@ -73,7 +73,7 @@ Feature: BR-UC-011 Manage Accounts
     Given the Buyer Agent has an unauthenticated connection
     When the Buyer Agent sends a list_accounts request without an authentication token
     Then the response is an error variant with no accounts array
-    And the error code is "AUTH_REQUIRED"
+    And the authentication error should match missing credentials for the active transport
     And the error message describes the authentication requirement
     # @bva authentication (account operations): no token on list
 
@@ -244,7 +244,7 @@ Feature: BR-UC-011 Manage Accounts
     | brand.domain    | operator      | billing  |
     | acme-corp.com   | acme-corp.com | operator |
     Then the response is an error variant with no accounts array
-    And the error code is "AUTH_REQUIRED"
+    And the authentication error should match missing credentials for the active transport
     And the error message describes the authentication requirement
     And the error should include "suggestion" field with remediation guidance
     And no accounts were modified on the seller
@@ -253,13 +253,13 @@ Feature: BR-UC-011 Manage Accounts
     # POST-F2: Buyer knows what failed
 
   @T-UC-011-ext-a-expired @sync @ext-a @auth @error @partition @boundary
-  Scenario: Sync with expired token -- sync_invalid_token returns AUTH_REQUIRED (invalid token on sync)
-    Given the Buyer Agent has an A2A connection with an expired token
+  Scenario: Sync with expired token -- sync_invalid_token returns the transport auth error
+    Given the Buyer Agent presents an expired authentication credential
     When the Buyer Agent sends a sync_accounts request with:
     | brand.domain    | operator      | billing  |
     | acme-corp.com   | acme-corp.com | operator |
     Then the response is an error variant
-    And the error code is "AUTH_REQUIRED"
+    And the authentication error should match invalid credentials for the active transport
     And the error should include "suggestion" field with remediation guidance
     # @bva authentication (account operations): invalid token on sync
 
@@ -462,7 +462,8 @@ Feature: BR-UC-011 Manage Accounts
   Scenario: Context echoed in sync error response
     Given the Buyer Agent has an unauthenticated connection
     When the Buyer Agent sends a sync_accounts request with context {"trace": "err-001"}
-    Then the response is an error variant with AUTH_REQUIRED
+    Then the response is an error variant
+    And the authentication error should match missing credentials for the active transport
     And the response includes context {"trace": "err-001"}
     And the error should include "suggestion" field with remediation guidance
     # POST-F3: Context echoed even on error path

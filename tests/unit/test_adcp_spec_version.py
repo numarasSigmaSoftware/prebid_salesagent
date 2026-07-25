@@ -3,6 +3,7 @@
 import adcp
 
 EXPECTED_SPEC_VERSION = "3.1.1"
+EXPECTED_SCHEMA_SOURCE_SHA = "467fd93d77112baf9e094e18980119edcd3a4d07"
 
 
 def test_adcp_spec_version_matches_pin() -> None:
@@ -18,4 +19,15 @@ def test_adcp_spec_version_matches_pin() -> None:
         f"adcp SDK targets spec {actual}, but this codebase expects "
         f"{EXPECTED_SPEC_VERSION}. See docs/adcp-spec-version.md for "
         f"reconciliation steps."
+    )
+
+
+def test_pinned_schema_refresh_source_matches_spec_release() -> None:
+    """Keep the vendored schema refresh source on the declared v3.1.1 release."""
+    from tests.fixtures.adcp_schemas_pinned._refresh import PINNED_SHA
+
+    assert PINNED_SHA == EXPECTED_SCHEMA_SOURCE_SHA, (
+        f"Pinned schemas claim AdCP {EXPECTED_SPEC_VERSION} but refresh from "
+        f"{PINNED_SHA}; expected the immutable v{EXPECTED_SPEC_VERSION} release "
+        f"{EXPECTED_SCHEMA_SOURCE_SHA}."
     )

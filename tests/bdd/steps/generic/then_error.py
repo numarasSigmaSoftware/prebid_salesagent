@@ -9,7 +9,14 @@ an operation fails. Errors are real exceptions from production code:
 
 from __future__ import annotations
 
+import json
+
 from pytest_bdd import parsers, then
+
+from tests.helpers.auth_contract import (
+    CredentialState,
+    assert_two_layer_auth_contract,
+)
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -281,6 +288,58 @@ def then_error_code(ctx: dict, code: str) -> None:
         assert error is not None, "No error recorded in ctx"
         actual = _get_error_code(error)
     assert actual == code, f"Expected error code '{code}', got '{actual}'"
+
+
+def _assert_transport_auth_contract(ctx: dict, credential_state: CredentialState) -> None:
+    """Assert the exact pinned auth contract for the scenario's transport."""
+    transport = ctx.get("transport")
+    assert transport is not None, "Auth wire-contract assertion requires an explicit transport"
+
+    result = ctx.get("result")
+    assert result is not None, "Auth wire-contract assertion requires a TransportResult"
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    assert envelope is not None, "Auth wire-contract assertion requires the serialized two-layer error envelope"
+    assert_two_layer_auth_contract(envelope, transport, credential_state)
+
+
+@then("the authentication error should match missing credentials for the active transport")
+def then_missing_auth_contract(ctx: dict) -> None:
+    """Every wire transport reports absent credentials as AUTH_MISSING."""
+    _assert_transport_auth_contract(ctx, "missing")
+
+
+@then("the authentication error should match invalid credentials for the active transport")
+def then_invalid_auth_contract(ctx: dict) -> None:
+    """Every wire transport reports rejected credentials as AUTH_INVALID."""
+    _assert_transport_auth_contract(ctx, "invalid")
+
+
+@then("the authentication error should disclose no account resolution information")
+def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
+    """Reject account identifiers, natural keys, ambiguity, and match details."""
+    result = ctx.get("result")
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    assert envelope is not None, "Non-disclosure assertion requires the serialized wire envelope"
+
+    for layer_name, error_object in (
+        ("errors[0]", (envelope.get("errors") or [{}])[0]),
+        ("adcp_error", envelope.get("adcp_error") or {}),
+    ):
+        assert "details" not in error_object, f"{layer_name} must not expose account-resolution details"
+
+    serialized = json.dumps(envelope, sort_keys=True).lower()
+    forbidden = {
+        str(ctx.get("request_brand", "")).lower(),
+        str(ctx.get("request_operator", "")).lower(),
+        "account_ambiguous",
+        "acc-multi-",
+        "matched_count",
+        "match_count",
+        "matching accounts",
+        "candidate_accounts",
+    }
+    leaked = sorted(value for value in forbidden if value and value in serialized)
+    assert not leaked, f"Authentication envelope leaked account-resolution information: {leaked}"
 
 
 # ── Error message content (generic) ───────────────────────────────────

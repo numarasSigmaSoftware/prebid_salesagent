@@ -285,6 +285,47 @@ class TestBaseClassContract:
         assert result.is_success
         assert result.payload.ok is True
 
+    def test_presented_auth_token_disables_identity_injection(self):
+        """Real-auth mode forwards the token seam without a resolved identity."""
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        class _TestEnv(BaseTestEnv):
+            def call_a2a(self, **kwargs):
+                return kwargs
+
+        env = _TestEnv()
+        result = env.call_via(Transport.A2A, presented_auth_token="rejected-token")
+
+        assert result.is_success
+        assert result.payload == {"presented_auth_token": "rejected-token"}
+
+    def test_presented_auth_token_rejects_identity_override(self):
+        """A test cannot silently bypass real auth with two auth inputs."""
+        import pytest
+
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        env = BaseTestEnv()
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            env.call_via(
+                Transport.A2A,
+                identity=env.identity_for(Transport.A2A),
+                presented_auth_token="rejected-token",
+            )
+
+    def test_presented_auth_token_rejects_none(self):
+        """The real-auth seam cannot silently fall back to identity injection."""
+        import pytest
+
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        env = BaseTestEnv()
+        with pytest.raises(TypeError, match="must be a string"):
+            env.call_via(Transport.A2A, presented_auth_token=None)
+
     def test_nested_integration_env_raises(self):
         """Nesting two IntegrationEnvs must raise to prevent session corruption."""
         import pytest

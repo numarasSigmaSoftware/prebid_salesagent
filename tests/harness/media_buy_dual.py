@@ -229,9 +229,9 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         # Shared preamble (identity resolution + commit + client + auth-dep
         # override): with no identity the REST auth dep rejects, so the no-auth
         # update scenario fires instead of test-mode auth letting it through.
-        client, identity = self._prepare_rest_request(kwargs)
+        client, identity, auth_headers = self._prepare_rest_request(kwargs)
 
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = dict(auth_headers)
         if identity is not None:
             auth_token = identity.auth_token
             if auth_token:

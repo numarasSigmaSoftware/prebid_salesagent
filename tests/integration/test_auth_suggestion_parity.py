@@ -1,9 +1,10 @@
 """Authentication rejections must carry the pinned error-code suggestion on the wire.
 
-Core invariant: every authentication rejection carries a non-empty top-level
-``suggestion`` in the two-layer wire envelope. The A2A boundary uses the
-``AUTH_MISSING``/``AUTH_INVALID`` split from the pinned AdCP 3.1.1 enum, while
-legacy shared auth helpers still emit the deprecated ``AUTH_REQUIRED`` alias.
+Core invariant: every authentication rejection carries the pinned top-level
+``suggestion`` in the two-layer wire envelope. Every wire boundary uses the
+``AUTH_MISSING``/``AUTH_INVALID`` split from the pinned AdCP 3.1.1 enum; direct
+implementation helpers retain ``AUTH_REQUIRED`` where credential state is
+unknowable.
 
 Wire-first per tests/CLAUDE.md § Error Verification Policy: the
 missing-principal case drives the real A2A wire; the remaining helpers are
@@ -12,23 +13,18 @@ raise (``build_two_layer_error_envelope`` — the same builder every transport
 dispatcher calls).
 """
 
+from typing import Any
+
 import pytest
 
 from src.core.exceptions import AdCPError, build_two_layer_error_envelope
-from tests.helpers import assert_envelope_shape
+from tests.helpers.auth_contract import assert_two_layer_auth_contract
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 
-def _assert_auth_required_with_suggestion(envelope: dict) -> None:
-    from tests.harness.transport import extract_wire_suggestion
-
-    assert_envelope_shape(envelope, "AUTH_REQUIRED", recovery="correctable")
-    suggestion = extract_wire_suggestion(envelope)
-    assert suggestion, (
-        "Expected a non-empty TOP-LEVEL suggestion in the AUTH_REQUIRED wire "
-        f"envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
-    )
+def _assert_legacy_impl_auth_with_suggestion(envelope: dict[str, Any]) -> None:
+    assert_two_layer_auth_contract(envelope, "impl", "missing")
 
 
 class TestRequirePrincipalIdA2ASuggestion:
@@ -60,6 +56,45 @@ class TestRequirePrincipalIdA2ASuggestion:
             )
 
 
+class TestRestAuthSuggestion:
+    """The real REST dependency path emits the pinned missing-auth suggestion."""
+
+    def test_missing_rest_credentials_emit_pinned_suggestion(self, integration_db):
+        from tests.factories import TenantFactory
+        from tests.harness.account_list import AccountListEnv
+        from tests.harness.transport import Transport
+
+        with AccountListEnv(tenant_id="rest_auth_sugg", principal_id="rest_auth_principal") as env:
+            TenantFactory(tenant_id="rest_auth_sugg")
+
+            result = env.call_via(Transport.REST, identity=None)
+
+        assert result.is_error, f"Expected REST auth rejection, got payload: {result.payload!r}"
+        assert_two_layer_auth_contract(result.wire_error_envelope, "rest", "missing")
+
+
+class TestRejectedCredentialWireBoundaries:
+    """Every wire transport resolves and rejects a token with no principal row."""
+
+    @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
+    def test_rejected_token_runs_real_auth_chain(self, integration_db, transport):
+        from tests.factories import TenantFactory
+        from tests.harness.account_list import AccountListEnv
+        from tests.harness.transport import Transport
+
+        wire_transport = Transport(transport)
+        tenant_id = f"rejected_token_{transport}"
+        with AccountListEnv(tenant_id=tenant_id, principal_id=f"principal_{transport}") as env:
+            TenantFactory(tenant_id=tenant_id)
+            result = env.call_via(
+                wire_transport,
+                presented_auth_token="expired-or-revoked-token",
+            )
+
+        assert result.is_error, f"Expected {transport} to reject a token with no principal row"
+        assert_two_layer_auth_contract(result.wire_error_envelope, wire_transport, "invalid")
+
+
 class TestAuthHelperFamilySuggestion:
     """The remaining AUTH_REQUIRED raise sites in src/core/auth.py carry a suggestion.
 
@@ -80,7 +115,7 @@ class TestAuthHelperFamilySuggestion:
             with pytest.raises(AdCPError) as exc_info:
                 resolve_principal_or_raise("nonexistent-principal", tenant_id="auth_sugg_t1")
 
-        _assert_auth_required_with_suggestion(build_two_layer_error_envelope(exc_info.value))
+        _assert_legacy_impl_auth_with_suggestion(build_two_layer_error_envelope(exc_info.value))
 
     def test_require_tenant_missing_carries_suggestion(self):
         from src.core.auth import require_tenant
@@ -91,7 +126,7 @@ class TestAuthHelperFamilySuggestion:
         with pytest.raises(AdCPError) as exc_info:
             require_tenant(identity)
 
-        _assert_auth_required_with_suggestion(build_two_layer_error_envelope(exc_info.value))
+        _assert_legacy_impl_auth_with_suggestion(build_two_layer_error_envelope(exc_info.value))
 
     def test_invalid_token_carries_suggestion(self, integration_db):
         """get_principal_from_context with an invalid token (require_valid_token=True)
@@ -118,4 +153,4 @@ class TestAuthHelperFamilySuggestion:
             with pytest.raises(AdCPError) as exc_info:
                 get_principal_from_context(_HeaderCarrier())
 
-        _assert_auth_required_with_suggestion(build_two_layer_error_envelope(exc_info.value))
+        _assert_legacy_impl_auth_with_suggestion(build_two_layer_error_envelope(exc_info.value))

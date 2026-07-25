@@ -20,7 +20,7 @@ from src.core.exceptions import (
     AdCPError,
     RecoveryHint,
     build_two_layer_error_envelope,
-    normalize_to_adcp_error,
+    safe_adcp_error,
 )
 from src.core.tool_context import ToolContext
 
@@ -192,13 +192,16 @@ def record_boundary_error(
             ``"anonymous"`` for downstream sinks.
 
     Behavior:
-        1. stdlib logger: WARNING for typed ``AdCPError`` (expected,
-           buyer-correctable error path), ERROR with ``exc_info=True`` for
-           untyped fallthrough so on-call sees the traceback.
-        2. ``activity_feed.log_error`` (when ``tenant_id`` present) so the
-           operator UI surfaces the error in real time.
+        1. privileged stdlib logger: the original message at WARNING for typed
+           ``AdCPError`` (expected, buyer-correctable error path), or ERROR with
+           ``exc_info=True`` for untyped fallthrough so on-call sees the
+           traceback.
+        2. ``activity_feed.log_error`` (when ``tenant_id`` present) receives a
+           buyer-safe message so tenant dashboard/WebSocket consumers cannot
+           see adapter, credential, or connection details.
         3. ``get_audit_logger(transport.upper(), tenant_id).log_operation``
-           (when ``tenant_id`` present) for the persistent record.
+           receives the same safe message for the persistent record and any
+           downstream notification sink.
 
     All sinks are defensively wrapped — observability failures cannot
     replace the buyer's original error. Sink failures log at WARNING (not
@@ -232,14 +235,23 @@ def record_boundary_error(
         # No tenant context — activity feed and audit log require tenant scoping.
         return
 
+    # Tenant-visible and persistent sinks are not privileged diagnostic
+    # channels. Typed internal errors can contain adapter responses,
+    # connection strings, or credentials even when their wire envelope is
+    # scrubbed later, so derive their fields from the same safe representation
+    # used at transport boundaries. The original remains in the server logger
+    # above for on-call diagnosis.
+    sink_error = safe_adcp_error(error)
+    sink_error_code, sink_error_message, _sink_recovery = extract_error_info(sink_error)
+
     try:
         from src.services.activity_feed import activity_feed
 
         activity_feed.log_error(
             tenant_id=tenant_id,
             principal_name=principal_id or "anonymous",
-            error_message=f"{operation}: {error_message}",
-            error_code=error_code,
+            error_message=f"{operation}: {sink_error_message}",
+            error_code=sink_error_code,
         )
     except Exception as e:
         logger.warning("Failed to log %s error to activity feed: %s", transport_upper, e)
@@ -254,10 +266,38 @@ def record_boundary_error(
             principal_id=principal_id or "anonymous",
             adapter_id=f"{transport}_boundary",
             success=False,
-            error=error_message,
+            error=sink_error_message,
         )
     except Exception as e:
         logger.warning("Failed to log %s error to audit log: %s", transport_upper, e)
+
+
+def best_effort_boundary_identity(
+    resolver: Callable[[], Any],
+    *,
+    transport: str,
+) -> tuple[str | None, str | None]:
+    """Resolve identity scope for observability without affecting the response.
+
+    Non-authentication failures can reuse an already-permissive identity path to
+    enrich activity-feed and audit records. Authentication failures stay
+    unscoped because their client-controlled routing headers are not an
+    attestation of tenant ownership. Resolution failures degrade to an unscoped
+    server log and never replace the buyer's original error.
+    """
+    try:
+        identity = resolver()
+    except Exception:
+        logger.debug("%s boundary: best-effort identity resolution failed", transport.upper(), exc_info=True)
+        return None, None
+
+    principal_id = getattr(identity, "principal_id", None)
+    if not principal_id:
+        # Tenant routing hints are client-controlled. Without an authenticated
+        # principal they cannot authorize writes to tenant-visible activity or
+        # persistent audit sinks.
+        return None, None
+    return getattr(identity, "tenant_id", None), principal_id
 
 
 def _log_tool_error(tool_name: str, error: Exception, tenant_id: str | None, principal_id: str | None) -> None:
@@ -285,13 +325,9 @@ def _translate_to_tool_error(error: Exception) -> NoReturn:
     if isinstance(error, ToolError):
         # Includes AdCPToolError — already in wire shape.
         raise error
-    # Normalize untyped exceptions (ValueError, PermissionError) to typed
-    # AdCPError via the shared normalize_to_adcp_error() helper — same
-    # mapping the A2A and REST boundaries apply. The result is always an
-    # AdCPError; the wrap-vs-passthrough branches produce byte-identical
-    # AdCPToolError values, so the function unconditionally builds the
-    # envelope and chains the original exception for traceback fidelity.
-    typed = normalize_to_adcp_error(error)
+    # Normalize semantics and scrub untrusted raw-exception presentation
+    # fields through the shared buyer-facing policy used by every transport.
+    typed = safe_adcp_error(error)
     raise AdCPToolError(build_two_layer_error_envelope(typed), status_code=typed.status_code) from error
 
 

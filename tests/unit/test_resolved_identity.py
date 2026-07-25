@@ -140,6 +140,24 @@ class TestResolveIdentity:
         assert identity.tenant_id == "default"
         assert identity.is_authenticated is False
 
+    @patch("src.core.auth_utils.get_principal_from_token", return_value=(None, None))
+    @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
+    @patch("src.core.resolved_identity.get_tenant_by_subdomain", return_value={"tenant_id": "default"})
+    def test_rejected_token_raises_auth_invalid(self, mock_get_subdomain, mock_get_vhost, mock_get_principal):
+        """A supplied token rejected by the credential resolver is terminal."""
+        from src.core.exceptions import AdCPAuthInvalidError
+
+        with pytest.raises(AdCPAuthInvalidError) as exc_info:
+            resolve_identity(
+                headers={"x-adcp-tenant": "default", "x-adcp-auth": "rejected"},
+                auth_token="rejected",
+                protocol="mcp",
+            )
+
+        assert exc_info.value.error_code == "AUTH_INVALID"
+        assert exc_info.value.recovery == "terminal"
+        mock_get_principal.assert_called_once_with("rejected", "default")
+
     @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
     @patch("src.core.resolved_identity.get_tenant_by_subdomain")
     def test_resolve_localhost_defaults_to_default_tenant(self, mock_get_subdomain, mock_get_vhost):

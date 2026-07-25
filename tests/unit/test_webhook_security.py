@@ -16,6 +16,15 @@ from src.core.webhook_validator import (
 )
 
 
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Resolve the documentation host without relying on external DNS."""
+    monkeypatch.setattr(
+        "src.core.security.url_validator.socket.gethostbyname",
+        lambda hostname: "93.184.216.34",
+    )
+
+
 class TestValidateWebhookTaskType:
     """Coercion of untrusted action labels to SDK-accepted TaskType values."""
 
@@ -47,13 +56,13 @@ class TestValidateWebhookTaskType:
 class TestWebhookURLValidator:
     """Test SSRF protection in webhook URL validation."""
 
-    def test_valid_public_https_url(self):
+    def test_valid_public_https_url(self, public_dns):
         """Valid public HTTPS URLs should pass."""
         is_valid, error = WebhookURLValidator.validate_webhook_url("https://example.com/webhook")
         assert is_valid
         assert error == ""
 
-    def test_valid_public_http_url(self):
+    def test_valid_public_http_url(self, public_dns):
         """Valid public HTTP URLs should pass (for testing)."""
         is_valid, error = WebhookURLValidator.validate_webhook_url("http://example.com/webhook")
         assert is_valid

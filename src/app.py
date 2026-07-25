@@ -37,18 +37,23 @@ from src.core.domain_routing import route_landing_page
 from src.core.exceptions import (
     INVALID_REQUEST_SUGGESTION,
     VALIDATION_ERROR_SUGGESTION,
+    AdCPAuthenticationError,
     AdCPError,
     AdCPInvalidRequestError,
     AdCPValidationError,
     build_two_layer_error_envelope,
     build_validation_error_details,
-    normalize_to_adcp_error,
+    safe_adcp_error,
 )
 from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
 from src.core.lifecycle import run_all_shutdown_callbacks
 from src.core.main import mcp
 from src.core.resolved_identity import resolve_identity
-from src.core.tool_error_logging import handle_tool_error, record_boundary_error
+from src.core.tool_error_logging import (
+    best_effort_boundary_identity,
+    handle_tool_error,
+    record_boundary_error,
+)
 from src.landing import generate_tenant_landing_page
 from src.landing.landing_page import generate_fallback_landing_page
 from src.routes.api_v1 import router as api_v1_router
@@ -141,14 +146,20 @@ def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
     Symmetric with the MCP and A2A boundaries: all three transports delegate
     to ``record_boundary_error`` so log severity, activity-feed publishing,
     and audit logging stay in lockstep. Identity is not resolved on
-    ``request.state`` at the exception-handler boundary, so we resolve it
-    best-effort here (auth token + tenant headers) to populate the
-    tenant-scoped sinks (activity feed, audit log) for REST errors the same
-    way MCP and A2A do. Identity resolution never raises into the error path —
-    a lookup miss degrades to anonymous and ``record_boundary_error`` falls
-    back to the WARNING log line carrying the error code, message, and path.
+    ``request.state`` at the exception-handler boundary, so we recover scope
+    best-effort here to populate the tenant-scoped sinks (activity feed, audit
+    log) for REST errors the same way MCP and A2A do. Authentication errors
+    remain unscoped: client-controlled routing headers do not attest tenant
+    ownership, and rejected credentials cannot supply a trusted principal.
+    Other errors may reuse a fully authenticated identity, but tenant routing
+    hints alone never scope a sink write. Scope lookup never raises into the
+    error path — a miss degrades to anonymous and
+    ``record_boundary_error`` falls back to the server log.
     """
-    tenant_id, principal_id = _best_effort_rest_identity(request)
+    if isinstance(exc, AdCPAuthenticationError):
+        tenant_id, principal_id = None, None
+    else:
+        tenant_id, principal_id = _best_effort_rest_identity(request)
     record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
     return JSONResponse(
         status_code=exc.status_code,
@@ -161,17 +172,15 @@ def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None
 
     Used solely to scope the activity-feed and audit-log sinks in
     ``record_boundary_error`` — never to make an authorization decision.
-    ``require_valid_token=False`` so an invalid/expired token (which may be
-    the very error being handled) still yields a tenant from the host headers
-    instead of raising. Any failure degrades to ``(None, None)``; observability
-    must not shadow the buyer's original error.
+    ``require_valid_token=False`` avoids replacing the original response while
+    the shared helper requires a resolved principal before trusting tenant
+    scope. Any failure or anonymous identity degrades to ``(None, None)``;
+    observability must not shadow the buyer's original error.
     """
-    try:
-        identity = resolve_identity(dict(request.headers), protocol="rest", require_valid_token=False)
-        return identity.tenant_id, identity.principal_id
-    except Exception:
-        logger.debug("REST boundary: best-effort identity resolution failed", exc_info=True)
-        return None, None
+    return best_effort_boundary_identity(
+        lambda: resolve_identity(dict(request.headers), protocol="rest", require_valid_token=False),
+        transport="rest",
+    )
 
 
 @app.exception_handler(AdCPError)
@@ -193,7 +202,7 @@ async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
     in ``_envelope_response`` so all three handlers leave a uniform
     breadcrumb.
     """
-    return _envelope_response(request, exc)
+    return _envelope_response(request, safe_adcp_error(exc))
 
 
 @app.exception_handler(ValueError)
@@ -209,7 +218,7 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
     Does NOT catch FastAPI's ``RequestValidationError`` (separate class, not a
     ValueError subclass) — that has its own handler below.
     """
-    return _envelope_response(request, normalize_to_adcp_error(exc))
+    return _envelope_response(request, safe_adcp_error(exc))
 
 
 @app.exception_handler(RequestValidationError)
@@ -268,7 +277,7 @@ async def permission_error_handler(request: Request, exc: PermissionError) -> JS
     error instead of the 403 authorization envelope every transport should
     emit for the same condition.
     """
-    return _envelope_response(request, normalize_to_adcp_error(exc))
+    return _envelope_response(request, safe_adcp_error(exc))
 
 
 @app.exception_handler(ToolError)

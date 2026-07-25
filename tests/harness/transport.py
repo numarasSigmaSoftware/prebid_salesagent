@@ -13,29 +13,13 @@ Usage::
 
 from __future__ import annotations
 
-import functools
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-_PINNED_ERROR_ENUM = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
-)
-
-
-@functools.lru_cache(maxsize=1)
-def _pinned_error_metadata() -> dict[str, dict[str, str]]:
-    """code -> {recovery, suggestion} from the pinned AdCP error-code enum.
-
-    The pinned enum (@04f59d2d5) is the authoritative recovery classification;
-    the installed SDK ships fewer codes and diverges on several recovery values,
-    so it is NOT used here (pin-wins).
-    """
-    return json.loads(_PINNED_ERROR_ENUM.read_text())["enumMetadata"]
+from tests.helpers.pinned_schema import pinned_error_code_metadata
 
 
 def extract_wire_suggestion(envelope: dict | None) -> str | None:
@@ -161,7 +145,7 @@ class TransportResult:
         """
         from tests.helpers import assert_envelope_shape
 
-        meta = _pinned_error_metadata()
+        meta = pinned_error_code_metadata()
         spec = meta.get(code)
         assert spec is not None, (
             f"{code!r} is not a canonical AdCP error code (pinned error-code.json @04f59d2d5). "

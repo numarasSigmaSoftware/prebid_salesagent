@@ -172,11 +172,12 @@ def given_unauthenticated(ctx: dict, transport: str | None = None) -> None:
     ctx["force_identity"] = None
 
 
-@given("the Buyer Agent has an A2A connection with an expired token")
+@given("the Buyer Agent presents an expired authentication credential")
 def given_expired_token(ctx: dict) -> None:
-    """Set up A2A connection with an expired/invalid token."""
+    """Set up a real wire credential that resolves to no valid principal."""
+    _setup_tenant_and_principal(ctx)
     ctx["has_auth"] = False
-    ctx["force_identity"] = None
+    ctx["presented_auth_token"] = "expired-bdd-auth-token"
 
 
 @given("the sync_accounts response schema uses oneOf")
@@ -827,7 +828,7 @@ def when_sync_accounts_with_table(ctx: dict, datatable: Any) -> None:
     """Send sync_accounts with accounts from Gherkin data table.
 
     pytest-bdd datatable: list of lists. First row = headers, rest = data rows.
-    Handles force_identity (unauthenticated) and force_internal_error contexts.
+    Handles unauthenticated, expired-token, and forced-internal-error contexts.
     """
     from src.core.schemas.account import SyncAccountsRequest
 
@@ -839,9 +840,12 @@ def when_sync_accounts_with_table(ctx: dict, datatable: Any) -> None:
 
     kwargs: dict[str, Any] = {}
 
-    # Handle forced identity (unauthenticated/expired token)
+    # Missing credentials use an explicit identity=None. Expired credentials
+    # are presented on the real transport so production resolves and rejects.
     if "force_identity" in ctx:
         kwargs["identity"] = ctx["force_identity"]
+    if "presented_auth_token" in ctx:
+        kwargs["presented_auth_token"] = ctx["presented_auth_token"]
 
     # Handle forced internal error
     if ctx.get("force_internal_error"):
@@ -2024,6 +2028,8 @@ def when_request_with_context(ctx: dict, operation: str, ctx_json: str) -> None:
     dispatch_kwargs: dict[str, Any] = {}
     if "force_identity" in ctx:
         dispatch_kwargs["identity"] = ctx["force_identity"]
+    if "presented_auth_token" in ctx:
+        dispatch_kwargs["presented_auth_token"] = ctx["presented_auth_token"]
 
     try:
         dispatch_request(ctx, req=req, **dispatch_kwargs)

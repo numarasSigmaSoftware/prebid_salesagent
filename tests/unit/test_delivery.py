@@ -2061,6 +2061,10 @@ class TestDeliveryWebhookRetry:
 
             with (
                 patch("src.core.webhook_delivery.time.sleep"),
+                patch(
+                    "src.core.security.url_validator.socket.gethostbyname",
+                    return_value="93.184.216.34",
+                ),
                 patch("requests.post") as mock_post,
             ):
                 mock_response = MagicMock()

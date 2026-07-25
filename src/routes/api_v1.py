@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_request import (
 from fastapi import APIRouter, Depends, Request
 
 from src.core.auth_context import require_auth, resolve_auth
+from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
 from src.core.schema_helpers import (
     coerce_creative_filters,
     to_account_reference,
@@ -48,6 +50,10 @@ from src.core.version_compat import apply_version_compat
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["api-v1"])
+
+# REST imports the same transport-neutral policy as A2A and MCP. Route
+# signatures index this immutable map instead of maintaining another allowlist.
+REST_AUTH_OPTIONAL_DEPENDENCIES = MappingProxyType(dict.fromkeys(AUTH_OPTIONAL_SKILLS, resolve_auth))
 
 
 # Note: ToolError handling lives entirely in the global ``@app.exception_handler``
@@ -221,7 +227,10 @@ class SyncAccountsBody(SalesAgentBaseModel):
 
 
 @router.post("/products")
-async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None = resolve_auth):
+async def get_products(
+    body: GetProductsBody,
+    identity: ResolvedIdentity | None = REST_AUTH_OPTIONAL_DEPENDENCIES["get_products"],
+):
     """Get available products matching the brief (auth-optional discovery skill).
 
     ``ToolError`` propagates to the global handler in ``src.app`` for envelope
@@ -239,14 +248,19 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
 
 
 @router.get("/capabilities")
-async def get_capabilities(identity: ResolvedIdentity | None = resolve_auth):
+async def get_capabilities(
+    identity: ResolvedIdentity | None = REST_AUTH_OPTIONAL_DEPENDENCIES["get_adcp_capabilities"],
+):
     """Get AdCP capabilities (auth-optional discovery skill)."""
     response = await capabilities_module.get_adcp_capabilities_raw(identity=identity)
     return response.model_dump(mode="json")
 
 
 @router.post("/creative-formats")
-async def list_creative_formats(body: ListCreativeFormatsBody, identity: ResolvedIdentity | None = resolve_auth):
+async def list_creative_formats(
+    body: ListCreativeFormatsBody,
+    identity: ResolvedIdentity | None = REST_AUTH_OPTIONAL_DEPENDENCIES["list_creative_formats"],
+):
     """List available creative formats (auth-optional discovery skill)."""
     from src.core.schemas import ListCreativeFormatsRequest
 
@@ -260,7 +274,8 @@ async def list_creative_formats(body: ListCreativeFormatsBody, identity: Resolve
 
 @router.post("/authorized-properties")
 async def list_authorized_properties(
-    body: ListAuthorizedPropertiesBody, identity: ResolvedIdentity | None = resolve_auth
+    body: ListAuthorizedPropertiesBody,
+    identity: ResolvedIdentity | None = REST_AUTH_OPTIONAL_DEPENDENCIES["list_authorized_properties"],
 ):
     """List authorized properties (auth-optional discovery skill)."""
     from src.core.schemas import ListAuthorizedPropertiesRequest

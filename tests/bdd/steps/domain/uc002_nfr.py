@@ -126,19 +126,18 @@ def then_error_minimum_spend(ctx: dict) -> None:
 def then_auth_before_business_logic(ctx: dict) -> None:
     """Assert authentication is the first gate before any business logic.
 
-    Sends a SECOND request with invalid credentials (no principal_id) THROUGH
-    THE WIRE (the parametrized transport) and verifies: (1) the wire envelope
-    carries the AUTH_REQUIRED error code, and (2) no adapter calls were made —
-    proving auth blocks before business logic side effects.
+    Sends a SECOND request with an invalid token THROUGH THE WIRE (the
+    parametrized transport) and verifies: (1) production token resolution
+    emits the pinned invalid-credential contract, and (2) no adapter calls
+    were made — proving auth blocks before business logic side effects.
+    Both mirrored error layers are graded against the pinned enum metadata.
 
     Per the Error Verification Policy (tests/CLAUDE.md), this asserts on the
-    wire envelope, not a reconstructed exception. The auth error code is
-    AUTH_REQUIRED on the wire (a recent reversal flipped AUTH_TOKEN_INVALID ->
-    AUTH_REQUIRED); the "Principal ID not found" message still holds.
+    wire envelope, not a reconstructed exception. Every wire transport uses
+    AUTH_INVALID with terminal recovery.
     """
     from src.core.exceptions import AdCPAuthenticationError
     from src.core.schemas import CreateMediaBuyRequest
-    from tests.factories.principal import PrincipalFactory
 
     env = ctx["env"]
 
@@ -152,14 +151,6 @@ def then_auth_before_business_logic(ctx: dict) -> None:
     else:
         assert resp is not None, "Expected either a response or an error"
 
-    # Now make a SECOND call with invalid credentials to prove ordering.
-    # Build an identity with no principal_id — auth should reject before
-    # any business logic (adapter, DB writes) executes.
-    invalid_identity = PrincipalFactory.make_identity(
-        principal_id=None,
-        tenant_id=env._tenant_id,
-    )
-
     # Reset adapter mock call count to detect any side effects
     mock_adapter = env.mock["adapter"].return_value
     mock_adapter.create_media_buy.reset_mock()
@@ -168,17 +159,16 @@ def then_auth_before_business_logic(ctx: dict) -> None:
     request_kwargs = ctx.get("request_kwargs", {})
     req = CreateMediaBuyRequest(**request_kwargs)
 
-    # Dispatch through the wire with the invalid identity — the parametrized
-    # transport (a2a/mcp/rest) actually exercises the auth gate on the wire.
+    # Present a token that has no principal row. The harness deliberately
+    # disables identity injection/REST dependency overrides in this mode.
     auth_ctx: dict = {k: ctx[k] for k in ("env", "transport", "e2e_config") if k in ctx}
-    dispatch_request(auth_ctx, req=req, identity=invalid_identity)
+    dispatch_request(auth_ctx, req=req, presented_auth_token="expired-bdd-auth-token")
+
+    from tests.helpers.auth_contract import assert_two_layer_auth_contract
 
     result = auth_ctx.get("result")
-    assert result is not None, "dispatch_request did not produce a TransportResult for the invalid-identity request"
-    # recovery omitted -> defaults to the pinned AUTH_REQUIRED enum (correctable). Do not
-    # pass an explicit recovery= that shadows the pinned enum (#1417: superseded
-    # the earlier terminal override; the pinned enum is the single source of truth).
-    result.assert_wire_error("AUTH_REQUIRED", message_substr="Principal ID not found")
+    assert result is not None, "dispatch_request did not produce a TransportResult for the invalid-token request"
+    assert_two_layer_auth_contract(result.wire_error_envelope, ctx["transport"], "invalid")
 
     # Verify no business logic side effects occurred
     assert not mock_adapter.create_media_buy.called, (

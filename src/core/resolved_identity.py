@@ -171,9 +171,9 @@ def resolve_identity(
 
         if principal_id is None:
             if require_valid_token:
-                from src.core.exceptions import AdCPAuthenticationError
+                from src.core.exceptions import AdCPAuthInvalidError
 
-                raise AdCPAuthenticationError(
+                raise AdCPAuthInvalidError(
                     f"Authentication token is invalid for tenant '{tenant_id or 'any'}'. "
                     f"The token may be expired, revoked, or associated with a different tenant.",
                 )

@@ -18,6 +18,7 @@ Task. These tests pin the returned-failed-Task contract on the wire artifact.
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,11 +42,13 @@ from src.core.exceptions import (
     AUTH_REQUIRED_CANONICAL_SUGGESTION,
     VALIDATION_ERROR_SUGGESTION,
     AdCPAuthenticationError,
+    AdCPError,
     AdCPValidationError,
 )
 from tests.a2a_helpers import make_a2a_context
 from tests.factories import PrincipalFactory
 from tests.helpers import assert_envelope_shape
+from tests.helpers.pinned_schema import pinned_error_code_suggestion
 from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
 from tests.utils.a2a_helpers import (
     assert_failed_task_envelope,
@@ -57,6 +60,16 @@ from tests.utils.a2a_helpers import (
 )
 
 _TEST_IDENTITY = make_test_a2a_identity()
+
+
+def _capture_a2a_auth_records():
+    """Return a semantic recorder spy for pre-identity A2A auth failures."""
+    records = []
+
+    def _record(transport, operation, error, *, tenant_id=None, principal_id=None):
+        records.append((transport, operation, error.error_code, tenant_id, principal_id))
+
+    return records, _record
 
 
 def _make_handler() -> tuple[AdCPRequestHandler, object]:
@@ -245,6 +258,41 @@ async def test_explicit_skill_raw_builtin_scrubs_secret_but_keeps_semantic_code(
     # wire == module constant, and test_sanitized_suggestions_match_pinned_spec_enum pins
     # module constant == the pinned spec fixture's enumMetadata.
     assert envelope["errors"][0]["suggestion"] == expected_suggestion
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_raw_error_scrubs_activity_and_audit_sinks():
+    """A2A preserves raw provenance until tenant-visible observability is scrubbed."""
+    handler = AdCPRequestHandler()
+    feed_records: list[dict[str, object]] = []
+    audit_records: list[dict[str, object]] = []
+    audit_logger = SimpleNamespace(log_operation=lambda **kwargs: audit_records.append(kwargs))
+
+    with (
+        patch.object(
+            handler,
+            "_handle_get_products_skill",
+            new_callable=AsyncMock,
+            side_effect=ValueError(SECRET_BEARING_MESSAGE),
+        ),
+        patch(
+            "src.services.activity_feed.activity_feed.log_error",
+            side_effect=lambda **kwargs: feed_records.append(kwargs),
+        ),
+        patch("src.core.audit_logger.get_audit_logger", return_value=audit_logger),
+        pytest.raises(AdCPError) as exc_info,
+    ):
+        await handler._handle_explicit_skill(
+            "get_products",
+            {"brief": "video"},
+            _TEST_IDENTITY,
+        )
+
+    assert exc_info.value.wire_error_code == "VALIDATION_ERROR"
+    assert len(feed_records) == 1
+    assert len(audit_records) == 1
+    assert_no_secret_leak(feed_records[0], context="A2A activity error payload")
+    assert_no_secret_leak(audit_records[0], context="A2A audit error payload")
 
 
 @pytest.mark.asyncio
@@ -698,11 +746,22 @@ async def test_every_auth_guarded_method_carries_the_auth_missing_envelope(handl
     """
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value=None)
+    context = make_a2a_context(
+        auth_token=None,
+        headers={"x-adcp-tenant": "tenant-from-a2a-headers"},
+    )
+    records, recorder = _capture_a2a_auth_records()
 
-    with pytest.raises(InvalidRequestError) as exc_info:
-        await getattr(handler, handler_method)(params, context=None)
+    with (
+        patch("src.core.resolved_identity.resolve_identity") as mock_resolve,
+        patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder),
+    ):
+        with pytest.raises(InvalidRequestError) as exc_info:
+            await getattr(handler, handler_method)(params, context=context)
 
+    mock_resolve.assert_not_called()
     err = exc_info.value
+    assert records == [("a2a", "authentication", "AUTH_MISSING", None, None)]
     assert err.data is not None, f"{handler_method} auth failure dropped the AdCP envelope from error.data"
     # Assert on the SERIALIZED JSON-RPC body the buyer actually receives, not the raised exception
     # object: ``build_error_response`` is the SDK dispatcher's own serializer, so a payload that
@@ -714,7 +773,7 @@ async def test_every_auth_guarded_method_carries_the_auth_missing_envelope(handl
     # pinned above, so a regression that desynced ``error.message`` from the envelope's message, or
     # dropped/replaced the suggestion, would have gone undetected.
     assert body["error"]["message"] == body["error"]["data"]["adcp_error"]["message"]
-    assert body["error"]["data"]["adcp_error"]["suggestion"] == "provide credentials via the auth header and retry"
+    assert body["error"]["data"]["adcp_error"]["suggestion"] == pinned_error_code_suggestion("AUTH_MISSING")
 
 
 # The parametrization above drives only the MISSING-TOKEN arm. The remaining auth arms each
@@ -728,14 +787,30 @@ async def test_auth_resolution_failure_arm_carries_the_auth_invalid_envelope(han
     """Every A2A auth boundary classifies a rejected presented token as AUTH_INVALID."""
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value="a-rejected-token")
+    auth_error = AdCPAuthenticationError("Token rejected by the credential store.")
 
-    with patch(
-        "src.core.resolved_identity.resolve_identity",
-        side_effect=AdCPAuthenticationError("Token rejected by the credential store."),
+    context = make_a2a_context(
+        auth_token="a-rejected-token",
+        headers={"x-adcp-tenant": "tenant-from-a2a-headers"},
+    )
+    records, recorder = _capture_a2a_auth_records()
+
+    with (
+        patch(
+            "src.core.resolved_identity.resolve_identity",
+            side_effect=auth_error,
+        ) as mock_resolve,
+        patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
-            await getattr(handler, handler_method)(params, context=None)
+            await getattr(handler, handler_method)(params, context=context)
 
+    assert len(mock_resolve.call_args_list) == 1
+    resolve_call = mock_resolve.call_args_list[0]
+    assert resolve_call.kwargs["auth_token"] == "a-rejected-token"
+    assert resolve_call.kwargs["require_valid_token"] is True
+    assert resolve_call.kwargs["protocol"] == "a2a"
+    assert records == [("a2a", "authentication", "AUTH_INVALID", None, None)]
     assert_envelope_shape(exc_info.value.data, "AUTH_INVALID", recovery="terminal")
 
 
@@ -748,11 +823,18 @@ async def test_principal_less_identity_arm_carries_the_auth_invalid_envelope(han
     principal_less = PrincipalFactory.make_identity(
         principal_id=None, tenant_id="test-tenant", tenant={"tenant_id": "test-tenant"}, protocol="a2a"
     )
+    records, recorder = _capture_a2a_auth_records()
 
-    with patch("src.core.resolved_identity.resolve_identity", return_value=principal_less):
+    with (
+        patch("src.core.resolved_identity.resolve_identity", return_value=principal_less) as mock_resolve,
+        patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder),
+    ):
         with pytest.raises(InvalidRequestError) as exc_info:
             await getattr(handler, handler_method)(params, context=None)
 
+    assert len(mock_resolve.call_args_list) == 1
+    assert mock_resolve.call_args_list[0].kwargs["require_valid_token"] is True
+    assert records == [("a2a", "authentication", "AUTH_INVALID", None, None)]
     assert_envelope_shape(exc_info.value.data, "AUTH_INVALID", recovery="terminal")
 
 
@@ -764,10 +846,13 @@ async def test_explicit_skill_identity_guard_carries_the_envelope():
     identity object rather than the token.
     """
     handler = AdCPRequestHandler()
+    records, recorder = _capture_a2a_auth_records()
 
-    with pytest.raises(InvalidRequestError) as exc_info:
-        await handler._handle_explicit_skill("create_media_buy", {"buyer_ref": "b1"}, None)
+    with patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder):
+        with pytest.raises(InvalidRequestError) as exc_info:
+            await handler._handle_explicit_skill("create_media_buy", {"buyer_ref": "b1"}, None)
 
+    assert records == [("a2a", "authentication", "AUTH_MISSING", None, None)]
     assert_envelope_shape(exc_info.value.data, "AUTH_MISSING", recovery="correctable")
 
 
@@ -782,11 +867,16 @@ async def test_tenantless_authenticated_principal_is_a_terminal_config_error_not
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value="a-valid-token")
     tenantless = PrincipalFactory.make_identity(principal_id="p-orphan", tenant_id=None, tenant=None, protocol="a2a")
+    records, recorder = _capture_a2a_auth_records()
 
-    with patch("src.core.resolved_identity.resolve_identity", return_value=tenantless):
+    with (
+        patch("src.core.resolved_identity.resolve_identity", return_value=tenantless),
+        patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=recorder),
+    ):
         with pytest.raises(InvalidRequestError) as exc_info:
             await handler.on_get_task(GetTaskRequest(id="task_envelope"), context=None)
 
+    assert records == [("a2a", "authentication", "CONFIGURATION_ERROR", None, "p-orphan")]
     err = exc_info.value
     assert_envelope_shape(err.data, "CONFIGURATION_ERROR", recovery="terminal")
     assert "p-orphan" not in json.dumps(err.data, default=str), "principal id leaked to the wire"

@@ -467,10 +467,10 @@ Feature: BR-UC-003 Update Media Buy
     | paused       | true        |
     When the Buyer Agent sends the update_media_buy request
     Then the operation should fail
-    And the error code should be "AUTH_REQUIRED"
+    And the authentication error should match missing credentials for the active transport
     And the error message should contain "authentication"
     And the error should include "suggestion" field
-    And the suggestion should contain "valid credentials"
+    And the suggestion should contain "provide credentials"
     # POST-F1: System state unchanged
     # POST-F2: Error explains authentication failed
     # POST-F3: Suggestion to obtain valid credentials

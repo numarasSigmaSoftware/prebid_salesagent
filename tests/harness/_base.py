@@ -579,13 +579,21 @@ class BaseTestEnv:
         """Dispatch through *transport* and return normalized TransportResult.
 
         Injects the correct identity for the transport into kwargs (unless
-        the caller explicitly provides one). Routes to the appropriate
-        dispatcher.
+        the caller explicitly provides one or asks the wire boundary to resolve
+        a presented auth token). Routes to the appropriate dispatcher.
         """
         from tests.harness.dispatchers import DISPATCHERS
 
-        # Inject transport-correct identity
-        kwargs.setdefault("identity", self.identity_for(transport))
+        # ``presented_auth_token`` is the real-auth test seam: the token is put
+        # on the transport request and production resolves it. Never also inject
+        # a pre-resolved identity, which would bypass the boundary under test.
+        if "presented_auth_token" in kwargs:
+            if not isinstance(kwargs["presented_auth_token"], str):
+                raise TypeError("presented_auth_token must be a string")
+            if "identity" in kwargs:
+                raise ValueError("presented_auth_token and identity are mutually exclusive")
+        else:
+            kwargs.setdefault("identity", self.identity_for(transport))
 
         dispatcher = DISPATCHERS[transport]
         # Reset success-path wire capture; _run_a2a_handler / _run_mcp_client
@@ -660,15 +668,17 @@ class BaseTestEnv:
         exercises: message parsing → skill routing → normalize_request_params →
         handler dispatch → _serialize_for_a2a → Task/Artifact framing.
 
-        Identity is injected by monkey-patching ``_resolve_a2a_identity`` and
-        ``_get_auth_token`` on the handler instance — single mock point, same
-        as the MCP Client approach patches resolve_identity_from_context.
+        Identity is normally injected by monkey-patching
+        ``_resolve_a2a_identity`` and ``_get_auth_token`` on the handler
+        instance. Supplying ``presented_auth_token`` instead puts that token in
+        the real AuthContext and exercises production token resolution.
 
         Args:
             skill_name: A2A skill name (e.g., "get_products").
             response_cls: Pydantic model class to parse artifact data into.
-            **kwargs: Skill parameters. ``identity`` is popped and used for
-                the identity mock; remaining kwargs become skill parameters.
+            **kwargs: Skill parameters. ``identity`` or
+                ``presented_auth_token`` is popped for auth; remaining kwargs
+                become skill parameters.
         """
         import asyncio
 
@@ -681,10 +691,15 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
+        presented_auth_token = self._pop_presented_auth_token(kwargs)
+
         # Pop identity — used for the handler mock, not sent as a skill parameter.
         _NO_OVERRIDE = object()
         identity = kwargs.pop("identity", _NO_OVERRIDE)
-        a2a_identity = self.identity_for(Transport.A2A) if identity is _NO_OVERRIDE else identity
+        if presented_auth_token is not None:
+            a2a_identity = None
+        else:
+            a2a_identity = self.identity_for(Transport.A2A) if identity is _NO_OVERRIDE else identity
 
         # The real A2A handler writes audit logs which require the tenant to exist
         # in the DB. Ensure the tenant record exists (idempotent) so audit logging
@@ -711,14 +726,19 @@ class BaseTestEnv:
         # (the in-process equivalent of MCP's get_http_headers seam) — the auth
         # chain itself is real. When no real token exists (unit mode), inject the
         # identity directly via the single mock point (unchanged behavior).
-        auth_token = a2a_identity.auth_token if a2a_identity else None
+        auth_token = (
+            presented_auth_token
+            if presented_auth_token is not None
+            else (a2a_identity.auth_token if a2a_identity else None)
+        )
 
-        if auth_token:
+        if presented_auth_token is not None or auth_token:
+            assert auth_token is not None
             from src.core.auth_context import AUTH_CONTEXT_STATE_KEY, AuthContext
 
             headers = {
                 "x-adcp-auth": auth_token,
-                "x-adcp-tenant": a2a_identity.tenant_id or "",
+                "x-adcp-tenant": (a2a_identity.tenant_id if a2a_identity else self._tenant_id) or "",
             }
             server_context = ServerCallContext(
                 state={AUTH_CONTEXT_STATE_KEY: AuthContext(auth_token=auth_token, headers=headers)}
@@ -806,10 +826,11 @@ class BaseTestEnv:
         Uses FastMCP's in-memory transport (FastMCPTransport) to go through the
         complete server path: middleware chain → TypeAdapter → tool function.
 
-        When the identity carries a real ``auth_token`` (integration mode),
-        patches ``get_http_headers`` so the full auth chain runs: header
-        extraction → tenant detection → token-to-principal DB lookup →
-        ResolvedIdentity from real data.
+        When the identity carries a real ``auth_token`` (integration mode), or
+        the caller supplies ``presented_auth_token``, patches
+        ``get_http_headers`` so the full auth chain runs: header extraction →
+        tenant detection → token-to-principal DB lookup → ResolvedIdentity from
+        real data.
 
         When no real token is available (unit mode), patches
         ``resolve_identity_from_context`` directly.
@@ -817,9 +838,9 @@ class BaseTestEnv:
         Args:
             tool_name: MCP tool name (e.g., "get_products").
             response_cls: Pydantic model class to parse structured_content into.
-            **kwargs: Tool arguments. ``identity`` is popped and used for the
-                auth mock; ``req`` is popped and its fields unpacked into the
-                arguments dict.
+            **kwargs: Tool arguments. ``identity`` or
+                ``presented_auth_token`` is popped for auth; ``req`` is popped
+                and its fields unpacked into the arguments dict.
         """
         import asyncio
         from unittest.mock import patch
@@ -831,10 +852,15 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
+        presented_auth_token = self._pop_presented_auth_token(kwargs)
+
         # Pop identity — used for the auth mock, not sent as a tool argument.
         _NO_OVERRIDE = object()
         identity = kwargs.pop("identity", _NO_OVERRIDE)
-        mcp_identity = self.identity_for(Transport.MCP) if identity is _NO_OVERRIDE else identity
+        if presented_auth_token is not None:
+            mcp_identity = None
+        else:
+            mcp_identity = self.identity_for(Transport.MCP) if identity is _NO_OVERRIDE else identity
 
         # Unpack req object into flat arguments if present.
         # MCP tools accept individual params, not a request model.
@@ -847,16 +873,21 @@ class BaseTestEnv:
             arguments = dict(kwargs)
 
         # Choose auth strategy based on whether we have a real DB token.
-        auth_token = mcp_identity.auth_token if mcp_identity else None
+        auth_token = (
+            presented_auth_token
+            if presented_auth_token is not None
+            else (mcp_identity.auth_token if mcp_identity else None)
+        )
 
-        if auth_token:
+        if presented_auth_token is not None or auth_token:
+            assert auth_token is not None
             # Real auth chain: header → token → DB lookup → identity.
             # Patch get_http_headers in BOTH modules that import it:
             # transport_helpers (called by resolve_identity_from_context) and
             # mcp_auth_middleware (called for context_id extraction).
             headers = {
                 "x-adcp-auth": auth_token,
-                "x-adcp-tenant": mcp_identity.tenant_id or "",
+                "x-adcp-tenant": (mcp_identity.tenant_id if mcp_identity else self._tenant_id) or "",
             }
 
             async def _call():
@@ -943,35 +974,64 @@ class BaseTestEnv:
         5. Return raw httpx.Response
 
         Identity handling (mirrors production auth middleware):
-        - identity is None → dep raises AUTH_REQUIRED (no token) with suggestion
+        - identity is None → dep raises AUTH_MISSING (no token) with suggestion
         - identity is ResolvedIdentity → dep returns it (valid token)
         - identity absent → uses default self.identity_for(Transport.REST)
         """
-        client, identity = self._prepare_rest_request(kwargs)
+        client, identity, headers = self._prepare_rest_request(kwargs)
         body = self.build_rest_body(**kwargs)
-        return client.post(endpoint, json=body)
+        return client.post(endpoint, json=body, headers=headers)
 
-    def _prepare_rest_request(self, kwargs: dict[str, Any]) -> tuple[Any, Any]:
+    @staticmethod
+    def _pop_presented_auth_token(kwargs: dict[str, Any]) -> str | None:
+        """Pop the real-auth harness seam without letting it reach tool input."""
+        sentinel = object()
+        token = kwargs.pop("presented_auth_token", sentinel)
+        if token is sentinel:
+            return None
+        if not isinstance(token, str):
+            raise TypeError("presented_auth_token must be a string")
+        return token
+
+    def _prepare_rest_request(self, kwargs: dict[str, Any]) -> tuple[Any, Any, dict[str, str]]:
         """Resolve identity, commit factory data, get the client, and install auth.
 
         Single source of truth for the REST request preamble every dispatcher
-        shares: pops ``identity`` from *kwargs* (defaulting to the REST identity),
-        commits pending factory rows, creates/returns the TestClient, and installs
-        the per-request auth-dep override (which must run AFTER ``get_rest_client``).
-        Returns ``(client, resolved_identity)``; the caller builds the body from the
-        now-identity-free *kwargs* and issues the HTTP verb.
+        shares. ``presented_auth_token`` selects the real production dependency
+        path and is sent as a request header; otherwise this installs the normal
+        per-request identity override. Returns ``(client, identity, headers)``.
         """
         from tests.harness.transport import Transport
 
+        presented_auth_token = self._pop_presented_auth_token(kwargs)
         _NO_OVERRIDE = object()
         identity = kwargs.pop("identity", _NO_OVERRIDE)
-        if identity is _NO_OVERRIDE:
+        if presented_auth_token is not None:
+            identity = None
+        elif identity is _NO_OVERRIDE:
             identity = self.identity_for(Transport.REST)
 
         self._commit_factory_data()
         client = self.get_rest_client()
-        self._configure_rest_auth_override(identity)
-        return client, identity
+        headers: dict[str, str] = {}
+        if presented_auth_token is not None:
+            self._configure_rest_real_auth()
+            headers = {
+                "x-adcp-auth": presented_auth_token,
+                "x-adcp-tenant": self._tenant_id,
+            }
+        else:
+            self._configure_rest_auth_override(identity)
+        return client, identity, headers
+
+    @staticmethod
+    def _configure_rest_real_auth() -> None:
+        """Remove harness overrides so REST resolves request credentials."""
+        from src.app import app
+        from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
+
+        app.dependency_overrides.pop(_require_auth_dep, None)
+        app.dependency_overrides.pop(_resolve_auth_dep, None)
 
     @staticmethod
     def _configure_rest_auth_override(identity: Any) -> None:
@@ -981,7 +1041,7 @@ class BaseTestEnv:
         (must run AFTER ``get_rest_client``). With ``identity=None`` the
         ``_require_auth_dep`` override is REMOVED so the real production
         dependency runs against the token-less request and raises the real
-        ``AUTH_REQUIRED`` error — the harness must not hand-copy the production
+        ``AUTH_MISSING`` error — the harness must not hand-copy the production
         raise (a simulated raise drifted from production once already,
         #1417/cx41); otherwise both deps return the identity.
         """

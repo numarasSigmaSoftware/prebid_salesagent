@@ -620,7 +620,7 @@ class TestMCPRecoveryInErrorResponses:
             exc_info.value,
             expected_code,
             recovery=expected_recovery,
-            message_substr=msg,
+            message_substr=None if expected_code == "SERVICE_UNAVAILABLE" else msg,
             check_mcp_tool_error=True,
         )
 
@@ -722,8 +722,8 @@ class TestRecoveryOverrideInSerialization:
         overridden = AdCPConflictError("permanent conflict", recovery="terminal")
         assert overridden.to_dict()["recovery"] == "terminal"
 
-    def test_custom_recovery_survives_mcp_then_extract(self):
-        """Custom recovery: AdCPError(recovery=X) -> ToolError -> extract_error_info -> X."""
+    def test_internal_recovery_is_canonicalized_by_mcp_boundary(self):
+        """Internal wire codes use pinned recovery rather than a raise-site override."""
         from fastmcp.exceptions import ToolError
 
         from src.core.exceptions import AdCPAdapterError
@@ -738,7 +738,9 @@ class TestRecoveryOverrideInSerialization:
             wrapped()
 
         code, message, recovery = extract_error_info(exc_info.value)
-        assert recovery == "terminal"  # Custom, not default "transient"
+        assert code == "SERVICE_UNAVAILABLE"
+        assert recovery == "transient"
+        assert message != "permanent failure"
 
 
 # ---------------------------------------------------------------------------

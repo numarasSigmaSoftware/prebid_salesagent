@@ -115,7 +115,7 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 **Layer** behavioral
 **Given** no authentication
 **When** the buyer sends `sync_accounts`
-**Then** the request is rejected with AUTH_REQUIRED
+**Then** every wire transport rejects the request with AUTH_MISSING
 **Business Rule:** BR-12
 **Priority:** P0
 
@@ -209,14 +209,14 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 **Business Rule:** BR-10
 **Priority:** P0
 
-### Extension A: AUTH_REQUIRED
+### Extension A: Authentication errors
 
 #### Scenario: Missing auth token on sync_accounts
 **Obligation ID** UC-011-EXT-A-01
 **Layer** behavioral
 **Given** no Bearer token in request
 **When** the buyer sends `sync_accounts`
-**Then** the response is error variant with `AUTH_REQUIRED`
+**Then** every wire transport returns an error variant with `AUTH_MISSING`
 **And** no accounts are modified
 **And** context is echoed
 **Business Rule:** BR-12, POST-F1
@@ -227,7 +227,7 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 **Layer** behavioral
 **Given** an expired Bearer token
 **When** the buyer sends `sync_accounts`
-**Then** the response is error variant with `AUTH_REQUIRED`
+**Then** every wire transport returns an error variant with `AUTH_INVALID`
 **Priority:** P1
 
 #### Scenario: Malformed auth token on sync_accounts
@@ -235,7 +235,7 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 **Layer** behavioral
 **Given** a malformed Bearer token
 **When** the buyer sends `sync_accounts`
-**Then** the response is error variant with `AUTH_REQUIRED`
+**Then** every wire transport returns an error variant with `AUTH_INVALID`
 **Priority:** P1
 
 ### Extension B: SYNC_PARTIAL_FAILURE
@@ -394,7 +394,7 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 **Obligation ID** UC-011-EXT-G-03
 **Layer** schema
 **Given** an unauthenticated buyer sending sync_accounts with `context: {"trace": "t1"}`
-**When** the AUTH_REQUIRED error is returned
+**When** the wire transport returns AUTH_MISSING
 **Then** the error response includes `context: {"trace": "t1"}`
 **Business Rule:** POST-F3
 **Priority:** P1
@@ -430,7 +430,7 @@ High impact. Account management is a new protocol domain in adcp 3.x. The schema
 #### Scenario: sync-accounts-response error variant
 **Obligation ID** UC-011-SCHEMA-03
 **Layer** schema
-**Given** an operation-level error response (e.g., AUTH_REQUIRED)
+**Given** an operation-level error response (e.g., AUTH_MISSING, AUTH_INVALID, or AUTH_REQUIRED)
 **When** serialized
 **Then** it validates against `sync-accounts-response.json` (error oneOf variant)
 **And** has errors array

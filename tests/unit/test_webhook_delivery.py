@@ -2,6 +2,7 @@
 
 from unittest.mock import Mock, call, patch
 
+import pytest
 import requests
 
 from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retry
@@ -10,6 +11,14 @@ from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retr
 @patch("src.core.webhook_delivery.time.sleep")
 class TestWebhookDelivery:
     """Test cases for webhook delivery with exponential backoff retry."""
+
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self, monkeypatch):
+        """Keep delivery unit tests independent of external DNS availability."""
+        monkeypatch.setattr(
+            "src.core.security.url_validator.socket.gethostbyname",
+            lambda hostname: "93.184.216.34",
+        )
 
     def test_successful_delivery_first_attempt(self, mock_sleep):
         """Test successful delivery on first attempt (200 OK)."""
