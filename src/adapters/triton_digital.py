@@ -4,7 +4,12 @@ from typing import Any
 
 import requests
 
-from src.adapters.base import AdServerAdapter, CreativeEngineAdapter
+from src.adapters.base import (
+    AdServerAdapter,
+    CreativeEngineAdapter,
+    DownstreamMutation,
+    ReconciliationResult,
+)
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.core.exceptions import (
     AdCPAdapterError,
@@ -20,6 +25,7 @@ class TritonDigital(AdServerAdapter):
     """
 
     adapter_name = "triton"
+    supports_media_buy_update_reconciliation = True
 
     # Triton Digital specializes in streaming_audio and podcast advertising
     # V3 channel names: audio → streaming_audio
@@ -699,3 +705,36 @@ class TritonDigital(AdServerAdapter):
             except requests.exceptions.RequestException as e:
                 self.log(f"Error updating Triton campaign/flight: {e}")
                 raise AdCPAdapterError(str(e)) from e
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Read the stable Triton campaign or flight resource before retrying."""
+        from src.adapters.reconciliation import reconcile_campaign_flight_update
+
+        campaign_id = mutation.media_buy_id.replace("triton_", "")
+
+        def get_campaign() -> dict[str, Any]:
+            response = requests.get(f"{self.base_url}/campaigns/{campaign_id}", headers=self.headers)
+            response.raise_for_status()
+            return response.json()
+
+        def list_flights() -> list[dict[str, Any]]:
+            response = requests.get(
+                f"{self.base_url}/flights",
+                headers=self.headers,
+                params={"campaignId": campaign_id},
+            )
+            response.raise_for_status()
+            return response.json()
+
+        return reconcile_campaign_flight_update(
+            mutation,
+            dry_run=self.dry_run,
+            get_campaign=get_campaign,
+            list_flights=list_flights,
+            campaign_active=lambda campaign: bool(campaign["active"]),
+            flight_name=lambda flight: str(flight["name"]),
+            flight_active=lambda flight: bool(flight["active"]),
+            flight_rate=lambda flight: float(flight.get("rate", 25.0)),
+            flight_impressions=lambda flight: int(flight["goal"]["value"]),
+            default_rate=25.0,
+        )

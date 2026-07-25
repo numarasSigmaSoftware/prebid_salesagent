@@ -199,10 +199,8 @@ class TestAdCPReferenceImplementation:
             print(f"   ✓ Update status: {update_data.get('status', 'unknown')}")
             assert update_data.get("context") == {"e2e": "update_media_buy"}
 
-            # PHASE 6: webhook delivery is asserted by test_update_media_buy_push_webhook_delivery
-            # (xfail) — update_media_buy's notification is a pre-existing server bug, so this
-            # lifecycle covers the synchronous contract rather than swallow a missing webhook.
-            print("\n🔔 PHASE 6: webhook delivery → see test_update_media_buy_push_webhook_delivery (xfail)")
+            # PHASE 6: webhook delivery is asserted independently below.
+            print("\n🔔 PHASE 6: webhook delivery → see test_update_media_buy_push_webhook_delivery")
 
             print("\n📋 PHASE 7: List Creatives (verify final state)")
 
@@ -231,18 +229,6 @@ class TestAdCPReferenceImplementation:
             print("=" * 80)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Pre-existing server bug: update_media_buy's task-status push webhook is never "
-            "delivered. _send_push_notifications (src/core/context_manager.py) queries "
-            "object_workflow_mapping in a separate session before the update's UnitOfWork commits "
-            "that mapping, so it logs 'No object mappings found' and returns without POSTing (the "
-            "row IS written, visible post-request — a commit-ordering defect, not a missing row). "
-            "The create/auto-approve path was fixed by linking the mapping before the notification "
-            "fires; update_media_buy needs the same treatment. Remove this marker once it does."
-        ),
-    )
     async def test_update_media_buy_push_webhook_delivery(
         self, docker_services_e2e, live_server, test_auth_token, auto_approval_adapter
     ):

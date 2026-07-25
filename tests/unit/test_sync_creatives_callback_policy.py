@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 from src.app import app
 from src.core.exceptions import AdCPValidationError
 from tests.factories import PrincipalFactory
-from tests.helpers import assert_envelope_shape
+from tests.helpers import assert_envelope_field, assert_envelope_shape
 
 _INVALID_CALLBACK_URLS = (
     pytest.param("http://example.com/callback", id="plain-http"),
@@ -79,5 +79,5 @@ def test_rest_sync_rejects_unsafe_callback_before_impl(url: str):
 
     assert response.status_code == 400, response.text
     assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-    assert response.json()["errors"][0]["field"] == "push_notification_config.url"
+    assert_envelope_field(response.json(), "push_notification_config.url")
     mock_impl.assert_not_called()

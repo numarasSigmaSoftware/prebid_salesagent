@@ -29,24 +29,26 @@ Each caller supplies:
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from pydantic import BaseModel, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 
 from src.core.database.repositories.idempotency_attempt import COMPLETED, EXPIRED, IN_FLIGHT, RESERVED
+from src.core.idempotency_logging import redact_idempotency_key
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from contextlib import AbstractContextManager
     from datetime import timedelta
 
-    from pydantic import BaseModel
-
     from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
+    from src.core.resolved_identity import ResolvedIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +90,24 @@ def raise_on_payload_conflict(
         )
 
 
+def raise_on_tool_conflict(stored_tool_name: str | None, tool_name: str) -> None:
+    """Reject cross-tool key reuse even when both request payloads are empty."""
+    if stored_tool_name is not None and stored_tool_name != tool_name:
+        from src.core.exceptions import AdCPIdempotencyConflictError
+
+        raise AdCPIdempotencyConflictError(
+            "idempotency_key was reused for a different tool",
+            details={"original_tool": stored_tool_name, "requested_tool": tool_name},
+        )
+
+
 def lookup_cached_replay[T](
     uow_factory: Callable[[str], AbstractContextManager[_IdempotencyUoWLike]],
     tenant_id: str,
     *,
-    principal_id: str,
+    principal_id: str | None,
     account_id: str | None,
+    tool_name: str,
     idempotency_key: str,
     request_hash: str | None,
     decode: Callable[[dict[str, Any]], T | None],
@@ -130,6 +144,7 @@ def lookup_cached_replay[T](
                     account_id=account_id,
                 )
             return None
+        raise_on_tool_conflict(cached.tool_name, tool_name)
         raise_on_payload_conflict(cached.payload_hash, request_hash, details=conflict_details)
         # An in-flight reservation carries a NULL envelope and is not replayable —
         # treat it as a miss (the caller falls through to fresh execution or the
@@ -179,14 +194,14 @@ def record_replayable_success(
     except IntegrityError:
         logger.info(
             "Idempotency cache race for key %s (tenant %s, principal %s) — winner already stored",
-            idempotency_key,
+            redact_idempotency_key(idempotency_key),
             tenant_id,
             principal_id,
         )
     except Exception:
         logger.warning(
             "Best-effort idempotency cache write failed for key %s (tenant %s, principal %s)",
-            idempotency_key,
+            redact_idempotency_key(idempotency_key),
             tenant_id,
             principal_id,
             exc_info=True,
@@ -275,7 +290,7 @@ def reserve_idempotent[T](
     uow_factory: Callable[[str], AbstractContextManager[_IdempotencyUoWLike]],
     tenant_id: str,
     *,
-    principal_id: str,
+    principal_id: str | None,
     account_id: str | None,
     tool_name: str,
     idempotency_key: str,
@@ -284,6 +299,8 @@ def reserve_idempotent[T](
     decode: Callable[[dict[str, Any]], T | None],
     enforce_ceiling: bool = False,
     conflict_details: dict[str, Any] | None = None,
+    operation_class: str = "write",
+    on_reserved: Callable[[Any], None] | None = None,
 ) -> ReservationResult[T]:
     """Reserve the idempotency key in its OWN committed transaction, or replay/raise.
 
@@ -320,6 +337,7 @@ def reserve_idempotent[T](
             idempotency_key=idempotency_key,
         )
         if cached is not None:
+            raise_on_tool_conflict(cached.tool_name, tool_name)
             raise_on_payload_conflict(cached.payload_hash, request_hash, details=conflict_details)
             return ReservationResult(
                 replay=_decode_reserved_replay(cached.response_envelope, decode),
@@ -330,7 +348,12 @@ def reserve_idempotent[T](
         if enforce_ceiling:
             from src.services.idempotency_policy import enforce_insert_ceiling
 
-            enforce_insert_ceiling(repo, principal_id=principal_id, account_id=account_id)
+            enforce_insert_ceiling(
+                repo,
+                principal_id=principal_id,
+                account_id=account_id,
+                operation_class=operation_class,
+            )
         outcome = repo.reserve(
             principal_id=principal_id,
             account_id=account_id,
@@ -338,6 +361,7 @@ def reserve_idempotent[T](
             idempotency_key=idempotency_key,
             payload_hash=request_hash,
             lease=lease,
+            operation_class=operation_class,
         )
         if outcome.kind == EXPIRED:
             from src.core.exceptions import AdCPIdempotencyExpiredError
@@ -349,6 +373,7 @@ def reserve_idempotent[T](
         # Check the canonical payload before classifying a live or completed
         # collision. A different-payload retry is CONFLICT even while the first
         # request is still in flight.
+        raise_on_tool_conflict(outcome.stored_tool_name, tool_name)
         raise_on_payload_conflict(outcome.stored_hash, request_hash, details=conflict_details)
         if outcome.kind == IN_FLIGHT:
             from src.core.exceptions import AdCPIdempotencyInFlightError
@@ -367,6 +392,8 @@ def reserve_idempotent[T](
         # reservation is durable only after this commit.
         assert outcome.kind == RESERVED
         reserved_attempt_id = outcome.attempt_id
+        if on_reserved is not None:
+            on_reserved(uow)
     return ReservationResult(replay=None, attempt_id=reserved_attempt_id)
 
 
@@ -374,7 +401,7 @@ def complete_idempotent(
     uow: _IdempotencyUoWLike,
     *,
     attempt_id: str,
-    response_model: BaseModel,
+    response_model: BaseModel | dict[str, Any],
     protocol_status: str,
 ) -> None:
     """Flip the reserved row to completed on the SHARED work UoW (strict, atomic).
@@ -446,3 +473,167 @@ def release_reservation_on_error(
         if attempt_id is not None:
             release_idempotent(uow_factory, tenant_id, attempt_id=attempt_id)
         raise
+
+
+def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str | None, str | None]:
+    """Resolve the durable read scope, including anonymous principals."""
+    tenant_id = identity.tenant_id if identity is not None else None
+    if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
+        tenant_id = identity.tenant.get("tenant_id")
+    if not tenant_id:
+        from src.core.exceptions import AdCPServiceUnavailableError
+
+        raise AdCPServiceUnavailableError(
+            "A tenant scope is required to honor the supplied idempotency_key",
+            retry_after=1,
+        )
+    return tenant_id, identity.principal_id if identity else None, identity.account_id if identity else None
+
+
+def _decode_read_response(
+    envelope: dict[str, Any],
+    response_type: type[Any] | None,
+) -> Any:
+    """Reconstruct and mark a cached read response."""
+    try:
+        payload = envelope["response"]
+        if response_type is None:
+            if not isinstance(payload, dict):
+                return None
+            return {**payload, "replayed": True}
+        model_fields = getattr(response_type, "model_fields", {})
+        if {"content", "structured_content"}.issubset(model_fields) and isinstance(payload, dict):
+            # FastMCP ToolResult's custom __init__ converts a serialized list of
+            # content blocks into one JSON text block. Validate the blocks
+            # directly, then bypass that lossy constructor for byte-stable replay.
+            content = TypeAdapter(model_fields["content"].annotation).validate_python(payload.get("content", []))
+            response = response_type.model_construct(
+                content=content,
+                structured_content=payload.get("structured_content"),
+                meta=payload.get("meta"),
+            )
+        else:
+            response = response_type.model_validate(payload)
+        structured = getattr(response, "structured_content", None)
+        if isinstance(structured, dict):
+            replayed_structured = {**structured, "replayed": True}
+            content = []
+            for block in getattr(response, "content", []):
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    try:
+                        decoded_text = json.loads(text)
+                    except (TypeError, ValueError):
+                        decoded_text = None
+                    if decoded_text == structured:
+                        block = block.model_copy(
+                            update={
+                                "text": json.dumps(
+                                    replayed_structured,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            }
+                        )
+                content.append(block)
+            return response.model_copy(
+                update={
+                    "content": content,
+                    "structured_content": replayed_structured,
+                }
+            )
+        return response.model_copy(update={"replayed": True})
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def execute_idempotent_read_sync[T: BaseModel | dict[str, Any]](
+    *,
+    tool_name: str,
+    idempotency_key: str | None,
+    identity: ResolvedIdentity | None,
+    raw_wire_payload: dict[str, Any],
+    response_type: type[T] | None,
+    work: Callable[[], T],
+) -> T:
+    """Execute a synchronous read with durable replay when a key is supplied."""
+    if idempotency_key is None:
+        return work()
+
+    from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
+    from src.core.database.repositories.uow import IdempotencyUoW
+    from src.core.idempotency_canonical import canonical_payload_hash
+
+    tenant_id, principal_id, account_id = _read_scope(identity)
+    reservation = reserve_idempotent(
+        IdempotencyUoW,
+        tenant_id,
+        principal_id=principal_id,
+        account_id=account_id,
+        tool_name=tool_name,
+        idempotency_key=idempotency_key,
+        request_hash=canonical_payload_hash(raw_wire_payload),
+        lease=DEFAULT_IN_FLIGHT_LEASE,
+        decode=lambda envelope: _decode_read_response(envelope, response_type),
+        enforce_ceiling=True,
+        operation_class="read",
+    )
+    if reservation.replay is not None:
+        return reservation.replay
+    assert reservation.attempt_id is not None
+    with release_reservation_on_error(IdempotencyUoW, tenant_id, reservation.attempt_id):
+        response = work()
+        with IdempotencyUoW(tenant_id) as uow:
+            complete_idempotent(
+                uow,
+                attempt_id=reservation.attempt_id,
+                response_model=response,
+                protocol_status="completed",
+            )
+        return response
+
+
+async def execute_idempotent_read[T: BaseModel | dict[str, Any]](
+    *,
+    tool_name: str,
+    idempotency_key: str | None,
+    identity: ResolvedIdentity | None,
+    raw_wire_payload: dict[str, Any],
+    response_type: type[T] | None,
+    work: Callable[[], Awaitable[T]],
+) -> T:
+    """Execute an asynchronous read with the same durable semantics."""
+    if idempotency_key is None:
+        return await work()
+
+    from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
+    from src.core.database.repositories.uow import IdempotencyUoW
+    from src.core.idempotency_canonical import canonical_payload_hash
+
+    tenant_id, principal_id, account_id = _read_scope(identity)
+    reservation = reserve_idempotent(
+        IdempotencyUoW,
+        tenant_id,
+        principal_id=principal_id,
+        account_id=account_id,
+        tool_name=tool_name,
+        idempotency_key=idempotency_key,
+        request_hash=canonical_payload_hash(raw_wire_payload),
+        lease=DEFAULT_IN_FLIGHT_LEASE,
+        decode=lambda envelope: _decode_read_response(envelope, response_type),
+        enforce_ceiling=True,
+        operation_class="read",
+    )
+    if reservation.replay is not None:
+        return reservation.replay
+    assert reservation.attempt_id is not None
+    with release_reservation_on_error(IdempotencyUoW, tenant_id, reservation.attempt_id):
+        response = await work()
+        with IdempotencyUoW(tenant_id) as uow:
+            complete_idempotent(
+                uow,
+                attempt_id=reservation.attempt_id,
+                response_model=response,
+                protocol_status="completed",
+            )
+        return response

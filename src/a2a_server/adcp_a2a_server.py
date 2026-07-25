@@ -1672,6 +1672,34 @@ class AdCPRequestHandler(RequestHandler):
 
         return response_data
 
+    async def _execute_explicit_skill_handler(
+        self,
+        *,
+        skill_name: str,
+        handler: Callable[..., Awaitable[Any]],
+        parameters: dict[str, Any],
+        identity: ResolvedIdentity | None,
+        raw_wire_payload: dict[str, Any] | None,
+        read_idempotency_key: str | None,
+    ) -> Any:
+        wire_payload_kwargs = {"raw_wire_payload": raw_wire_payload} if skill_name in _RAW_WIRE_PAYLOAD_SKILLS else {}
+
+        async def dispatch() -> Any:
+            return await handler(parameters, identity, **wire_payload_kwargs)
+
+        if read_idempotency_key is None:
+            return await dispatch()
+        from src.services.idempotency_replay import execute_idempotent_read
+
+        return await execute_idempotent_read(
+            tool_name=skill_name,
+            idempotency_key=read_idempotency_key,
+            identity=identity,
+            raw_wire_payload=raw_wire_payload or {},
+            response_type=None,
+            work=dispatch,
+        )
+
     async def _handle_explicit_skill(
         self,
         skill_name: str,
@@ -1740,18 +1768,17 @@ class AdCPRequestHandler(RequestHandler):
         try:
             validate_adcp_version_pins(parameters)
             # Authentication already ran above, and VERSION wins when both the
-            # version and inert read key are malformed.
+            # version and read replay key are malformed.
             validate_standard_read_idempotency_key(skill_name, parameters)
         except AdCPError as boundary_exc:
             record_boundary_error_for_identity("a2a", skill_name, boundary_exc, identity)
             raise
 
-        # On standard reads a valid supplied key is validated inert envelope
-        # metadata (the 3.1 grace accepts omission). Consume it before strict
-        # task-model validation; malformed supplied values were rejected above.
-        if skill_name in STANDARD_ADCP_READ_TOOLS and "idempotency_key" in parameters:
+        read_idempotency_key = parameters.get("idempotency_key") if skill_name in STANDARD_ADCP_READ_TOOLS else None
+        # The shared dispatcher owns read replay. Consume the envelope field
+        # before strict task-model validation while retaining it for that guard.
+        if read_idempotency_key is not None:
             parameters = {key: value for key, value in parameters.items() if key != "idempotency_key"}
-            _log_dropped_fields(skill_name, DROPPED_FIELDS_UNDECLARED_ENVELOPE, ["idempotency_key"])
 
         # Strip the negotiation envelope fields (adcp_version /
         # adcp_major_version) that every AdCP SDK client injects on each
@@ -1820,15 +1847,14 @@ class AdCPRequestHandler(RequestHandler):
 
         try:
             handler = skill_handlers[skill_name]
-            # Only the skills that actually deduplicate retries take the wire
-            # payload; the rest validate-and-accept the key without a cache
-            # read, so threading it would imply a guarantee they do not make.
-            # Extend this set as dedupe reaches the other mutating tools.
-            wire_payload_kwargs = (
-                {"raw_wire_payload": raw_wire_payload} if skill_name in _RAW_WIRE_PAYLOAD_SKILLS else {}
+            result = await self._execute_explicit_skill_handler(
+                skill_name=skill_name,
+                handler=handler,
+                parameters=parameters,
+                identity=identity,
+                raw_wire_payload=raw_wire_payload,
+                read_idempotency_key=read_idempotency_key,
             )
-            # Handlers return raw Pydantic models (or raise typed AdCPError on validation failure)
-            result = await handler(parameters, identity, **wire_payload_kwargs)
             # Serialize at the boundary — models become dicts with protocol fields
             return self._serialize_for_a2a(result)
         except A2AError:

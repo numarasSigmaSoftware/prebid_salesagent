@@ -12,120 +12,29 @@ from typing import Any
 
 from pydantic import BaseModel
 
-_CONTEXT_UNSET = object()
+from src.core.application_context_values import (
+    MAX_APPLICATION_CONTEXT_DEPTH,
+    MAX_APPLICATION_CONTEXT_NODES,
+    ApplicationContextViolation,
+    detach_context_value,
+    validate_context_value,
+)
+from src.core.exceptions import AdCPValidationError
 
-# Keep accepted application contexts below every production transport's
-# recursive JSON-encoding ceiling.  The lowest observed framework ceiling is
-# FastAPI's jsonable_encoder at roughly 900 levels; a deliberately conservative
-# bound leaves ample headroom for the response envelope around the context.
-MAX_APPLICATION_CONTEXT_DEPTH = 64
-MAX_APPLICATION_CONTEXT_NODES = 10_000
+_CONTEXT_UNSET = object()
 
 
 def validate_application_context(context: Any) -> None:
-    """Reject context that a production transport cannot safely encode.
-
-    ``context`` is opaque JSON, but the HTTP/MCP/A2A frameworks all recursively
-    encode the final response envelope.  Accepting an arbitrarily deep or broad
-    object and only copying it iteratively postpones the failure until after
-    business logic has run, where it becomes an untyped 500.  Validate the raw
-    buyer-owned object at each transport boundary instead, before dispatch.
-    """
-    if context is None:
-        return
-    if isinstance(context, BaseModel):
-        context = context.model_extra or {}
-    if not isinstance(context, dict):
-        return  # Request-schema validation owns the object/type error.
-
-    stack: list[tuple[dict[Any, Any] | list[Any], int]] = [(context, 1)]
-    seen: set[int] = set()
-    nodes = 0
-    while stack:
-        container, depth = stack.pop()
-        container_id = id(container)
-        if container_id in seen:
-            from src.core.exceptions import AdCPValidationError
-
-            raise AdCPValidationError(
-                "context must be an acyclic JSON object",
-                field="context",
-                suggestion="Remove cyclic references from context and retry.",
-                context=None,
-            )
-        seen.add(container_id)
-        if depth > MAX_APPLICATION_CONTEXT_DEPTH:
-            from src.core.exceptions import AdCPValidationError
-
-            raise AdCPValidationError(
-                f"context exceeds the maximum nesting depth of {MAX_APPLICATION_CONTEXT_DEPTH}",
-                field="context",
-                suggestion=(
-                    "Flatten deeply nested context values or store the large object externally "
-                    "and pass a stable reference."
-                ),
-                context=None,
-            )
-        values = container.values() if isinstance(container, dict) else container
-        for value in values:
-            nodes += 1
-            if nodes > MAX_APPLICATION_CONTEXT_NODES:
-                from src.core.exceptions import AdCPValidationError
-
-                raise AdCPValidationError(
-                    f"context exceeds the maximum size of {MAX_APPLICATION_CONTEXT_NODES} values",
-                    field="context",
-                    suggestion="Reduce context size or pass a stable external reference.",
-                    context=None,
-                )
-            if isinstance(value, (dict, list)):
-                stack.append((value, depth + 1))
-
-
-def _detach(value: Any) -> Any:
-    """Deep-copy JSON containers with an explicit heap stack, never Python recursion.
-
-    ``context`` is opaque per ``core/context.json`` (v3.1.1). Transport
-    boundaries call :func:`validate_application_context` before dispatch, so
-    every accepted context fits the recursive final encoders; this helper then
-    detaches that accepted object without adding a second, lower recursion
-    ceiling.
-
-    ``copy.deepcopy`` and Pydantic's own JSON serializer both recurse per
-    nesting level and exhaust their respective recursion guards.
-    This function instead walks the structure with an explicit Python list as
-    the traversal stack — heap-allocated, so its capacity is bounded by
-    available memory, not a fixed recursion limit. JSON scalars (str / int /
-    float / bool / None) are immutable, so they are assigned directly rather
-    than copied; only dict/list containers are cloned, which is sufficient to
-    guarantee a later mutation of the source object cannot change an already-
-    emitted response.
-    """
-    if isinstance(value, dict):
-        root: Any = {}
-    elif isinstance(value, list):
-        root = []
-    else:
-        return value
-
-    stack: list[tuple[Any, Any]] = [(value, root)]
-    while stack:
-        source, dest = stack.pop()
-        items = source.items() if isinstance(source, dict) else enumerate(source)
-        for key, item in items:
-            if isinstance(item, dict):
-                child: Any = {}
-                stack.append((item, child))
-            elif isinstance(item, list):
-                child = []
-                stack.append((item, child))
-            else:
-                child = item
-            if isinstance(dest, dict):
-                dest[key] = child
-            else:
-                dest.append(child)
-    return root
+    """Translate a transport-neutral value violation to the AdCP error vocabulary."""
+    try:
+        validate_context_value(context)
+    except ApplicationContextViolation as exc:
+        raise AdCPValidationError(
+            exc.message,
+            field="context",
+            suggestion=exc.suggestion,
+            context=None,
+        ) from exc
 
 
 def serialize_application_context(context: Any) -> dict[str, Any] | None:
@@ -149,17 +58,22 @@ def serialize_application_context(context: Any) -> dict[str, Any] | None:
     """
     if context is None:
         return None
-    if isinstance(context, dict):
-        return _detach(context)
-    if isinstance(context, BaseModel):
-        extra = context.model_extra or {}
-        declared = context.model_dump(
-            mode="json",
-            exclude=set(extra),
-            exclude_unset=True,
-            exclude_none=False,
-        )
-        return _detach({**declared, **extra})
+    try:
+        if isinstance(context, dict):
+            return detach_context_value(context)
+        if isinstance(context, BaseModel):
+            extra = context.model_extra or {}
+            declared = context.model_dump(
+                mode="json",
+                exclude=set(extra),
+                exclude_unset=True,
+                exclude_none=False,
+            )
+            return detach_context_value({**declared, **extra})
+    except (ApplicationContextViolation, ValueError, TypeError):
+        # Serialization is commonly part of an existing error path. Invalid
+        # caller context must be omitted rather than masking that primary error.
+        return None
     return None
 
 
@@ -246,7 +160,10 @@ def dump_adcp_response(
     path below ever runs; the real context is restored afterward.
     """
     if isinstance(response, dict):
-        data = _detach(response)
+        try:
+            data = detach_context_value(response)
+        except ApplicationContextViolation:
+            data = {}
     else:
         data = _response_with_context_cleared(response).model_dump(mode=mode, **kwargs)
 

@@ -9,6 +9,7 @@ Runs after MCPAuthMiddleware.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -22,6 +23,7 @@ from src.core.exceptions import AdCPError, normalize_to_adcp_error
 from src.core.request_compat import (
     DROPPED_FIELDS_NEGOTIATION,
     DROPPED_FIELDS_UNDECLARED_ENVELOPE,
+    STANDARD_ADCP_READ_TOOLS,
     _log_dropped_fields,
     deep_strip_to_schema,
     normalize_request_params,
@@ -46,8 +48,8 @@ class RequestCompatMiddleware(Middleware):
     1. Translate deprecated field names via normalize_request_params()
     2. Reject an unsupported AdCP version pin via validate_adcp_version_pins()
        (VERSION_UNSUPPORTED) — before the fields are stripped below.
-    3. Validate a supplied idempotency_key on registered standard reads. With
-       on reads it is validated inert metadata; omission is tolerated (3.1 grace).
+    3. Validate a supplied idempotency_key on registered standard reads. The
+       shared read-replay boundary consumes it; omission is tolerated (3.1 grace).
     4. Drop AdCP version-negotiation envelope fields (adcp_version,
        adcp_major_version) via strip_negotiation_fields() — all environments,
        since no tool wrapper declares them.
@@ -168,12 +170,55 @@ class RequestCompatMiddleware(Middleware):
 
         # Step 7: Dispatch — with production fallback on TypeAdapter rejection.
         # Extracted to keep this method's cyclomatic size bounded (ADR-009 / #1610).
-        return await self._dispatch_with_typeadapter_fallback(
-            context,
-            tool_name,
-            normalized,
-            call_next,
-            application_context=application_context,
+        async def dispatch() -> ToolResult:
+            return await self._dispatch_with_typeadapter_fallback(
+                context,
+                tool_name,
+                normalized,
+                call_next,
+                application_context=application_context,
+            )
+
+        return await self._execute_read_with_replay(
+            context=context,
+            tool_name=tool_name,
+            arguments=arguments,
+            dispatch=dispatch,
+        )
+
+    async def _execute_read_with_replay(
+        self,
+        *,
+        context: MiddlewareContext,
+        tool_name: str,
+        arguments: dict[str, Any],
+        dispatch: Callable[[], Awaitable[ToolResult]],
+    ) -> ToolResult:
+        if tool_name not in STANDARD_ADCP_READ_TOOLS or "idempotency_key" not in arguments:
+            return await dispatch()
+
+        identity = None
+        if context.fastmcp_context is not None:
+            try:
+                identity = await context.fastmcp_context.get_state("identity")
+            except TypeError:
+                # Lightweight middleware unit contexts use a synchronous mock;
+                # the real FastMCP state API is awaitable.
+                identity = None
+        if identity is None:
+            # Direct middleware unit callers do not run MCPAuthMiddleware.
+            # Production requests always carry a tenant-resolved identity,
+            # including anonymous discovery calls.
+            return await dispatch()
+        from src.services.idempotency_replay import execute_idempotent_read
+
+        return await execute_idempotent_read(
+            tool_name=tool_name,
+            idempotency_key=arguments["idempotency_key"],
+            identity=identity,
+            raw_wire_payload=dict(arguments),
+            response_type=ToolResult,
+            work=dispatch,
         )
 
     async def _dispatch_with_typeadapter_fallback(

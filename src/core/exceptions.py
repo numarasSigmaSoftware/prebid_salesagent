@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import ValidationError
 
-from src.core.application_context import serialize_application_context
-
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
@@ -26,6 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 RecoveryHint = Literal["transient", "correctable", "terminal"]
+
 
 # ---------------------------------------------------------------------------
 # Error-code compliance: mapping non-standard codes to SDK equivalents
@@ -226,6 +225,8 @@ def _serialize_context(
           the original exception and the boundary translator would fail open
           with no envelope. A malformed context drops to ``None`` instead.
     """
+    from src.core.application_context import serialize_application_context
+
     serialized = serialize_application_context(context)
     if context is not None and serialized is None:
         logger.warning(

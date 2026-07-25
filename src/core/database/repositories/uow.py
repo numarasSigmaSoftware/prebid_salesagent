@@ -37,6 +37,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.repositories.account import AccountRepository
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
+from src.core.database.repositories.downstream_mutation_claim import DownstreamMutationClaimRepository
 from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.product import ProductRepository
@@ -135,6 +136,7 @@ class MediaBuyUoW(BaseUoW):
     creatives: CreativeRepository | None
     currency_limits: CurrencyLimitRepository | None
     idempotency_attempts: IdempotencyAttemptRepository | None
+    downstream_mutation_claims: DownstreamMutationClaimRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
@@ -143,6 +145,7 @@ class MediaBuyUoW(BaseUoW):
         self.creatives = CreativeRepository(self._session, self._tenant_id)
         self.currency_limits = CurrencyLimitRepository(self._session, self._tenant_id)
         self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
+        self.downstream_mutation_claims = DownstreamMutationClaimRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.media_buys = None
@@ -150,6 +153,7 @@ class MediaBuyUoW(BaseUoW):
         self.creatives = None
         self.currency_limits = None
         self.idempotency_attempts = None
+        self.downstream_mutation_claims = None
 
 
 class ProductUoW(BaseUoW):
@@ -262,13 +266,16 @@ class IdempotencyUoW(BaseUoW):
     """Short transaction containing only the tenant-scoped replay repository."""
 
     idempotency_attempts: IdempotencyAttemptRepository | None
+    downstream_mutation_claims: DownstreamMutationClaimRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
+        self.downstream_mutation_claims = DownstreamMutationClaimRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.idempotency_attempts = None
+        self.downstream_mutation_claims = None
 
 
 class CreativeUoW(BaseUoW):

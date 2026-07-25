@@ -15,6 +15,27 @@ from src.core.schemas import CreativeStatusEnum
 logger = logging.getLogger(__name__)
 
 
+def _workflow_comment(creative_info: dict[str, Any], approval_mode: str) -> str:
+    status = creative_info.get("status", CreativeStatusEnum.pending_review.value)
+    label = f"Creative '{creative_info['name']}' (format: {creative_info['format']})"
+    if status == CreativeStatusEnum.rejected.value:
+        return f"{label} was rejected by AI review"
+    if status == CreativeStatusEnum.pending_review.value and approval_mode == "ai-powered":
+        return f"{label} requires human review per AI recommendation"
+    if status == CreativeStatusEnum.pending_review.value:
+        return f"{label} requires manual approval"
+    return f"{label} requires review"
+
+
+def _has_active_approval_workflow(uow: WorkflowUoW, creative_id: str) -> bool:
+    assert uow.workflows is not None
+    existing_mapping = uow.workflows.get_latest_mapping_for_object("creative", creative_id)
+    if existing_mapping is None or existing_mapping.action != "approval_required":
+        return False
+    existing_step = uow.workflows.get_step_by_id(existing_mapping.step_id)
+    return existing_step is not None and existing_step.status in {"requires_approval", "in_progress"}
+
+
 def _create_sync_workflow_steps(
     creatives_needing_approval: list[dict[str, Any]],
     principal_id: str,
@@ -48,20 +69,14 @@ def _create_sync_workflow_steps(
 
     with WorkflowUoW(tenant["tenant_id"]) as uow:
         assert uow.workflows is not None
+        created_count = 0
         for creative_info in creatives_needing_approval:
+            if _has_active_approval_workflow(uow, creative_info["creative_id"]):
+                continue
+
             # Build appropriate comment based on status
             status = creative_info.get("status", CreativeStatusEnum.pending_review.value)
-            if status == CreativeStatusEnum.rejected.value:
-                comment = (
-                    f"Creative '{creative_info['name']}' (format: {creative_info['format']}) was rejected by AI review"
-                )
-            elif status == CreativeStatusEnum.pending_review.value:
-                if approval_mode == "ai-powered":
-                    comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires human review per AI recommendation"
-                else:
-                    comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires manual approval"
-            else:
-                comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires review"
+            comment = _workflow_comment(creative_info, approval_mode)
 
             # Create workflow step for creative approval
             # Serialize format to JSON-compatible form (FormatId is a Pydantic model)
@@ -108,9 +123,10 @@ def _create_sync_workflow_steps(
                 object_id=creative_info["creative_id"],
                 action="approval_required",
             )
+            created_count += 1
 
         # WorkflowUoW auto-commits on clean exit
-        logger.info(f"📋 Created {len(creatives_needing_approval)} workflow steps for creative approval")
+        logger.info("📋 Created %d workflow steps for creative approval", created_count)
 
 
 def _send_creative_notifications(

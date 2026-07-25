@@ -12,7 +12,7 @@ from src.core.exceptions import AdCPValidationError
 from src.core.mcp_compat_middleware import RequestCompatMiddleware
 from src.core.request_compat import STANDARD_ADCP_READ_TOOLS, NormalizationResult
 from src.core.tool_error_logging import AdCPToolError
-from tests.helpers import assert_envelope_shape, assert_no_raw_validation_leak
+from tests.helpers import assert_envelope_field, assert_envelope_shape, assert_no_raw_validation_leak
 
 
 @pytest.fixture()
@@ -38,6 +38,7 @@ def _make_copied_context(original, **kwargs):
     """Simulate MiddlewareContext.copy(message=...)."""
     copied = MagicMock()
     copied.message = kwargs.get("message", original.message)
+    copied.fastmcp_context = original.fastmcp_context
     copied.copy = original.copy
     return copied
 
@@ -210,26 +211,40 @@ class TestMiddlewareDropsUndeclaredEnvelopeFields:
 
 
 class TestMiddlewareReadIdempotencyEnvelope:
-    """Every registered standard read consumes one validated inert key."""
+    """Every registered standard read reaches the shared durable replay service."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tool_name", sorted(STANDARD_ADCP_READ_TOOLS))
     async def test_valid_key_is_consumed_before_dispatch_for_every_read(self, middleware, tool_name):
         ctx = _make_context(tool_name, {"idempotency_key": "valid-read-key-0001"})
+        ctx.fastmcp_context = MagicMock()
+        ctx.fastmcp_context.get_state = AsyncMock(
+            return_value=MagicMock(tenant_id="tenant-1", principal_id="principal-1")
+        )
         captured_ctx = None
 
         async def capturing_call_next(context):
             nonlocal captured_ctx
             captured_ctx = context
 
+        async def execute_without_persistence(**kwargs):
+            return await kwargs["work"]()
+
         with (
             patch.object(middleware, "_get_known_params", AsyncMock(return_value=set())),
             patch("src.core.config.is_production", return_value=False),
+            patch(
+                "src.services.idempotency_replay.execute_idempotent_read",
+                new=AsyncMock(side_effect=execute_without_persistence),
+            ) as replay_service,
         ):
             await middleware.on_call_tool(ctx, capturing_call_next)
 
         assert captured_ctx is not None
         assert captured_ctx.message.arguments == {}
+        replay_service.assert_awaited_once()
+        assert replay_service.await_args.kwargs["tool_name"] == tool_name
+        assert replay_service.await_args.kwargs["idempotency_key"] == "valid-read-key-0001"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tool_name", sorted(STANDARD_ADCP_READ_TOOLS))
@@ -445,7 +460,7 @@ class TestTypeAdapterValidationEnvelope:
             message_substr=message,
             check_mcp_tool_error=True,
         )
-        assert exc_info.value.envelope["errors"][0]["field"] == field
+        assert_envelope_field(exc_info.value.envelope, field)
         wire_message = exc_info.value.envelope["errors"][0]["message"]
         assert_no_raw_validation_leak(wire_message)
 

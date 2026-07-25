@@ -31,6 +31,18 @@ MAX_ACTIVE_ATTEMPTS_PER_SCOPE = int(os.getenv("IDEMPOTENCY_MAX_ACTIVE_ATTEMPTS_P
 INSERT_RATE_WINDOW = timedelta(seconds=int(os.getenv("IDEMPOTENCY_INSERT_RATE_WINDOW_SECONDS") or "10"))
 MAX_INSERTS_PER_WINDOW = int(os.getenv("IDEMPOTENCY_MAX_INSERTS_PER_WINDOW") or "300")
 
+
+def _operation_limits(operation_class: str) -> tuple[int, int, timedelta]:
+    """Resolve independently tunable read/write limits with legacy fallbacks."""
+    prefix = f"IDEMPOTENCY_{operation_class.upper()}"
+    active = int(os.getenv(f"{prefix}_MAX_ACTIVE_ATTEMPTS_PER_SCOPE") or MAX_ACTIVE_ATTEMPTS_PER_SCOPE)
+    inserts = int(os.getenv(f"{prefix}_MAX_INSERTS_PER_WINDOW") or MAX_INSERTS_PER_WINDOW)
+    window = timedelta(
+        seconds=int(os.getenv(f"{prefix}_INSERT_RATE_WINDOW_SECONDS") or int(INSERT_RATE_WINDOW.total_seconds()))
+    )
+    return active, inserts, window
+
+
 # The spec Error model bounds retry_after to [1, 3600] seconds (clients clamp
 # anyway); never emit more even when the oldest row expires further out. A spec
 # constant, not an operational knob — deliberately not env-tunable.
@@ -49,11 +61,12 @@ def _clamp_retry_after(seconds: float) -> int:
 def enforce_insert_ceiling(
     attempts: IdempotencyAttemptRepository,
     *,
-    principal_id: str,
+    principal_id: str | None,
     account_id: str | None = None,
     ceiling: int | None = None,
     rate_ceiling: int | None = None,
     now: datetime | None = None,
+    operation_class: str = "write",
 ) -> None:
     """Raise ``RATE_LIMITED`` when the scope has no room for another cached success.
 
@@ -76,13 +89,17 @@ def enforce_insert_ceiling(
     current = now or datetime.now(UTC)
 
     # Insert-rate bound: rows CREATED inside the trailing window, expired or not.
-    rate_limit = rate_ceiling if rate_ceiling is not None else MAX_INSERTS_PER_WINDOW
-    window_start = current - INSERT_RATE_WINDOW
+    default_active, default_inserts, rate_window = _operation_limits(operation_class)
+    rate_limit = rate_ceiling if rate_ceiling is not None else default_inserts
+    window_start = current - rate_window
     recent, oldest_in_window = attempts.count_inserts_since(
-        principal_id=principal_id, account_id=account_id, since=window_start
+        principal_id=principal_id,
+        account_id=account_id,
+        since=window_start,
+        operation_class=operation_class,
     )
     if recent >= rate_limit:
-        window_seconds = math.ceil(INSERT_RATE_WINDOW.total_seconds())
+        window_seconds = math.ceil(rate_window.total_seconds())
         raw_wait = window_seconds - (current - oldest_in_window).total_seconds() if oldest_in_window else 1
         # The wait can never logically exceed the window itself; the bound
         # also absorbs DB-vs-app clock skew on created_at (server_default).
@@ -92,8 +109,13 @@ def enforce_insert_ceiling(
         )
 
     # Storage bound: ACTIVE (non-expired) rows.
-    limit = ceiling if ceiling is not None else MAX_ACTIVE_ATTEMPTS_PER_SCOPE
-    active, oldest_expiry = attempts.count_active(principal_id=principal_id, account_id=account_id, now=current)
+    limit = ceiling if ceiling is not None else default_active
+    active, oldest_expiry = attempts.count_active(
+        principal_id=principal_id,
+        account_id=account_id,
+        now=current,
+        operation_class=operation_class,
+    )
     if active < limit:
         return
 

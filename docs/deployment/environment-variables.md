@@ -104,6 +104,21 @@ Or use individual variables:
 |----------|---------|-------------|
 | `SKIP_MIGRATIONS` | `false` | Skip automatic migrations on startup |
 
+### Idempotency Admission Limits
+
+Read and write attempts are counted separately. Class-specific variables fall
+back to the matching legacy `IDEMPOTENCY_*` value when present, then to the
+default shown below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IDEMPOTENCY_READ_MAX_ACTIVE_ATTEMPTS_PER_SCOPE` | `1000` | Maximum non-expired read attempts per tenant/principal/account scope |
+| `IDEMPOTENCY_READ_MAX_INSERTS_PER_WINDOW` | `300` | Maximum read-attempt inserts during the configured window |
+| `IDEMPOTENCY_READ_INSERT_RATE_WINDOW_SECONDS` | `10` | Read insert-rate window |
+| `IDEMPOTENCY_WRITE_MAX_ACTIVE_ATTEMPTS_PER_SCOPE` | `1000` | Maximum non-expired write attempts per tenant/principal/account scope |
+| `IDEMPOTENCY_WRITE_MAX_INSERTS_PER_WINDOW` | `300` | Maximum write-attempt inserts during the configured window |
+| `IDEMPOTENCY_WRITE_INSERT_RATE_WINDOW_SECONDS` | `10` | Write insert-rate window |
+
 ---
 
 ## AI Features

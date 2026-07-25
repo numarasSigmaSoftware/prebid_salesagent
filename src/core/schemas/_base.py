@@ -1969,7 +1969,7 @@ RawIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic ne
     ),
 ]
 
-# Read requests accept the same raw key shape as inert 3.1 envelope metadata,
+# Read requests accept the same raw key shape as 3.1 envelope metadata,
 # but omission remains valid during the 3.1 grace window.  Keep the annotation
 # non-nullable in generated schemas while ``SkipValidation`` preserves an
 # explicit JSON null until the shared ingress validator can reject it with the
@@ -1977,7 +1977,7 @@ RawIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic ne
 RawOptionalIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic need runtime Annotated metadata
     SkipValidation[str],
     Field(
-        description="Optional inert request key (AdCP 3.1.1, 16-255 characters when supplied).",
+        description="Optional replay key (AdCP 3.1.1, 16-255 characters when supplied).",
         json_schema_extra={
             "minLength": _IDEMPOTENCY_KEY_MIN,
             "maxLength": _IDEMPOTENCY_KEY_MAX,

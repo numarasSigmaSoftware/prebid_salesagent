@@ -8,6 +8,8 @@ Handles media buy updates including:
 - Currency limit validation
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
@@ -18,12 +20,13 @@ from adcp import PushNotificationConfig
 from adcp.server.helpers import MEDIA_BUY_STATE_MACHINE, is_terminal_status, valid_actions_for_status
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
-from pydantic import Field, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
 
 if TYPE_CHECKING:
+    from src.adapters.base import AdServerAdapter
     from src.core.database.models import MediaBuy
 
 # ---------------------------------------------------------------------------
@@ -35,7 +38,6 @@ if TYPE_CHECKING:
 MAX_CAMPAIGN_BUDGET: Decimal = Decimal(os.environ.get("MAX_CAMPAIGN_BUDGET_USD", "10000000"))
 
 from adcp.types import ContextObject, ReportingWebhook, TargetingOverlay
-from adcp.types import PackageUpdate as UpdatePackage
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 from sqlalchemy import select
@@ -81,6 +83,7 @@ from src.core.helpers.adapter_helpers import get_adapter
 from src.core.idempotency_canonical import canonical_payload_hash
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
+    AdCPPackageUpdate,
     AffectedPackage,
     Budget,
     Principal,
@@ -88,6 +91,7 @@ from src.core.schemas import (
     RawUnsupportedRevision,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
+    UpdateMediaBuyResponse,
     UpdateMediaBuyResult,
     UpdateMediaBuySubmitted,
     UpdateMediaBuySuccess,
@@ -106,7 +110,15 @@ from src.core.transport_helpers import get_mcp_raw_wire_payload, resolve_identit
 from src.core.utils import utc_flight_start
 from src.core.validation_helpers import adcp_validation_boundary, package_field_path
 from src.core.webhook_validator import require_valid_callback_config_urls, validated_callback_url_scope
-from src.services.idempotency_replay import complete_idempotent, reserve_idempotent
+from src.services.downstream_reconciliation import (
+    execute_reconciled_media_buy_update,
+    plan_reconciled_media_buy_update,
+)
+from src.services.idempotency_replay import (
+    complete_idempotent,
+    release_reservation_on_error,
+    reserve_idempotent,
+)
 from src.services.targeting_capabilities import (
     property_list_unsupported_advisories,
     raise_if_property_targeting_violations,
@@ -128,6 +140,7 @@ class _RevisionOmitted(int):
 
 
 REVISION_OMITTED = _RevisionOmitted(0)
+_UPDATE_RESPONSE_ADAPTER: TypeAdapter[UpdateMediaBuyResponse] = TypeAdapter(UpdateMediaBuyResponse)
 
 
 def revision_omitted_default() -> RawUnsupportedRevision:
@@ -241,7 +254,7 @@ def validate_update_media_buy_protocol_fields(
 
 
 def _adcp_status_and_actions(
-    buy: "MediaBuy | None", today: date | None = None, *, fallback_status: str | None = None
+    buy: MediaBuy | None, today: date | None = None, *, fallback_status: str | None = None
 ) -> tuple[MediaBuyStatus | None, list[str]]:
     """Map a media buy to ``(media_buy_status, valid_actions)``, DATE-REFINED.
 
@@ -311,9 +324,9 @@ def _normalize_creative_agent_url(url: str | None) -> str | None:
 def _validate_creatives_for_assignment(
     creative_ids: list[str],
     *,
-    uow: "MediaBuyUoW",
+    uow: MediaBuyUoW,
     principal_id: str,
-    product: "DBProduct | None",
+    product: DBProduct | None,
     product_name: str | None = None,
     context: ContextObject | None = None,
 ) -> None:
@@ -431,7 +444,7 @@ def _validate_creatives_for_assignment(
 
 def _verify_principal(
     media_buy_id: str,
-    identity: "ResolvedIdentity",
+    identity: ResolvedIdentity,
     repo: MediaBuyRepository,
     *,
     context: ContextObject | None = None,
@@ -492,6 +505,45 @@ def _decode_update_media_buy_replay(envelope: dict[str, Any]) -> UpdateMediaBuyR
     return UpdateMediaBuyResult(response=response, status=protocol_status, replayed=True)
 
 
+def _adapter_update_specs(req: UpdateMediaBuyRequest, implementation_date: datetime) -> list[dict[str, Any]]:
+    """Describe every consequential adapter call the validated request can reach."""
+    specs: list[dict[str, Any]] = []
+    if req.paused is not None:
+        specs.append(
+            {
+                "operation_key": f"campaign:{'pause_media_buy' if req.paused else 'resume_media_buy'}",
+                "action": "pause_media_buy" if req.paused else "resume_media_buy",
+                "package_id": None,
+                "budget": None,
+                "implementation_date": implementation_date,
+            }
+        )
+    for package in req.packages or []:
+        if package.paused is not None:
+            action = "pause_package" if package.paused else "resume_package"
+            specs.append(
+                {
+                    "operation_key": f"{package.package_id or 'campaign'}:{action}",
+                    "action": action,
+                    "package_id": package.package_id,
+                    "budget": None,
+                    "implementation_date": implementation_date,
+                }
+            )
+        if package.budget is not None:
+            amount = float(package.budget) if isinstance(package.budget, int | float) else float(package.budget.total)
+            specs.append(
+                {
+                    "operation_key": f"{package.package_id or 'campaign'}:update_package_budget",
+                    "action": "update_package_budget",
+                    "package_id": package.package_id,
+                    "budget": int(amount),
+                    "implementation_date": implementation_date,
+                }
+            )
+    return specs
+
+
 def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
     identity: ResolvedIdentity | None = None,
@@ -520,6 +572,26 @@ def _update_media_buy_impl(
     )
     require_idempotency_key(idempotency_key)
     assert idempotency_key is not None
+    testing_ctx = resolved_identity.testing_context or AdCPTestContext()
+    implementation_date = utc_flight_start(req.today or date.today())
+    downstream_specs = _adapter_update_specs(req, implementation_date)
+    adapter = get_adapter(
+        principal,
+        dry_run=testing_ctx.dry_run,
+        testing_context=testing_ctx,
+        tenant=tenant,
+    )
+
+    def plan_downstream_claims(uow: Any) -> None:
+        for spec in downstream_specs:
+            plan_reconciled_media_buy_update(
+                uow=uow,
+                adapter=adapter,
+                identity=resolved_identity,
+                idempotency_key=idempotency_key,
+                media_buy_id=req.media_buy_id,
+                **spec,
+            )
 
     reservation = reserve_idempotent(
         MediaBuyUoW,
@@ -532,42 +604,31 @@ def _update_media_buy_impl(
         lease=DEFAULT_IN_FLIGHT_LEASE,
         decode=_decode_update_media_buy_replay,
         enforce_ceiling=True,
+        on_reserved=plan_downstream_claims if downstream_specs else None,
     )
     if reservation.replay is not None:
         return reservation.replay
     assert reservation.attempt_id is not None
 
-    try:
+    with release_reservation_on_error(MediaBuyUoW, tenant["tenant_id"], reservation.attempt_id):
         result = _update_media_buy_work(
             req=req,
             identity=resolved_identity,
             principal=principal,
+            adapter_override=adapter,
             context_id=context_id,
+            guard_downstream=True,
         )
-    except Exception:
-        # The worker can cross an external adapter boundary before raising.
-        # Leave the claim in flight until its advertised lease expires; freeing
-        # it immediately could repeat an update whose remote side effect landed.
-        logger.warning(
-            "update_media_buy failed after reservation %s; leaving it in flight to fail closed",
-            reservation.attempt_id,
-            exc_info=True,
-        )
-        raise
-
-    # Work may span adapter and workflow side effects, so completion uses a
-    # separate strict transaction. If fencing fails, leave the key in-flight
-    # and fail closed rather than allowing an immediate duplicate update.
-    response_model = result.response if isinstance(result, UpdateMediaBuyResult) else result
-    protocol_status = result.status if isinstance(result, UpdateMediaBuyResult) else AdcpTaskStatus.submitted.value
-    with MediaBuyUoW(tenant["tenant_id"]) as uow:
-        complete_idempotent(
-            uow,
-            attempt_id=reservation.attempt_id,
-            response_model=response_model,
-            protocol_status=protocol_status,
-        )
-    return result
+        response_model = result.response if isinstance(result, UpdateMediaBuyResult) else result
+        protocol_status = result.status if isinstance(result, UpdateMediaBuyResult) else AdcpTaskStatus.submitted.value
+        with MediaBuyUoW(tenant["tenant_id"]) as uow:
+            complete_idempotent(
+                uow,
+                attempt_id=reservation.attempt_id,
+                response_model=response_model,
+                protocol_status=protocol_status,
+            )
+        return result
 
 
 def _update_media_buy_work(
@@ -575,6 +636,8 @@ def _update_media_buy_work(
     principal: Principal | None = None,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
+    guard_downstream: bool = False,
+    adapter_override: AdServerAdapter | None = None,
 ) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
@@ -703,8 +766,45 @@ def _update_media_buy_work(
                     tenant_id=identity.tenant_id,
                     context=req.context,
                 )
-            adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
+            adapter = adapter_override or get_adapter(
+                principal,
+                dry_run=testing_ctx.dry_run,
+                testing_context=testing_ctx,
+                tenant=tenant,
+            )
             today = req.today or date.today()
+
+            def invoke_adapter_update(
+                *,
+                action: str,
+                package_id: str | None,
+                budget: int | None,
+            ) -> UpdateMediaBuyResponse:
+                def invoke() -> UpdateMediaBuyResponse:
+                    return adapter.update_media_buy(
+                        media_buy_id=media_buy_id_to_use,
+                        action=action,
+                        package_id=package_id,
+                        budget=budget,
+                        today=utc_flight_start(today),
+                    )
+
+                if not guard_downstream:
+                    return invoke()
+                assert req.idempotency_key is not None
+                return execute_reconciled_media_buy_update(
+                    adapter=adapter,
+                    identity=identity,
+                    idempotency_key=req.idempotency_key,
+                    operation_key=f"{package_id or 'campaign'}:{action}",
+                    media_buy_id=media_buy_id_to_use,
+                    action=action,
+                    package_id=package_id,
+                    budget=budget,
+                    implementation_date=utc_flight_start(today),
+                    response_decoder=_UPDATE_RESPONSE_ADAPTER.validate_python,
+                    work=invoke,
+                )
 
             # AdCP 3.0.0 spec (core/product.json `property_targeting_allowed`): reject property_list targeting
             # on products with property_targeting_allowed=False. Runs before the dry_run
@@ -933,12 +1033,10 @@ def _update_media_buy_work(
             if req.paused is not None:
                 # adcp 2.12.0+: paused=True means pause, paused=False means resume
                 action = "pause_media_buy" if req.paused else "resume_media_buy"
-                result = adapter.update_media_buy(
-                    media_buy_id=req.media_buy_id,
+                result = invoke_adapter_update(
                     action=action,
                     package_id=None,
                     budget=None,
-                    today=utc_flight_start(today),
                 )
                 # Manual approval case - convert adapter result to appropriate Success/Error
                 # adcp v1.2.1 oneOf pattern: Check if result is Error variant (has errors field)
@@ -998,12 +1096,10 @@ def _update_media_buy_work(
                     if pkg_update.paused is not None:
                         # adcp 2.12.0+: paused=True means pause, paused=False means resume
                         action = "pause_package" if pkg_update.paused else "resume_package"
-                        result = adapter.update_media_buy(
-                            media_buy_id=req.media_buy_id,
+                        result = invoke_adapter_update(
                             action=action,
                             package_id=pkg_update.package_id,
                             budget=None,
-                            today=utc_flight_start(today),
                         )
                         # adcp v1.2.1 oneOf pattern: Check if result is Error variant
                         if isinstance(result, UpdateMediaBuyError) and result.errors:
@@ -1066,12 +1162,10 @@ def _update_media_buy_work(
                             req.media_buy_id, pkg_update.package_id, context=req.context
                         )
 
-                        result = adapter.update_media_buy(
-                            media_buy_id=req.media_buy_id,
+                        result = invoke_adapter_update(
                             action="update_package_budget",
                             package_id=pkg_update.package_id,
                             budget=int(budget_amount),
-                            today=utc_flight_start(today),
                         )
                         # adcp v1.2.1 oneOf pattern: Check if result is Error variant
                         if isinstance(result, UpdateMediaBuyError) and result.errors:
@@ -1782,7 +1876,7 @@ async def update_media_buy(
     end_time: Annotated[str | None, Field(description="New campaign end time in ISO 8601 format")] = None,
     pacing: Annotated[str | None, Field(description="Budget pacing strategy: 'even' or 'asap'")] = None,
     daily_budget: Annotated[float | None, Field(description="Maximum daily spend cap")] = None,
-    packages: list[UpdatePackage] | None = None,
+    packages: list[AdCPPackageUpdate] | None = None,
     creatives: list = None,
     push_notification_config: PushNotificationConfig | None = None,
     context: ContextObject | None = None,  # payload-level context
@@ -1878,7 +1972,7 @@ def update_media_buy_raw(
     daily_budget: float = None,
     # A2A/REST send wire dicts; UpdateMediaBuyRequest validates them as the
     # request's packages[] field.
-    packages: list[UpdatePackage] | list[dict[str, Any]] | None = None,
+    packages: list[AdCPPackageUpdate] | list[dict[str, Any]] | None = None,
     creatives: list = None,
     push_notification_config: PushNotificationConfig | None = None,
     context: ContextObject | None = None,  # payload-level context

@@ -17,7 +17,15 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from src.adapters.base import AdapterCapabilities, AdServerAdapter, CreativeEngineAdapter, TargetingCapabilities
+from src.adapters.base import (
+    AdapterCapabilities,
+    AdServerAdapter,
+    CreativeEngineAdapter,
+    DownstreamMutation,
+    ReconciliationOutcome,
+    ReconciliationResult,
+    TargetingCapabilities,
+)
 from src.adapters.broadstreet.client import BroadstreetClient
 from src.adapters.broadstreet.config_schema import parse_implementation_config
 from src.adapters.broadstreet.managers import (
@@ -62,6 +70,7 @@ class BroadstreetAdapter(AdServerAdapter):
     """
 
     adapter_name = "broadstreet"
+    supports_media_buy_update_reconciliation = True
 
     # Broadstreet specializes in display advertising
     default_channels = ["display"]
@@ -799,6 +808,60 @@ class BroadstreetAdapter(AdServerAdapter):
 
         # Should not reach here - all actions are handled above
         return UpdateMediaBuySuccess(media_buy_id=media_buy_id, affected_packages=[], implementation_date=today)
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Reconcile Broadstreet state from stable advertisement IDs or local-only fields."""
+        from src.adapters.reconciliation import (
+            applied_update_result,
+            classify_observed_values,
+            load_media_package_snapshots,
+            reconcile_local_package_update,
+        )
+
+        assert self.tenant_id is not None
+        packages = load_media_package_snapshots(self.tenant_id, mutation)
+        local_result = reconcile_local_package_update(mutation, packages)
+        if local_result is not None:
+            return local_result
+
+        advertisement_ids = {
+            str(advertisement_id)
+            for package in packages
+            for advertisement_id in package.package_config.get("broadstreet_advertisement_ids", [])
+        }
+
+        if mutation.action not in {"pause_media_buy", "resume_media_buy", "pause_package", "resume_package"}:
+            return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+        if self.dry_run or not advertisement_ids:
+            return applied_update_result(
+                mutation,
+                paused=mutation.action.startswith("pause_") if mutation.package_id else None,
+            )
+        if not self.client or not self.advertiser_id:
+            return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+
+        desired_active = mutation.action.startswith("resume_")
+        observed: list[bool] = []
+        try:
+            for advertisement_id in sorted(advertisement_ids):
+                advertisement = self.client.get_advertisement(self.advertiser_id, advertisement_id)
+                active = advertisement.get("active")
+                if active is None:
+                    return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+                observed.append(bool(int(active)) == desired_active)
+        except (KeyError, TypeError, ValueError):
+            return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+        except Exception:
+            logger.warning("Broadstreet reconciliation read failed", exc_info=True)
+            return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+
+        outcome = classify_observed_values(observed)
+        if outcome is ReconciliationOutcome.APPLIED:
+            return applied_update_result(
+                mutation,
+                paused=not desired_active if mutation.package_id else None,
+            )
+        return ReconciliationResult(outcome)
 
     async def get_available_inventory(self) -> dict[str, Any]:
         """Fetch available inventory (zones) from Broadstreet.

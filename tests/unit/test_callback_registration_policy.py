@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 from src.app import app
 from src.core.exceptions import AdCPValidationError
 from tests.factories import PrincipalFactory
-from tests.helpers import assert_envelope_shape
+from tests.helpers import assert_envelope_field, assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_media_buy_request_dict
 
 _INVALID_CALLBACK_URLS = (
@@ -145,7 +145,7 @@ def test_rest_create_rejects_unsafe_callback_before_impl(field: str, url: str):
 
     assert response.status_code == 400, response.text
     assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-    assert response.json()["errors"][0]["field"] == f"{field}.url"
+    assert_envelope_field(response.json(), f"{field}.url")
     mock_impl.assert_not_awaited()
 
 

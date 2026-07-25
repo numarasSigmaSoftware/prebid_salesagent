@@ -6,7 +6,7 @@ Issue #816 revealed that list_tasks was broken but had no test coverage.
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import ANY, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastmcp import Client
@@ -92,9 +92,16 @@ class TestListTasksTool:
         mock_workflow_repo.list_by_tenant.return_value = []
         mock_workflow_repo.get_mappings_for_steps.return_value = {}
 
+        async def execute_without_persistence(**kwargs):
+            return await kwargs["work"]()
+
         with (
             patch("src.core.mcp_auth_middleware.resolve_identity_from_context", return_value=identity),
             patch("src.core.tools.task_management.WorkflowUoW", return_value=mock_uow),
+            patch(
+                "src.services.idempotency_replay.execute_idempotent_read",
+                new=AsyncMock(side_effect=execute_without_persistence),
+            ),
         ):
             async with Client(mcp) as client:
                 result = await client.call_tool("list_tasks", arguments, raise_on_error=False)

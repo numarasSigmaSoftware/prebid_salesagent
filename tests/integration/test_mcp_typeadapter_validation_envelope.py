@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.helpers import assert_envelope_shape, assert_no_raw_validation_leak
+from tests.helpers import assert_envelope_field, assert_envelope_shape, assert_no_raw_validation_leak
 from tests.helpers.adcp_factories import create_test_package_request_dict
 from tests.helpers.mcp_envelope_capture import call_mcp_tool_capturing_envelope
 
@@ -31,7 +31,7 @@ def test_typeadapter_validation_error_emits_adcp_envelope_on_mcp_wire():
     assert envelope is not None, f"{tool_name}: no MCP wire error envelope captured"
     assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable", message_substr="List should have")
     assert envelope["errors"][0].get("suggestion"), f"{tool_name}: envelope must include a recovery suggestion"
-    assert envelope["errors"][0].get("field") == "filters.concept_ids"
+    assert_envelope_field(envelope, "filters.concept_ids")
     assert_no_raw_validation_leak(envelope["errors"][0]["message"])
 
 
@@ -62,7 +62,7 @@ def test_create_media_buy_missing_key_preserves_field_on_mcp_wire():
         recovery="correctable",
         message_substr="idempotency_key is required",
     )
-    assert envelope["errors"][0].get("field") == "idempotency_key"
+    assert_envelope_field(envelope, "idempotency_key")
     assert_no_raw_validation_leak(envelope["errors"][0]["message"])
 
 
@@ -82,7 +82,7 @@ def test_create_media_buy_empty_arguments_emit_adcp_envelope_on_mcp_wire():
         recovery="correctable",
         message_substr="idempotency_key is required",
     )
-    assert envelope["errors"][0].get("field") == "idempotency_key"
+    assert_envelope_field(envelope, "idempotency_key")
     assert_no_raw_validation_leak(envelope["errors"][0]["message"])
 
 

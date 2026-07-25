@@ -11,9 +11,8 @@ same-key retry re-executed. These tests pin the wired reservation:
   observably re-deriving the creative to "unchanged".
 
 sync_creatives reserves in its own committed transaction and completes
-strictly after successful work. Handler and completion failures remain in
-flight and fail closed so a retry cannot immediately repeat already-committed
-side effects.
+strictly after successful work. Handler failures release the reservation so
+errors are never cached and a corrected retry can execute.
 """
 
 from __future__ import annotations
@@ -23,11 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.core.exceptions import (
-    AdCPIdempotencyConflictError,
-    AdCPIdempotencyInFlightError,
-    build_two_layer_error_envelope,
-)
+from src.core.exceptions import AdCPIdempotencyConflictError, build_two_layer_error_envelope
 from tests.harness import CreativeSyncEnv
 from tests.helpers import assert_envelope_shape
 from tests.helpers.creative_test_helpers import creative_payload
@@ -101,7 +96,7 @@ class TestSyncCreativesIdempotency:
         assert second.replayed is False
         assert _action(second.creatives[0].action) in ("unchanged", "updated")
 
-    def test_failure_after_reservation_stays_in_flight(self, integration_db):
+    def test_failure_after_reservation_releases_for_retry(self, integration_db):
         from src.core.tools.creatives._sync import _sync_creatives_impl
 
         with CreativeSyncEnv(tenant_id="cre_fail_closed", principal_id="agent_cre_fail_closed") as env:
@@ -113,7 +108,7 @@ class TestSyncCreativesIdempotency:
             with patch(
                 "src.core.tools.creatives._sync._sync_creatives_work",
                 side_effect=RuntimeError("failure after reservation"),
-            ):
+            ) as work:
                 with pytest.raises(RuntimeError, match="failure after reservation"):
                     _sync_creatives_impl(
                         creatives=[_creative()],
@@ -121,10 +116,11 @@ class TestSyncCreativesIdempotency:
                         identity=env.identity,
                         raw_wire_payload=raw,
                     )
-                with pytest.raises(AdCPIdempotencyInFlightError):
+                with pytest.raises(RuntimeError, match="failure after reservation"):
                     _sync_creatives_impl(
                         creatives=[_creative()],
                         idempotency_key=key,
                         identity=env.identity,
                         raw_wire_payload=raw,
                     )
+            assert work.call_count == 2
