@@ -1133,8 +1133,22 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
         return exc
     if isinstance(exc, ValidationError):
         errors = exc.errors()
+        first_type = errors[0]["type"] if errors else None
+        first_message = errors[0]["msg"] if errors else None
+        # Structural request-shape failures (missing required fields or
+        # forbidden extras) are INVALID_REQUEST at every transport boundary.
+        # Value/constraint failures on an otherwise well-formed request remain
+        # VALIDATION_ERROR. This mirrors the REST RequestValidationError
+        # boundary and the pinned 3.1.1 wire contract.
+        if first_type in {"missing", "extra_forbidden"}:
+            return AdCPInvalidRequestError(
+                first_message or "Request failed schema validation",
+                field=first_validation_error_field(exc),
+                suggestion=INVALID_REQUEST_SUGGESTION,
+                details=build_validation_error_details(errors),
+            )
         return AdCPValidationError(
-            errors[0].get("msg") if errors else "Request failed schema validation",
+            first_message or "Request failed schema validation",
             field=first_validation_error_field(exc),
             suggestion=VALIDATION_ERROR_SUGGESTION,
             details=build_validation_error_details(errors),

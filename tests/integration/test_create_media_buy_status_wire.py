@@ -26,18 +26,17 @@ MediaBuyStatus.pending_start, so the emitted media_buy_status must be
 "pending_start" (coupled to the same single value source; the spec forbids
 divergent lifecycle emission).
 
-Wire faithfulness: CreateMediaBuyResult._serialize (src/core/schemas/_base.py)
-produces the transport-invariant body — result.model_dump(mode="json") is the
-same serializer every transport emits, and it is exactly the exclude_none path
-that drops the field today (reverting the media_buy_status kwarg goes red).
+Wire faithfulness: this test calls the in-memory MCP client, which exercises
+the production TypeAdapter, MCP wrapper, and response serializer before
+capturing its structured wire body (including the exclude_none path that
+previously dropped the field).
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
+from tests.harness import Transport
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -46,22 +45,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 # adcp 6.6 MediaBuyStatus enum. Kept literal so the test pins the wire contract
 # rather than echoing production's enum import.
 _LIFECYCLE_VALUES = {"completed", "pending_creatives", "pending_start", "active"}
-
-
-def _create_kwargs(product, *, domain: str) -> dict:
-    """Create kwargs with packages WITHOUT creative_ids.
-
-    has_creatives=False drives _determine_media_buy_status to
-    "pending_creatives" — the storyboard create_buy_no_creatives step.
-    """
-    now = datetime.now(UTC)
-    return {
-        "brand": {"domain": domain},
-        "packages": [{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
-        "start_time": (now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end_time": (now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "po_number": "STATUS-WIRE-1",
-    }
 
 
 def test_create_success_wire_carries_media_buy_status_distinct_from_envelope_status(integration_db):
@@ -75,9 +58,13 @@ def test_create_success_wire_carries_media_buy_status_distinct_from_envelope_sta
     with MediaBuyCreateEnv() as env:
         _tenant, _principal, product, _pricing = env.setup_media_buy_data()
 
-        result = env.call_impl(**_create_kwargs(product, domain="status-wire.example.com"))
+        result = env.call_via(
+            Transport.MCP,
+            **env.default_create_kwargs(product, brand_domain="status-wire.example.com"),
+        )
 
-    envelope = result.model_dump(mode="json")
+    assert result.is_success and result.wire_response is not None
+    envelope = result.wire_response
 
     assert envelope["status"] == "completed", (
         f"top-level status slot is reserved for the envelope TaskStatus, got {envelope.get('status')!r}"
@@ -110,10 +97,14 @@ def test_create_dry_run_wire_carries_media_buy_status_pending_start(integration_
     with MediaBuyCreateEnv(dry_run=True) as env:
         _tenant, _principal, product, _pricing = env.setup_media_buy_data()
 
-        result = env.call_impl(**_create_kwargs(product, domain="status-wire-dry.example.com"))
+        result = env.call_via(
+            Transport.MCP,
+            **env.default_create_kwargs(product, brand_domain="status-wire-dry.example.com"),
+        )
 
-    envelope = result.model_dump(mode="json")
-    response_envelope = result.response.model_dump(mode="json")
+    assert result.is_success and result.wire_response is not None
+    envelope = result.wire_response
+    response_envelope = envelope
 
     # Branch-proof: only the dry-run branch mints a "dry_run_"-prefixed
     # media_buy_id (no adapter call, no persisted buy).

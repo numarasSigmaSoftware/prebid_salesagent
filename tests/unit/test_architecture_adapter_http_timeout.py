@@ -61,7 +61,7 @@ def _requests_function_names(tree: ast.AST) -> tuple[set[str], set[str]]:
             bound = alias.asname or alias.name
             if node.module in {"requests", "requests.api"} and alias.name in _REQUESTS_METHODS:
                 methods.add(bound)
-            if alias.name == "Session":
+            if alias.name in {"Session", "session"}:
                 sessions.add(bound)
     return methods, sessions
 
@@ -113,8 +113,12 @@ def _requests_session_aliases(tree: ast.AST, module_names: set[str], sessions_mo
         chain = _attribute_chain(value)
         if not chain:
             continue
-        direct_session = chain[0] in module_names and chain[-1] == "Session" and chain[1:-1] in ([], ["sessions"])
-        imported_sessions_module = len(chain) == 2 and chain[0] in sessions_module_names and chain[1] == "Session"
+        direct_session = (
+            chain[0] in module_names and chain[-1] in {"Session", "session"} and chain[1:-1] in ([], ["sessions"])
+        )
+        imported_sessions_module = (
+            len(chain) == 2 and chain[0] in sessions_module_names and chain[1] in {"Session", "session"}
+        )
         if direct_session or imported_sessions_module:
             aliases.update(target.id for target in targets if isinstance(target, ast.Name))
     return aliases
@@ -165,12 +169,12 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
         chain = _attribute_chain(node.func)
         if not chain:
             continue
-        if len(chain) == 2 and chain[0] in sessions_module_names and chain[1] == "Session":
+        if len(chain) == 2 and chain[0] in sessions_module_names and chain[1] in {"Session", "session"}:
             hits.append(node.lineno)
             continue
         if chain[0] not in module_names:
             continue
-        if chain[-1] == "Session" and chain[1:-1] in ([], ["sessions"]):
+        if chain[-1] in {"Session", "session"} and chain[1:-1] in ([], ["sessions"]):
             hits.append(node.lineno)
         elif len(chain) in {2, 3} and chain[-1] in _REQUESTS_METHODS and chain[1:-1] in ([], ["api"]):
             timeout_kw = next((kw for kw in node.keywords if kw.arg == "timeout"), None)
@@ -245,6 +249,12 @@ def test_guard_detects_locally_aliased_session_constructor():
     assert _snippet_hits(
         "from requests import sessions\n\n\ndef f():\n    make_session = sessions.Session\n    return make_session()\n"
     ) == [6]
+
+
+def test_guard_detects_lowercase_session_factory():
+    """Known-bad: Requests' lowercase session factory returns the same escape hatch."""
+    assert _snippet_hits("import requests\n\n\ndef f():\n    return requests.session()\n") == [5]
+    assert _snippet_hits("from requests import session\n\n\ndef f():\n    return session()\n") == [5]
 
 
 def test_guard_detects_directly_imported_request_call():

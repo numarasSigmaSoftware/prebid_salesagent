@@ -18,32 +18,19 @@ artifact, not this envelope". Storyboard: T-UC-002-alt-manual (POST-S7..S10 —
 buyer tracks the pending buy via task_id). update_media_buy already emits its
 Submitted variant on the sibling path (commit b8b7e751b).
 
-Wire faithfulness: CreateMediaBuyResult._serialize (src/core/schemas/_base.py)
-produces the transport-invariant body — response.model_dump() with the envelope
-status overriding — so asserting on the serialized result exercises the same
-shape every transport emits.
+Wire faithfulness: this test calls the in-memory MCP client, which exercises
+the production TypeAdapter, MCP wrapper, and response serializer before
+capturing its structured wire body.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
+from tests.harness import Transport
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
-
-
-def _create_kwargs(product):
-    now = datetime.now(UTC)
-    return {
-        "brand": {"domain": "pending-approval-wire.example.com"},
-        "packages": [{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
-        "start_time": (now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end_time": (now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "po_number": "PENDING-WIRE-1",
-    }
 
 
 def _assert_submitted_shape(envelope: dict) -> None:
@@ -80,19 +67,29 @@ def test_adapter_manual_approval_create_emits_submitted_not_confirmed(integratio
         adapter.manual_approval_required = True
         adapter.manual_approval_operations = ["create_media_buy"]
 
-        result = env.call_impl(**_create_kwargs(product))
+        result = env.call_via(
+            Transport.MCP,
+            **env.default_create_kwargs(product, brand_domain="pending-approval-wire.example.com"),
+        )
 
-    _assert_submitted_shape(result.model_dump(mode="json"))
+    assert result.is_success and result.wire_response is not None
+    _assert_submitted_shape(result.wire_response)
 
 
 def test_config_approval_create_emits_submitted_not_confirmed(integration_db):
-    """Config-approval branch (tenant auto_create_media_buys=False): submitted shape on the wire."""
-    with MediaBuyCreateEnv(auto_create_media_buys=False) as env:
+    """Config-approval branch (product auto-create disabled): submitted shape on the wire."""
+    with MediaBuyCreateEnv() as env:
         _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+        product.implementation_config = {"auto_create_enabled": False}
+        env._commit_factory_data()
 
-        result = env.call_impl(**_create_kwargs(product))
+        result = env.call_via(
+            Transport.MCP,
+            **env.default_create_kwargs(product, brand_domain="pending-approval-wire.example.com"),
+        )
 
-    _assert_submitted_shape(result.model_dump(mode="json"))
+    assert result.is_success and result.wire_response is not None
+    _assert_submitted_shape(result.wire_response)
 
 
 def test_submitted_create_replays_verbatim_without_second_workflow_step(integration_db):
@@ -106,18 +103,22 @@ def test_submitted_create_replays_verbatim_without_second_workflow_step(integrat
     """
     import uuid as _uuid
 
-    with MediaBuyCreateEnv(auto_create_media_buys=False) as env:
+    with MediaBuyCreateEnv() as env:
         _tenant, _principal, product, _pricing = env.setup_media_buy_data()
-        kwargs = _create_kwargs(product)
+        product.implementation_config = {"auto_create_enabled": False}
+        env._commit_factory_data()
+        kwargs = env.default_create_kwargs(product, brand_domain="pending-approval-wire.example.com")
         kwargs["idempotency_key"] = f"pending-replay-{_uuid.uuid4().hex}"
         ctx_mgr = env.mock["context_mgr"].return_value
 
-        first = env.call_impl(**dict(kwargs))
+        first = env.call_via(Transport.MCP, **dict(kwargs))
         steps_after_first = ctx_mgr.create_workflow_step.call_count
-        second = env.call_impl(**dict(kwargs))
+        second = env.call_via(Transport.MCP, **dict(kwargs))
 
-    first_env = first.model_dump(mode="json")
-    second_env = second.model_dump(mode="json")
+    assert first.is_success and first.wire_response is not None
+    assert second.is_success and second.wire_response is not None
+    first_env = first.wire_response
+    second_env = second.wire_response
     _assert_submitted_shape(first_env)
     assert second_env.get("replayed") is True, "retry must be the verbatim replay, not a re-execution"
     assert second_env["task_id"] == first_env["task_id"], "replay must return the SAME task_id"

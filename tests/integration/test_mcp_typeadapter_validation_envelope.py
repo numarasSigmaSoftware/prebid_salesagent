@@ -66,26 +66,24 @@ def test_create_media_buy_missing_key_preserves_field_on_mcp_wire():
     assert_no_raw_validation_leak(envelope["errors"][0]["message"])
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Tracked in #1604: AdCP 3.1.1 BR-UC-002-create-media-buy.feature "
-        "@T-UC-002-inv-015-6 grades this in-body missing-field path INVALID_REQUEST; "
-        "the current TypeAdapter boundary emits VALIDATION_ERROR"
-    ),
-    strict=True,
-)
 def test_create_media_buy_typeadapter_error_uses_storyboard_invalid_request_code():
     package = create_test_package_request_dict(
         product_id="prod_missing",
         pricing_option_id="cpm_usd_fixed",
         budget=5000,
     )
-    del package["product_id"]
+    package["creatives"] = [
+        {
+            "creative_id": "creative-missing-asset-type",
+            "name": "Missing asset discriminator",
+            "assets": {"main": {"url": "https://example.com/creative.jpg"}},
+        }
+    ]
     is_error, envelope = call_mcp_tool_capturing_envelope(
         "create_media_buy",
         {
             "brand": {"domain": "wiretest.example"},
-            "idempotency_key": "wire-missing-package-product",
+            "idempotency_key": "wire-missing-asset-type",
             "packages": [package],
             "start_time": "2026-08-01T00:00:00Z",
             "end_time": "2026-09-01T00:00:00Z",

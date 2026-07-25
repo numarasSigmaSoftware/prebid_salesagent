@@ -23,7 +23,8 @@ from pydantic import Field
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
 
 if TYPE_CHECKING:
-    from src.core.database.models import MediaBuy, Product as DBProduct
+    from src.core.database.models import MediaBuy
+    from src.core.database.models import Product as DBProduct
 
 # ---------------------------------------------------------------------------
 # Financial policy constants (F-05)
