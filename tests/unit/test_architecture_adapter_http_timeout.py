@@ -66,6 +66,21 @@ def _requests_function_names(tree: ast.AST) -> tuple[set[str], set[str]]:
     return methods, sessions
 
 
+def _requests_sessions_module_names(tree: ast.AST) -> set[str]:
+    """Names bound to the ``requests.sessions`` module itself."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "requests.sessions" and alias.asname:
+                    names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom) and node.module == "requests":
+            for alias in node.names:
+                if alias.name == "sessions":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
 def _attribute_chain(node: ast.expr) -> list[str] | None:
     """Flatten ``requests.sessions.Session``-style attribute chains."""
     parts: list[str] = []
@@ -94,6 +109,7 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
     """
     module_names = _requests_module_names(tree)
     direct_methods, direct_sessions = _requests_function_names(tree)
+    sessions_module_names = _requests_sessions_module_names(tree)
     hits: list[int] = []
     for node in iter_call_expressions(tree):
         if isinstance(node.func, ast.Name):
@@ -106,7 +122,12 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
             continue
 
         chain = _attribute_chain(node.func)
-        if not chain or chain[0] not in module_names:
+        if not chain:
+            continue
+        if len(chain) == 2 and chain[0] in sessions_module_names and chain[1] == "Session":
+            hits.append(node.lineno)
+            continue
+        if chain[0] not in module_names:
             continue
         if chain[-1] == "Session" and chain[1:-1] in ([], ["sessions"]):
             hits.append(node.lineno)
@@ -188,6 +209,16 @@ def test_guard_detects_directly_imported_requests_api_call():
 def test_guard_detects_nested_session_constructor():
     """Known-bad: ``requests.sessions.Session`` is the same escape hatch."""
     assert _snippet_hits("import requests\n\n\ndef f():\n    return requests.sessions.Session()\n") == [5]
+
+
+def test_guard_detects_sessions_module_imported_from_requests():
+    """Known-bad: ``from requests import sessions`` cannot hide Session creation."""
+    assert _snippet_hits("from requests import sessions\n\n\ndef f():\n    return sessions.Session()\n") == [5]
+
+
+def test_guard_detects_aliased_requests_sessions_module_import():
+    """Known-bad: an alias for ``requests.sessions`` cannot hide Session creation."""
+    assert _snippet_hits("import requests.sessions as rs\n\n\ndef f():\n    return rs.Session()\n") == [5]
 
 
 def test_guard_accepts_bounded_requests_call():

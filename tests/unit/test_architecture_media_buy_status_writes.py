@@ -90,6 +90,11 @@ MEDIA_BUY_SPECIFIC_METHODS = {
 # that have no ``.media_buys`` receiver.
 MEDIA_BUY_COLLECTION_METHODS = {"get_all_by_statuses"}
 
+# Ordinary single-row reads are shared across repositories. They become a
+# MediaBuy source only when invoked through a local constructed from
+# ``MediaBuyRepository(...)``.
+MEDIA_BUY_REPOSITORY_SINGLE_ROW_METHODS = {"get_by_id"}
+
 # Pre-existing violations: (relative_file_path, binding_name, attribute).
 # Empty — every production write routes through the repository. It may
 # only ever shrink; a new entry means a new bypass was introduced.
@@ -106,7 +111,7 @@ def _attr_chain_contains(node: ast.expr, name: str) -> bool:
     return isinstance(cur, ast.Name) and cur.id == name
 
 
-def _rhs_is_media_buy(rhs: ast.expr) -> bool:
+def _rhs_is_media_buy(rhs: ast.expr, repo_locals: set[str] | None = None) -> bool:
     """True if *rhs* is an expression that yields a single MediaBuy instance."""
     if not isinstance(rhs, ast.Call):
         return False
@@ -115,6 +120,12 @@ def _rhs_is_media_buy(rhs: ast.expr) -> bool:
         return func.id in ("MediaBuy", "MediaBuyFactory")
     if isinstance(func, ast.Attribute):
         if func.attr in MEDIA_BUY_SPECIFIC_METHODS:
+            return True
+        if (
+            func.attr in MEDIA_BUY_REPOSITORY_SINGLE_ROW_METHODS
+            and isinstance(func.value, ast.Name)
+            and func.value.id in (repo_locals or set())
+        ):
             return True
         # Repository access via a Unit of Work: ``<uow>.media_buys.<method>(...)``.
         if _attr_chain_contains(func.value, "media_buys"):
@@ -166,14 +177,15 @@ def _media_buy_collection_aliases(tree: ast.AST) -> set[str]:
 def _media_buy_typed_locals(tree: ast.AST) -> set[str]:
     """Local names bound (anywhere in the file) from a MediaBuy source."""
     names: set[str] = set()
+    repo_locals = _media_buy_repo_locals(tree)
     collection_aliases = _media_buy_collection_aliases(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _rhs_is_media_buy(node.value):
+        if isinstance(node, ast.Assign) and _rhs_is_media_buy(node.value, repo_locals):
             names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         elif (
             isinstance(node, ast.AnnAssign)
             and node.value is not None
-            and _rhs_is_media_buy(node.value)
+            and _rhs_is_media_buy(node.value, repo_locals)
             and isinstance(node.target, ast.Name)
         ):
             names.add(node.target.id)
@@ -185,7 +197,7 @@ def _media_buy_typed_locals(tree: ast.AST) -> set[str]:
         # then ``for row in rows``). A status write through the loop variable
         # bypasses the seam exactly like a direct assignment.
         elif isinstance(node, (ast.For, ast.comprehension)) and (
-            _rhs_is_media_buy(node.iter)
+            _rhs_is_media_buy(node.iter, repo_locals)
             or _rhs_is_media_buy_iterable(node.iter)
             or (isinstance(node.iter, ast.Name) and node.iter.id in collection_aliases)
         ):
@@ -341,6 +353,17 @@ def test_detector_flags_cross_tenant_sweep_via_intermediate_alias():
         "    rows = MediaBuyRepository.get_all_by_statuses(session, ['active'])\n"
         "    for row in rows:\n"
         "        row.status = 'completed'\n"
+    )
+    assert ("row", "status") in _detect(ast.parse(src))
+
+
+def test_detector_flags_status_write_after_repository_get_by_id():
+    """A standard locally constructed repository read must remain type-tracked."""
+    src = (
+        "def update(session):\n"
+        "    repo = MediaBuyRepository(session, 'tenant')\n"
+        "    row = repo.get_by_id('buy')\n"
+        "    row.status = 'active'\n"
     )
     assert ("row", "status") in _detect(ast.parse(src))
 
