@@ -12,7 +12,7 @@ from decimal import Decimal
 # --- V2.3 Pydantic Models (Bearer Auth, Restored & Complete) ---
 # --- MCP Status System (AdCP PR #77) ---
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, TypeAlias
 
 from src.core.enum_helpers import enum_value
 
@@ -118,9 +118,18 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    SkipValidation,
     model_serializer,
     model_validator,
 )
+
+# Transport wrappers must preserve malformed JSON values until the common
+# request boundary can emit the same AdCP error envelope on A2A, MCP, and REST.
+# ``SkipValidation`` does that without erasing the public JSON Schema: clients
+# still see the concrete AdCP types and constraints rather than ``Any``.
+RawRevision: TypeAlias = SkipValidation[Annotated[int, Field(ge=1)]]  # noqa: UP040 - Pydantic runtime alias
+RawMediaBuyIds: TypeAlias = SkipValidation[Annotated[list[str], Field(min_length=1)]]  # noqa: UP040 - Pydantic runtime alias
+type RawMediaBuyStatusFilter = SkipValidation[MediaBuyStatus | Annotated[list[MediaBuyStatus], Field(min_length=1)]]
 
 # Type alias for the union of all AdCP pricing option types (V3 consolidated)
 AdCPPricingOption = (
@@ -2096,9 +2105,8 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
         # enforced before Pydantic's default coercion. This bites at the raw-dict (A2A)
         # boundary, where the payload reaches this model before any typed coercion,
         # rejecting numeric strings and booleans as optimistic-concurrency tokens. On
-        # MCP/REST the typed ``revision: int | None`` param lax-coerces "7" -> 7 before
-        # this runs, so a numeric string is honored there — a known cross-transport
-        # divergence, deferred and tracked in #1582.
+        # Transport wrappers preserve raw values with ``SkipValidation`` so this
+        # shared gate rejects numeric strings and booleans uniformly.
         if "revision" in values and values["revision"] is not None:
             revision = values["revision"]
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
@@ -2845,11 +2853,35 @@ class GetMediaBuysRequest(SalesAgentBaseModel):
     (extra=forbid in dev/CI) validation and serialization behavior.
     """
 
-    media_buy_ids: list[str] | None = Field(default=None, description="Specific media buy IDs to retrieve")
-    status_filter: Any | None = Field(default=None, description="Filter by status (MediaBuyStatus or list)")
+    media_buy_ids: RawMediaBuyIds | None = Field(default=None, description="Specific media buy IDs to retrieve")
+    status_filter: RawMediaBuyStatusFilter | None = Field(
+        default=None, description="Filter by status (MediaBuyStatus or list)"
+    )
     account_id: str | None = Field(default=None, description="Account to filter to (legacy, prefer account)")
     account: LibraryAccountReference | None = Field(default=None, description="Account reference (AdCP 3.x)")
     context: ContextObject | None = Field(default=None, description="Application-level context")
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_filter_wire_shapes(cls, values):
+        """Validate filter shapes after every transport has preserved raw JSON."""
+        if not isinstance(values, dict):
+            return values
+        media_buy_ids = values.get("media_buy_ids")
+        if media_buy_ids is not None and (
+            not isinstance(media_buy_ids, list)
+            or not media_buy_ids
+            or any(not isinstance(media_buy_id, str) for media_buy_id in media_buy_ids)
+        ):
+            raise ValueError("media_buy_ids must be a non-empty array of strings")
+
+        status_filter = values.get("status_filter")
+        status_values = status_filter if isinstance(status_filter, list) else [status_filter]
+        if status_filter is not None and (
+            not status_values or any(not isinstance(status, (str, MediaBuyStatus)) for status in status_values)
+        ):
+            raise ValueError("status_filter must be a MediaBuyStatus or a non-empty array of MediaBuyStatus values")
+        return values
 
 
 class GetMediaBuysResponse(NestedModelSerializerMixin, SalesAgentBaseModel):

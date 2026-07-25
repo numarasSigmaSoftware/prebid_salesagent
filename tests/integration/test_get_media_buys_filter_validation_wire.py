@@ -1,10 +1,9 @@
 """Integration wire pins: schema-invalid filter fields on get_media_buys.
 
-``GetMediaBuysBody`` (src/routes/api_v1.py) deliberately types ``media_buy_ids``
-and ``status_filter`` as ``Any`` rather than their concrete AdCP shapes
-(``list[str] | None`` / ``MediaBuyStatus | list[MediaBuyStatus] | None``). The
-in-code comment states why: typing them concretely would make FastAPI reject a
-wrong-typed value during body parsing, BEFORE the shared
+``GetMediaBuysBody`` (src/routes/api_v1.py) uses ``SkipValidation`` around the
+concrete AdCP shapes (``list[str] | None`` /
+``MediaBuyStatus | list[MediaBuyStatus] | None``). This preserves a malformed
+wire value until the shared
 ``GetMediaBuysRequest`` validation boundary MCP/A2A go through — producing
 ``INVALID_REQUEST`` on REST while MCP/A2A produce ``VALIDATION_ERROR`` for the
 identical buyer mistake. Staying ``Any`` lets the raw value reach the SAME
@@ -17,7 +16,7 @@ for a different reason — see test_update_media_buy_revision_validation_wire.py
 per the sibling REST *Body models) because they have no such cross-transport
 classification split to protect.
 
-These tests pin the CLAIM that the ``Any`` typing decision actually delivers
+These tests pin the claim that the raw-value-preserving typing decision delivers
 parity, not just that it exists: if a future edit types ``media_buy_ids``/
 ``status_filter`` concretely (reintroducing the split this decision exists to
 avoid), the REST case here goes red instead of drifting silently. The A2A case
@@ -42,7 +41,7 @@ _WIRE_TRANSPORTS = [Transport.A2A, Transport.MCP, Transport.REST]
 @pytest.mark.requires_db
 class TestGetMediaBuysFilterValidationWire:
     """A wrong-typed ``media_buy_ids``/``status_filter`` must emit VALIDATION_ERROR
-    identically on every wire transport — proving the ``Any`` typing decision in
+    identically on every wire transport — proving the raw-value-preserving typing in
     ``GetMediaBuysBody`` achieves parity rather than merely claiming to."""
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
@@ -50,8 +49,8 @@ class TestGetMediaBuysFilterValidationWire:
         """media_buy_ids as a bare string (not an array) reaches the shared
         GetMediaBuysRequest boundary on every transport -> VALIDATION_ERROR/correctable.
 
-        If GetMediaBuysBody.media_buy_ids is ever typed concretely (list[str] | None),
-        FastAPI would reject this during REST body parsing -> INVALID_REQUEST, and
+        If GetMediaBuysBody drops ``SkipValidation``, FastAPI would reject this during
+        REST body parsing -> INVALID_REQUEST, and
         only the REST parametrization here reddens — pinning the split, not just
         this one transport's happy case.
         """

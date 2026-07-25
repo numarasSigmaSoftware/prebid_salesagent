@@ -246,9 +246,6 @@ def e2e_wire_headers(identity: Any) -> dict[str, str]:
             subdomain = tenant.get("subdomain") if isinstance(tenant, dict) else getattr(tenant, "subdomain", None)
             if subdomain is not None:
                 headers["x-adcp-tenant"] = subdomain
-        tc = getattr(identity, "testing_context", None)
-        if tc is not None and getattr(tc, "dry_run", False):
-            headers["x-dry-run"] = "true"
     return headers
 
 

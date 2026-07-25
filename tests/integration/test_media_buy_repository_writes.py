@@ -216,10 +216,36 @@ class TestUpdateStatus:
         with get_db_session() as session:
             repo = MediaBuyRepository(session, tenant_a)
             fetched = repo.get_by_id("mb_status_1")
-            assert fetched is not None
-            assert fetched.status == "approved"
-            assert fetched.approved_by == "admin@test.com"
-            assert fetched.approved_at is not None
+        assert fetched is not None
+        assert fetched.status == "approved"
+        assert fetched.approved_by == "admin@test.com"
+        assert fetched.approved_at is not None
+
+
+class TestUpdateOperationLease:
+    """Durable ownership around adapter-backed update operations."""
+
+    def test_expired_invoked_lease_requires_manual_reconciliation(self, tenant_a, principal_a):
+        media_buy_id = "mb_update_lease"
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, media_buy_id))
+
+        clock = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock) as uow:
+            lease_id = uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1)
+            assert lease_id is not None
+            assert uow.media_buys.mark_update_adapter_invoked(media_buy_id, lease_id, lease_ttl_seconds=1)
+
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock + timedelta(seconds=2)) as uow:
+            # A replay could duplicate a partially applied remote change, so the
+            # claim is denied and a durable operator-visible incident is stored.
+            assert uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1) is None
+
+        with MediaBuyUoW(tenant_a) as uow:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            assert media_buy.update_recovery_mode == "manual_required"
+            assert media_buy.update_reconcile_incident_at is not None
 
     def test_update_status_nonexistent_returns_none(self, tenant_a, principal_a):
         """Updating status of nonexistent media buy returns None."""

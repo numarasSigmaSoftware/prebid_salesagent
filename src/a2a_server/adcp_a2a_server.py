@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 
 # Import core functions for direct calls (raw functions without FastMCP decorators)
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from a2a.server.context import ServerCallContext
 from a2a.server.events.event_queue import Event
@@ -1070,7 +1070,7 @@ class AdCPRequestHandler(RequestHandler):
     )
 
     @staticmethod
-    def _raise_task_not_found(task_id: str) -> None:
+    def _raise_task_not_found(task_id: str) -> NoReturn:
         """Raise the uniform response for unknown and inaccessible task IDs."""
         raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
 

@@ -715,7 +715,8 @@ def _run_adapter_and_finalize(
          - handled failure ``(False, msg)`` → ``failed`` transition via lease-CAS
            (+ step failed with a buyer-facing envelope), commit, ``ADAPTER_FAILED``.
       2. Success publish: ``finalizing`` → flight-derived serving status via
-         lease-CAS with ``bump=False`` (the claim already advanced the revision) and
+         lease-CAS with ``bump=True`` (the buyer-visible serving transition advances
+         the revision independently of the approval claim) and
          ``clear_finalize_state=True`` (lease/marker/recovery_mode cleared —
          including the self-heal of a ``manual_required`` flag set while this slow
          owner was still running). The step terminalization commits IN THE SAME

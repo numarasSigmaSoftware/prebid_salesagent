@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 #: Configurable via MAX_CAMPAIGN_BUDGET_USD env var; default 10,000,000.
 MAX_CAMPAIGN_BUDGET: Decimal = Decimal(os.environ.get("MAX_CAMPAIGN_BUDGET_USD", "10000000"))
 
+MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS = 10 * 60
+
 from adcp.types import ContextObject, ReportingWebhook, TargetingOverlay
 from adcp.types import PackageUpdate as UpdatePackage
 from fastmcp.server.context import Context
@@ -45,6 +47,7 @@ from src.core.exceptions import (
     AdCPBudgetExceededError,
     AdCPBudgetTooLowError,
     AdCPCapabilityNotSupportedError,
+    AdCPConflictError,
     AdCPContextNotFoundError,
     AdCPCreativeRejectedError,
     AdCPGoneError,
@@ -56,7 +59,6 @@ from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
-from src.adapters.constants import MEDIA_BUY_UPDATE_IDLE_TX_TIMEOUT
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import (
     require_identity,
@@ -81,6 +83,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
     Budget,
+    RawRevision,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
     UpdateMediaBuyResult,
@@ -435,18 +438,13 @@ def _update_media_buy_impl(
             # Acquire the authoritative row lock before any workflow or adapter
             # side effect. The lock is held by this UoW until commit, so two
             # same-token requests cannot both reach the adapter. lock_timeout
-            # bounds the WAITER; idle_in_transaction_session_timeout bounds the
-            # HOLDER — a hung adapter (SOAP/GAM, or one that forgot its client
-            # timeout) sits idle-in-transaction holding this lock, and the bound
-            # releases it instead of pinning the row indefinitely. Both live in
-            # the repository — the lock policy is a data-access concern, kept out
-            # of this transport-agnostic _impl. #1544.
+            # bounds the WAITER; durable update leases below make the remote-call
+            # phase safe without relying on this transaction's lifetime. #1544.
             _current_mb = uow.media_buys.get_by_id(
                 media_buy_id_to_use,
                 for_update=True,
                 populate_existing=True,
                 lock_timeout_seconds=5,
-                idle_in_transaction_timeout_seconds=MEDIA_BUY_UPDATE_IDLE_TX_TIMEOUT,
                 context=req.context,
             )
             _current_status = _current_mb.status if _current_mb else ""
@@ -611,7 +609,7 @@ def _update_media_buy_impl(
                 # spec-correct (PR #1567): spec 3.1.1
                 # update-media-buy-response.json has exactly three variants
                 # (Success/Error/Submitted) and NO simulation envelope; dry_run is a
-                # (deprecated) testing hook (X-Dry-Run header), not a wire field, and the
+                # internal test context, not a wire field, and the
                 # spec is SILENT on a dry_run response status -> production authoritative.
                 # Unlike pending-approval (-> UpdateMediaBuySubmitted) and reject
                 # (-> Error), a dry_run buyer asked to SIMULATE the would-be
@@ -678,6 +676,51 @@ def _update_media_buy_impl(
                 # status="submitted" (const) natively — returned unwrapped so every
                 # transport serializes the spec-correct submitted envelope.
                 return approval_response
+
+            update_lease_id = uow.media_buys.claim_update_lease(
+                req.media_buy_id, lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
+            )
+            media_buy_repo = uow.media_buys
+            # The claim is a short, durable transaction. Remote calls never run
+            # while this UoW holds a row lock or idle DB transaction.
+            uow.commit()
+            if update_lease_id is None:
+                raise AdCPConflictError(
+                    "A previous update is still running or requires reconciliation.",
+                    field="media_buy_id",
+                    suggestion="Re-read the media buy and retry later; contact the seller if it remains unavailable.",
+                    details={"resource_id": req.media_buy_id},
+                    recovery="transient",
+                    context=req.context,
+                )
+
+            def prepare_adapter_call() -> None:
+                if not media_buy_repo.mark_update_adapter_invoked(
+                    req.media_buy_id,
+                    update_lease_id,
+                    lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS,
+                ):
+                    raise AdCPConflictError(
+                        "Update ownership was lost before the adapter call.",
+                        field="media_buy_id",
+                        suggestion="Re-read the media buy and retry later.",
+                        details={"resource_id": req.media_buy_id},
+                        recovery="transient",
+                        context=req.context,
+                    )
+                uow.commit()
+
+            def release_update_lease() -> None:
+                if not media_buy_repo.complete_update_lease(req.media_buy_id, update_lease_id):
+                    raise AdCPConflictError(
+                        "Update ownership was lost before completion.",
+                        field="media_buy_id",
+                        suggestion="Re-read the media buy before retrying.",
+                        details={"resource_id": req.media_buy_id},
+                        recovery="transient",
+                        context=req.context,
+                    )
+                uow.commit()
 
             # Validate currency limits if flight dates or budget changes
             # This prevents workarounds where buyers extend flight to bypass daily max
@@ -764,6 +807,7 @@ def _update_media_buy_impl(
             if req.paused is not None:
                 # adcp 2.12.0+: paused=True means pause, paused=False means resume
                 action = "pause_media_buy" if req.paused else "resume_media_buy"
+                prepare_adapter_call()
                 result = adapter.update_media_buy(
                     media_buy_id=req.media_buy_id,
                     action=action,
@@ -781,6 +825,7 @@ def _update_media_buy_impl(
                         status="failed",
                         error_message=result.errors[0].message if result.errors else "Pause/resume failed",
                     )
+                    release_update_lease()
                     return UpdateMediaBuyResult(response=error_response, status=AdcpTaskStatus.failed.value)
                 else:
                     # UpdateMediaBuySuccess extends adcp v1.2.1 with internal fields
@@ -829,6 +874,7 @@ def _update_media_buy_impl(
                         },
                     )
                     ctx_manager.audit_workflow_step_result(step.step_id, success_response)
+                    release_update_lease()
                     return UpdateMediaBuyResult(response=success_response, status=AdcpTaskStatus.completed.value)
 
             # Every column mutation from this update is staged here and applied
@@ -847,6 +893,7 @@ def _update_media_buy_impl(
                     if pkg_update.paused is not None:
                         # adcp 2.12.0+: paused=True means pause, paused=False means resume
                         action = "pause_package" if pkg_update.paused else "resume_package"
+                        prepare_adapter_call()
                         result = adapter.update_media_buy(
                             media_buy_id=req.media_buy_id,
                             action=action,
@@ -868,6 +915,7 @@ def _update_media_buy_impl(
                                 status="failed",
                                 error_message=error_message,
                             )
+                            release_update_lease()
                             return UpdateMediaBuyResult(response=response_data, status=AdcpTaskStatus.failed.value)
 
                     # Handle budget updates
@@ -915,6 +963,7 @@ def _update_media_buy_impl(
                             req.media_buy_id, pkg_update.package_id, context=req.context
                         )
 
+                        prepare_adapter_call()
                         result = adapter.update_media_buy(
                             media_buy_id=req.media_buy_id,
                             action="update_package_budget",
@@ -936,6 +985,7 @@ def _update_media_buy_impl(
                                 status="failed",
                                 error_message=error_message,
                             )
+                            release_update_lease()
                             return UpdateMediaBuyResult(response=response_data, status=AdcpTaskStatus.failed.value)
 
                         # Track budget update in affected_packages
@@ -1062,7 +1112,9 @@ def _update_media_buy_impl(
                                 context=req.context,
                             )
 
-                        # Sync creatives (upload/update)
+                        # Sync creatives (upload/update) may call the ad server,
+                        # so persist the operation marker before leaving the DB.
+                        prepare_adapter_call()
                         sync_response = _sync_creatives_impl(
                             creatives=pkg_update.creatives,
                             assignments={
@@ -1526,6 +1578,7 @@ def _update_media_buy_impl(
             # Persist success with response data, then return
             # Use mode="json" to ensure enums are serialized as strings for JSONB storage
             ctx_manager.audit_workflow_step_result(step.step_id, final_response)
+            release_update_lease()
 
         return UpdateMediaBuyResult(response=final_response, status=AdcpTaskStatus.completed.value)
 
@@ -1652,7 +1705,7 @@ async def update_media_buy(
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
     idempotency_key: Annotated[str | None, Field(description="Idempotency key for retry safety")] = None,
     revision: Annotated[
-        Any,
+        RawRevision | None,
         Field(description="Expected current revision for optimistic concurrency (CONFLICT on mismatch)"),
     ] = None,
     ctx: Context | ToolContext | None = None,

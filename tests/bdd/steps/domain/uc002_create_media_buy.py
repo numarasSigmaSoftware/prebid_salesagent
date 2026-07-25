@@ -2281,12 +2281,12 @@ def then_valid_actions_are_enum_members(ctx: dict) -> None:
 
 @given("the request is sent in dry-run mode")
 def given_dry_run_mode(ctx: dict) -> None:
-    """Enable dry-run so the create dispatches with ``x-dry-run: true``.
+    """Enable direct in-process dry-run simulation for the create dispatch.
 
-    Toggling ``env._dry_run`` before the When step makes the harness stamp the
-    dry-run testing context onto the identity/headers for whichever transport is
-    parametrized. The identity cache is cleared so the not-yet-built identity
-    picks up the flag.
+    Toggling ``env._dry_run`` makes the harness construct an
+    ``AdCPTestContext`` on the resolved identity after normal authentication.
+    No protocol header is sent; AdCP 3.1.1 requires production transports to
+    ignore buyer-controlled X-* testing headers.
     """
     env = ctx["env"]
     env._dry_run = True
@@ -2297,28 +2297,9 @@ def given_dry_run_mode(ctx: dict) -> None:
 def then_adapter_never_invoked(ctx: dict) -> None:
     """The dry-run arm returns a simulated success before any ad-server booking.
 
-    In-process: assert the pytest-process adapter mock's ``create_media_buy`` was
-    never called. Over an e2e_* transport the create runs in the live server,
-    whose adapter this mock can never see, so assert the wire-level proxy for the
-    same invariant — the response's simulated ``dry_run_`` media_buy_id. A live
-    server that ignored x-dry-run and actually booked the buy would return a real
-    persisted id, failing this; a vacuous ``response is not None`` would not.
+    This internal simulation scenario runs only over in-process transports, so
+    the pytest-process adapter mock is an authoritative no-invocation oracle.
     """
-    from tests.bdd.steps._outcome_helpers import is_e2e
-
-    if is_e2e(ctx):
-        # Shared by INV-5 (dry-run) and INV-4 (pre-adapter validation failure).
-        # On the error path the rejection itself proves the adapter was never
-        # reached — there is no success response to inspect.
-        if ctx.get("error") is not None:
-            return
-        resp = _require_success_response(ctx)
-        media_buy_id = _get_response_field(resp, "media_buy_id")
-        assert isinstance(media_buy_id, str) and media_buy_id.startswith("dry_run_"), (
-            f"dry-run over e2e must return a simulated dry_run_ media_buy_id (proof the adapter "
-            f"was not invoked), got {media_buy_id!r}"
-        )
-        return
     env = ctx["env"]
     adapter = env.mock["adapter"].return_value
     assert not adapter.create_media_buy.called, (
@@ -2346,14 +2327,13 @@ def then_dry_run_sandbox_labelled_conformant(ctx: dict) -> None:
 
     3.1.1 create-media-buy-response.json oneOf[0] (CreateMediaBuySuccess) required =
     [media_buy_id, confirmed_at, revision, packages], so the dry-run arm cannot be
-    thin. The response is honestly labelled ``sandbox=true`` (the proprietary
-    X-Dry-Run header maps onto the spec's sanctioned account-level ``sandbox`` test
-    concept), and:
+    thin. This is an internal simulation, not the protocol's account-level
+    sandbox mode, and:
       revision == 1  — correct initial value of a would-be-fresh buy (schema:
                        integer, minimum=1).
       confirmed_at is None — a simulation commits nothing; confirmed_at is a REQUIRED
                        but nullable field (["string","null"], "May be null in deferred
-                       or manual-approval flows"), so the sandbox serializer emits it
+                       or manual-approval flows"), so the serializer emits it
                        as null on the wire (present, not omitted). #1544.
 
     The confirmed_at claim is a SERIALIZATION claim, so it is asserted on the wire
@@ -2365,7 +2345,6 @@ def then_dry_run_sandbox_labelled_conformant(ctx: dict) -> None:
     from tests.bdd.steps._outcome_helpers import wire_integer
 
     resp = _require_success_response(ctx)
-    assert _get_response_field(resp, "sandbox") is True, "dry-run must be labelled sandbox=true"
     body = _serialized_success_body(ctx)
     # revision is graded on the WIRE like the sibling exact-value steps — a
     # serialization regression of the token must go red here too. #1544 round-4.

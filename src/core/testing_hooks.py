@@ -38,11 +38,9 @@ def test_hooks_enabled() -> bool:
     It remains fail-closed in production for callers that use it to enable
     internal diagnostics.
 
-    Absent production, the headers are honored only on explicit operator
-    opt-in: ``ENVIRONMENT`` set to a dev value (``development`` / ``test``), or
-    ``ADCP_TEST_HOOKS_ENABLED=true``. An UNSET ``ENVIRONMENT`` disables the
-    hooks — a deployment must not depend on remembering to set
-    ``ENVIRONMENT=production`` to be safe.
+    Absent production, it enables only internal diagnostics. An UNSET
+    ``ENVIRONMENT`` disables those diagnostics — a deployment must not depend
+    on remembering to set ``ENVIRONMENT=production`` to be safe.
     """
     from src.core.config import is_production
 
@@ -118,8 +116,7 @@ class AdCPTestContext(BaseModel):
         Every downstream comparator (TimeSimulator.calculate_campaign_progress,
         NextEventCalculator.calculate_next_event_time, the delivery status
         refinement) compares ``mock_time`` against UTC-aware flight datetimes.
-        A naive clock — e.g. an X-Mock-Time header parsed without an offset —
-        raises ``TypeError: can't compare offset-naive and offset-aware
+        A naive injected clock raises ``TypeError: can't compare offset-naive and offset-aware
         datetimes`` deep in the request path, so coerce once here instead of
         per-comparator.
         """

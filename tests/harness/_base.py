@@ -492,15 +492,11 @@ class BaseTestEnv:
     def _wire_auth_headers(self, auth_token: str, tenant_id: str | None) -> dict[str, str]:
         """Build the wire auth headers for an integration-mode transport call.
 
-        Shared by the A2A and MCP dispatch paths. When the env is in dry-run
-        mode, stamps ``x-dry-run`` so production reads it from the wire headers
-        (apply_testing_hooks) exactly as a real dry-run client would — the
-        identity object's testing_context is not consulted on those transports.
+        Shared by the A2A and MCP dispatch paths. Test simulation is injected
+        into the in-process resolved identity below; no buyer-controlled X-*
+        testing header is emitted on a protocol transport.
         """
-        headers = {"x-adcp-auth": auth_token, "x-adcp-tenant": tenant_id or ""}
-        if self._dry_run:
-            headers["x-dry-run"] = "true"
-        return headers
+        return {"x-adcp-auth": auth_token, "x-adcp-tenant": tenant_id or ""}
 
     def switch_principal(self, principal_id: str) -> None:
         """Re-point the env at *principal_id*, clearing cached identity.
@@ -689,6 +685,15 @@ class BaseTestEnv:
             server_context = ServerCallContext(
                 state={AUTH_CONTEXT_STATE_KEY: AuthContext(auth_token=auth_token, headers=headers)}
             )
+            resolve_identity = handler._resolve_a2a_identity
+
+            def resolve_with_test_context(*args, **kw):
+                resolved = resolve_identity(*args, **kw)
+                return resolved.model_copy(update={"testing_context": a2a_identity.testing_context})
+
+            # Preserve the real header -> token -> database authentication chain,
+            # then inject test-only simulation after identity resolution.
+            handler._resolve_a2a_identity = resolve_with_test_context  # type: ignore[assignment]
         else:
             # _get_auth_token must return a non-None value when identity exists,
             # otherwise the handler rejects the request before _resolve_a2a_identity
@@ -827,15 +832,20 @@ class BaseTestEnv:
             # transport_helpers (called by resolve_identity_from_context) and
             # mcp_auth_middleware (called for context_id extraction).
             headers = self._wire_auth_headers(auth_token, mcp_identity.tenant_id)
+            from src.core.mcp_auth_middleware import resolve_identity_from_context as resolve_identity
+
+            def resolve_with_test_context(*args, **kw):
+                resolved = resolve_identity(*args, **kw)
+                return resolved.model_copy(update={"testing_context": mcp_identity.testing_context})
 
             async def _call():
                 mock_th = patch("src.core.transport_helpers.get_http_headers", return_value=headers)
                 mock_mw = patch("src.core.mcp_auth_middleware.get_http_headers", return_value=headers)
-                # testing_hooks.TestContext.from_context reads its OWN imported
-                # get_http_headers, so the testing context (e.g. x-dry-run) only
-                # reaches the mcp path if this third module is patched too.
-                mock_hooks = patch("src.core.testing_hooks.get_http_headers", return_value=headers)
-                with mock_th as patched_th, mock_mw as patched_mw, mock_hooks:
+                mock_identity = patch(
+                    "src.core.mcp_auth_middleware.resolve_identity_from_context",
+                    side_effect=resolve_with_test_context,
+                )
+                with mock_th as patched_th, mock_mw as patched_mw, mock_identity:
                     async with Client(mcp) as client:
                         result = await client.call_tool(tool_name, arguments)
                         # Guard: verify the header patches were called.

@@ -110,17 +110,9 @@ class MediaBuyRepository:
         LOCAL`` / driver error codes — the lock policy is a data-access concern.
 
         ``lock_timeout`` bounds only the WAITER. ``idle_in_transaction_timeout_seconds``
-        bounds the HOLDER: it arms a transaction-scoped ``SET LOCAL
-        idle_in_transaction_session_timeout`` so Postgres terminates THIS session
-        if it sits idle inside the transaction past the bound — which is exactly
-        what a hung adapter does (the connection is idle-in-transaction for the
-        whole outbound call while it holds the row lock). The bound must exceed
-        the max legitimate adapter holder-idle time so it only fires on a genuine
-        hang (see ``MEDIA_BUY_UPDATE_IDLE_TX_TIMEOUT``); the client-side
-        ``ADAPTER_HTTP_TIMEOUT`` remains the first line for ``requests`` adapters,
-        while this covers SOAP/GAM and any adapter that forgets its client
-        timeout. Both are ``SET LOCAL``, scoped to the caller's transaction.
-        ``context`` is echoed into the CONFLICT envelope. #1544.
+        bounds the HOLDER for legacy callers. Durable update operations must use
+        a lease instead of relying on a fixed holder timeout. ``context`` is
+        echoed into the CONFLICT envelope. #1544.
         """
         stmt = select(MediaBuy).where(
             MediaBuy.tenant_id == self._tenant_id,
@@ -769,6 +761,63 @@ class MediaBuyRepository:
     @staticmethod
     def _new_finalize_lease() -> str:
         return f"lease_{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def _new_update_lease() -> str:
+        return f"update_{uuid.uuid4().hex[:12]}"
+
+    def claim_update_lease(self, media_buy_id: str, *, lease_ttl_seconds: int) -> str | None:
+        """Claim a remote-update operation without holding a DB transaction open.
+
+        An unexpired lease serializes concurrent buyer updates. If a previous
+        lease expired after an adapter was invoked, a retry must stop for manual
+        reconciliation rather than replaying a potentially partial remote update.
+        The caller commits this short claim before making any adapter call.
+        """
+        now = self._now()
+        media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
+        if media_buy is None:
+            return None
+        if media_buy.update_lease_expires_at is not None and media_buy.update_lease_expires_at > now:
+            return None
+        if media_buy.update_adapter_invoked_at is not None:
+            media_buy.update_recovery_mode = MEDIA_BUY_RECOVERY_MANUAL
+            if media_buy.update_reconcile_incident_at is None:
+                media_buy.update_reconcile_incident_at = now
+                media_buy.update_reconcile_incident_reason = "update lease expired after adapter invocation"
+            self._session.flush()
+            return None
+
+        lease_id = self._new_update_lease()
+        media_buy.update_lease_id = lease_id
+        media_buy.update_lease_expires_at = now + datetime.timedelta(seconds=lease_ttl_seconds)
+        media_buy.update_adapter_invoked_at = None
+        media_buy.update_recovery_mode = None
+        self._session.flush()
+        return lease_id
+
+    def mark_update_adapter_invoked(self, media_buy_id: str, lease_id: str, *, lease_ttl_seconds: int) -> bool:
+        """Durably mark the remote-update point of no return and renew ownership."""
+        media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
+        if media_buy is None or media_buy.update_lease_id != lease_id:
+            return False
+        now = self._now()
+        media_buy.update_adapter_invoked_at = media_buy.update_adapter_invoked_at or now
+        media_buy.update_lease_expires_at = now + datetime.timedelta(seconds=lease_ttl_seconds)
+        self._session.flush()
+        return True
+
+    def complete_update_lease(self, media_buy_id: str, lease_id: str) -> bool:
+        """CAS-clear successful remote-update operation state after local publish."""
+        media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
+        if media_buy is None or media_buy.update_lease_id != lease_id:
+            return False
+        media_buy.update_lease_id = None
+        media_buy.update_lease_expires_at = None
+        media_buy.update_adapter_invoked_at = None
+        media_buy.update_recovery_mode = None
+        self._session.flush()
+        return True
 
     def claim_finalizing(
         self,

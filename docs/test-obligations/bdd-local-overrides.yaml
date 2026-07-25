@@ -11,6 +11,36 @@ schema_version: 1
 # - UC-019 revision and confirmed_at: dist/schemas/3.1.1/media-buy/get-media-buys-response.json;
 #   storyboard: ungraded. The local scenarios grade the schema contract directly.
 overrides:
+  - feature: BR-UC-003-update-media-buy.feature
+    scenario_id: T-UC-003-partition-revision
+    authority: "AdCP 3.1.1 dist/schemas/3.1.1/media-buy/update-media-buy-request.json: revision is an integer with minimum 1; revision_optimistic_concurrency storyboard: a mismatch is CONFLICT."
+    reason: "Protocol wrappers preserve raw values until the shared request boundary, so numeric strings are rejected identically instead of being transport-coerced."
+    gherkin: |
+      @T-UC-003-partition-revision @partition @revision @schema-v3.1
+      Scenario Outline: Revision optimistic-concurrency partition validation - <partition>
+        Given the media buy "mb_existing" is at revision 7
+        And a valid update_media_buy request with:
+        | field        | value       |
+        | media_buy_id | mb_existing |
+        | budget       | 9000        |
+        And the request revision is set to <value>
+        When the Buyer Agent sends the update_media_buy request
+        Then the result should be <outcome>
+        # AdCP 3.1.1: revision is optional, but when supplied it is an integer >= 1;
+        # optimistic-concurrency mismatch is CONFLICT. Storyboard: revision_optimistic_concurrency.yaml.
+
+        Examples: Valid partitions
+          | partition       | value          | outcome |
+          | absent          | <not provided> | success |
+          | matches_current | 7              | success |
+
+        Examples: Invalid partitions
+          | partition      | value          | outcome                                      |
+          | stale_revision | 5              | error "CONFLICT" with suggestion             |
+          | ahead_revision | 99             | error "CONFLICT" with suggestion             |
+          | below_min      | 0              | error "INVALID_REQUEST" with suggestion      |
+          | numeric_string | "7"            | error "INVALID_REQUEST" with suggestion      |
+          | wrong_type     | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
   - feature: BR-UC-005-discover-creative-formats.feature
     scenario_id: T-UC-005-ext-b-disclosure-dupes
     authority: "AdCP 3.1.1 list-creative-formats-request schema: disclosure_positions.uniqueItems=true"

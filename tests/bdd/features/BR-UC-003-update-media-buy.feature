@@ -2118,8 +2118,8 @@ Feature: BR-UC-003 Update Media Buy
     And the request revision is set to <value>
     When the Buyer Agent sends the update_media_buy request
     Then the result should be <outcome>
-    # v3.1 (revision_optimistic_concurrency.yaml): revision optional; minimum 1; mismatch -> CONFLICT
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/media-buy/update-media-buy-request.json
+    # AdCP 3.1.1: revision is optional, but when supplied it is an integer >= 1;
+    # optimistic-concurrency mismatch is CONFLICT. Storyboard: revision_optimistic_concurrency.yaml.
 
     Examples: Valid partitions
       | partition       | value          | outcome |
@@ -2127,19 +2127,12 @@ Feature: BR-UC-003 Update Media Buy
       | matches_current | 7              | success |
 
     Examples: Invalid partitions
-      | partition      | value | outcome                            |
-      | stale_revision | 5     | error "CONFLICT" with suggestion   |
-      | ahead_revision | 99    | error "CONFLICT" with suggestion   |
-      | below_min      | 0             | error "INVALID_REQUEST" with suggestion |
-      # A non-numeric string (not a coercible numeral like "7", which pydantic
-      # lax-coerces to a valid int on the JSON transports) so the wrong-TYPE is
-      # rejected consistently on every transport, not just A2A. "7" has no single
-      # cross-transport outcome (A2A rejects; JSON transports coerce it to 7, which
-      # here MATCHES the current revision and succeeds), so it cannot be a Scenario
-      # Outline row; the numeric-string coercion divergence is exercised in
-      # tests/unit/test_media_buy_revision_bump.py::TestRevisionNumericStringCoercionDivergence
-      # and deferred/tracked in #1582.
-      | wrong_type     | "not-an-int"  | error "INVALID_REQUEST" with suggestion |
+      | partition      | value          | outcome                                      |
+      | stale_revision | 5              | error "CONFLICT" with suggestion             |
+      | ahead_revision | 99             | error "CONFLICT" with suggestion             |
+      | below_min      | 0              | error "INVALID_REQUEST" with suggestion      |
+      | numeric_string | "7"            | error "INVALID_REQUEST" with suggestion      |
+      | wrong_type     | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
 
   @T-UC-003-boundary-revision @boundary @revision @schema-v3.1
   Scenario Outline: Revision optimistic-concurrency boundary validation - <boundary_point>

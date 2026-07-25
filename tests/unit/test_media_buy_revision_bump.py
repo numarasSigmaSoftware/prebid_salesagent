@@ -151,6 +151,12 @@ class TestRevisionNumericStringValidationParity:
 
         assert UpdateMediaBuyBody.model_validate({"revision": "7"}).revision == "7"
 
+    def test_rest_body_advertises_the_integer_revision_schema(self):
+        from src.routes.api_v1 import UpdateMediaBuyBody
+
+        revision_schema = UpdateMediaBuyBody.model_json_schema()["properties"]["revision"]
+        assert revision_schema["anyOf"][0] == {"minimum": 1, "type": "integer"}
+
     def test_shared_boundary_rejects_numeric_string_as_invalid_request(self):
         from src.core.exceptions import AdCPInvalidRequestError
         from src.core.tools.media_buy_update import _build_update_request

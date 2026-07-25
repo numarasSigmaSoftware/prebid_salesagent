@@ -7,7 +7,7 @@ This directory contains comprehensive end-to-end tests for the AdCP (Advertising
 The E2E tests exercise:
 - All MCP (Model Context Protocol) tools
 - A2A (Agent-to-Agent) protocol integration
-- Testing hooks from [AdCP PR #34](https://github.com/adcontextprotocol/adcp/pull/34)
+- Real protocol behavior over disposable E2E state
 - Complete campaign lifecycle from discovery to completion
 - Error handling and edge cases
 
@@ -80,44 +80,13 @@ Preserve test data after completion for debugging:
 pytest tests/e2e/test_adcp_full_lifecycle.py --keep-data
 ```
 
-## Testing Hooks
+## Test Isolation and Simulation
 
-The tests implement all AdCP testing hooks from [PR #34](https://github.com/adcontextprotocol/adcp/pull/34):
-
-### X-Dry-Run
-Execute operations without affecting production platforms:
-```python
-headers = {"X-Dry-Run": "true"}
-```
-
-### X-Mock-Time
-Control simulated time for testing:
-```python
-headers = {"X-Mock-Time": "2025-09-15T14:00:00Z"}
-```
-
-### X-Jump-To-Event
-Jump to specific campaign lifecycle events:
-```python
-headers = {"X-Jump-To-Event": "campaign-midpoint"}
-```
-
-Available events:
-- `campaign-start`
-- `campaign-midpoint`
-- `campaign-complete`
-
-### X-Test-Session-ID
-Isolate test sessions for parallel execution:
-```python
-headers = {"X-Test-Session-ID": "unique-test-id"}
-```
-
-### X-Simulated-Spend
-Track spending without real money:
-```python
-headers = {"X-Simulated-Spend": "true"}
-```
+AdCP 3.1.1 requires protocol transports to ignore proprietary `X-*` testing
+headers. E2E tests therefore create real, disposable state and use the normal
+authentication path. Tests that need simulated time, dry runs, or forced
+conditions inject `AdCPTestContext` only through the in-process harness; they
+do not run as live HTTP tests.
 
 ## Test Coverage
 

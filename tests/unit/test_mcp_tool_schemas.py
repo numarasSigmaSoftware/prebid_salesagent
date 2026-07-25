@@ -6,6 +6,8 @@ which ensures tools/list exposes full JSON schemas with $defs for nested types.
 
 import inspect
 
+from pydantic import TypeAdapter
+
 
 class TestMCPToolTypedSchemas:
     """Verify MCP tools expose typed schemas instead of untyped dicts."""
@@ -127,6 +129,10 @@ class TestMCPToolTypedSchemas:
         assert "PackageUpdate" in str(params["packages"].annotation), (
             f"packages should use PackageUpdate type (V3), got {params['packages'].annotation}"
         )
+
+        revision_schema = TypeAdapter(params["revision"].annotation).json_schema()
+        assert revision_schema["anyOf"][0] == {"minimum": 1, "type": "integer"}
+        assert {"type": "object"} not in revision_schema["anyOf"]
 
     def test_list_creative_formats_uses_typed_parameters(self):
         """list_creative_formats should use FormatId, etc."""

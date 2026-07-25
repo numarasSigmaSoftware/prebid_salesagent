@@ -10,7 +10,6 @@ import socket
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -571,19 +570,12 @@ def auto_approval_adapter(live_server):
 
 @pytest.fixture
 async def e2e_client(live_server, test_auth_token):
-    """Provide async client for E2E testing with testing hooks.
-
-    Dry-run + per-test session id; tenant selected via x-adcp-tenant (the Host
-    header is set by the HTTP client from the URL). Tests needing other header
-    shapes call tests.e2e.utils.make_mcp_client directly (GH #1423).
-    """
+    """Provide an authenticated async client for real E2E state transitions."""
     from tests.e2e.utils import make_mcp_client
 
     client = make_mcp_client(
         live_server,
         token=test_auth_token,
-        dry_run=True,
-        session_id=str(uuid.uuid4()),
     )
     async with client:
         yield client
@@ -608,8 +600,6 @@ async def a2a_client(live_server, test_auth_token):
         client.headers.update(
             {
                 "Authorization": f"Bearer {test_auth_token}",
-                "X-Test-Session-ID": str(uuid.uuid4()),
-                "X-Dry-Run": "true",
             }
         )
         yield client

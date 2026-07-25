@@ -1032,6 +1032,15 @@ class MediaBuy(Base):
     # shows serving. Surfaced on the admin media-buy detail page.
     finalize_reconcile_incident_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finalize_reconcile_incident_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Crash-recoverable update operation state (#1544) ──────────────────
+    # Update adapters may make several remote calls. These fields fence the
+    # remote phase without retaining a database row lock/transaction across it.
+    update_lease_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    update_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    update_adapter_invoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    update_recovery_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    update_reconcile_incident_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    update_reconcile_incident_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     tenant = relationship("Tenant", back_populates="media_buys", overlaps="media_buys")

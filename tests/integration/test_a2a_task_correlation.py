@@ -259,6 +259,38 @@ class TestA2ATaskCorrelation:
             with pytest.raises(TaskNotFoundError):
                 asyncio.run(handler.on_get_task(GetTaskRequest(id="task_owned"), context=None))
 
+    def test_on_cancel_task_requires_the_same_owner_as_tasks_get(self, integration_db, sample_tenant, sample_principal):
+        """A task id is a correlation handle, not authority to cancel another buyer's task."""
+        from a2a.types import CancelTaskRequest, Task, TaskStatus
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        tenant_id = sample_tenant["tenant_id"]
+        owner_id = sample_principal["principal_id"]
+        owner = PrincipalFactory.make_identity(principal_id=owner_id, tenant_id=tenant_id, protocol="a2a")
+        sibling = PrincipalFactory.make_identity(
+            principal_id=_SIBLING_PRINCIPAL_ID, tenant_id=tenant_id, protocol="a2a"
+        )
+        handler = AdCPRequestHandler.__new__(AdCPRequestHandler)
+        submitted = Task(id="task_cancellable", status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
+        handler.tasks = {submitted.id: submitted}
+        handler._task_owners = {submitted.id: (tenant_id, owner_id)}
+
+        with (
+            patch.object(handler, "_get_auth_token", return_value="tok"),
+            patch.object(handler, "_resolve_a2a_identity", return_value=sibling),
+            pytest.raises(TaskNotFoundError),
+        ):
+            asyncio.run(handler.on_cancel_task(CancelTaskRequest(id=submitted.id), context=None))
+
+        with (
+            patch.object(handler, "_get_auth_token", return_value="tok"),
+            patch.object(handler, "_resolve_a2a_identity", return_value=owner),
+        ):
+            cancelled = asyncio.run(handler.on_cancel_task(CancelTaskRequest(id=submitted.id), context=None))
+
+        assert cancelled.status.state == TaskState.TASK_STATE_CANCELED
+
     def _poll_with_stale_in_memory(self, handler, tenant_id, principal_id, external_task_id):
         """Seed a SUBMITTED in-memory task OWNED by (tenant_id, principal_id), then poll on_get_task."""
         from a2a.types import Task, TaskStatus

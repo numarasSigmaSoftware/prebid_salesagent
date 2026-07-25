@@ -2837,7 +2837,10 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         transports = [Transport.A2A, Transport.MCP]
         ids = ["a2a", "mcp"]
 
-    if os.environ.get("BDD_E2E_ENABLED") == "true" and not no_rest_uc:
+    # Internal AdCPTestContext simulation is deliberately in-process only:
+    # live protocol requests must use real disposable state, never X-* hooks.
+    is_internal_simulation = "T-UC-002-inv-020-5" in marker_names
+    if os.environ.get("BDD_E2E_ENABLED") == "true" and not no_rest_uc and not is_internal_simulation:
         transports.append(Transport.E2E_REST)
         ids.append("e2e_rest")
 

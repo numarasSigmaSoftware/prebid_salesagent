@@ -32,9 +32,9 @@ class TestAdCPFullLifecycle:
         """
         Minimal lifecycle: get_products -> create_media_buy -> sync_creatives -> get_media_buy_delivery.
 
-        This test uses its own Client (not e2e_client) to avoid X-Dry-Run:true.
+        This test uses its own authenticated client to make a real lifecycle.
         """
-        # Setup MCP client without dry-run (make_mcp_client defaults to dry_run=False)
+        # Setup MCP client for a real stateful lifecycle.
         async with make_mcp_client(live_server, token=test_auth_token) as client:
             # ============================================================
             # PHASE 1: Product Discovery

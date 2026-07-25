@@ -3671,7 +3671,7 @@ async def _create_media_buy_impl(
             # dry_run and is spec-correct (PR #1567): spec 3.1.1
             # create-media-buy-response.json has exactly three variants
             # (Success/Error/Submitted) and NO simulation envelope; dry_run is a
-            # (deprecated) testing hook (X-Dry-Run header), not a wire field, and the spec
+            # internal test context, not a wire field, and the spec
             # is SILENT on a dry_run response status -> production authoritative. A dry_run
             # buyer asked to SIMULATE the would-be outcome, which IS completion, so
             # "completed" is a truthful preview (unlike the pending-approval and reject paths, where the op

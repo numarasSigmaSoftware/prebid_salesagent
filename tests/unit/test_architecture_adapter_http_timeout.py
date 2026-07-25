@@ -55,11 +55,11 @@ def _requests_function_names(tree: ast.AST) -> tuple[set[str], set[str]]:
     methods: set[str] = set()
     sessions: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom) or node.module not in {"requests", "requests.sessions"}:
+        if not isinstance(node, ast.ImportFrom) or node.module not in {"requests", "requests.api", "requests.sessions"}:
             continue
         for alias in node.names:
             bound = alias.asname or alias.name
-            if node.module == "requests" and alias.name in _REQUESTS_METHODS:
+            if node.module in {"requests", "requests.api"} and alias.name in _REQUESTS_METHODS:
                 methods.add(bound)
             if alias.name == "Session":
                 sessions.add(bound)
@@ -110,7 +110,7 @@ def _unbounded_requests_calls(tree: ast.AST) -> list[int]:
             continue
         if chain[-1] == "Session" and chain[1:-1] in ([], ["sessions"]):
             hits.append(node.lineno)
-        elif len(chain) == 2 and chain[-1] in _REQUESTS_METHODS:
+        elif len(chain) in {2, 3} and chain[-1] in _REQUESTS_METHODS and chain[1:-1] in ([], ["api"]):
             timeout_kw = next((kw for kw in node.keywords if kw.arg == "timeout"), None)
             if timeout_kw is None or _is_none_literal(timeout_kw.value):
                 hits.append(node.lineno)
@@ -173,6 +173,16 @@ def test_guard_detects_aliased_requests_call():
 def test_guard_detects_directly_imported_request_call():
     """Known-bad: ``from requests import get`` cannot evade the timeout guard."""
     assert _snippet_hits("from requests import get\n\n\ndef f(url):\n    return get(url)\n") == [5]
+
+
+def test_guard_detects_requests_api_call():
+    """Known-bad: ``requests.api.get`` cannot bypass the module matcher."""
+    assert _snippet_hits("import requests\n\n\ndef f(url):\n    return requests.api.get(url)\n") == [5]
+
+
+def test_guard_detects_directly_imported_requests_api_call():
+    """Known-bad: ``from requests.api import get`` cannot bypass the guard."""
+    assert _snippet_hits("from requests.api import get\n\n\ndef f(url):\n    return get(url)\n") == [5]
 
 
 def test_guard_detects_nested_session_constructor():

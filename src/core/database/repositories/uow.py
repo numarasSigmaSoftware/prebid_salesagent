@@ -94,6 +94,11 @@ class BaseUoW:
         self._init_repos()
         return self
 
+    def commit(self) -> None:
+        """Persist the current unit of work before continuing a multi-phase operation."""
+        assert self._session is not None
+        self._session.commit()
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,

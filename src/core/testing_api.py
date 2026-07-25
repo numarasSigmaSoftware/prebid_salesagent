@@ -57,17 +57,9 @@ class TestingCapabilities(BaseModel):
 def get_testing_capabilities() -> TestingCapabilities:
     """Get comprehensive testing capabilities."""
     return TestingCapabilities(
-        supported_headers=[
-            "X-Dry-Run",
-            "X-Mock-Time",
-            "X-Jump-To-Event",
-            "X-Test-Session-ID",
-            "X-Auto-Advance",
-            "X-Simulated-Spend",
-            "X-Force-Error",
-            "X-Slow-Mode",
-            "X-Debug-Mode",
-        ],
+        # AdCP 3.1.1 forbids protocol behavior changes from proprietary X-*
+        # testing headers. Test contexts are injected only at internal seams.
+        supported_headers=[],
         lifecycle_events=[e.value for e in CampaignEvent],
         error_scenarios=[
             "budget_exceeded",

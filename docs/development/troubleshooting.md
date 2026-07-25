@@ -640,12 +640,13 @@ See `docs/testing/mock-reduction-patterns.md` for detailed examples.
 
 ## Testing Backend Issues
 
-### Testing Hooks Not Working
+### Test Simulation Does Not Affect a Live Request
 
-**Issue**: X-Dry-Run, X-Mock-Time headers not being processed
+**Issue**: Adding `X-Dry-Run`, `X-Mock-Time`, or similar headers has no effect.
 
-**Cause**: Headers not being extracted from FastMCP context properly
-**Fix**: Use `context.meta.get("headers", {})` to extract headers from FastMCP context
+**Cause**: AdCP 3.1.1 requires sellers to ignore proprietary testing headers.
+**Fix**: Use a real disposable account/state for an end-to-end request; inject
+`AdCPTestContext` only through an in-process test harness.
 
 ### Response Headers Missing
 
@@ -654,12 +655,12 @@ See `docs/testing/mock-reduction-patterns.md` for detailed examples.
 **Cause**: Response headers not being set after apply_testing_hooks
 **Fix**: Ensure `campaign_info` dict is passed to testing hooks for event calculation
 
-### Session Isolation Not Working
+### E2E Tests Interfere With Each Other
 
-**Issue**: Parallel tests interfering with each other
+**Issue**: Parallel tests share data.
 
-**Cause**: Missing or incorrect X-Test-Session-ID header
-**Fix**: Generate unique session IDs per test and include in all requests
+**Fix**: Use the harness's disposable database/tenant isolation. Do not rely
+on `X-Test-Session-ID`, which production ignores.
 
 ## Production Issues
 

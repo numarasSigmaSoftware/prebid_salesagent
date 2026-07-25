@@ -30,7 +30,7 @@ from src.core.schema_helpers import (
     to_push_notification_config,
     to_reporting_webhook,
 )
-from src.core.schemas import SalesAgentBaseModel
+from src.core.schemas import RawMediaBuyIds, RawMediaBuyStatusFilter, RawRevision, SalesAgentBaseModel
 from src.core.tools import accounts as accounts_module
 from src.core.tools import capabilities as capabilities_module
 from src.core.tools import creative_formats as creative_formats_module
@@ -105,7 +105,7 @@ class UpdateMediaBuyBody(SalesAgentBaseModel):
     # Preserve the raw wire value until the shared UpdateMediaBuyRequest
     # validation boundary. Otherwise FastAPI classifies/coerces this field before
     # A2A/MCP reach the common contract.
-    revision: Any = None
+    revision: RawRevision | None = None
     # Fields update_media_buy_raw plumbs through to UpdateMediaBuyRequest. Raw dicts
     # are coerced downstream (Pattern #7 extra policy inherited from SalesAgentBaseModel).
     # NOTE: top-level targeting_overlay/creatives are intentionally omitted — the raw
@@ -144,8 +144,8 @@ class GetMediaBuysBody(SalesAgentBaseModel):
     # This deviation governs the two FILTER fields only — they are what the shared
     # boundary classifies. ``account`` and ``context`` carry no such cross-transport
     # split, so they keep the concrete typing every sibling *Body model uses.
-    media_buy_ids: Any = None
-    status_filter: Any = None
+    media_buy_ids: RawMediaBuyIds | None = None
+    status_filter: RawMediaBuyStatusFilter | None = None
     include_snapshot: bool = False
     account: dict[str, Any] | None = None  # AccountReference; coerced downstream
     context: dict[str, Any] | None = None  # ContextObject; coerced by GetMediaBuysRequest
