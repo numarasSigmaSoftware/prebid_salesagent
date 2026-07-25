@@ -57,11 +57,31 @@ def canonical_payload_hash(payload: dict[str, Any]) -> str:
     excluded fields) hash equal — the equivalence test for replay vs conflict.
     """
     try:
-        return _canonical_json_sha256(payload)
+        return _canonical_json_sha256(_json_compatible(payload))
     except RecursionError as exc:
         # A pathologically nested payload must reject as a buyer error, not
         # crash the boundary with an unhandled RecursionError.
         raise AdCPValidationError("request payload too deeply nested to canonicalize for idempotency") from exc
+
+
+def _json_compatible(value: Any) -> Any:
+    """Normalize boundary-injected Pydantic values back to JSON primitives.
+
+    Transport wrappers retain the raw wire body for idempotency equivalence, but
+    some framework TypeAdapters mutate nested values into ``BaseModel`` objects
+    before threading that body into the implementation. RFC 8785 only accepts
+    JSON values, so normalize those wrapper artifacts without changing the
+    semantic payload being hashed.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_compatible(item) for item in value]
+    return value
 
 
 def canonical_request_hash(request: BaseModel) -> str:

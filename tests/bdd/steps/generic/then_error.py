@@ -190,12 +190,12 @@ def _get_error_code(error: object) -> str:
     # adcp.types.Error model (from partial success response.errors)
     if hasattr(error, "code") and not isinstance(error, Exception):
         return error.code
-    # Pydantic ValidationError → VALIDATION_ERROR
+    # Raw Pydantic errors are request-schema failures → INVALID_REQUEST.
     try:
         from pydantic import ValidationError
 
         if isinstance(error, ValidationError):
-            return "VALIDATION_ERROR"
+            return "INVALID_REQUEST"
     except ImportError:
         pass
     return type(error).__name__
@@ -782,7 +782,7 @@ def then_validation_error(ctx: dict) -> None:
         error = ctx.get("error")
         assert error is not None, "Expected a validation error"
         actual = _get_error_code(error)
-    assert actual == "VALIDATION_ERROR", f"Expected VALIDATION_ERROR, got {actual}"
+    assert actual in {"INVALID_REQUEST", "VALIDATION_ERROR"}, f"Expected a validation rejection, got {actual}"
 
 
 @then("the error should be a real validation error, not simulated")

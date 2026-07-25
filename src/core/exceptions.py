@@ -1125,32 +1125,25 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
     Single source of truth for the wrapping applied at all three transport
     boundaries (MCP, A2A, REST). Already-typed ``AdCPError`` passes through
     unchanged. Pydantic ``ValidationError`` maps to a structured, sanitized
-    ``AdCPValidationError``; other ``ValueError`` instances map to the plain
-    validation error, ``PermissionError`` to ``AdCPAuthorizationError``, and
-    anything else wraps in base ``AdCPError`` (INTERNAL_ERROR).
+    ``AdCPInvalidRequestError``; other ``ValueError`` instances map to the
+    semantic validation error, ``PermissionError`` to
+    ``AdCPAuthorizationError``, and anything else wraps in base ``AdCPError``
+    (INTERNAL_ERROR).
     """
     if isinstance(exc, AdCPError):
         return exc
     if isinstance(exc, ValidationError):
         errors = exc.errors()
-        first_type = errors[0]["type"] if errors else None
         first_message = errors[0]["msg"] if errors else None
-        # Structural request-shape failures (missing required fields or
-        # forbidden extras) are INVALID_REQUEST at every transport boundary.
-        # Value/constraint failures on an otherwise well-formed request remain
-        # VALIDATION_ERROR. This mirrors the REST RequestValidationError
-        # boundary and the pinned 3.1.1 wire contract.
-        if first_type in {"missing", "extra_forbidden"}:
-            return AdCPInvalidRequestError(
-                first_message or "Request failed schema validation",
-                field=first_validation_error_field(exc),
-                suggestion=INVALID_REQUEST_SUGGESTION,
-                details=build_validation_error_details(errors),
-            )
-        return AdCPValidationError(
+        # Pydantic/TypeAdapter errors are request-schema failures, including
+        # missing fields and value/constraint violations. AdCP 3.1.1
+        # error-code.json reserves VALIDATION_ERROR for semantic or business
+        # rules beyond schema validation, so every transport emits
+        # INVALID_REQUEST here.
+        return AdCPInvalidRequestError(
             first_message or "Request failed schema validation",
             field=first_validation_error_field(exc),
-            suggestion=VALIDATION_ERROR_SUGGESTION,
+            suggestion=INVALID_REQUEST_SUGGESTION,
             details=build_validation_error_details(errors),
         )
     if isinstance(exc, ValueError):

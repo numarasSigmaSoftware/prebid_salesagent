@@ -34,6 +34,29 @@ from tests.factories.account import AccountFactory, AgentAccountAccessFactory
 # ═══════════════════════════════════════════════════════════════════════
 
 
+@given('a create_media_buy request with an inline creative whose assets map value lacks an "asset_type" field')
+def given_inline_creative_missing_asset_type(ctx: dict) -> None:
+    """Build BR-RULE-015 INV-6's schema-invalid inline creative payload.
+
+    The missing discriminator must be rejected at the request-schema boundary,
+    before any creative processing or adapter call.
+    """
+    from tests.bdd.steps.generic.given_media_buy import _ensure_request_defaults
+
+    request = _ensure_request_defaults(ctx)
+    request["packages"][0]["creatives"] = [
+        {
+            "creative_id": "inline-missing-asset-type",
+            "name": "Missing asset discriminator",
+            "format_id": {
+                "agent_url": "https://creative.adcontextprotocol.org",
+                "id": "display_300x250",
+            },
+            "assets": {"main": {"url": "https://example.com/creative.jpg"}},
+        }
+    ]
+
+
 def _attach_account_to_full_request(ctx: dict) -> None:
     """Build a complete, valid create request carrying the account reference.
 
@@ -556,7 +579,7 @@ def given_request_with_boundary_config(ctx: dict, config: str) -> None:
 
     elif "both fields" in config:
         # Schema-shape case: raw account with BOTH account_id and brand+operator.
-        # Pydantic oneOf rejects at the boundary → VALIDATION_ERROR on the wire.
+        # Pydantic oneOf rejects at the boundary → INVALID_REQUEST on the wire.
         _attach_raw_account_shape(ctx, {"account_id": "acc_001", "brand": {"domain": "x.com"}, "operator": "x.com"})
         return
 
@@ -862,14 +885,10 @@ def then_result_should_be(ctx: dict, outcome: str) -> None:
     if outcome == "success":
         # Bare success outcome (e.g. UC-003 targeting-overlay "Valid partitions"):
         # the operation proceeded without error and produced a response.
-        assert "error" not in ctx, f"Expected success but got error: {ctx.get('error')}"
-        assert ctx.get("response") is not None, "Expected a response for success outcome but ctx['response'] is None"
+        assert ctx.get("error") is None, f"Expected success but got error: {ctx.get('error')!r}"
+        _require_success_response(ctx)
     elif outcome.startswith("account resolution succeeds"):
         _assert_account_resolution_succeeds(ctx)
-    elif outcome.strip() == "success":
-        # Plain-success partition arm: the operation returned a response, no error.
-        assert ctx.get("error") is None, f"Expected success, got error: {ctx.get('error')!r}"
-        _require_success_response(ctx)
     elif outcome.startswith("error"):
         _assert_error_outcome(ctx, outcome)
     elif _is_pipeline_routing_outcome(outcome):
@@ -1905,6 +1924,15 @@ def then_error_references_missing_field(ctx: dict, field: str) -> None:
 
     message = _get_error_message_for_step(error)
     assert field in message, f"Validation error does not reference the missing '{field}' field. Message: {message!r}"
+
+
+@then("the error should reference the unresolvable asset_type discriminator")
+def then_error_references_asset_type_discriminator(ctx: dict) -> None:
+    """BR-RULE-015 INV-6: expose the missing union discriminator to the buyer."""
+    error = ctx.get("error")
+    assert error is not None, "Expected a schema rejection for the missing asset_type discriminator"
+    message = _get_error_message_for_step(error)
+    assert "asset_type" in message, f"Expected error to identify asset_type discriminator, got: {message!r}"
 
 
 def _get_error_message_for_step(error: object) -> str:

@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pydantic import ValidationError
 
 from src.core.exceptions import (
+    AdCPInvalidRequestError,
     AdCPValidationError,
     build_validation_error_details,
 )
@@ -29,9 +30,9 @@ def adcp_validation_boundary(
     context: str = "parameters",
     field: str | None = None,
     *,
-    error_type: type[AdCPValidationError] = AdCPValidationError,
+    error_type: type[AdCPValidationError] = AdCPInvalidRequestError,
 ) -> Iterator[None]:
-    """Translate a Pydantic ``ValidationError`` into a typed ``AdCPValidationError``.
+    """Translate a Pydantic ``ValidationError`` into a typed ``AdCPInvalidRequestError``.
 
     Transport wrappers and skill handlers validate buyer parameters at the
     boundary. A raw ``ValidationError`` leaking from ``model_validate`` (or a
@@ -40,8 +41,10 @@ def adcp_validation_boundary(
     subclasses, so the buyer would lose the real code/recovery. This boundary is
     the SINGLE translation point (#1417): every rejection carries the
     buyer-friendly ``format_validation_error`` message, the structured ``field``
-    path, and error.json's top-level ``suggestion`` — no tool hand-rolls its own
-    try/except copy.
+    path, and error.json's top-level ``suggestion``. Per AdCP 3.1.1
+    ``enums/error-code.json``, this request-schema boundary emits
+    ``INVALID_REQUEST``; semantic/business-rule checks raise
+    ``AdCPValidationError`` explicitly from tool logic.
 
     ``context`` names what was invalid in the message (e.g. ``"get_products
     request"``); the default renders the ``Invalid parameters`` prefix existing

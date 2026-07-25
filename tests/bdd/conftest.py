@@ -185,10 +185,11 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-003-ext-u": "new_packages midflight capability check not implemented (BR-RULE-217) — production gap salesagent-u35g",
     # FIXME(salesagent-12nd): UC-002 ASAP — response doesn't expose resolved start_time
     "T-UC-002-alt-asap": "response lacks resolved start_time field — spec-production gap",
-    # FIXME(salesagent-fie): UC-002 error code mismatch — Pydantic VALIDATION_ERROR vs spec INVALID_REQUEST
-    "T-UC-002-inv-087-5": "duplicate optimization_goals priority: VALIDATION_ERROR instead of INVALID_REQUEST — spec-production gap",
-    "T-UC-002-inv-087-6": "empty optimization_goals array: VALIDATION_ERROR instead of INVALID_REQUEST — spec-production gap",
-    "T-UC-002-inv-087-7": "per_ad_spend without value_field: VALIDATION_ERROR instead of INVALID_REQUEST — spec-production gap",
+    # The schema-code mapping is correct; these scenarios remain dormant until
+    # their create-media-buy harness steps are wired.
+    "T-UC-002-inv-087-5": "duplicate optimization_goals priority scenario not yet harness-wired",
+    "T-UC-002-inv-087-6": "empty optimization_goals array scenario not yet harness-wired",
+    "T-UC-002-inv-087-7": "per_ad_spend without value_field scenario not yet harness-wired",
     # Un-graduated: T-UC-005-sandbox-happy — sandbox=True not set on response (all transports)
     "T-UC-005-sandbox-happy": "sandbox mode not implemented in list_creative_formats response — spec-production gap",
     # Un-graduated: T-UC-005-sandbox-validation — sandbox validation not triggered (all transports)
@@ -229,7 +230,7 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-005-ext-b-persistence-invalid": "assertion steps undefined; behind them, disclosure_persistence specific error code/suggestion not implemented",
     "T-UC-005-ext-b-persistence-empty": "assertion steps undefined; behind them, disclosure_persistence specific error code/suggestion not implemented",
     # FIXME(beads-dul): specific error codes (OUTPUT_FORMAT_IDS_EMPTY etc.)
-    # not produced by production — Pydantic gives generic VALIDATION_ERROR
+    # not produced by production — Pydantic gives generic INVALID_REQUEST
     "T-UC-005-ext-b-output-empty": "specific validation error codes not implemented",
     "T-UC-005-ext-b-output-invalid": "specific validation error codes not implemented",
     "T-UC-005-ext-b-output-noid": "specific validation error codes not implemented",
@@ -240,7 +241,7 @@ _XFAIL_TAGS: dict[str, str] = {
     # Targeting uses extra=get_pydantic_extra_mode(): 'forbid' in dev (ValidationError at parse time),
     # 'ignore' in prod (field silently dropped). Neither produces INVALID_REQUEST.
     # Spec expects business-logic validation with INVALID_REQUEST code and suggestion field.
-    "T-UC-002-ext-f": "unknown targeting field caught by Pydantic (VALIDATION_ERROR), not business logic (INVALID_REQUEST) — spec-production gap",
+    "T-UC-002-ext-f": "unknown targeting field is rejected only in strict development schema mode and ignored in production — spec-production gap",
     # FIXME(salesagent-scxw): the error CODE is fixed (currency-not-supported now
     # raises AdCPCapabilityNotSupportedError -> UNSUPPORTED_FEATURE, verified by
     # tests/integration/test_currency_not_supported_error_code.py). But this scenario
@@ -1703,7 +1704,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             )
 
         # attribution_window REFERENCE (clean scenario->step->harness path): the Examples
-        # name the exact error code (error "VALIDATION_ERROR" — the schema-canonical code
+        # name the exact error code (error "VALIDATION_ERROR" — the semantic-validation code
         # for value/enum/range/business-rule violations; reconciled from the earlier
         # INVALID_REQUEST mis-pin per the AdCP graded error-compliance storyboard), the
         # step asserts it on the harness wire envelope. interval=0 / unit=weeks /
@@ -2718,6 +2719,9 @@ _UC002_CREATE_WIRED: set[str] = {
     # Dry-run parity: the simulated success arm carries confirmed_at/revision too,
     # never invokes the adapter, and persists nothing
     "T-UC-002-inv-020-5",
+    # BR-RULE-015 INV-6: a schema-invalid inline creative must reject with
+    # INVALID_REQUEST on every create transport.
+    "T-UC-002-inv-015-6",
 }
 
 # UC-003 scenarios wired to MediaBuyDualEnv (real create in the Background,
@@ -3230,8 +3234,6 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             with _db_scope_for(request, e2e_config), MediaBuyCreateEnv(e2e_config=e2e_config) as env:
                 _seed_media_buy_ctx(ctx, env)
                 yield
-        elif "T-UC-002-inv-015-6" in marker_names:
-            pytest.xfail("T-UC-002-inv-015-6 create_media_buy harness wiring is tracked in #1652")
         else:
             # Restore the xfail guard every other use case keeps on its catch-all:
             # non-account / non-extension UC-002 scenarios are NOT yet wired (no

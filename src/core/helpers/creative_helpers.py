@@ -543,7 +543,7 @@ def process_and_upload_package_creatives(
     import logging
 
     # Lazy import to avoid circular dependency
-    from src.core.exceptions import AdCPAdapterError, AdCPCreativeRejectedError, AdCPError
+    from src.core.exceptions import AdCPAdapterError, AdCPCreativeRejectedError, AdCPError, AdCPInvalidRequestError
     from src.core.tools.creatives import _sync_creatives_impl
 
     logger = logging.getLogger(__name__)
@@ -583,6 +583,18 @@ def process_and_upload_package_creatives(
                 detail_msgs = [f"{r.creative_id}: {err.message}" for r in failed_results for err in (r.errors or [])]
                 error_msg = "Creative validation failed:\n" + "\n".join(f"  • {m}" for m in detail_msgs)
                 logger.error(error_msg)
+                if any("discriminator 'asset_type'" in detail for detail in detail_msgs):
+                    # The outer create schema accepts an inline creative as a
+                    # generic object, but CreativeAsset's discriminated-union
+                    # schema owns the nested asset shape. Preserve that
+                    # request-schema classification when it is validated
+                    # during creative sync rather than at the outer boundary.
+                    raise AdCPInvalidRequestError(
+                        error_msg,
+                        field="packages.creatives.assets",
+                        suggestion="Provide a valid asset_type for every inline creative asset and resend the request.",
+                        details={"creative_errors": detail_msgs},
+                    )
                 raise AdCPCreativeRejectedError(
                     error_msg,
                     suggestion=(

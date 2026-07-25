@@ -11,6 +11,7 @@ import struct
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import BaseModel
 
 from src.core.idempotency_canonical import canonical_payload_hash, canonical_request_hash, strip_excluded_fields
 
@@ -79,6 +80,18 @@ def test_input_not_mutated() -> None:
     }
     canonical_payload_hash(payload)
     assert payload == snapshot
+
+
+def test_nested_pydantic_values_are_normalized_before_hashing() -> None:
+    """TypeAdapter-mutated raw payloads remain canonicalizable on MCP."""
+
+    class NestedFormat(BaseModel):
+        id: str
+        agent_url: str
+
+    model_payload = {"format_id": NestedFormat(id="display_300x250", agent_url="https://creative.example")}
+    json_payload = {"format_id": {"id": "display_300x250", "agent_url": "https://creative.example"}}
+    assert canonical_payload_hash(model_payload) == canonical_payload_hash(json_payload)
 
 
 def test_strip_excluded_fields_removes_closed_set() -> None:

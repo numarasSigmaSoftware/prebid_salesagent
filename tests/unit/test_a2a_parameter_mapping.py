@@ -115,14 +115,13 @@ class TestA2AParameterMapping:
             assert call_kwargs["pacing"] == "even"
             assert call_kwargs["daily_budget"] == 500.0
 
-    def test_update_media_buy_invalid_revision_emits_validation_error(self):
-        """A schema-invalid revision emits VALIDATION_ERROR on the A2A skill path.
+    def test_update_media_buy_invalid_revision_emits_invalid_request(self):
+        """A schema-invalid revision emits INVALID_REQUEST on the A2A skill path.
 
         The update path is reconciled to the ONE sanctioned
         translation point — ``adcp_validation_boundary`` — which emits
-        VALIDATION_ERROR (with the error.json top-level suggestion + field) for a
-        schema-invalid revision. The earlier hand-rolled INVALID_REQUEST
-        variant was reverted to comply with the no-handrolled-boundary guard.
+        INVALID_REQUEST (with the error.json top-level suggestion + field) for
+        a schema-invalid revision.
 
         Drives the REAL boundary — ``on_message_send`` → skill dispatch → failed
         Task — and asserts on the wire error envelope in the Task's artifact

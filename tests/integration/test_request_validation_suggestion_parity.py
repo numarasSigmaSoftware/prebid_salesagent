@@ -42,7 +42,7 @@ class TestGetMediaBuyDeliveryRestSuggestionParity:
 
     def test_invalid_status_filter_rest_envelope_carries_suggestion(self, integration_db):
         """An invalid ``status_filter`` rejected on the REST wire must produce
-        the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` (error.json @v3.1-04f59d2d5).
 
         Pins that ``get_media_buy_delivery`` builds ``GetMediaBuyDeliveryRequest``
@@ -65,7 +65,7 @@ class TestGetMediaBuyDeliveryRestSuggestionParity:
             )
             assert result.envelope["status_code"] == 400
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="status_filter",
@@ -87,7 +87,7 @@ class TestGetMediaBuysA2ASuggestionParity:
 
     def test_malformed_media_buy_ids_a2a_envelope_carries_suggestion(self, integration_db):
         """A wrong-typed ``media_buy_ids`` (string instead of array) rejected
-        on the A2A wire must produce the AdCP two-layer VALIDATION_ERROR
+        on the A2A wire must produce the AdCP two-layer INVALID_REQUEST
         envelope WITH a top-level ``suggestion`` (error.json
         @v3.1-04f59d2d5), matching what REST emits for the same input.
 
@@ -110,7 +110,7 @@ class TestGetMediaBuysA2ASuggestionParity:
                 f"Malformed media_buy_ids must be rejected on the A2A wire, got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="media_buy_ids",
@@ -123,7 +123,7 @@ class TestListAccountsA2ASuggestionParity:
 
     def test_invalid_status_a2a_envelope_carries_suggestion(self, integration_db):
         """An invalid ``status`` rejected on the A2A wire must produce the AdCP
-        two-layer VALIDATION_ERROR envelope WITH a top-level ``suggestion`` —
+        two-layer INVALID_REQUEST envelope WITH a top-level ``suggestion`` —
         the same enriched envelope REST emits for the same input
         (``/api/v1/accounts`` wraps construction in ``adcp_validation_boundary``).
 
@@ -144,7 +144,7 @@ class TestListAccountsA2ASuggestionParity:
                 f"Invalid status must be rejected on the A2A wire, got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="status",
@@ -157,7 +157,7 @@ class TestSyncAccountsA2ASuggestionParity:
 
     def test_account_missing_brand_a2a_envelope_carries_suggestion(self, integration_db):
         """An account entry missing the required ``brand`` rejected on the A2A
-        wire must produce the AdCP two-layer VALIDATION_ERROR envelope WITH a
+        wire must produce the AdCP two-layer INVALID_REQUEST envelope WITH a
         top-level ``suggestion`` — parity with ``/api/v1/accounts/sync``.
 
         Pins that ``_handle_sync_accounts_skill`` constructs
@@ -177,7 +177,7 @@ class TestSyncAccountsA2ASuggestionParity:
                 f"got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="brand",
@@ -190,7 +190,7 @@ class TestListAuthorizedPropertiesA2ASuggestionParity:
 
     def test_invalid_context_a2a_envelope_carries_suggestion(self, integration_db):
         """A wrong-typed ``context`` rejected on the A2A wire must produce the
-        AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` — parity with ``/api/v1/authorized-properties``.
 
         Pins that ``_handle_list_authorized_properties_skill`` constructs
@@ -212,7 +212,7 @@ class TestListAuthorizedPropertiesA2ASuggestionParity:
                 f"Wrong-typed context must be rejected on the A2A wire, got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="context",
@@ -225,7 +225,7 @@ class TestListCreativeFormatsA2ASuggestionParity:
 
     def test_invalid_asset_types_a2a_envelope_carries_suggestion(self, integration_db):
         """An invalid ``asset_types`` member rejected on the A2A wire must
-        produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        produce the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` — parity with ``/api/v1/creative-formats``.
 
         Pins that ``_handle_list_creative_formats_skill`` calls
@@ -242,7 +242,7 @@ class TestListCreativeFormatsA2ASuggestionParity:
                 f"Invalid asset_types must be rejected on the A2A wire, got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="asset_types",
@@ -255,7 +255,7 @@ class TestGetProductsRestSuggestionParity:
 
     def test_invalid_filters_rest_envelope_carries_suggestion(self, integration_db):
         """An invalid ``filters.delivery_type`` rejected on the REST wire must
-        produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        produce the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` (error.json @v3.1-04f59d2d5).
 
         The invalid value passes ``GetProductsBody`` (``filters: dict``) and
@@ -287,13 +287,13 @@ class TestGetProductsRestSuggestionParity:
             envelope = response.json()
             assert_envelope_shape(
                 envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 message_substr="delivery_type",
             )
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, (
-                "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
+                "Expected a non-empty TOP-LEVEL suggestion in the INVALID_REQUEST "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
 
@@ -304,7 +304,7 @@ class TestCreateMediaBuyRestWebhookSuggestionParity:
 
     def test_invalid_reporting_webhook_rest_envelope_carries_suggestion(self, integration_db):
         """A malformed ``reporting_webhook`` rejected on the REST wire must
-        produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        produce the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` (error.json @v3.1-04f59d2d5).
 
         The invalid value passes ``CreateMediaBuyBody`` (``dict``) and fails
@@ -339,12 +339,12 @@ class TestCreateMediaBuyRestWebhookSuggestionParity:
             envelope = response.json()
             assert_envelope_shape(
                 envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
             )
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, (
-                "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
+                "Expected a non-empty TOP-LEVEL suggestion in the INVALID_REQUEST "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
 
@@ -365,7 +365,7 @@ class TestCreateMediaBuyA2AWebhookSuggestionParity:
 
     def test_invalid_reporting_webhook_a2a_envelope_carries_suggestion(self, integration_db):
         """A malformed ``reporting_webhook`` rejected on the A2A wire must
-        produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        produce the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` (error.json @v3.1-04f59d2d5) — identical to REST.
         """
         from tests.harness.media_buy_create import MediaBuyCreateEnv
@@ -388,7 +388,7 @@ class TestCreateMediaBuyA2AWebhookSuggestionParity:
                 f"got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
             )
@@ -418,7 +418,7 @@ class TestSyncCreativesA2ASuggestionParity:
 
     def test_invalid_creative_a2a_envelope_carries_suggestion(self, integration_db):
         """A creative entry missing the required ``format_id`` rejected on the
-        A2A wire must produce the AdCP two-layer VALIDATION_ERROR envelope WITH
+        A2A wire must produce the AdCP two-layer INVALID_REQUEST envelope WITH
         a top-level ``suggestion`` (error.json @v3.1-04f59d2d5) — parity with
         the nine wrapped skill handlers in the same file.
         """
@@ -443,7 +443,7 @@ class TestSyncCreativesA2ASuggestionParity:
                 f"got success payload: {result.payload!r}"
             )
             result.assert_wire_error(
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 require_suggestion=True,
                 message_substr="format_id",
@@ -456,7 +456,7 @@ class TestListAccountsRestSuggestionParity:
 
     def test_invalid_status_rest_envelope_carries_suggestion(self, integration_db):
         """An invalid ``status`` rejected on the REST wire must produce the
-        AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion`` (error.json @v3.1-04f59d2d5).
 
         The invalid value passes ``ListAccountsBody`` (``str``) and fails
@@ -483,13 +483,13 @@ class TestListAccountsRestSuggestionParity:
             envelope = response.json()
             assert_envelope_shape(
                 envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 message_substr="status",
             )
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, (
-                "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
+                "Expected a non-empty TOP-LEVEL suggestion in the INVALID_REQUEST "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
 
@@ -500,7 +500,7 @@ class TestSyncAccountsRestSuggestionParity:
 
     def test_account_missing_brand_rest_envelope_carries_suggestion(self, integration_db):
         """An account entry missing the required ``brand`` rejected on the
-        REST wire must produce the AdCP two-layer VALIDATION_ERROR envelope
+        REST wire must produce the AdCP two-layer INVALID_REQUEST envelope
         WITH a top-level ``suggestion``.
 
         The invalid entry passes ``SyncAccountsBody`` (``list[dict]``) and
@@ -530,13 +530,13 @@ class TestSyncAccountsRestSuggestionParity:
             envelope = response.json()
             assert_envelope_shape(
                 envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 message_substr="brand",
             )
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, (
-                "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
+                "Expected a non-empty TOP-LEVEL suggestion in the INVALID_REQUEST "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
 
@@ -547,7 +547,7 @@ class TestListCreativeFormatsRestSuggestionParity:
 
     def test_invalid_asset_types_rest_envelope_carries_suggestion(self, integration_db):
         """An invalid ``asset_types`` member rejected on the REST wire must
-        produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
+        produce the AdCP two-layer INVALID_REQUEST envelope WITH a top-level
         ``suggestion``.
 
         The invalid value passes ``ListCreativeFormatsBody`` (``list[str]``)
@@ -579,12 +579,12 @@ class TestListCreativeFormatsRestSuggestionParity:
             envelope = response.json()
             assert_envelope_shape(
                 envelope,
-                "VALIDATION_ERROR",
+                "INVALID_REQUEST",
                 recovery="correctable",
                 message_substr="asset_types",
             )
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, (
-                "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
+                "Expected a non-empty TOP-LEVEL suggestion in the INVALID_REQUEST "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
