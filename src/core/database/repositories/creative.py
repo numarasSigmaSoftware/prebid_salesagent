@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import NamedTuple, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import InstrumentedAttribute, Session, attributes
 
 from src.core.database.models import (
@@ -432,23 +432,18 @@ class CreativeAssignmentRepository:
         assignments = self.get_by_media_buy(media_buy_id)
         if not assignments:
             return CreativeReadiness(has_assignments=False, unapproved_creative_ids=[])
-        ids_by_principal: dict[str, set[str]] = {}
-        for assignment in assignments:
-            ids_by_principal.setdefault(assignment.principal_id, set()).add(assignment.creative_id)
-        approved: set[tuple[str, str]] = set()
-        for principal_id, creative_ids in ids_by_principal.items():
-            rows = self._session.scalars(
-                select(Creative).where(
-                    Creative.tenant_id == self._tenant_id,
-                    Creative.principal_id == principal_id,
-                    Creative.creative_id.in_(sorted(creative_ids)),
-                )
-            ).all()
-            # "approved" is the ONLY creative-ready status; "active" is not a
-            # member of the creative status domain (the DB column is free-form,
-            # but no production path writes it — the schemas' CreativeStatusEnum
-            # and the pinned spec enum both lack it).
-            approved.update((principal_id, c.creative_id) for c in rows if c.status == "approved")
+        creative_keys = {(assignment.principal_id, assignment.creative_id) for assignment in assignments}
+        rows = self._session.scalars(
+            select(Creative).where(
+                Creative.tenant_id == self._tenant_id,
+                tuple_(Creative.principal_id, Creative.creative_id).in_(sorted(creative_keys)),
+            )
+        ).all()
+        # "approved" is the ONLY creative-ready status; "active" is not a
+        # member of the creative status domain (the DB column is free-form,
+        # but no production path writes it — the schemas' CreativeStatusEnum
+        # and the pinned spec enum both lack it).
+        approved = {(row.principal_id, row.creative_id) for row in rows if row.status == "approved"}
         unapproved = sorted({a.creative_id for a in assignments if (a.principal_id, a.creative_id) not in approved})
         return CreativeReadiness(has_assignments=True, unapproved_creative_ids=unapproved)
 

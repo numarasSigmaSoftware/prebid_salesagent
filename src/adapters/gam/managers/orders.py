@@ -12,6 +12,7 @@ from typing import Any
 
 from googleads import ad_manager
 
+from src.adapters.base import AdapterIdempotencyUncertain
 from src.adapters.gam.utils.timeout_handler import timeout
 from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError
 from src.core.logging_utils import sanitize_log_value
@@ -180,8 +181,6 @@ class GAMOrdersManager:
         try:
             return self._query_order_id_by_name(order_service, order_name)
         except Exception as e:
-            from src.adapters.base import AdapterIdempotencyUncertain
-
             raise AdapterIdempotencyUncertain(
                 f"GAM order-existence lookup for '{order_name}' failed; refusing to create blindly: {e}"
             ) from e
