@@ -78,7 +78,7 @@ class TestA2AParameterMapping:
                 "paused": False,  # adcp 2.12.0+: paused=False means resume
                 "packages": [{"package_id": "pkg_1", "paused": False}],  # AdCP v2.12.0+ field name
                 # Budget/pacing fields the skill handler must forward to the core tool
-                # (#1544 parity fix — previously silently dropped on the A2A path).
+                # These were previously silently dropped on the A2A path.
                 "currency": "USD",
                 "pacing": "even",
                 "daily_budget": 500.0,
@@ -108,7 +108,7 @@ class TestA2AParameterMapping:
             assert call_kwargs["media_buy_id"] == "mb_123"
             assert call_kwargs["paused"] is False  # adcp 2.12.0+: paused=False means resume
 
-            # Budget/pacing parity (#1544): these three must reach the core tool.
+            # Budget/pacing parity: these three must reach the core tool.
             # Removing any of the handler's params.get(...) forwards makes the key
             # absent here, so this pins the plumbing that otherwise reverts green.
             assert call_kwargs["currency"] == "USD"
@@ -118,10 +118,10 @@ class TestA2AParameterMapping:
     def test_update_media_buy_invalid_revision_emits_validation_error(self):
         """A schema-invalid revision emits VALIDATION_ERROR on the A2A skill path.
 
-        On the #1417 merge, the update path was reconciled to the ONE sanctioned
+        The update path is reconciled to the ONE sanctioned
         translation point — ``adcp_validation_boundary`` — which emits
         VALIDATION_ERROR (with the error.json top-level suggestion + field) for a
-        schema-invalid revision. PR1544's earlier hand-rolled INVALID_REQUEST
+        schema-invalid revision. The earlier hand-rolled INVALID_REQUEST
         variant was reverted to comply with the no-handrolled-boundary guard.
 
         Drives the REAL boundary — ``on_message_send`` → skill dispatch → failed

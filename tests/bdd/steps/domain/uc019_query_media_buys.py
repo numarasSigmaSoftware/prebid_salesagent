@@ -2548,7 +2548,7 @@ def then_unavailable_reason_shorthand(ctx: dict, reason: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Revision / confirmed_at invariants (BR-RULE-291, POST-S6 / INT-006, #1544)
+# Revision / confirmed_at invariants (BR-RULE-291, POST-S6 / INT-006)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -2739,7 +2739,7 @@ def _query_seeded_buys(ctx: dict, read_key: str) -> None:
     # Pydantic lax-coerces, making those oracles blind to serialization regressions
     # their single-read siblings catch. Popping BOTH slots together also keeps
     # ``wire_dict``'s missing-wire guard honest: a stale t1 body left in the slot
-    # would silently satisfy a wire step that ran after the response moved. #1544.
+    # would silently satisfy a wire step that ran after the response moved.
     ctx[f"{read_key}_wire"] = ctx.pop("wire_response", None)
     assert ctx[read_key] is not None, f"{read_key} read failed: {ctx.get('error')!r}"
 
@@ -2772,7 +2772,7 @@ def when_update_lands_between_reads(ctx: dict) -> None:
     # t1/t2 reads run through the parametrized transport
     result = env.call_impl(req=UpdateMediaBuyRequest(media_buy_id=media_buy_id, budget=6100.0))
     # _update_media_buy_impl returns UpdateMediaBuyResult wrapping the success
-    # response (upstream #1417 unified the return type).
+    # response (the upstream return type is unified).
     assert isinstance(result.response, UpdateMediaBuySuccess), f"the intervening update must succeed, got {result!r}"
 
 
@@ -2786,7 +2786,7 @@ def when_seller_approves(ctx: dict, label: str) -> None:
     bypassing the admin blueprint/workflow entry points (session auth, the
     single-winner claim, FinalizeOutcome orchestration). Every production approve
     path is guard-enforced to route through this same repository seam
-    (test_architecture_media_buy_status_writes, #1544), so a broken CALLER (e.g.
+    (test_architecture_media_buy_status_writes), so a broken caller (e.g.
     a route that forgets to pass approved_at=) would NOT be caught here — that
     risk is covered by a dedicated route-level test instead:
     tests/admin/test_workflows_blueprint.py::
@@ -2814,7 +2814,7 @@ def _wire_buys(ctx: dict) -> list[dict]:
 
     Wire-graded on purpose: the reconstructed typed payload re-defaults absent
     fields, so serialization regressions (an ``exclude_none`` omission, a wrong
-    JSON type) are only observable here. #1544.
+    JSON type) are only observable here.
     """
     from tests.bdd.steps._outcome_helpers import wire_dict
 
@@ -2885,7 +2885,7 @@ def then_media_buy_revision_equals(ctx: dict, label: str, revision: int) -> None
 
     Wire-graded (not the reconstructed payload) so a serialization regression of
     the optimistic-concurrency token goes red across a2a/mcp/rest; the A2A
-    whole-number-float nuance lives in ``wire_integer`` (#1583).
+    whole-number-float nuance lives in ``wire_integer``.
     """
     from tests.bdd.steps._outcome_helpers import wire_integer
 
@@ -2899,7 +2899,7 @@ def then_revision_stable_across_reads(ctx: dict) -> None:
 
     Wire-graded per read (not the reconstructed object): Pydantic lax-coerces on
     reconstruction, so a serialization regression that emits ``revision`` as a
-    string would still compare equal here. #1544.
+    string would still compare equal here.
     """
     from tests.bdd.steps._outcome_helpers import wire_integer
 
@@ -2936,7 +2936,7 @@ def then_wire_confirmed_at_present_as_null(ctx: dict, label: str) -> None:
     production serializer re-injects it as null
     (``GetMediaBuysMediaBuy.model_dump``), and this step is that fix's wire
     oracle — key PRESENCE is the claim, so it must read the wire, never the
-    reconstructed payload (which re-defaults an absent key to None). #1544.
+    reconstructed payload (which re-defaults an absent key to None).
     """
     buy = _wire_buy(ctx, label)
     assert "confirmed_at" in buy, f"confirmed_at key MISSING from the wire body (3.1.1 required-nullable): {buy!r}"
@@ -2986,7 +2986,7 @@ def then_confirmed_at_at_read_equals(ctx: dict, read_index: int, timestamp: str)
     """The write-once stamp on THIS read's wire body still carries the same instant.
 
     Wire-graded per read: reading the reconstructed object would re-parse a
-    datetime the serializer might have emitted in a wrong JSON shape. #1544.
+    datetime the serializer might have emitted in a wrong JSON shape.
     """
     buy = _wire_buy_at_read(ctx, f"read_t{read_index}", "mb-001")
     confirmed_at = buy.get("confirmed_at")

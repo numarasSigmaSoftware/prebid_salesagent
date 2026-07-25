@@ -43,7 +43,7 @@ from src.routes.api_v1 import (
 # resolved at the transport boundary; raw_wire_payload is the raw wire request
 # body captured server-side for idempotency hashing (FastAPI raw_json_body dependency).
 # external_task_id is the transport's outer async task id (the A2A ``task_*``),
-# injected by the A2A wrapper for durable task correlation (#1544) — transport
+# injected by the A2A wrapper for durable task correlation — transport
 # plumbing like ctx/identity/raw_wire_payload, never a buyer-supplied body field.
 _TRANSPORT_PARAMS = {"ctx", "identity", "raw_wire_payload", "external_task_id"}
 # Body-only meta field (not a raw-wrapper param).

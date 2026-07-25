@@ -1,4 +1,4 @@
-"""GAM order creation is idempotent for crash-recoverable approval resumes (#1637).
+"""GAM order creation is idempotent for crash-recoverable approval resumes.
 
 A mid-finalize crash can re-invoke ``execute_approved_media_buy`` with the SAME deterministic
 order name (the default template keys on media_buy_id). ``create_order`` must reuse an existing
@@ -55,7 +55,7 @@ def test_archived_order_is_not_reused():
 
 
 def test_lookup_failure_raises_uncertain_and_never_creates_blindly():
-    """FAIL CLOSED (#1637): an uncertain existence lookup must abort creation — a
+    """FAIL CLOSED: an uncertain existence lookup must abort creation — a
     transient GAM error must never mint a possibly-duplicate remote order. The typed
     ``AdapterIdempotencyUncertain`` keeps the buy retryable in ``finalizing``."""
     import pytest
@@ -75,7 +75,7 @@ def test_gam_does_not_claim_full_create_replay():
     """Order-name dedup covers ONLY createOrders — line items / creative associations /
     order approval can still duplicate on a mid-graph resume. GAM must therefore NOT
     claim ``supports_full_create_replay`` until a full-graph
-    ``resume_or_reconcile_media_buy`` exists and is itself tested (#1637)."""
+    ``resume_or_reconcile_media_buy`` exists and is itself tested."""
     from src.adapters.google_ad_manager import GoogleAdManager
 
     assert GoogleAdManager.capabilities.supports_full_create_replay is False

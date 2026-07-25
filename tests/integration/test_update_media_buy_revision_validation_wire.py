@@ -66,7 +66,7 @@ class TestUpdateRevisionValidationWire:
         but the only CONFLICT grades were reconstructed-exception ``error_code``
         asserts at the ``_impl`` layer, so flipping the factory to ``correctable``
         stayed green everywhere. This pins the wire ``recovery`` per transport;
-        a factory regression now reddens here. #1544.
+        a factory regression now reddens here.
         """
         env, media_buy = env_with_media_buy
         # A fresh buy is at revision 1; 999 is a valid int that mismatches, so it

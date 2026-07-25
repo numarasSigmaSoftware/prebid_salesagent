@@ -306,7 +306,7 @@ class TestAssignmentRepoGetByCreative:
 
 
 class TestAssignmentRepoCreativeReadiness:
-    """creative_readiness — the shared finalize-vs-hold gate (#1544).
+    """creative_readiness — the shared finalize-vs-hold gate.
 
     One tenant-scoped home for the readiness query previously open-coded (with
     drift) in the workflow approve route, the operations approve route, and the
@@ -362,7 +362,7 @@ class TestAssignmentRepoCreativeReadiness:
 
         Pins the one-home policy split: ready_for_finalize is False (hold at
         pending_creatives — seller-approved, no creatives assigned yet) while
-        all_assigned_approved is vacuously True (scheduler activation). #1544.
+        all_assigned_approved is vacuously True (scheduler activation).
         """
         with _RepoEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
@@ -382,7 +382,7 @@ class TestAssignmentRepoCreativeReadiness:
 
         Dropping the tenant filter from the assignments query flips
         has_assignments True — this test reddens on that (the fail-closed status
-        lookup keeps ready_for_finalize False either way). #1544.
+        lookup keeps ready_for_finalize False either way).
         """
         with _RepoEnv() as env:
             tenant_a = TenantFactory(tenant_id="tenant_a")
@@ -416,7 +416,7 @@ class TestAssignmentRepoCreativeReadiness:
         dropping the tenant filter from the creatives query lets the foreign
         approved row satisfy the gate and flips ready_for_finalize True. This
         test is the red oracle for that mutation (the principal filter alone
-        cannot catch it: the foreign row shares the principal id). #1544.
+        cannot catch it: the foreign row shares the principal id).
         """
         with _RepoEnv() as env:
             tenant_a = TenantFactory(tenant_id="tenant_a")
@@ -440,7 +440,7 @@ class TestAssignmentRepoCreativeReadiness:
         status lookup matches the assignment's OWN principal, so principal-b's
         APPROVED "c1" must not stand in for principal-a's PENDING "c1". Dropping
         the principal filter (tenant-only matching) could flip this ready — this
-        test is the red oracle for that mutation. #1544.
+        test is the red oracle for that mutation.
         """
         with _RepoEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")

@@ -470,7 +470,7 @@ def pending_buy_with_ok_and_failing_creatives(pending_media_buy_with_approved_cr
 
 class TestMixedCreativeUploadPersistsEnrichmentThenFails:
     """A MIXED creative upload (one asset succeeds, one FAILS) must fail the approval AND
-    still persist the successful asset's enrichment (#1637 review blocker).
+    still persist the successful asset's enrichment.
 
     The old code raised ``AdapterPostMutationIncomplete`` INSIDE the ``MediaBuyUoW`` that
     held the enrichment writebacks, so ``__exit__`` rolled them back — the "successes are

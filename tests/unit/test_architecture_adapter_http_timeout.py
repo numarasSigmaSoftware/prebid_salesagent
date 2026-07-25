@@ -133,7 +133,7 @@ def test_adapter_requests_calls_are_bounded():
         ALLOWLIST,
         fix_hint=(
             "Pass timeout=ADAPTER_HTTP_TIMEOUT (from src.adapters.constants) to every "
-            "requests call so a hung ad server cannot pin an update_media_buy row lock. #1544."
+            "requests call so a hung ad server cannot pin an update_media_buy row lock."
         ),
     )
 

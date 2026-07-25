@@ -766,7 +766,7 @@ def when_send_create_media_buy(ctx: dict) -> None:
 def _dispatch_honoring_identity(ctx: dict, **kwargs) -> None:
     """Dispatch, forwarding the scenario's identity override when one is staged.
 
-    No-auth scenarios (#1417 nfr-001) stash ``ctx["dispatch_identity"] = None`` so
+    No-auth scenarios stash ``ctx["dispatch_identity"] = None`` so
     each transport's REAL auth gate produces the wire rejection — EVERY create
     dispatch path must honor it, or the request silently runs authenticated and
     reaches business logic (the exact regression the nfr scenario pins).
@@ -1308,7 +1308,7 @@ def _assert_error_has_suggestion(error: object) -> None:
 
     error.json places ``suggestion`` at the top level of the error object;
     reading it out of the free-form ``details`` dict masks non-conformant
-    emitters (#1417), so we assert the top-level attribute only.
+    emitters, so we assert the top-level attribute only.
     """
     suggestion = getattr(error, "suggestion", None)
     assert suggestion, f"Expected a top-level suggestion on the error, got: {error!r}"
@@ -2157,7 +2157,7 @@ def then_webhook_notification(ctx: dict) -> None:
 
 # ═══════════════════════════════════════════════════════════════════════
 # THEN steps — v3.1 GA sync-success fields: revision / confirmed_at /
-# valid_actions (T-UC-002-v31-success-revision-and-actions, #1544)
+# valid_actions (T-UC-002-v31-success-revision-and-actions)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -2193,8 +2193,8 @@ def then_response_confirmed_at_is_iso(ctx: dict) -> None:
     create_media_buy response constitutes order confirmation. At 3.1.1
     ``confirmed_at``/``revision`` are schema-REQUIRED on the success arm
     (create-media-buy-response.json ``oneOf[0].required`` =
-    [media_buy_id, confirmed_at, revision, packages]). The divergence tracked in
-    #1564 is that the pinned SDK types ``confirmed_at`` as non-nullable while the
+    [media_buy_id, confirmed_at, revision, packages]). The pinned SDK types
+    ``confirmed_at`` as non-nullable while the
     spec schema types it ``["string","null"]`` (nullable) — SDK-required-non-nullable
     vs spec-nullable; a committed success carries a real ISO instant regardless.
     """
@@ -2214,10 +2214,9 @@ def then_response_revision_is_integer_on_wire(ctx: dict) -> None:
 
     The per-transport integer nuance (A2A serializes DataParts through a
     protobuf ``Struct`` whose only numeric type is ``double``, so an integer
-    arrives as a whole-number float — #1583) lives in the shared
+    arrives as a whole-number float) lives in the shared
     :func:`tests.bdd.steps._outcome_helpers.wire_integer` oracle, which rejects
-    a string, null, bool, or fractional revision on every transport. See #1544
-    round-3.
+    a string, null, bool, or fractional revision on every transport.
     """
     from tests.bdd.steps._outcome_helpers import wire_integer
 
@@ -2230,8 +2229,8 @@ def then_response_revision_is_1(ctx: dict) -> None:
     buy starts at EXACTLY 1 — the same value the integration test pins
     (test_media_buy_revision.py). Asserting the exact initial value, not merely
     ``>= 1``, is what catches a create arm that echoes a stale/garbage counter
-    (#1544 round-2 TQ-02). Wire-graded via ``wire_integer`` so a serialization
-    regression of the token goes red here too (#1544 round-4)."""
+    Wire-graded via ``wire_integer`` so a serialization regression of the token
+    goes red here too."""
     from tests.bdd.steps._outcome_helpers import wire_integer
 
     _require_success_response(ctx)
@@ -2248,7 +2247,7 @@ def then_response_valid_actions_array(ctx: dict) -> None:
     this step is the auto-approved sync success — an active buy, for which an
     empty valid_actions would be a real regression). The BR-UC-019
     terminal-status scenarios that legitimately expect an EMPTY array bind
-    different step text. #1544 round-4.
+    different step text.
     """
     assert_valid_actions_array(ctx)
 
@@ -2266,7 +2265,7 @@ def then_valid_actions_are_enum_members(ctx: dict) -> None:
     from adcp.types.generated_poc.enums.media_buy_valid_action import MediaBuyValidAction
 
     # Shared wire-graded + non-empty oracle: an empty array would make this
-    # membership check pass vacuously. #1544 round-4.
+    # membership check pass vacuously.
     actions = assert_valid_actions_array(ctx)
     allowed = {member.value for member in MediaBuyValidAction}
     outside = [value for value in actions if value not in allowed]
@@ -2275,7 +2274,7 @@ def then_valid_actions_are_enum_members(ctx: dict) -> None:
 
 # ═══════════════════════════════════════════════════════════════════════
 # Dry-run mode (INV-5): the simulated success arm carries revision and confirmed_at,
-# never invokes the adapter, and persists nothing (T-UC-002-inv-020-5, #1544)
+# never invokes the adapter, and persists nothing (T-UC-002-inv-020-5)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -2334,7 +2333,7 @@ def then_dry_run_sandbox_labelled_conformant(ctx: dict) -> None:
       confirmed_at is None — a simulation commits nothing; confirmed_at is a REQUIRED
                        but nullable field (["string","null"], "May be null in deferred
                        or manual-approval flows"), so the serializer emits it
-                       as null on the wire (present, not omitted). #1544.
+                       as null on the wire (present, not omitted).
 
     The confirmed_at claim is a SERIALIZATION claim, so it is asserted on the wire
     body (present-as-null) as well as on the typed payload — mirroring the unit
@@ -2347,7 +2346,7 @@ def then_dry_run_sandbox_labelled_conformant(ctx: dict) -> None:
     resp = _require_success_response(ctx)
     body = _serialized_success_body(ctx)
     # revision is graded on the WIRE like the sibling exact-value steps — a
-    # serialization regression of the token must go red here too. #1544 round-4.
+    # serialization regression of the token must go red here too.
     assert wire_integer(ctx, body, "revision") == 1, "dry-run must carry the initial revision 1 on the wire"
     assert "confirmed_at" in body, f"REQUIRED confirmed_at must be PRESENT on the wire, not omitted: {body!r}"
     assert body["confirmed_at"] is None, (

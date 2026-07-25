@@ -890,7 +890,7 @@ class GoogleAdManager(AdServerAdapter):
         return response
 
     def _build_placement_targeting_map(self, products_map: dict) -> None:
-        """Populate ``self._placement_targeting_map`` (placement_id → targeting_name) from products (adcp#208)."""
+        """Populate ``self._placement_targeting_map`` (placement_id → targeting_name) from products."""
         self._placement_targeting_map.clear()  # Reset for this order
         for _pid, prod_info in products_map.items():
             if not prod_info or not isinstance(prod_info, dict):

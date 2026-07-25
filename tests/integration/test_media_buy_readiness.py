@@ -415,7 +415,7 @@ class TestReadinessCreativeCountScoping:
         "cr_collide". A tenant-only ``creative_id IN (...)`` lookup pulls the
         sibling's APPROVED row into the count (creatives_approved == 1); the
         composite match counts only the buy's own row (approved == 0). This is the
-        red oracle for that scoping — it fails on the tenant-only lookup. #1544.
+        red oracle for that scoping — it fails on the tenant-only lookup.
         """
         with _ReadinessEnv() as env:
             tenant = TenantFactory(tenant_id="readiness_scope_tenant")

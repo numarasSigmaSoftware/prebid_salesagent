@@ -425,7 +425,7 @@ class TestGAMAdapterErrorTaxonomy:
         self, mock_principal, sample_request, sample_packages
     ):
         """A line-item failure happens AFTER the remote order exists, so it surfaces as
-        ``AdapterPostMutationIncomplete`` — the #1637 mutation-boundary contract: the
+        ``AdapterPostMutationIncomplete`` — the mutation-boundary contract: the
         approval finalizer must preserve the manual-reconciliation state, never
         terminal-fail a buy whose partial remote graph exists. The original
         AdCPLineItemError is preserved as the cause chain."""

@@ -888,7 +888,7 @@ class TestUC003MainObligations:
         Reverting the gate (media_buy_update.py) to an unlocked read leaves the
         repository CONFLICT backstop green but lets both requests hit the adapter
         — this pins the lock acquisition the repository-level backstop tests
-        cannot observe. #1544.
+        cannot observe.
         """
         with MediaBuyUpdateEnv(principal_id="principal_test", tenant_id="tenant_test") as env:
             mock_session = env.mock["uow"].return_value.session
@@ -2935,7 +2935,7 @@ class TestUC003StateMachine:
         that revision genuinely advances 1 → 2 in PostgreSQL — is asserted
         against the real database in
         ``tests/integration/test_media_buy_revision.py::...::test_pause_bumps_persisted_revision``
-        (#1544 round-2 TQ-03: never assert a magic revision literal sourced from
+        (never assert a magic revision literal sourced from
         the mock).
         """
         with MediaBuyUpdateEnv(principal_id="principal_test", tenant_id="tenant_test") as env:
@@ -2960,7 +2960,7 @@ class TestUC003StateMachine:
             result = _update_media_buy_impl(req=req, identity=env.identity)
 
             # _update_media_buy_impl uniformly returns UpdateMediaBuyResult wrapping
-            # the UpdateMediaBuySuccess response (upstream #1417 unified the return
+            # the UpdateMediaBuySuccess response (the unified return
             # type; the pause path no longer returns the bare success early).
             assert isinstance(result.response, UpdateMediaBuySuccess)
             env.mock["uow"].return_value.media_buys.bump_revision_or_raise.assert_called_once_with(

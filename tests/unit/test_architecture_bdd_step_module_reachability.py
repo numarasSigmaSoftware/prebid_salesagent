@@ -54,7 +54,7 @@ _ALLOWED_UNREGISTERED: set[str] = {
     # kept out of pytest_plugins so its 8 generic-step overrides stay UC-019-scoped):
     "tests.bdd.steps.domain.uc019_query_media_buys",
     # NOTE: uc003_update_media_buy, given_media_buy, and then_media_buy are
-    # globally registered in conftest pytest_plugins (the #1544 wired UC-002/003/019
+    # globally registered in conftest pytest_plugins (the UC-002/003/019
     # revision/confirmed_at scenarios need them and they do not redefine generic
     # steps), so they are intentionally NOT allowlisted here.
 }

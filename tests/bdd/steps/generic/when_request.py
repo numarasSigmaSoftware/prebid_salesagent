@@ -96,7 +96,7 @@ def when_send_a2a(ctx: dict) -> None:
 @when(parsers.parse('the Buyer Agent sends a list_creative_formats task via A2A with type filter "{type_filter}"'))
 def when_send_a2a_type_filter(ctx: dict, type_filter: str) -> None:
     # The media-buy ListCreativeFormatsRequest has no `type` filter — that filter is a
-    # creative-agent-role field by design (SDK adcp-client-python#971 role boundary), not
+    # creative-agent-role field by design (SDK role boundary), not
     # part of this media-buy contract; dispatch unfiltered.
     when_send_a2a_no_filters(ctx)
 
@@ -104,7 +104,7 @@ def when_send_a2a_type_filter(ctx: dict, type_filter: str) -> None:
 @when(parsers.parse('the Buyer Agent sends a list_creative_formats task via A2A with type "{type_value}"'))
 def when_send_a2a_type_value(ctx: dict, type_value: str) -> None:
     # The media-buy ListCreativeFormatsRequest has no `type` filter — that filter is a
-    # creative-agent-role field by design (SDK adcp-client-python#971 role boundary), not
+    # creative-agent-role field by design (SDK role boundary), not
     # part of this media-buy contract; dispatch unfiltered.
     when_send_a2a_no_filters(ctx)
 
@@ -125,7 +125,7 @@ def when_call_mcp(ctx: dict) -> None:
 @when(parsers.parse('the Buyer Agent calls list_creative_formats MCP tool with type "{type_value}"'))
 def when_call_mcp_type(ctx: dict, type_value: str) -> None:
     # The media-buy ListCreativeFormatsRequest has no `type` filter — that filter is a
-    # creative-agent-role field by design (SDK adcp-client-python#971 role boundary), not
+    # creative-agent-role field by design (SDK role boundary), not
     # part of this media-buy contract; dispatch unfiltered.
     when_call_mcp_no_filters(ctx)
 
@@ -166,7 +166,7 @@ def when_send_request_invalid_dimensions(ctx: dict) -> None:
 @when(parsers.parse('the Buyer Agent requests formats with type "{fmt_type}" and asset_types {asset_types}'))
 def when_request_type_and_asset(ctx: dict, fmt_type: str, asset_types: str) -> None:
     # The media-buy ListCreativeFormatsRequest has no `type` filter (creative-agent-role
-    # field by design, SDK adcp-client-python#971 role boundary); only asset_types applies.
+    # field by design, SDK role boundary); only asset_types applies.
     parsed_assets = json.loads(asset_types)
     try:
         req = ListCreativeFormatsRequest(asset_types=parsed_assets)
@@ -195,7 +195,7 @@ def when_request_asset_types_and_name_search(ctx: dict, asset_types: str, name_s
 @when(parsers.parse('the Buyer Agent requests formats with type "{fmt_type}"'))
 def when_request_type_filter(ctx: dict, fmt_type: str) -> None:
     # The media-buy ListCreativeFormatsRequest has no `type` filter (creative-agent-role
-    # field by design, SDK adcp-client-python#971 role boundary); dispatch unfiltered.
+    # field by design, SDK role boundary); dispatch unfiltered.
     _call(ctx)
 
 
@@ -320,7 +320,7 @@ def _partition_type(ctx: dict, partition: str) -> None:
 
     The media-buy ListCreativeFormatsRequest has no `type` filter — that filter
     (audio/video/display/dooh) is a creative-agent-role field by design (SDK
-    adcp-client-python#971 role boundary), not part of this media-buy contract, so all
+    SDK role boundary), not part of this media-buy contract, so all
     partitions dispatch an unfiltered request.
     """
     _call(ctx)
@@ -773,7 +773,7 @@ def when_boundary_input_ids(ctx: dict, boundary_point: str) -> None:
 # These test creative-agent-specific format filtering through the same
 # list_creative_formats harness. The media-buy ListCreativeFormatsRequest has no
 # `type` filter — that filter (audio/video/display/dooh) is a creative-agent-role
-# field by design (SDK adcp-client-python#971 triage), not part of the media-buy
+# field by design (SDK role boundary), not part of the media-buy
 # contract our tool exposes — so type partitions dispatch unfiltered. Asset type
 # partitions map to the asset_types filter on ListCreativeFormatsRequest.
 
@@ -783,7 +783,7 @@ def _partition_agent_type(ctx: dict, partition: str) -> None:
 
     The media-buy ``ListCreativeFormatsRequest`` has no ``type`` field: the `type`
     filter (audio/video/display/dooh) is a creative-agent-role field by design (SDK
-    adcp-client-python#971 role boundary), NOT an omission of a media-buy feature. So
+    SDK role boundary), NOT an omission of a media-buy feature. So
     EVERY type partition — including the former 'unknown_value'/'native' rejection
     cases — carries no field to land on and dispatches the same unfiltered request
     through the wire. Production returns the full catalog. The previous code

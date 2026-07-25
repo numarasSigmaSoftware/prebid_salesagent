@@ -1659,7 +1659,6 @@ class TestCreateMediaBuyAdapterInteraction:
             #                    because confirmed_at is a REQUIRED nullable field
             #                    (["string","null"]), the sandbox serializer emits it
             #                    as null on the wire so the required key is present.
-            # #1544.
             assert response.revision == 1
             assert response.confirmed_at is None
             # Wire body: confirmed_at MUST be present-with-null (not omitted by

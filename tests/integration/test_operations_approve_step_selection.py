@@ -1,4 +1,4 @@
-"""approve_media_buy step selection is constrained to the CREATE-approval step (#1637).
+"""approve_media_buy step selection is constrained to the CREATE-approval step.
 
 ``WorkflowRepository.list_actionable_steps_for_object`` (used by the approve/reject route's
 ``_select_actionable_create_step``) must return only steps of the given ``tool_name``, so the

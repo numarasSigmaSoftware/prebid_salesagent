@@ -1554,7 +1554,7 @@ class TestMediaBuyStatusOnSync:
             assert mb is not None
             assert mb.status == "pending_creatives"
             # The draft→pending_creatives transition is this pass's single revision
-            # bump (1 → 2) — not double-counted with the assignment mutation. #1544 B3.
+            # bump (1 → 2) — not double-counted with the assignment mutation.
             assert mb.revision == 2
 
     def test_draft_without_approved_at_stays_draft(self, integration_db):
@@ -1588,7 +1588,7 @@ class TestMediaBuyStatusOnSync:
             assert mb is not None
             assert mb.status == "draft"
             # No status transition, but a NEW assignment materially changed the buy,
-            # so the revision still advances exactly once (1 → 2). #1544 B3.
+            # so the revision still advances exactly once (1 → 2).
             assert mb.revision == 2
 
     def test_non_draft_status_unchanged(self, integration_db):
@@ -1625,7 +1625,7 @@ class TestMediaBuyStatusOnSync:
             assert mb.status == "active"
             # An assignment to a live (active) buy leaves the status untouched but
             # still advances the optimistic-concurrency revision (1 → 2) — the core
-            # B3 case: a creative change a buyer's next update must observe. #1544.
+            # case: a creative change a buyer's next update must observe.
             assert mb.revision == 2
 
     def test_upsert_assignment_still_transitions(self, integration_db):
@@ -1670,7 +1670,7 @@ class TestMediaBuyStatusOnSync:
             # First assignment bumps once (via the draft→pending_creatives transition,
             # 1 → 2). The second is an idempotent no-op re-assign (weight already 100,
             # status already pending_creatives), so it does NOT bump again — the
-            # revision stays at 2, proving no-ops are excluded. #1544 B3.
+            # revision stays at 2, proving no-ops are excluded.
             assert mb.revision == 2
 
 

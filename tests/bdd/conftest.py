@@ -65,7 +65,7 @@ pytest_plugins = [
     # test_uc019_query_media_buys.py `import *` (it redefines 8 generic step
     # texts; global registration would shadow them for every other UC). It is
     # therefore intentionally absent here and allowlisted in the reachability
-    # guard. See #1544 / upstream conftest reorg.
+    # guard. See the upstream conftest reorganization.
     "tests.bdd.steps.domain.uc006_sync_creatives",
     "tests.bdd.steps.domain.uc005_format_id_shape",
     "tests.bdd.steps.domain.uc005_format_id_roundtrip",
@@ -208,7 +208,7 @@ _XFAIL_TAGS: dict[str, str] = {
     # FIXME(beads-dul): suggestion field not in production error model
     # NOTE(ah98 red-step inspection, 2026-07-06): NOT graduatable as-is — the
     # When step dispatches unfiltered because the media-buy ListCreativeFormatsRequest
-    # has no `type` filter (creative-agent role boundary by design, SDK #971 triage),
+    # has no `type` filter (creative-agent role boundary by design),
     # so the scenario fails on "operation should fail", not on the missing suggestion.
     # Suggestion parity for list_creative_formats is pinned instead by
     # tests/integration/test_request_validation_suggestion_parity.py.
@@ -2713,10 +2713,10 @@ _IMPL_ONLY: set[tuple[str, str]] = set()
 _UC002_CREATE_WIRED: set[str] = {
     "T-UC-002-v31-idempotency-replay",
     "T-UC-002-v31-idempotency-missing",
-    # AdCP 3.1.1 revision/confirmed_at/valid_actions on the sync success arm (#1544)
+    # AdCP 3.1.1 revision/confirmed_at/valid_actions on the sync success arm
     "T-UC-002-v31-success-revision-and-actions",
     # Dry-run parity: the simulated success arm carries confirmed_at/revision too,
-    # never invokes the adapter, and persists nothing (#1544 round-2 BG-04)
+    # never invokes the adapter, and persists nothing
     "T-UC-002-inv-020-5",
 }
 
@@ -2724,7 +2724,7 @@ _UC002_CREATE_WIRED: set[str] = {
 # real update through every transport). The rest stay blanket-xfailed in
 # _harness_env until their steps are wired.
 _UC003_WIRED: set[str] = {
-    # AdCP 3.1.1 revision counter: successful update increments and returns it (#1544)
+    # AdCP 3.1.1 revision counter: successful update increments and returns it
     "T-UC-003-revision-success-increments",
     # Canonical schema-invalid rows now converge on INVALID_REQUEST at the shared
     # request boundary across A2A/MCP/REST, so both generated outlines are live.
@@ -2735,7 +2735,7 @@ _UC003_WIRED: set[str] = {
     # a valid update carrying BOTH (matching revision + an idempotency_key) still
     # succeeds. Same real create+update wire path as the INV-4 sibling
     # (T-UC-003-revision-success-increments); the request-builder step already
-    # supports the idempotency_key field. #1544.
+    # supports the idempotency_key field.
     "T-UC-003-revision-and-idempotency-independent",
 }
 
@@ -2743,7 +2743,7 @@ _UC003_WIRED: set[str] = {
 # queries run through every transport). The rest stay blanket-xfailed in
 # _harness_env until their steps are wired.
 _UC019_WIRED: set[str] = {
-    # AdCP 3.1.1 revision/confirmed_at invariants (#1544). These scenarios
+    # AdCP 3.1.1 revision/confirmed_at invariants. These scenarios
     # create a REAL buy (via create_default_buy) and drive real revision/
     # confirmed_at transitions, so they must run on MediaBuyLifecycleEnv (the
     # list-only MediaBuyListEnv has no create_default_buy). Query-only scenarios
@@ -2783,7 +2783,7 @@ _ADMIN_TAG_PREFIX = "T-ADMIN-"
 
 # UCs whose tool has no REST route — parametrize across A2A + MCP only (a REST
 # variant would 404). Currently empty: get_media_buys (UC-019) gained its REST
-# binding (POST /api/v1/media-buys/query) in #1544, and both UC-019 harness envs
+# binding (POST /api/v1/media-buys/query), and both UC-019 harness envs
 # (MediaBuyListEnv, MediaBuyLifecycleEnv) dispatch it, so UC-019 now runs a2a/mcp/rest.
 _NO_REST_UC_TAG_PREFIXES: tuple[str, ...] = ()
 
@@ -3188,7 +3188,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             # create_media_buy through every transport: the idempotency
             # replay/missing pair exercises the production replay path, and the
             # v3.1 success scenario asserts the GA revision/confirmed_at/
-            # valid_actions fields (#1544). Everything else stays
+            # valid_actions fields. Everything else stays
             # blanket-xfailed below until its production gaps + steps are wired.
             from tests.harness.media_buy_create import MediaBuyCreateEnv
 
@@ -3221,7 +3221,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 # the parametrized transport (not account resolution). (PR #1567)
                 ctx["uc002_full_create"] = True
             # Brand-shorthand create scenarios (get_products shorthand targeting
-            # create_media_buy) + the PR #1567 manual-approval submitted-envelope
+            # create_media_buy) + the manual-approval submitted-envelope
             # scenario — both run a real create_media_buy through every transport.
             # (The v3.1 idempotency replay/missing tags are members of
             # _UC002_CREATE_WIRED, checked FIRST above, so they never reach here.)
@@ -3260,7 +3260,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             "T-UC-003-approval-adapter",
         }
         if marker_names & _UC003_WIRED:
-            # Wired revision scenarios (#1544) — MediaBuyDualEnv drives a real create
+            # Wired revision scenarios — MediaBuyDualEnv drives a real create
             # (Background) then a real update_media_buy through every transport.
             request.getfixturevalue("integration_db")
             from tests.harness.media_buy_dual import MediaBuyDualEnv
@@ -3331,7 +3331,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         if marker_names & _UC019_WIRED:
             # Wired revision/confirmed_at invariants — MediaBuyLifecycleEnv
             # composes create/update/get so Given steps drive real transitions
-            # and the query runs through every transport (incl. REST). #1544.
+            # and the query runs through every transport (including REST).
             # The intervening state change is a TRANSPORT-BYPASS ``call_impl`` that
             # runs IN-PROCESS even over e2e, so production must point at the same DB
             # the seed factories and the wire reads use: the live-server DB in e2e
@@ -3340,7 +3340,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             # matching every other e2e-capable branch — the prior unconditional
             # ``integration_db`` repointed production at the per-test DB while the
             # env's factories/reads used the server DB, so an intervening in-process
-            # update never landed where the wire read looked (#1544 e2e revision/
+            # update never landed where the wire read looked (e2e revision/
             # confirmed_at drift).
             from tests.harness.media_buy_lifecycle import MediaBuyLifecycleEnv
 
@@ -3516,7 +3516,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         with _db_scope_for(request, e2e_config), ProductEnv(e2e_config=e2e_config) as env:
             ctx["env"] = env
             yield
-    # NOTE: upstream's #1430 added its own `elif uc == "UC-019"` MediaBuyListEnv branch
+    # NOTE: upstream added its own `elif uc == "UC-019"` MediaBuyListEnv branch
     # here; this branch already routes UC-019 above (wired revision/confirmed_at
     # scenarios → MediaBuyLifecycleEnv, query-only → MediaBuyListEnv), so a second
     # arm would be unreachable (duplicate-elif guard). Dropped on merge.

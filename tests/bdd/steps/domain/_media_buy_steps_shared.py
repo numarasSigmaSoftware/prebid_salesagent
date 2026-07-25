@@ -5,7 +5,7 @@ session: resolve a Gherkin label to the real ``media_buy_id``, drive a real
 create through the tool and load the persisted ORM row, and advance the
 persisted revision through the real ``bump_revision`` seam. Keeping one copy
 here means a fix (a tz bug, a seam rename) lands once instead of drifting
-between the two step modules (#1544 round-2 DRY-02/03).
+between the two step modules.
 """
 
 from __future__ import annotations

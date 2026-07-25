@@ -2,7 +2,7 @@
 
 Covers ``resolve_flight_window_utc`` (window resolution + tz normalization) and
 ``lifecycle_status_for_window`` (the window→status decision the admin approve
-route and creative-review path share). See #1544.
+route and creative-review path share).
 """
 
 from datetime import UTC, date, datetime, timedelta, timezone

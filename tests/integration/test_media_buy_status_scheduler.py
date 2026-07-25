@@ -202,7 +202,7 @@ def _get_media_buy_revision(tenant_id: str, media_buy_id: str) -> int | None:
 async def test_scheduler_transition_bumps_revision(integration_db):
     """A scheduler-driven lifecycle transition advances the persisted revision.
 
-    Regression for #1544: the flight-date sweep mutated ``.status`` directly and
+    The flight-date sweep mutated ``.status`` directly and
     never bumped ``revision``, so seller-initiated transitions (scheduled →
     active) left the AdCP 3.1.1 optimistic-concurrency token stale.
     """

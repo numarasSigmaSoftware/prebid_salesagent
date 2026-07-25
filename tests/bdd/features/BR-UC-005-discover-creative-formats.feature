@@ -862,7 +862,7 @@ Feature: BR-UC-005 Discover Creative Formats
 
     # Our list_creative_formats tool uses the media-buy ListCreativeFormatsRequest, which
     # has no 'type' field — the `type` filter is a creative-agent-role field by design (SDK
-    # adcp-client-python#971 role boundary), not part of this media-buy contract. So every
+    # SDK role boundary), not part of this media-buy contract. So every
     # value dispatches unfiltered and production returns the full catalog; the former
     # 'unknown_value -> invalid' rejection does not apply here (reconciled to valid).
     Examples: No type filter on the media-buy request (role boundary — all dispatch unfiltered)
@@ -898,7 +898,7 @@ Feature: BR-UC-005 Discover Creative Formats
     Then the creative agent type handling should be <expected>
 
     # The media-buy list_creative_formats request has no 'type' field — 'type' is a
-    # creative-agent-role field (intentional AdCP role boundary, adcp-client-python#971
+    # creative-agent-role field (intentional AdCP role boundary,
     # triage), not part of this request — so 'native' dispatches unfiltered; production
     # no longer rejects it. Reconciled to valid (success).
     Examples:

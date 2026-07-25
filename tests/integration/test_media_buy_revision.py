@@ -34,7 +34,7 @@ def _update_budget(env, media_buy_id: str, budget: float) -> UpdateMediaBuySucce
     req = UpdateMediaBuyRequest(media_buy_id=media_buy_id, budget=budget)
     result = env.call_impl(req=req)
     # _update_media_buy_impl returns UpdateMediaBuyResult wrapping the success
-    # response (upstream #1417 unified the return type).
+    # response (the return type is unified).
     assert isinstance(result.response, UpdateMediaBuySuccess), f"update must succeed, got {result!r}"
     return result.response
 
@@ -80,7 +80,7 @@ class TestPersistedRevisionOnReadPath:
         """One accepted update that changes budget AND dates advances revision by
         exactly 1 — not once per changed field group.
 
-        Regression for #1544: the update path bumped independently for the
+        The update path bumped independently for the
         package set, the budget, and the date range (3 sites), so a combined
         update jumped the revision by 2-3. AdCP 3.1.1 ``revision`` is a per-resource
         version token, so one update must advance it by exactly one.
@@ -141,7 +141,7 @@ class TestPersistedRevisionOnReadPath:
         The value the buyer sees is produced by PostgreSQL (the server-side
         increment), not echoed from a mock — the real-DB half of the pause-bump
         contract whose plumbing half lives in
-        ``tests/unit/test_update_media_buy_behavioral.py`` (#1544 round-2 TQ-03).
+        ``tests/unit/test_update_media_buy_behavioral.py``.
         """
         from src.core.database.repositories import MediaBuyUoW
         from tests.harness.media_buy_dual import MediaBuyDualEnv
@@ -171,7 +171,7 @@ class TestRevisionOptimisticConcurrency:
     AdCP 3.1.1 update-media-buy-request.json ``properties.revision``:
     "When provided, sellers MUST reject the update with CONFLICT if the media
     buy's current revision does not match." (Schema MUST; no conformance
-    storyboard step grades it — ungraded. #1544 round-6 review item 1.)
+    storyboard step grades it — ungraded.)
     """
 
     def test_stale_revision_rejected_with_conflict_and_nothing_written(self, integration_db):
@@ -204,7 +204,7 @@ class TestRevisionOptimisticConcurrency:
         The pinned update-media-buy-request schema mandates CONFLICT on ANY revision
         mismatch unconditionally, so the optimistic-concurrency gate runs before the
         terminal-state gate. Pre-fix the terminal check ran first and returned GONE,
-        masking the stale write and denying the buyer the refetch recovery. #1544.
+        masking the stale write and denying the buyer the refetch recovery.
         """
         from src.core.database.repositories import MediaBuyUoW
         from src.core.exceptions import AdCPConflictError

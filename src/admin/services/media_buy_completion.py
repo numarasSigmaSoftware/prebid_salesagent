@@ -102,11 +102,11 @@ MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE = (
 def workflow_step_snapshot(step: WorkflowStep) -> dict[str, Any]:
     """Snapshot the fields a finalize/webhook call needs from a WorkflowStep row.
 
-        The ORM instance may expire/detach after the caller's commit (nested
-        sessions, the post-commit webhook read), so every finalize seam takes this
-        dict instead of the live row. ``request_data`` is JSONType (``dict|str|None``)
-        — narrowed to a dict here so every consumer's ``.get()`` is safe, rather than
-        each of the five call sites narrowing (or forgetting to narrow) it themselves.
+    The ORM instance may expire/detach after the caller's commit (nested
+    sessions, the post-commit webhook read), so every finalize seam takes this
+    dict instead of the live row. ``request_data`` is JSONType (``dict|str|None``)
+    — narrowed to a dict here so every consumer's ``.get()`` is safe, rather than
+    each of the five call sites narrowing (or forgetting to narrow) it themselves.
     """
     request_data = step.request_data
     return {
@@ -282,7 +282,7 @@ def build_media_buy_result(
     ``AdCPMediaBuyRejectedError`` cascade (internal ``MEDIA_BUY_REJECTED`` →
     ``POLICY_VIOLATION``), matching the create-media-buy tool path — never hand-picked.
     Authority: dist/compliance/3.1.1/domains/media-buy/scenarios/governance_denied.yaml
-    (create_media_buy_denied, Case-2 wire placement). / PR #1567.
+    (create_media_buy_denied, Case-2 wire placement).
     """
     if rejection_reason is not None:
         rejection = AdCPMediaBuyRejectedError(f"Rejected: {rejection_reason}")
@@ -323,7 +323,7 @@ async def emit_protocol_result_webhook_async(
     loop, so it awaits this directly with the ``SyncCreativesResponse`` result).
     Protocol (``mcp``/``a2a``) is read from the workflow step's ``request_data``.
     ``metadata`` carries the app-specific delivery/audit fields the protocol webhook
-    service logs (task_type/tenant_id/principal_id/media_buy_id — PR #1567 round-2).
+    service logs (task_type/tenant_id/principal_id/media_buy_id).
     Best-effort: a webhook failure is logged, never raised — the DB transition has
     already committed and must not be rolled back by a delivery error (mirrors the
     approval routes). Returns ``True`` when the notification was sent.
@@ -416,7 +416,7 @@ def emit_media_buy_completion(
         return
     webhook_config = matches[0]
     # App-specific metadata the protocol webhook service reads for delivery logging and
-    # the audit trail (task_type/tenant_id/principal_id/media_buy_id — PR #1567 round-2).
+    # the audit trail (task_type/tenant_id/principal_id/media_buy_id).
     metadata = {
         "task_type": step_data["tool_name"],
         "tenant_id": tenant_id,
@@ -605,29 +605,29 @@ def _flag_manual_reconciliation(
 ) -> tuple[FinalizeOutcome, str | None]:
     """Owner-CAS a ``finalizing`` buy to ``manual_required`` (fail-safe) and log remediation.
 
-        Shared by the two conservative outcomes that leave a possibly-partial remote graph with
-        NO proof of completion, and so must NOT be reported as success:
+    Shared by the two conservative outcomes that leave a possibly-partial remote graph with
+    NO proof of completion, and so must NOT be reported as success:
 
-        - ``AdapterPostMutationIncomplete`` (AMBIGUOUS): the adapter created the remote order but
-          a later stage (creative upload / order approval / id persistence) failed. Pass
-          ``cooldown_seconds`` so the owner-CAS RETAINS the lease with a cool-down expiry, fencing
-          re-approval until a committed-but-invisible first remote order becomes visible (
-          Hole B).
-        - PROVABLE ownership loss during the adapter run — the phase-2 heartbeat lost the lease
-          (a newer owner took over) or the lease provably expired because renewals kept failing,
-          so this worker can no longer assert it owns the finalization even though its adapter
-          call ran. Request the same cool-down: normally the owner-CAS loses, but if it wins
-          the heartbeat/publish race, retaining the lease fences re-approval during reconciliation.
+    - ``AdapterPostMutationIncomplete`` (AMBIGUOUS): the adapter created the remote order but
+      a later stage (creative upload / order approval / id persistence) failed. Pass
+      ``cooldown_seconds`` so the owner-CAS RETAINS the lease with a cool-down expiry, fencing
+      re-approval until a committed-but-invisible first remote order becomes visible (
+      Hole B).
+    - PROVABLE ownership loss during the adapter run — the phase-2 heartbeat lost the lease
+      (a newer owner took over) or the lease provably expired because renewals kept failing,
+      so this worker can no longer assert it owns the finalization even though its adapter
+      call ran. Request the same cool-down: normally the owner-CAS loses, but if it wins
+      the heartbeat/publish race, retaining the lease fences re-approval during reconciliation.
 
-        In BOTH cases this worker's adapter RAN, so a duplicate/partial remote graph may exist —
-        a durable, OWNERSHIP-INDEPENDENT reconcile incident is recorded either way (failure mode A),
-        so the possible duplicate is never silently swallowed:
+    In BOTH cases this worker's adapter RAN, so a duplicate/partial remote graph may exist —
+    a durable, OWNERSHIP-INDEPENDENT reconcile incident is recorded either way (failure mode A),
+    so the possible duplicate is never silently swallowed:
 
-        - CAS WON (this worker still owns the lease): keep the buy ``finalizing`` with the invoked
-          marker intact, record the incident, ``RETRYING``.
-        - CAS LOST (a NEWER owner already took the row over — a real takeover): DON'T touch the
-          finalize state (the winner owns it), but still record the incident ownership-independently
-          and return ``NOT_CLAIMED``. The incident marker SURVIVES the winner's clean publish.
+    - CAS WON (this worker still owns the lease): keep the buy ``finalizing`` with the invoked
+      marker intact, record the incident, ``RETRYING``.
+    - CAS LOST (a NEWER owner already took the row over — a real takeover): DON'T touch the
+      finalize state (the winner owns it), but still record the incident ownership-independently
+      and return ``NOT_CLAIMED``. The incident marker SURVIVES the winner's clean publish.
     """
     flagged = repo.set_finalize_recovery_manual(media_buy_id, lease_id=lease_id, cooldown_seconds=cooldown_seconds)
     if not flagged:
@@ -1163,7 +1163,7 @@ def finalize_media_buy_rejection(
     ``pending_approval`` loses the claim rather than also succeeding. On a won claim,
     stores the rejection artifact on the workflow step, commits, and emits the rejection
     webhook as a ``CreateMediaBuyError`` (POLICY_VIOLATION) — AdCP 3.1.1 create-media-buy
-    has no rejection arm; see ``build_media_buy_result``. / PR #1567.
+    has no rejection arm; see ``build_media_buy_result``.
     """
     repo = MediaBuyRepository(session, tenant_id)
     claimed = repo.update_status_computed(media_buy_id, lambda _mb: "rejected", expected_status=expected_status)

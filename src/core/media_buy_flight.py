@@ -23,7 +23,7 @@ Two deliberate divergences do NOT route through here, and are called out so the
   same ``start_time`` else ``start_date`` preference at *date* granularity
   (``start_time.date()``) for the delivery/list status surface, without the
   ``_as_utc`` normalization ``resolve_flight_window_utc`` applies. That tz
-  asymmetry at day boundaries is a known follow-up (#1693); it is a distinct
+  asymmetry at day boundaries is a known follow-up; it is a distinct
   date-granular operation, not a fourth copy of THIS resolver.
 
 Otherwise, three divergent copies of the resolution (or the mapping) is a latent

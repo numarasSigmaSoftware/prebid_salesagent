@@ -515,7 +515,7 @@ def _assert_filter_content(ctx: dict, field: str, label: str) -> None:
     if field == "type":
         # The media-buy ListCreativeFormatsRequest has no `type` filter -- that filter
         # (audio/video/display/dooh) is a creative-agent-role field by design (SDK
-        # adcp-client-python#971 role boundary), so every type partition dispatches an
+        # SDK role boundary), so every type partition dispatches an
         # unfiltered request and the result should equal the full catalog.
         assert not was_narrowed or len(formats) == 0, (
             f"{label} 'type': the media-buy request has no type filter (creative-agent role "

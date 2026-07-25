@@ -327,7 +327,7 @@ class TestCreateMediaBuyManualApproval:
         Covers: UC-002-ALT-MANUAL-APPROVAL-REQUIRED-08
         Integration equivalent of unit xfail test_execute_approved_calls_adapter.
         Verifies execute_approved_media_buy triggers adapter creation and succeeds.
-        Status finalization is the approval ROUTE's job (#1544): execute does adapter
+        Status finalization is the approval route's job: execute does adapter
         work only, then the route stamps the FLIGHT-DERIVED status + approved_at in one
         write. This buy's flight starts tomorrow, so the correct finalized status is
         'scheduled' (the old unconditional 'active' ignored a future flight window).
@@ -364,7 +364,7 @@ class TestCreateMediaBuyManualApproval:
         assert success, f"execute_approved_media_buy should succeed, got error: {error}"
 
         # Finalize as the approval route does: flight-derived status + approved_at in
-        # one write (execute no longer sets status — #1544).
+        # one write (execute no longer sets status).
         from src.core.database.repositories import MediaBuyUoW
         from src.core.media_buy_flight import lifecycle_status_for_window, resolve_flight_window_utc
 

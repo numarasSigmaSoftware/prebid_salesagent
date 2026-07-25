@@ -2,7 +2,7 @@
 
 Extracted from the operations approve/reject routes so the workflow and
 creative-unblock routes can emit the same completion artifact (async buyers
-otherwise never get the final revision/confirmed_at). #1544.
+otherwise never get the final revision/confirmed_at).
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch

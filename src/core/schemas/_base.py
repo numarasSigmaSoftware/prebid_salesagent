@@ -1,4 +1,4 @@
-# SDK 6.6 type:ignore tracking (adcontextprotocol/adcp-client-python#913):
+# SDK 6.6 type:ignore tracking:
 # - [misc] on lines ~339, ~415: UpdateMediaBuySuccess/Error class defs.
 #   Pydantic metaclass interaction in SDK hierarchy; permanent.
 # - [assignment] on lines ~1449, ~1450, ~1637, ~1638: account/idempotency_key
@@ -285,7 +285,7 @@ def _mirror_media_buy_status(model: Any) -> Any:
     NOT identical. This is the GA model graded by the pinned 3.1.1 storyboard
     ``pending_creatives_to_start.yaml`` (status=field_value 'completed'); the
     earlier beta.3 storyboard's status=field_value_or_absent / MUST-equal
-    media_buy_status shape (#4908) was superseded on the 3.1.0 GA → 3.1.1 line.
+    media_buy_status shape was superseded on the 3.1.0 GA → 3.1.1 line.
     See docs/adcp-spec-version.md "Behavior target vs SDK pin".
 
     Shared by ``CreateMediaBuySuccess`` and ``UpdateMediaBuySuccess`` (DRY).
@@ -335,7 +335,7 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # immediate-activation paths set confirmed_at EXPLICITLY from the persisted MediaBuy (see
     # media_buy_completion.finalize_media_buy / the sync-success tool path), so a real
     # COMMITTED CreateMediaBuySuccess on the wire always carries a non-null confirmed_at.
-    # (prose/schema divergence historically tracked in #1564; re-grounded to 3.1.1.)
+    # (The prose/schema divergence is re-grounded to 3.1.1.)
     #
     # ``revision`` is NON-nullable: 3.1.1 requires it present as a non-null int >= 1 and —
     # unlike confirmed_at — it has NO spec-sanctioned null arm (a would-be-fresh buy is
@@ -627,7 +627,7 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     # every wire-emitting update path (dry-run / pause-resume / finalizer) passes the real
     # persisted revision explicitly, overriding the default (adapter-layer builders leave the
     # default; the tool rebuilds the wire success with the persisted counter).
-    # (prose/schema divergence historically tracked in #1564; re-grounded to 3.1.1.)
+    # (The prose/schema divergence is re-grounded to 3.1.1.)
     status: Literal["completed"] = "completed"
     revision: int = Field(default=1, ge=1)
 
@@ -638,7 +638,7 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     affected_packages: list[AffectedPackage] | None = None
 
     # buyer_ref: the SDK-5.7 parent wrongly declared it (removed from AdCP 3.1
-    # update-media-buy-response; SDK bug adcontextprotocol/adcp-client-python#950);
+    # update-media-buy-response; the SDK's earlier declaration has been corrected);
     # adcp 6.6 no longer declares it on the parent, so no override is needed here.
 
     # Internal fields (excluded from AdCP responses)

@@ -1,4 +1,4 @@
-"""Failed creative uploads must FAIL the approval, never publish the buy (#1637).
+"""Failed creative uploads must FAIL the approval, never publish the buy.
 
 Unit coverage for the PURE batching/message logic of ``enrich_uploaded_creatives``
 (the manual-approval GAM push path in ``execute_approved_media_buy``): a ``failed``

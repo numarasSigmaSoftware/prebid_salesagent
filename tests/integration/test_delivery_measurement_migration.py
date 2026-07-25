@@ -105,7 +105,7 @@ def _get_column_info(engine):
 
     Thin wrapper over the shared migration_helpers.get_column_info so the four
     call sites below read cleanly; the SQL lives in one place (removes the
-    former local copy that duplicated the shared helper — #1544 review).
+    former local copy that duplicated the shared helper).
     """
     return get_column_info(engine, "products", "delivery_measurement")
 

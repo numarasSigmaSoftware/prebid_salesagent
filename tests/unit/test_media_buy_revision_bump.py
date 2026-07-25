@@ -173,7 +173,7 @@ class TestRevisionSuccessFieldConstraint:
     ``UpdateMediaBuySuccess`` override the field to default it to the spec-minimum
     initial revision 1; the override MUST re-declare the ``ge=1`` constraint so a
     plain ``revision: int = 1`` cannot silently widen the domain to accept 0 or
-    negative counters. Regression for #1544 (the override had dropped the bound).
+    negative counters. Regression: the override had dropped the bound.
     """
 
     @pytest.mark.parametrize("bad_revision", [0, -1])

@@ -538,7 +538,7 @@ class ListCreativeFormatsRequest(LibraryListCreativeFormatsRequest):
     Note: this is the media-buy-role request model. It intentionally has no ``type``
     filter (audio/video/display/dooh) — that filter belongs to the creative-agent-role
     request ``ListCreativeFormatsRequestCreativeAgent``, a role boundary by design per
-    the SDK team's #971 triage — not an omission or a removed spec feature.
+    the SDK team's role-boundary decision — not an omission or a removed spec feature.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())

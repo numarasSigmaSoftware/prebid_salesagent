@@ -12,7 +12,7 @@ from src.core.helpers import enum_value
 from src.core.schemas import UpdateMediaBuySuccess
 
 # The "no media buy record should be persisted[ in the database]" steps are
-# owned by the now-registered then_media_buy.py (upstream #1417 canonicalized
+# owned by the now-registered then_media_buy.py (the upstream change canonicalized
 # that module). Re-exposing them here would double-register (shadowed-steps guard).
 
 

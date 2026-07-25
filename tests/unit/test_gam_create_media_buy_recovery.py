@@ -1,4 +1,4 @@
-"""GAM create_media_buy mutation-boundary recovery + deterministic naming (#1637).
+"""GAM create_media_buy mutation-boundary recovery + deterministic naming.
 
 The mutation boundary starts AT ``orders_manager.create_order`` — the actual remote
 mutation point — not at the later ``_finish_create_media_buy`` stage. A failure raised
@@ -157,7 +157,7 @@ def test_create_failure_with_persistent_lookup_miss_fails_safe_to_post_mutation_
     order can stay invisible), so FAIL SAFE to AdapterPostMutationIncomplete — the SAME
     conservative outcome as the lookup-failed branch, never a plain retryable re-raise.
 
-    Contract change (#1637): the previous test asserted a lookup miss re-raised the
+    Contract change: the previous test asserted a lookup miss re-raised the
     original error as a plain PRE-mutation failure. That encoded the WRONG contract — a
     miss could be a committed-but-invisible order, so treating it as pre-mutation risks a
     duplicate remote create on retry. Updated to pin the corrected fail-safe behaviour.
@@ -256,7 +256,7 @@ def test_idempotency_key_drives_deterministic_order_name():
 
 
 def test_fallback_anchor_uses_128_bit_hash_for_collision_resistance():
-    """Collision resistance (#1637): the no-idempotency-key fallback anchor embeds 128 bits
+    """Collision resistance: the no-idempotency-key fallback anchor embeds 128 bits
     (32 hex chars) of the SHA-256 digest, NOT 32 bits. At 32 bits the birthday bound gives
     ~50% collision near ~77k buys/tenant, so two DISTINCT idempotency keys could hash to one
     order name and the second buy would silently reuse the first's order. Pin the width."""

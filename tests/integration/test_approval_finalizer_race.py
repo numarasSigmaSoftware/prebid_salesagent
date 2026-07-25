@@ -1,4 +1,4 @@
-"""P1 (#1544): the approval finalizer is single-winner under concurrency.
+"""The approval finalizer is single-winner under concurrency.
 
 Two admin requests that both preload a ``pending_approval`` buy must NOT both invoke the
 adapter (duplicate remote orders) and must NOT overwrite each other's decision. The
@@ -181,7 +181,7 @@ class TestApprovalFinalizerRace:
         """A reject that OBSERVED pending_approval but whose buy already moved to
         pending_creatives (an approve-HOLD won first) must lose the claim — passing the
         observed status as expected_status, NOT a fixed set that also accepts
-        pending_creatives. #1544."""
+        pending_creatives."""
         tenant_id = sample_tenant["tenant_id"]
         step_id, step_data = self._seed_pending_buy_and_step(
             context_manager, tenant_id, sample_principal["principal_id"], "mb_hold_then_reject"

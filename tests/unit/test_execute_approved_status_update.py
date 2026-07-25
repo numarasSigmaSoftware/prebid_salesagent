@@ -1,6 +1,6 @@
 """Unit test: execute_approved_media_buy does ADAPTER work only — never writes status.
 
-Status finalization moved to the approval routes (#1544): the routes stamp
+Status finalization belongs to the approval routes: the routes stamp
 approved_at/approved_by and set the FLIGHT-DERIVED status in one write, so the
 write-once confirmed_at records the approval instant. execute_approved_media_buy
 previously force-wrote status='active' here, which overwrote the caller's
@@ -87,7 +87,7 @@ class TestExecuteApprovedStatusUpdate:
         """After successful adapter execution the function returns (True, None) and
         must NOT perform any media-buy status transition — finalization is the
         approval route's job (flight-derived status + approved_at in one write).
-        Regression for #1544: it used to force status='active' here.
+        Regression: it used to force status='active' here.
         """
         # -- Arrange --
         tenant = _make_mock_tenant()
@@ -186,7 +186,7 @@ class TestExecuteApprovedStatusUpdate:
 
         # THE KEY ASSERTION: execute_approved_media_buy performs NO status
         # transition — not on the dedicated status UoW, nor on any other repo it
-        # touches. The approval route finalizes the flight-derived status. #1544.
+        # touches. The approval route finalizes the flight-derived status.
         for repo in (mock_uow_1.media_buys, mock_repo_plids, mock_uow_2.media_buys, mock_repo_3):
             repo.update_status.assert_not_called()
             repo.update_status_or_raise.assert_not_called()

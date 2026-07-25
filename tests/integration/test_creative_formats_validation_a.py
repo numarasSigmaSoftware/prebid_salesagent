@@ -194,7 +194,7 @@ class TestInvalidFormatCategoryEnum:
         """UC-005-EXT-B-01: unknown fields are rejected by extra=forbid.
 
         The media-buy ListCreativeFormatsRequest has no `type` field — that filter is a
-        creative-agent-role field by design (SDK adcp-client-python#971 role boundary), not
+        creative-agent-role field by design, not
         part of this media-buy contract — so passing it triggers an extra_forbidden error.
         """
         with pytest.raises(ValidationError):
@@ -204,7 +204,7 @@ class TestInvalidFormatCategoryEnum:
         """UC-005-EXT-B-01: MCP wrapper correctly handles valid filter parameters.
 
         The media-buy request has no `type` filter (creative-agent-role field by design,
-        SDK adcp-client-python#971 role boundary). Verify the MCP wrapper handles the
+        role boundary). Verify the MCP wrapper handles the
         supported media-buy filters (e.g., name_search) without error.
         """
         with CreativeFormatsEnv() as env:
@@ -222,7 +222,7 @@ class TestInvalidFormatCategoryEnum:
         Ensures the validation correctly accepts valid ListCreativeFormatsRequest construction.
         """
         # The media-buy ListCreativeFormatsRequest has no `type` filter (creative-agent-role
-        # field by design, SDK adcp-client-python#971 role boundary)
+        # field by design)
         req = ListCreativeFormatsRequest()
         assert req is not None
 

@@ -8,7 +8,7 @@ staged status change inside ``update_media_buy``). Those methods bump the AdCP
 ``media_buy.status = ...`` / ``.approved_at = ...`` / ``.approved_by = ...``
 assignment in production code skips the bump, so ``revision`` silently goes
 stale and ``confirmed_at`` reports the wrong instant — the exact class of bug
-#1544 fixed across the admin approve/reject routes, the flight-date scheduler,
+fixed across the admin approve/reject routes, the flight-date scheduler,
 and creative-sync assignment.
 
 **Type-scoped, not name-scoped.** ``.status``/``.approved_at``/``.approved_by``
@@ -41,7 +41,7 @@ the no-raw-select allowlist only ever shrinks.
 
 Precedent: the no-raw-select guards (test_architecture_no_raw_select.py).
 
-GitHub PR #1544 (structural guard — no direct MediaBuy status/approval writes)
+Structural guard — no direct MediaBuy status/approval writes.
 """
 
 import ast
@@ -91,7 +91,7 @@ MEDIA_BUY_SPECIFIC_METHODS = {
 MEDIA_BUY_COLLECTION_METHODS = {"get_all_by_statuses"}
 
 # Pre-existing violations: (relative_file_path, binding_name, attribute).
-# Empty — #1544 routed every production write through the repository. It may
+# Empty — every production write routes through the repository. It may
 # only ever shrink; a new entry means a new bypass was introduced.
 ALLOWLIST: set[tuple[str, str, str]] = set()
 
@@ -308,7 +308,7 @@ def test_no_direct_media_buy_status_writes_outside_repository():
             "(or apply_status_transition() for an already-loaded cross-tenant row, "
             "or stage it into update_media_buy's pending_field_updates) so the "
             "AdCP 3.1.1 revision counter bumps and approved_at/approved_by "
-            "are stamped. See #1544."
+            "are stamped."
         ),
     )
 
@@ -320,7 +320,7 @@ def test_detector_flags_cross_tenant_sweep_loop_binding():
     a MediaBuy status write that bypasses the seam, even though the call has no
     ``.media_buys`` receiver and ``row`` is not a conventional binding name. This
     shape previously evaded the guard (get_all_by_statuses was absent from every
-    type-source set), leaving the invariant bypassable. Regression lock for #1544.
+    type-source set), leaving the invariant bypassable. Regression lock.
     """
     src = (
         "def sweep(session):\n"
@@ -334,7 +334,7 @@ def test_detector_flags_cross_tenant_sweep_via_intermediate_alias():
     """The guard must also flag the TWO-STEP form: assign the collection to a name,
     then iterate the alias. ``rows = get_all_by_statuses(...); for row in rows:
     row.status = ...`` bypasses the seam identically to the inline sweep, but the
-    alias hid it from the guard. Regression for #1544 review follow-up.
+    alias hid it from the guard. Regression coverage.
     """
     src = (
         "def sweep(session):\n"
@@ -352,7 +352,7 @@ def test_detector_flags_cross_tenant_sweep_via_intermediate_alias():
 # when the buy is not found in this tenant. A call whose return value is
 # DISCARDED (a bare expression statement) silently skips the write for a
 # vanished buy while the caller proceeds to report success — the round-6
-# class on GitHub PR #1544 (four admin transition sites plus the
+# class across four admin transition sites plus the
 # creative-approval activation). Callers must use the ``*_or_raise`` variant
 # or bind and check the return.
 # ---------------------------------------------------------------------------
@@ -419,8 +419,8 @@ def test_no_discarded_none_tolerant_media_buy_mutations():
         fix_hint=(
             "The return of update_status()/update_fields()/bump_revision() is None "
             "when the buy is not found — discarding it silently skips the write. "
-            "Use the *_or_raise variant, or bind the return and handle None. "
-            "See GitHub PR #1544 (round-6 sweep)."
+            "Use the *_or_raise variant, or bind the return and handle None; "
+            "this prevents finalization from reporting success after a vanished row."
         ),
     )
 

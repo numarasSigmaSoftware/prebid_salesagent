@@ -83,7 +83,7 @@ def given_buyer_owns_media_buy(ctx: dict) -> None:
 
 # The with-id variant 'the Buyer owns an existing media buy with media_buy_id "{}"'
 # is owned by given_buyer_owns_media_buy_labeled below (it CREATES a real buy for the
-# #1544 wired revision scenarios); a duplicate verify-only def here would collide
+# wired revision scenarios); a duplicate verify-only def here would collide
 # (duplicate-step-literals guard).
 
 
@@ -2312,7 +2312,7 @@ def _ensure_update_defaults(ctx: dict) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Revision counter steps (T-UC-003-revision-success-increments, #1544)
+# Revision counter steps (T-UC-003-revision-success-increments)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -2326,7 +2326,7 @@ def given_buyer_owns_media_buy_labeled(ctx: dict, label: str) -> None:
     - revision scenarios (``_UC003_WIRED`` via ``_seed_media_buy_ctx``, which does
       NOT pre-seed a buy) — CREATE one through the real create tool.
     Either way the label maps to the factory-generated real media_buy_id so
-    subsequent steps resolve it before hitting production. (#1544/#1417 merge.)
+    subsequent steps resolve it before hitting production.
     """
     if ctx.get("existing_media_buy") is not None:
         _verify_existing_media_buy(ctx)
@@ -2360,7 +2360,7 @@ def given_last_read_version(ctx: dict, label: str, version: int) -> None:
 
 # The 'the error "details" object should include "{}" with value {}' step is owned by
 # the registered generic then_error.py (numeric + quoted-string variants); a duplicate
-# here collides (duplicate-step-literals guard, #1417).
+# here collides (duplicate-step-literals guard).
 
 
 @given(parsers.parse("the request revision is set to {value}"))
@@ -2389,7 +2389,7 @@ def then_response_revision_value(ctx: dict, revision: int) -> None:
     payload — reconstruction re-defaults absent fields, so an ``exclude_none``
     omission or a wrong JSON type of the optimistic-concurrency token would
     stay green there. ``wire_integer`` carries the per-transport integer
-    nuance (A2A whole-number float, #1583).
+    nuance (A2A whole-number float).
     """
     from tests.bdd.steps._outcome_helpers import require_success_response, wire_dict, wire_integer
 

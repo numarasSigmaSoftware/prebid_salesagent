@@ -55,7 +55,7 @@ def test_agent_card_adcp_extension_follows_v2_convention():
     envelope release-precision rule — that rule governs the envelope-root
     adcp_version on request/response wire, not this card. Release-precision here
     would also fail the retained deprecated three-component version pattern.
-    Normative v3 discovery is get_adcp_capabilities, not this card. #1544.
+    Normative v3 discovery is get_adcp_capabilities, not this card.
     """
     from adcp import get_adcp_spec_version
 

@@ -158,8 +158,7 @@ def test_create_media_buy_dry_run_reports_completed(integration_db):
 def test_create_media_buy_dry_run_never_replays_a_cached_real_create(integration_db):
     """A dry-run ALWAYS simulates — it never replays a cached REAL create (INV-5).
 
-    Regression for the e2e_rest INV-5 failure on PR #1544: the idempotency replay
-    probe in _create_media_buy_impl sits BEFORE the dry_run simulation branch, and
+    The idempotency replay probe in _create_media_buy_impl sits BEFORE the dry_run simulation branch, and
     was gated only on ``req.idempotency_key`` — so a dry-run whose key hit a cached
     real create REPLAYED that committed buy (returning its real ``buy_`` id) instead
     of a fresh ``dry_run_`` simulation, violating BR-RULE-020 INV-5 ("dry-run never

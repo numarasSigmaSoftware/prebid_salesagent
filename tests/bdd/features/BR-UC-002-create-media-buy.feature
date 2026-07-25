@@ -831,7 +831,7 @@ Feature: BR-UC-002 Create Media Buy
     And no database records should be created
     And the simulated response should be labelled sandbox with revision 1 and confirmed_at null
     # BR-RULE-020 INV-5 (v3.1): dry-run validates fully but never calls the adapter or persists.
-    # #1544: X-Dry-Run is proprietary INTERNAL tooling mapped onto the spec's sanctioned
+    # X-Dry-Run is proprietary internal tooling mapped onto the spec's sanctioned
     # account-level ``sandbox`` test concept (see the @sandbox scenarios below). The simulated
     # response is a CONFORMANT 3.1.1 create-media-buy success: oneOf[0] (CreateMediaBuySuccess)
     # requires [media_buy_id, confirmed_at, revision, packages], so the arm carries sandbox=true,

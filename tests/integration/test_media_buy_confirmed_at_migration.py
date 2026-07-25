@@ -114,7 +114,7 @@ def _seed_pre_migration_media_buys(engine, tenant_id: str) -> None:
         approved_at=None,
         created_at=_CREATED,
     )
-    # Historical draft+approved_at hold (pre-#1544 creative-blocked class).
+    # Historical draft+approved_at hold for a creative-blocked buy.
     _insert_media_buy(
         engine,
         f"{tenant_id}_draft_approved",

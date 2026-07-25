@@ -1,4 +1,4 @@
-"""Kevel / Triton / Xandr create_media_buy post-mutation boundary (#1637 parity with GAM).
+"""Kevel / Triton / Xandr create_media_buy post-mutation boundary, matching GAM.
 
 Each of these adapters performs TWO sequential remote writes inside one
 ``create_media_buy`` call: a campaign/insertion-order create, then one

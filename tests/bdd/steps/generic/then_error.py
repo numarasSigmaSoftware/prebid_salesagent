@@ -70,7 +70,7 @@ def _wire_recovery(ctx: dict) -> str | None:
     ``ctx['error']`` (which can carry a recovery that never reached the wire).
     Reads the ``adcp_error`` layer, the same authoritative location ``_wire_code``
     uses. Returns ``None`` on IMPL / no-wire scenarios so callers fall back to the
-    reconstructed exception (#1544).
+    reconstructed exception.
     """
     result = ctx.get("result")
     envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
@@ -548,7 +548,7 @@ def then_error_recovery(ctx: dict, recovery: str) -> None:
     actually reached the buyer); otherwise fall back to the reconstructed
     ``ctx['error']`` for IMPL/no-wire scenarios. Pinning the wire value is what
     makes a factory ``recovery`` regression (e.g. ``transient`` → ``correctable``
-    on a since-terminal CONFLICT) go red. #1544.
+    on a since-terminal CONFLICT) go red.
     """
     actual = _wire_recovery(ctx)
     if actual is not None:

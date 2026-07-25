@@ -109,7 +109,7 @@ def make_pending_media_buy(integration_db):
         # An APPROVED creative assigned to the buy so the approve path treats the buy
         # as creative-ready and finalizes it (all_creatives_approved -> the shared
         # finalizer commits + emits the completion webhook). Without an approved
-        # creative the #1544 approve path holds at pending_creatives and emits nothing
+        # creative the approve path holds at pending_creatives and emits nothing
         # (the reject path is unaffected — it never gates on creatives).
         approved_creative = CreativeFactory(
             tenant=tenant,
@@ -336,10 +336,10 @@ class TestAdminMediaBuyRejectWebhook:
         Pin for PR #1567 round-2 cleanup (approve site routed through the sync_success()
         factory): the buy IS committed at approval time, so the embedded result
         must keep asserting completion — status="completed", the PERSISTED confirmed_at
-        and revision (echoed from the finalized MediaBuy, not hardcoded — the #1544
+        and revision (echoed from the finalized MediaBuy, not hardcoded — the
         real-revision model), the media_buy_id, and NO leaked internal fields. Guards the
         factory switch against any wire drift and pins that approve stays a Success (never
-        the Submitted variant the pending-approval CREATE path now emits — PR #1567 round-2
+        the Submitted variant the pending-approval CREATE path now emits — the
         item 2).
         """
         tenant_id = pending_reject_media_buy["tenant_id"]
@@ -390,7 +390,7 @@ class TestAdminMediaBuyRejectWebhook:
         finalizes via ``finalize_pending_media_buy_approval`` — and asserts the
         persisted MediaBuy carries ``approved_at``, with ``confirmed_at``
         recorded FROM that same instant (the write-once approval time the
-        phase-2 serving transition stamps; #1544/#1637).
+        phase-2 serving transition stamps).
         """
         from src.core.database.repositories import MediaBuyUoW
 

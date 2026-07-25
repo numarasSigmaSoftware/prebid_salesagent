@@ -102,7 +102,7 @@ def test_filtering_combined(integration_db):
     """Test that multiple filters work together.
 
     The media-buy request has no `type` filter (creative-agent-role field by design,
-    SDK adcp-client-python#971 role boundary), so min_width=500 returns all formats
+    role boundary), so min_width=500 returns all formats
     with width >= 500 regardless of category.
     """
     formats = [
@@ -331,7 +331,7 @@ def test_new_filters_combined_with_existing(integration_db):
         env.set_registry_formats(formats)
 
         # Dimension filter only (the media-buy request has no `type` filter — creative-agent
-        # role boundary, SDK adcp-client-python#971)
+        # role boundary)
         req = ListCreativeFormatsRequest(min_width=500)
         response = env.call_impl(req=req)
         assert len(response.formats) == 2

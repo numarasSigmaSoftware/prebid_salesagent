@@ -405,7 +405,7 @@ class CreativeAgentRegistry:
             # Build request parameters
             # Note: the media-buy ListCreativeFormatsRequest has no `type` filter — that
             # filter (audio/video/display/dooh) is a creative-agent-role field by design
-            # (SDK adcp-client-python#971 triage), not part of this media-buy contract;
+            # (the SDK's documented role boundary), not part of this media-buy contract;
             # formats are categorized structurally here via assets[].asset_type.
             request = ListCreativeFormatsRequest(
                 max_width=max_width,

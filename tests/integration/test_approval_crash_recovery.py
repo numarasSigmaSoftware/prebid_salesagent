@@ -1,4 +1,4 @@
-"""P0 crash-recovery (#1637): approval finalization is exactly-once under crashes AND races.
+"""Crash recovery: approval finalization is exactly-once under crashes AND races.
 
 Protocol under test (media_buy_completion.py + MediaBuyRepository lease seams):
 
@@ -12,10 +12,10 @@ Protocol under test (media_buy_completion.py + MediaBuyRepository lease seams):
   real adapters are flagged ``manual_required`` once — never a blind re-create, never
   a hot loop).
 - ``AdapterPostMutationIncomplete`` (remote mutations exist, workflow incomplete)
-  parks the buy manual; the owner RETAINS its lease with a cool-down expiry (#1637
-  Hole B) so re-approval is fenced until a committed-but-invisible first remote order
+  parks the buy manual; the owner retains its lease with a cool-down expiry so
+  re-approval is fenced until a committed-but-invisible first remote order
   becomes visible, and a durable OWNERSHIP-INDEPENDENT reconcile incident is recorded
-  (#1637 Hole A) — a losing worker (which owns no lease after a real takeover) still
+  — a losing worker (which owns no lease after a real takeover) still
   leaves the trace, and it survives the winning owner's clean publish.
 
 DB access is consolidated in the module helpers below, which go through the production
@@ -47,7 +47,7 @@ from tests.integration.conftest import seed_pending_buy_and_step
 
 class _FakeClock:
     """Thread-safe fake clock shared by a repo's lease/guard logic and a heartbeat, so
-    tests advance time instead of doing row surgery on lease expiries (#1637)."""
+    tests advance time instead of doing row surgery on lease expiries."""
 
     def __init__(self, start: datetime.datetime) -> None:
         self._t = start
@@ -459,8 +459,8 @@ class TestApprovalCrashRecovery:
     ):
         """A worker's lease expires mid-adapter and a reconciler takes over and completes; when
         the stale worker's adapter finally returns, its success-publish CAS loses the lease — it
-        must not publish, mark failed, terminalize, or emit a second artifact. This is #1637
-        Hole A path (ii): the heartbeat did NOT prove the loss in time (it is dormant), so the
+        must not publish, mark failed, terminalize, or emit a second artifact. In this path,
+        the heartbeat did NOT prove the loss in time (it is dormant), so the
         loss surfaces at the publish CAS, NOT via ``ownership_lost``/``_flag_manual_reconciliation``.
         Because the stale worker's adapter provably RAN this attempt, it must still record the
         durable ownership-independent incident (buy column + AuditLog) rather than silently
@@ -639,7 +639,7 @@ class TestApprovalCrashRecovery:
     def test_provable_ownership_loss_during_adapter_routes_to_manual_not_success(
         self, integration_db, sample_tenant, sample_principal, context_manager, monkeypatch
     ):
-        """Heartbeat is a liveness signal, not a hard fence (#1637). If the phase-2
+        """Heartbeat is a liveness signal, not a hard fence. If the phase-2
         heartbeat PROVES ownership loss while the adapter is running — renewals keep
         FAILING (e.g. Postgres connectivity lost) until more than the lease TTL has elapsed
         since the last successful renewal, so the lease certainly expired — the worker must
@@ -807,7 +807,7 @@ class TestApprovalCrashRecovery:
         ``finalizing`` with the invoked marker INTACT, flagged ``manual_required``,
         the step stays non-terminal, and the reconciler skips it.
 
-        AMBIGUOUS-path fixes (#1637 Holes A/B): the owner RETAINS its lease with a
+        The ambiguous path retains the owner's lease with a
         cool-down expiry (not released) so re-approval is fenced until a
         committed-but-invisible first remote order becomes visible, and a durable
         ownership-independent reconcile incident is recorded (buy column + AuditLog)."""
@@ -840,7 +840,7 @@ class TestApprovalCrashRecovery:
     def test_operator_reapproval_is_fenced_against_maybe_alive_workers(
         self, integration_db, sample_tenant, sample_principal, context_manager
     ):
-        """Re-approving a ``manual_required`` buy is FENCED (#1637 round N+8):
+        """Re-approving a ``manual_required`` buy is fenced:
 
         - A reconciler-flagged row keeps the expired lease of a possibly-still-alive
           worker → re-approval is REJECTED until the lease has been expired beyond
@@ -866,7 +866,7 @@ class TestApprovalCrashRecovery:
         # test_heartbeat_fences_reapproval_of_live_worker_until_it_crashes below.
 
         # (b) owner-flagged manual via the AMBIGUOUS post-mutation path RETAINS the lease with
-        # a cool-down (#1637 Hole B), so re-approval is FENCED — not immediate — until the
+        # a cool-down, so re-approval is fenced — not immediate — until the
         # cool-down + abandoned-owner grace elapses (the fenced→permitted transition on an
         # injected clock is pinned by test_ambiguous_post_mutation_cooldown_fences_reapproval).
         step2_id, step2_data = self._seed_pending(
@@ -894,7 +894,7 @@ class TestApprovalCrashRecovery:
     def test_heartbeat_fences_reapproval_of_live_worker_until_it_crashes(
         self, integration_db, sample_tenant, sample_principal, context_manager
     ):
-        """Elapsed time is NOT an ownership fence (#1637). A GENUINELY live worker whose
+        """Elapsed time is not an ownership fence. A genuinely live worker whose
         phase-2 heartbeat keeps renewing its lease fences operator re-approval even after
         the clock advances far past TTL+grace; only when the heartbeat STOPS (the worker
         crashed) does the lease age out and re-approval succeed.

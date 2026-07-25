@@ -361,7 +361,7 @@ class TestRevisionBumpsOnStatusTransition:
     """Every status transition through the repository seam bumps the AdCP 3.1.1
     ``revision`` counter, and manual approval stamps the confirmation instant.
 
-    Regression for #1544: the admin approve/reject routes, the flight-date
+    The admin approve/reject routes, the flight-date
     scheduler, and creative-sync assignment previously mutated ``.status``
     directly, bypassing the bump — so ``revision`` never advanced on those
     seller-side state changes and ``confirmed_at`` reported the buyer's request
@@ -464,7 +464,7 @@ class TestRevisionBumpsOnStatusTransition:
         """draft → pending_creatives through the creative-sync/scheduler seam stamps
         the write-once confirmed_at, so get_media_buys reports it on the wire.
 
-        Regression for #1544: apply_status_transition bumped revision but never
+        apply_status_transition bumped revision but never
         stamped confirmed_at, so a buy that reached a seller-confirmed status via
         creative-sync reported confirmed_at=None forever. All three status seams now
         route through MediaBuyRepository._stamp_confirmation_if_needed.
@@ -497,7 +497,7 @@ class TestRevisionBumpsOnStatusTransition:
         (draft→active), so apply_status_transition locks, refreshes, sees the
         committed status changed under the stale read, and no-ops — which
         preserves the committed ``confirmed_at`` (the write-once instant) rather
-        than clobbering it with this row's ``created_at``. Regression for #1544.
+        than clobbering it with this row's ``created_at``.
         """
         from sqlalchemy.orm import Session as SASession
 
@@ -553,7 +553,7 @@ class TestRevisionBumpsOnStatusTransition:
         Scheduler loads 'active'; an admin commits 'rejected'; the scheduler's stale
         active→completed transition must NO-OP under lock (the committed status
         changed), leaving 'rejected' intact instead of writing 'completed'.
-        Regression for #1544: apply_status_transition previously refreshed only
+        apply_status_transition previously refreshed only
         confirmed_at, never status, so it blindly applied the caller's stale target.
         """
         from sqlalchemy.orm import Session as SASession
@@ -597,7 +597,7 @@ class TestRevisionBumpsOnStatusTransition:
         breaker. A lock_timeout raises OperationalError (SQLSTATE 55P03); a prior
         version marked that as a DB outage in get_db_session, failing-fast every
         unrelated request for 10s. It must re-raise WITHOUT flipping _is_healthy,
-        so a subsequent session still works. #1544.
+        so a subsequent session still works.
 
         The waiter/probe run through MediaBuyUoW, whose session is a real
         get_db_session under the hood — so the OperationalError still propagates
@@ -644,7 +644,7 @@ class TestRevisionBumpsOnStatusTransition:
         a caller-installed timeout. A prior version put the SET LOCAL + SQLSTATE
         handling in the _impl; deleting it there stayed green because tests
         installed their own timeout. This drives the real repository seam under a
-        held lock so a regression reddens. #1544.
+        held lock so a regression reddens.
         """
         from sqlalchemy import select
         from sqlalchemy.orm import Session as SASession
@@ -683,7 +683,7 @@ class TestRevisionBumpsOnStatusTransition:
 
     def test_update_fields_staged_status_stamps_confirmed_at(self, tenant_a, principal_a):
         """A staged status change through update_fields (the update tool's approval
-        path) also stamps confirmed_at — the third blessed seam. #1544."""
+        path) also stamps confirmed_at — the third blessed seam."""
         from tests.factories.principal import PrincipalFactory
 
         with MediaBuyUoW(tenant_a) as uow:
@@ -1091,7 +1091,7 @@ class TestConcurrentRevisionBump:
       defeat it — see the guard note on ``_LIFECYCLE_REFRESH_FIELDS``).
 
     The second test below is therefore the one that actually isolates the
-    server-side increment (#1544).
+    server-side increment.
     """
 
     def test_two_concurrent_bumps_yield_distinct_revisions(self, tenant_a, principal_a):
@@ -1137,7 +1137,7 @@ class TestConcurrentRevisionBump:
         read-modify-write (both threads would write ``2``, leaving the final
         revision at 2 instead of 3). Verified: adding ``revision`` to the refresh
         set flips this test green even under a Python read-modify-write, which is
-        exactly why the counter is kept out of that set. #1544.
+        exactly why the counter is kept out of that set.
         """
         # Start already 'active' so both threads transition active→active: the
         # source status is unchanged under lock, so both legitimately proceed and
@@ -1179,7 +1179,7 @@ class TestConcurrentRevisionBump:
         Red oracle: dropping ``with_for_update=True`` from the refresh makes the
         scheduler read the stale (still-past) committed ``end_date`` under READ
         COMMITTED instead of waiting, so it writes ``completed`` over a live
-        ``active`` buy and this assertion fails. #1544.
+        ``active`` buy and this assertion fails.
         """
         past = date.today() - timedelta(days=2)
         future = date.today() + timedelta(days=30)
@@ -1239,7 +1239,7 @@ class TestPersistedRevisionBump:
     once the bump moved server-side: ``_bump_revision`` now assigns a SQL
     expression (``coalesce(revision, 0) + 1``), so the value only materializes on
     flush — the number a buyer sees must be read back from PostgreSQL, never
-    asserted on an in-memory ORM attribute (#1544 round-2 TQ-03).
+    asserted on an in-memory ORM attribute.
 
     Pins CROSS-SESSION persistence: every value is re-read from the database in
     a fresh session (in-session materialization on the seam's returned row is
@@ -1301,8 +1301,7 @@ class TestExpectedRevisionUnderLock:
     The discriminating case: the mutating session already holds a STALE
     in-memory instance (identity map), another session bumps the row, and the
     seam must still CONFLICT — the locked SELECT re-populates the counter under
-    the held lock (populate_existing) instead of trusting the stale attribute
-    (#1544 round-7).
+    the held lock (populate_existing) instead of trusting the stale attribute.
     """
 
     def test_stale_identity_map_instance_still_conflicts(self, tenant_a, principal_a):
@@ -1354,8 +1353,8 @@ class TestExpectedRevisionUnderLock:
         ``expected_revision=1``. The locked check serializes on the row
         write-lock — the winner mutates and bumps to 2; the loser's
         refresh-under-lock then reads the committed 2 and raises CONFLICT. A
-        gate that only checks the unlocked snapshot admits both writes
-        (#1544 round-7): this test is red under gate-only enforcement.
+        gate that only checks the unlocked snapshot admits both writes; this
+        test is red under gate-only enforcement.
         """
         from src.core.exceptions import AdCPConflictError
 

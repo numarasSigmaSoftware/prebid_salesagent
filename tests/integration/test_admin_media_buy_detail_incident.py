@@ -1,6 +1,6 @@
 """Render test: the possible-duplicate reconcile incident banner on media_buy_detail.
 
-The #1637 finalization lease records ``finalize_reconcile_incident_at`` /
+The finalization lease records ``finalize_reconcile_incident_at`` /
 ``finalize_reconcile_incident_reason`` on the MediaBuy when a worker's ad-server
 call ran but could not confirm single ownership. templates/media_buy_detail.html
 renders an ownership-independent warning banner from those fields, plus a

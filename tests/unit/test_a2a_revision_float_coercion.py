@@ -1,4 +1,4 @@
-"""B8 (#1544): pin the A2A whole-number-float ``revision`` coercion at the skill boundary.
+"""Pin the A2A whole-number-float ``revision`` coercion at the skill boundary.
 
 A2A carries numbers as protobuf doubles, so an inbound integer ``revision`` arrives as a
 whole-number float (7 -> 7.0). ``_handle_update_media_buy_skill`` coerces whole-number

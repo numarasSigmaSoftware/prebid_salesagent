@@ -1,4 +1,4 @@
-"""B6 (#1544): the media-buy completion/rejection webhook correlates to the id the BUYER holds.
+"""The media-buy completion/rejection webhook correlates to the id the BUYER holds.
 
 For A2A the buyer received an outer transport ``task_*`` id, persisted on the create
 step's ``request_data.external_task_id``. The webhook must carry THAT id, not the internal

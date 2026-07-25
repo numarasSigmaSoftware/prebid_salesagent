@@ -458,7 +458,7 @@ def _list_creative_formats_impl(
     # (The media-buy ListCreativeFormatsRequest — pinned
     # dist/schemas/3.1.1/media-buy/list-creative-formats-request.json — has no
     # `type`/FormatCategory property: it is a creative-agent-role field by design
-    # (SDK adcp-client-python#971 role boundary), so sort-by-type is not
+    # (the SDK role boundary), so sort-by-type is not
     # applicable in this media-buy contract — name is the sort key.)
     formats.sort(key=lambda f: f.name or "")
 

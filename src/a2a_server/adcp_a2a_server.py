@@ -2071,7 +2071,7 @@ class AdCPRequestHandler(RequestHandler):
         # it as on the response. Coerce whole-number floats back to int here so a
         # round-tripped token is accepted; a non-integral float (7.5) stays a float
         # and is still rejected downstream. Tracked with the other A2A float-token
-        # notes under #1583.
+        # notes in the shared A2A wire-integer compatibility documentation.
         _revision = params.get("revision")
         if isinstance(_revision, float) and _revision.is_integer():
             _revision = int(_revision)

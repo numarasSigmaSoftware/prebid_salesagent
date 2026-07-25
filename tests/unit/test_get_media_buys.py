@@ -848,7 +848,7 @@ class TestConfirmedAtStamping:
     update_fields, apply_status_transition), so the persisted column
     get_media_buys reads back cannot drift from what create_media_buy emitted for
     the same buy. A still-pending_approval buy carries no confirmed_at; a buy that
-    reached a committed status on any seam carries one. See #1544."""
+    reached a committed status on any seam carries one."""
 
     def test_unconfirmed_statuses_are_not_stamped(self):
         from datetime import UTC, datetime
@@ -860,7 +860,7 @@ class TestConfirmedAtStamping:
         # Iterate the CANONICAL unconfirmed set (the production guard is
         # ``status not in MEDIA_BUY_UNCONFIRMED_STATUSES``) rather than a
         # hand-copied literal, so a future add/remove (e.g. ``finalizing``) is
-        # covered automatically instead of silently dropped. #1544.
+        # covered automatically instead of silently dropped.
         for status in MEDIA_BUY_UNCONFIRMED_STATUSES:
             buy = MediaBuy(status=status, created_at=created, approved_at=None, confirmed_at=None)
             MediaBuyRepository._stamp_confirmation_if_needed(buy)
@@ -882,7 +882,7 @@ class TestConfirmedAtStamping:
 
     def test_confirmed_statuses_prefer_approval_instant(self):
         """Manual-approval path: confirmed_at is approved_at (the moment the seller
-        committed), NOT the buyer's create time — see #1544."""
+        committed), NOT the buyer's create time."""
         from datetime import UTC, datetime
 
         from src.core.database.models import MediaBuy
