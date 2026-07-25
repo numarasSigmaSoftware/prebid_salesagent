@@ -303,7 +303,7 @@ def strip_undeclared_envelope_fields(
     does not would otherwise reject it under FastMCP's strict per-tool
     arg-validation. Strip only the undeclared ones, in all environments. When
     ``known_params`` is None (schema lookup failed) strip nothing — the
-    production fallback handles it. See #1512.
+    production fallback handles it.
 
     Returns:
         Tuple of (params without the undeclared envelope fields, sorted removed
@@ -321,7 +321,7 @@ def strip_negotiation_fields(params: dict[str, Any]) -> tuple[dict[str, Any], li
     client for version negotiation. They are protocol envelope, not tool
     parameters, so FastMCP's strict per-tool arg-validation rejects them and
     makes the agent uncallable by conformant SDK clients. Strip them in all
-    environments before dispatch. See #1512.
+    environments before dispatch.
 
     Returns:
         Tuple of (params without negotiation fields, sorted list of removed keys).

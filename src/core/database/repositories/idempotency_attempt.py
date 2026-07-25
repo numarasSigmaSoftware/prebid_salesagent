@@ -102,6 +102,28 @@ class IdempotencyAttemptRepository:
         self._session = session
         self._tenant_id = tenant_id
 
+    def lock_admission_scope(
+        self,
+        *,
+        principal_id: str | None,
+        account_id: str | None,
+        operation_class: str,
+    ) -> None:
+        """Serialize ceiling checks and inserts for one idempotency scope.
+
+        PostgreSQL transaction-scoped advisory locks avoid a permanent quota
+        table while making COUNT → INSERT atomic across distinct keys.
+        """
+        material = "\x1f".join(
+            (
+                self._tenant_id,
+                principal_id or "",
+                account_id or "",
+                operation_class,
+            )
+        )
+        self._session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(material, 0))))
+
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
@@ -166,11 +188,12 @@ class IdempotencyAttemptRepository:
         The lookup scope is the spec's idempotency tuple — (agent, account,
         key) — with NO tool dimension: a key reused by a different tool must
         hit this same row (and conflict on its differing payload hash), never
-        a separate per-tool cache. Expired entries are treated as absent —
-        callers should fall through to re-execution rather than returning a
-        stale answer. Cleanup of expired rows is the responsibility of
-        ``expire_old``. ``account_id is None`` matches rows stored with no
-        account (``IS NULL``), mirroring the NULLS NOT DISTINCT unique index.
+        a separate per-tool cache. This completed-success lookup excludes
+        expired entries; the reservation path separately retains their
+        tombstone semantics and emits ``IDEMPOTENCY_EXPIRED``. Cleanup is the
+        responsibility of ``expire_old``. ``account_id is None`` matches rows
+        stored with no account (``IS NULL``), mirroring the NULLS NOT DISTINCT
+        unique index.
         """
         current = now or datetime.now(UTC)
         stmt = (
@@ -344,6 +367,7 @@ class IdempotencyAttemptRepository:
                     account_id=account_id,
                     idempotency_key=idempotency_key,
                     payload_hash=payload_hash,
+                    tool_name=tool_name,
                     lease=lease,
                     now=current,
                 )
@@ -362,6 +386,7 @@ class IdempotencyAttemptRepository:
         account_id: str | None,
         idempotency_key: str,
         payload_hash: str,
+        tool_name: str,
         lease: timedelta,
         now: datetime,
     ) -> ReservationOutcome | None:
@@ -375,6 +400,13 @@ class IdempotencyAttemptRepository:
             # The winner's row vanished between our failed INSERT and this read
             # (evicted / released). The caller retries the INSERT once.
             return None
+        if existing.tool_name != tool_name:
+            return ReservationOutcome(
+                kind=IN_FLIGHT,
+                attempt_id=existing.attempt_id,
+                stored_hash=existing.payload_hash,
+                stored_tool_name=existing.tool_name,
+            )
         if existing.status == _STATUS_COMPLETED:
             if existing.expires_at <= now:
                 return ReservationOutcome(
@@ -516,7 +548,7 @@ class IdempotencyAttemptRepository:
         result = self._session.execute(stmt)
         return (getattr(result, "rowcount", 0) or 0) == 1
 
-    def release(self, attempt_id: str, *, now: datetime | None = None) -> None:
+    def release(self, attempt_id: str, *, now: datetime | None = None) -> bool:
         """Delete an owned in_flight reservation (handler failed — errors are NEVER cached).
 
         Gated ``status='in_flight'`` so a row that raced to completion is never
@@ -528,7 +560,8 @@ class IdempotencyAttemptRepository:
             IdempotencyAttempt.tenant_id == self._tenant_id,
             IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
         )
-        self._session.execute(stmt)
+        result = self._session.execute(stmt)
+        return (getattr(result, "rowcount", 0) or 0) == 1
 
     def count_inserts_since(
         self,

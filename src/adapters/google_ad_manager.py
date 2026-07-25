@@ -89,7 +89,13 @@ class GoogleAdManager(AdServerAdapter):
     """Google Ad Manager adapter using modular architecture."""
 
     adapter_name = "google_ad_manager"
-    supports_media_buy_update_reconciliation = True
+    # Durable claims permit the first invocation. Ambiguous retries reconcile
+    # through the adapter contract and fail closed unless an exact provider
+    # marker proves APPLIED or NOT_APPLIED.
+    # Order + line-item + creative provisioning is compound: a partial provider
+    # acceptance remains UNKNOWN and is never blindly reinvoked.
+    supports_media_buy_create_reconciliation = True
+    supports_media_buy_update_reconciliation = False
 
     capabilities = AdapterCapabilities(
         supports_realtime_reporting=True,  # Snapshots via cached GAM line item stats
@@ -662,7 +668,11 @@ class GoogleAdManager(AdServerAdapter):
         base_order_name = apply_naming_template(order_name_template, context)
 
         # Add unique identifier to prevent duplicate order names
-        unique_suffix = f"mb_{pre_order_id}"
+        downstream_mutation = getattr(self, "_downstream_mutation", None)
+        operation_marker = (
+            f"op_{downstream_mutation.downstream_request_id}" if downstream_mutation is not None else None
+        )
+        unique_suffix = f"mb_{pre_order_id}" + (f"] [{operation_marker}" if operation_marker is not None else "")
         full_order_name = f"{base_order_name} [{unique_suffix}]"
 
         # Truncate to GAM's 255-character limit while preserving the unique suffix
@@ -677,6 +687,11 @@ class GoogleAdManager(AdServerAdapter):
             start_time=start_time,
             end_time=end_time,
             currency=order_currency,
+            external_order_id=(
+                int(downstream_mutation.downstream_request_id[:8], 16) & 0x7FFFFFFF
+                if downstream_mutation is not None
+                else None
+            ),
         )
 
         self.log(f"✓ Created GAM Order ID: {order_id}")
@@ -1463,7 +1478,6 @@ class GoogleAdManager(AdServerAdapter):
                 media_package.package_config["budget"] = float(budget)
                 # Flag the JSON field as modified so SQLAlchemy persists it
                 attributes.flag_modified(media_package, "package_config")
-                session.commit()
                 self.log(f"✓ Updated package {package_id} budget to ${budget} in both GAM and database")
 
             return UpdateMediaBuySuccess(
@@ -1615,40 +1629,27 @@ class GoogleAdManager(AdServerAdapter):
             },
         )
 
-    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Read GAM line items and prove the requested status or goal update."""
-        from src.adapters.reconciliation import (
-            applied_update_result,
-            load_media_package_snapshots,
-            reconcile_gam_line_items,
-        )
+    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Use GAM's full operation marker to prove a create did not land.
 
-        if self.dry_run:
-            return applied_update_result(
-                mutation,
-                paused=mutation.action.startswith("pause_") if mutation.package_id else None,
-            )
-        assert self.tenant_id is not None
-        package_specs = [
-            (
-                package.package_id,
-                str(package.package_config.get("platform_line_item_id") or ""),
-                package.package_config.get("pricing", {}),
-            )
-            for package in load_media_package_snapshots(self.tenant_id, mutation)
-        ]
-
+        ``externalOrderId`` is only a 31-bit compatibility marker; the complete
+        deterministic request ID is also embedded in the order-name suffix and
+        is the collision-resistant reconciliation authority. Finding no marked order proves NOT_APPLIED. Finding one proves the
+        provider accepted at least the order, but line-item creation may have
+        crashed partway through, so the safe classification remains UNKNOWN.
+        """
         try:
-            line_items = self.orders_manager.get_order_line_items(mutation.media_buy_id)
+            order = self.orders_manager.find_order_by_operation_marker(f"op_{mutation.downstream_request_id}")
         except Exception:
-            logger.warning("GAM reconciliation read failed", exc_info=True)
+            logger.warning("GAM create reconciliation read failed", exc_info=True)
             return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
-        return reconcile_gam_line_items(
-            mutation,
-            package_specs,
-            line_items,
-            self.orders_manager._safe_get_nested,
-        )
+        if order is None:
+            return ReconciliationResult(ReconciliationOutcome.NOT_APPLIED)
+        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Fail closed because GAM updates do not preserve an exact marker."""
+        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 
     def update_media_buy_performance_index(self, media_buy_id: str, package_performance: list) -> bool:
         """Update the performance index for packages in a media buy."""

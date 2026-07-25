@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from adcp.types import CreativeAsset
 from adcp.types import Error as AdCPErrorDetail
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from src.core.exceptions import AdCPConfigurationError
 from src.core.helpers import _extract_format_info, _validate_creative_assets
+from src.core.idempotency_canonical import canonical_payload_hash
 from src.core.schemas import CreativeStatusEnum, SyncCreativeResult
 from src.core.validation_helpers import run_async_in_sync_context
+from src.services.downstream_reconciliation import execute_reconciled_creative_build
 
 from ._assets import _build_creative_data, _extract_message_from_assets, _extract_url_from_assets
 
@@ -29,6 +31,84 @@ if TYPE_CHECKING:
     from src.core.database.repositories.creative import CreativeRepository
 
 logger = logging.getLogger(__name__)
+_JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, Any])
+
+
+def _hashable_build_payload(build_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the secret-free JSON value used to identify a creative build."""
+    return _JSON_OBJECT_ADAPTER.dump_python(
+        {key: value for key, value in build_kwargs.items() if key != "gemini_api_key"},
+        mode="json",
+    )
+
+
+def _defer_ai_review(
+    creative_repo: CreativeRepository,
+    *,
+    creative_id: str,
+    tenant: dict[str, Any],
+    webhook_url: str | None,
+    principal_id: str,
+) -> None:
+    """Submit AI review only after creative state and replay cache are durable."""
+
+    def submit() -> None:
+        from src.admin.blueprints.creatives import (
+            _ai_review_creative_async,
+            _ai_review_executor,
+            _ai_review_lock,
+            _ai_review_tasks,
+        )
+
+        task_id = f"ai_review_{creative_id}_{uuid.uuid4().hex[:8]}"
+        future = _ai_review_executor.submit(
+            _ai_review_creative_async,
+            creative_id=creative_id,
+            tenant_id=tenant["tenant_id"],
+            webhook_url=webhook_url,
+            slack_webhook_url=tenant.get("slack_webhook_url"),
+            principal_name=principal_id,
+        )
+        with _ai_review_lock:
+            _ai_review_tasks[task_id] = {
+                "future": future,
+                "creative_id": creative_id,
+                "created_at": time.time(),
+            }
+        logger.info("[sync_creatives] Submitted AI review for %s (task: %s)", creative_id, task_id)
+
+    creative_repo.defer_until_after_commit(submit)
+
+
+def _build_creative_once(
+    *,
+    registry: Any,
+    agent_url: str,
+    creative_id: str,
+    tenant_id: str,
+    principal_id: str,
+    account_id: str | None,
+    idempotency_key: str | None,
+    build_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Run or durably replay a consequential creative-agent build."""
+
+    def work() -> dict[str, Any]:
+        return run_async_in_sync_context(registry.build_creative(agent_url=agent_url, **build_kwargs)) or {}
+
+    if idempotency_key is None:
+        return work()
+    hashable_payload = _hashable_build_payload(build_kwargs)
+    return execute_reconciled_creative_build(
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        account_id=account_id,
+        idempotency_key=idempotency_key,
+        agent_url=agent_url,
+        creative_id=creative_id,
+        request_payload=hashable_payload,
+        work=work,
+    )
 
 
 def _failed_sync_result(
@@ -72,6 +152,8 @@ def _update_existing_creative(
     all_formats: list[Any],
     registry: Any,
     principal_id: str,
+    idempotency_key: str | None = None,
+    account_id: str | None = None,
 ) -> tuple[SyncCreativeResult, bool]:
     """Update an existing creative with upsert semantics (AdCP 2.5).
 
@@ -135,45 +217,19 @@ def _update_existing_creative(
             existing_creative.status = CreativeStatusEnum.approved.value
             needs_approval = False
         elif approval_mode == "ai-powered":
-            # Submit to background AI review (async)
-
-            from src.admin.blueprints.creatives import (
-                _ai_review_executor,
-                _ai_review_lock,
-                _ai_review_tasks,
-            )
-
             # Set status to pending_review for AI review
             existing_creative.status = CreativeStatusEnum.pending_review.value
             needs_approval = True
 
-            # Submit background task
-            task_id = f"ai_review_{existing_creative.creative_id}_{uuid.uuid4().hex[:8]}"
-
             # Need to flush to ensure creative_id is available
             creative_repo.flush()
-
-            # Import the async function
-            from src.admin.blueprints.creatives import _ai_review_creative_async
-
-            future = _ai_review_executor.submit(
-                _ai_review_creative_async,
+            _defer_ai_review(
+                creative_repo,
                 creative_id=existing_creative.creative_id,
-                tenant_id=tenant["tenant_id"],
+                tenant=tenant,
                 webhook_url=webhook_url,
-                slack_webhook_url=tenant.get("slack_webhook_url"),
-                principal_name=principal_id,
+                principal_id=principal_id,
             )
-
-            # Track the task
-            with _ai_review_lock:
-                _ai_review_tasks[task_id] = {
-                    "future": future,
-                    "creative_id": existing_creative.creative_id,
-                    "created_at": time.time(),
-                }
-
-            logger.info(f"[sync_creatives] Submitted AI review for {existing_creative.creative_id} (task: {task_id})")
         else:  # require-human
             existing_creative.status = CreativeStatusEnum.pending_review.value
             needs_approval = True
@@ -249,16 +305,22 @@ def _update_existing_creative(
                             f"context_id={context_id}"
                         )
 
-                        build_result = run_async_in_sync_context(
-                            registry.build_creative(
-                                agent_url=format_obj.agent_url,
-                                format_id=creative_format,
-                                message=message,
-                                gemini_api_key=gemini_api_key,
-                                promoted_offerings=promoted_offerings,
-                                context_id=context_id,
-                                finalize=getattr(creative, "approved", False),
-                            )
+                        build_result = _build_creative_once(
+                            registry=registry,
+                            agent_url=format_obj.agent_url,
+                            creative_id=existing_creative.creative_id,
+                            tenant_id=tenant["tenant_id"],
+                            principal_id=principal_id,
+                            account_id=account_id,
+                            idempotency_key=idempotency_key,
+                            build_kwargs={
+                                "format_id": creative_format,
+                                "message": message,
+                                "gemini_api_key": gemini_api_key,
+                                "promoted_offerings": promoted_offerings,
+                                "context_id": context_id,
+                                "finalize": getattr(creative, "approved", False),
+                            },
                         )
 
                         # Store build result in data
@@ -477,6 +539,8 @@ def _create_new_creative(
     all_formats: list[Any],
     registry: Any,
     principal_id: str,
+    idempotency_key: str | None = None,
+    account_id: str | None = None,
 ) -> tuple[SyncCreativeResult, bool]:
     """Create a new creative and persist it to the database (AdCP 2.5).
 
@@ -561,16 +625,26 @@ def _create_new_creative(
                         f"message_length={len(message) if message else 0}"
                     )
 
-                    build_result = run_async_in_sync_context(
-                        registry.build_creative(
-                            agent_url=format_obj.agent_url,
-                            format_id=format_id_str,
-                            message=message,
-                            gemini_api_key=gemini_api_key,
-                            promoted_offerings=promoted_offerings,
-                            context_id=getattr(creative, "context_id", None),
-                            finalize=getattr(creative, "approved", False),
-                        )
+                    build_kwargs = {
+                        "format_id": format_id_str,
+                        "message": message,
+                        "gemini_api_key": gemini_api_key,
+                        "promoted_offerings": promoted_offerings,
+                        "context_id": getattr(creative, "context_id", None),
+                        "finalize": getattr(creative, "approved", False),
+                    }
+                    creative_operation_id = creative.creative_id or (
+                        f"new:{canonical_payload_hash(_hashable_build_payload(build_kwargs))}"
+                    )
+                    build_result = _build_creative_once(
+                        registry=registry,
+                        agent_url=format_obj.agent_url,
+                        creative_id=creative_operation_id,
+                        tenant_id=tenant["tenant_id"],
+                        principal_id=principal_id,
+                        account_id=account_id,
+                        idempotency_key=idempotency_key,
+                        build_kwargs=build_kwargs,
                     )
 
                     # Store build result
@@ -758,43 +832,15 @@ def _create_new_creative(
         db_creative.status = CreativeStatusEnum.approved.value
         needs_approval = False
     elif approval_mode == "ai-powered":
-        # Submit to background AI review (async)
-
-        from src.admin.blueprints.creatives import (
-            _ai_review_executor,
-            _ai_review_lock,
-            _ai_review_tasks,
-        )
-
         # Set status to pending_review for AI review
         db_creative.status = CreativeStatusEnum.pending_review.value
         needs_approval = True
-
-        # Submit background task
-        task_id = f"ai_review_{db_creative.creative_id}_{uuid.uuid4().hex[:8]}"
-
-        # Import the async function
-        from src.admin.blueprints.creatives import _ai_review_creative_async
-
-        future = _ai_review_executor.submit(
-            _ai_review_creative_async,
+        _defer_ai_review(
+            creative_repo,
             creative_id=db_creative.creative_id,
-            tenant_id=tenant["tenant_id"],
+            tenant=tenant,
             webhook_url=webhook_url,
-            slack_webhook_url=tenant.get("slack_webhook_url"),
-            principal_name=principal_id,
-        )
-
-        # Track the task
-        with _ai_review_lock:
-            _ai_review_tasks[task_id] = {
-                "future": future,
-                "creative_id": db_creative.creative_id,
-                "created_at": time.time(),
-            }
-
-        logger.info(
-            f"[sync_creatives] Submitted AI review for new creative {db_creative.creative_id} (task: {task_id})"
+            principal_id=principal_id,
         )
     else:  # require-human
         db_creative.status = CreativeStatusEnum.pending_review.value

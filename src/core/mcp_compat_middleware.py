@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from src.core.adcp_version import validate_adcp_version_pins
 from src.core.application_context import validate_application_context
+from src.core.callable_argument_validation import validate_callable_arguments
 from src.core.exceptions import AdCPError, normalize_to_adcp_error
 from src.core.request_compat import (
     DROPPED_FIELDS_NEGOTIATION,
@@ -169,7 +170,7 @@ class RequestCompatMiddleware(Middleware):
             context = context.copy(message=new_message)
 
         # Step 7: Dispatch — with production fallback on TypeAdapter rejection.
-        # Extracted to keep this method's cyclomatic size bounded (ADR-009 / #1610).
+        # Extracted to keep this method's cyclomatic size bounded.
         async def dispatch() -> ToolResult:
             return await self._dispatch_with_typeadapter_fallback(
                 context,
@@ -183,6 +184,7 @@ class RequestCompatMiddleware(Middleware):
             context=context,
             tool_name=tool_name,
             arguments=arguments,
+            normalized_arguments=normalized,
             dispatch=dispatch,
         )
 
@@ -192,6 +194,7 @@ class RequestCompatMiddleware(Middleware):
         context: MiddlewareContext,
         tool_name: str,
         arguments: dict[str, Any],
+        normalized_arguments: dict[str, Any],
         dispatch: Callable[[], Awaitable[ToolResult]],
     ) -> ToolResult:
         if tool_name not in STANDARD_ADCP_READ_TOOLS or "idempotency_key" not in arguments:
@@ -212,14 +215,45 @@ class RequestCompatMiddleware(Middleware):
             return await dispatch()
         from src.services.idempotency_replay import execute_idempotent_read
 
-        return await execute_idempotent_read(
-            tool_name=tool_name,
-            idempotency_key=arguments["idempotency_key"],
-            identity=identity,
-            raw_wire_payload=dict(arguments),
-            response_type=ToolResult,
-            work=dispatch,
-        )
+        try:
+            # FastMCP normally validates and invokes in one TypeAdapter call.
+            # A keyed read must validate first so malformed requests never
+            # consume an idempotency reservation.
+            fastmcp_context = context.fastmcp_context
+            if fastmcp_context is None:
+                return await dispatch()
+            tool = await fastmcp_context.fastmcp.get_tool(tool_name)
+            if tool is None or not hasattr(tool, "fn"):
+                raise RuntimeError(f"Registered read tool {tool_name!r} has no callable")
+            validate_callable_arguments(tool.fn, normalized_arguments)
+            return await execute_idempotent_read(
+                tool_name=tool_name,
+                idempotency_key=arguments["idempotency_key"],
+                identity=identity,
+                raw_wire_payload=dict(arguments),
+                response_type=ToolResult,
+                work=dispatch,
+            )
+        except AdCPError as exc:
+            # Replay conflicts and admission failures originate in middleware,
+            # before a decorated tool can translate them. Emit the same exact
+            # MCP wire envelope used by the other pre-dispatch guards.
+            _reject_at_mcp_boundary(
+                tool_name,
+                exc,
+                identity,
+                context=arguments.get("context"),
+            )
+        except ValidationError as exc:
+            typed = normalize_to_adcp_error(exc, context=arguments.get("context"))
+            record_boundary_error(
+                "mcp",
+                tool_name,
+                typed,
+                tenant_id=identity.tenant_id,
+                principal_id=identity.principal_id,
+            )
+            translate_to_tool_error(exc, context=arguments.get("context"))
 
     async def _dispatch_with_typeadapter_fallback(
         self,
@@ -239,32 +273,10 @@ class RequestCompatMiddleware(Middleware):
             if not self._is_typeadapter_validation_error(exc):
                 raise
 
-            if self._should_retry(exc):
-                # Deep-strip unknown fields at every nesting level using the tool's
-                # JSON Schema. TypeAdapter rejects unknown fields in objects with
-                # additionalProperties: false. Our Pydantic models (extra='ignore')
-                # would accept them — stripping bridges the gap.
-                tool_schema = await self._get_tool_schema(context, tool_name)
-                if tool_schema is not None:
-                    stripped = deep_strip_to_schema(normalized, tool_schema)
-                    if stripped != normalized:
-                        logger.warning(
-                            "TypeAdapter rejected %s — retrying with deep-stripped arguments "
-                            "(production forward-compat): %s",
-                            tool_name,
-                            _summarize_error(exc),
-                        )
-                        stripped_message = CallToolRequestParams(
-                            name=tool_name,
-                            arguments=stripped,
-                        )
-                        stripped_context = context.copy(message=stripped_message)
-                        try:
-                            return await call_next(stripped_context)
-                        except Exception as retry_exc:
-                            if not self._is_typeadapter_validation_error(retry_exc):
-                                raise
-                            exc = retry_exc
+            retry = await self._retry_after_deep_strip(context, tool_name, normalized, call_next, exc)
+            if isinstance(retry, ToolResult):
+                return retry
+            exc = retry
 
             # Normalize once for the audit record, then pass the raw exception to
             # translate_to_tool_error so the emitted AdCPToolError keeps it as
@@ -288,6 +300,38 @@ class RequestCompatMiddleware(Middleware):
                 principal_id=principal_id,
             )
             translate_to_tool_error(exc, context=application_context)
+
+    async def _retry_after_deep_strip(
+        self,
+        context: MiddlewareContext,
+        tool_name: str,
+        normalized: dict[str, Any],
+        call_next: Callable[[MiddlewareContext], Awaitable[ToolResult]],
+        exc: Exception,
+    ) -> ToolResult | Exception:
+        """Retry a production structural failure after schema-aware stripping."""
+        if not self._should_retry(exc):
+            return exc
+        tool_schema = await self._get_tool_schema(context, tool_name)
+        if tool_schema is None:
+            return exc
+        stripped = deep_strip_to_schema(normalized, tool_schema)
+        if stripped == normalized:
+            return exc
+        logger.warning(
+            "TypeAdapter rejected %s — retrying with deep-stripped arguments (production forward-compat): %s",
+            tool_name,
+            _summarize_error(exc),
+        )
+        stripped_context = context.copy(
+            message=CallToolRequestParams(name=tool_name, arguments=stripped),
+        )
+        try:
+            return await call_next(stripped_context)
+        except Exception as retry_exc:
+            if not self._is_typeadapter_validation_error(retry_exc):
+                raise
+            return retry_exc
 
     @staticmethod
     def _should_retry(exc: Exception) -> bool:

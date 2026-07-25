@@ -25,7 +25,11 @@ def mock_all_external_dependencies():
     mock_first_result.order_name_template = None
     mock_session.scalars.return_value.first.return_value = mock_first_result
 
-    with patch("src.core.database.database_session.get_db_session") as mock_db:
+    with (
+        patch("src.core.database.database_session.get_db_session") as mock_db,
+        patch("src.core.database.repositories.uow.get_db_session", return_value=mock_session),
+        patch("src.core.database.repositories.uow.get_independent_db_session", return_value=mock_session),
+    ):
         mock_db.return_value = mock_session
 
         # Mock external services

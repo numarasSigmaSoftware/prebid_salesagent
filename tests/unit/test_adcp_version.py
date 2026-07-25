@@ -15,7 +15,6 @@ from src.core.adcp_version import (
 )
 from src.core.exceptions import AdCPConfigurationError, AdCPValidationError, AdCPVersionUnsupportedError
 from src.core.version import get_version
-from tests.helpers import assert_envelope_field, assert_envelope_shape
 
 
 def _request_compat_log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -616,8 +615,7 @@ class TestRESTVersionNegotiation:
         self._assert_version_unsupported(response)
         assert response.json()["context"] == request_context
 
-    def test_rest_deeply_nested_context_is_rejected_before_version_echo(self):
-        """Unsafe context wins before an error path can recursively echo it."""
+    def test_rest_deeply_nested_context_is_echoed_without_an_arbitrary_depth_limit(self):
         deep = cursor = {}
         for _ in range(65):
             cursor["nested"] = {}
@@ -628,10 +626,8 @@ class TestRESTVersionNegotiation:
             json={"brief": "ads", "adcp_version": "4.0", "context": deep},
         )
 
-        assert response.status_code == 400
-        assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-        assert_envelope_field(response.json(), "context")
-        assert response.json().get("context") is None
+        self._assert_version_unsupported(response)
+        assert response.json()["context"] == deep
 
     def test_rest_query_major_pin_is_coerced_then_rejected(self):
         """The URL's textual integer representation reaches the strict core as an int."""

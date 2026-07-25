@@ -82,17 +82,19 @@ def check_database_health() -> dict[str, Any]:
             extra = existing_tables - expected_tables - system_tables - deprecated_tables
             health_report["extra_tables"] = sorted(extra)
 
-            # Check migration status (optional for in-memory databases)
-            try:
-                result = db_session.execute(text("SELECT version_num FROM alembic_version"))
-                current_version = result.scalar()
-                health_report["migration_status"] = current_version or "unknown"
-            except Exception as e:
-                # Not having alembic_version is normal for in-memory test databases
-                # that use Base.metadata.create_all() instead of migrations
-                if "alembic_version" not in existing_tables:
-                    health_report["migration_status"] = "no_migrations_table"
-                else:
+            # Avoid issuing a known-invalid query: on PostgreSQL, selecting
+            # from an absent table aborts the entire transaction even when the
+            # Python exception is caught. Health checks may run inside a
+            # caller-owned scoped session, so poisoning that transaction would
+            # break the caller's next otherwise-valid query.
+            if "alembic_version" not in existing_tables:
+                health_report["migration_status"] = "no_migrations_table"
+            else:
+                try:
+                    result = db_session.execute(text("SELECT version_num FROM alembic_version"))
+                    current_version = result.scalar()
+                    health_report["migration_status"] = current_version or "unknown"
+                except Exception as e:
                     health_report["schema_issues"].append(f"Cannot read alembic_version: {e}")
 
             # Specific checks for problematic tables

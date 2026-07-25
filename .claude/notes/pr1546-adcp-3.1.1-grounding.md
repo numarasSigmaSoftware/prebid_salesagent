@@ -102,12 +102,15 @@ is not presented as an upstream conformance requirement.
 
 Authoritative sources:
 
+- `dist/docs/3.1.0/building/by-layer/L1/security.mdx`, section
+  **Request Safety / Idempotency**, normative seller rules 1–10
 - `dist/schemas/3.1.1/account/sync-accounts-request.json`
 - `dist/schemas/3.1.1/creative/sync-creatives-request.json`
 - `dist/schemas/3.1.1/media-buy/create-media-buy-request.json`
 - `dist/schemas/3.1.1/media-buy/update-media-buy-request.json`
 - `dist/schemas/3.1.1/protocol/get-adcp-capabilities-response.json`
 - `dist/compliance/3.1.1/universal/read-tool-idempotency.yaml`
+- `dist/compliance/3.1.1/universal/idempotency.yaml`
 - `dist/docs/3.1.0/protocol/get_adcp_capabilities.mdx`, section
   **adcp / idempotency**
 
@@ -136,31 +139,108 @@ actually exposes; `list_tasks` remains intentionally MCP-only as documented in
 it is a local, ungraded consistency rule using the same 16–255 character
 constraint.
 
-### Idempotency capability — mutation-wide support
+## Pause-on-create compatibility
+
+Authoritative source: `dist/schemas/3.1.1/media-buy/create-media-buy-request.json`,
+property `paused`. The field is accepted by the request schema, but no 3.1.1
+compliance storyboard grades provider-side pause-on-create behavior. Until every
+advertised adapter can create a campaign paused without an unreconciled second
+mutation, this seller rejects `paused=true` with `UNSUPPORTED_FEATURE` and
+an actionable `update_media_buy` suggestion instead of silently ignoring it.
+`paused=false` remains the ordinary create behavior. This is an ungraded,
+capability-truthfulness policy.
+
+## Webhook timing and lifetime delivery
+
+Authoritative sources:
+
+- `dist/docs/3.1.0/building/by-layer/L1/webhooks.mdx`, section
+  **When webhooks fire**: callbacks report changes after the initial response;
+  a synchronous terminal response does not synthesize a duplicate callback.
+- `dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json`,
+  `start_date`/`end_date`: omitting both requests campaign-lifetime data.
+
+Native A2A registrations are persisted with the initial task but first emit only
+after a later durable transition. Omitted delivery dates derive the selected
+campaigns' inclusive flight lifetime rather than a rolling 30-day window.
+
+### Durable universal replay and failure release
 
 The agent-wide capability now declares `supported: true`,
-`replay_ttl_seconds: 86400`, and `in_flight_max_seconds: 300`. This is backed
-by every implemented mutating tool:
+`replay_ttl_seconds: 86400`, and `in_flight_max_seconds: 300`.
 
-- `create_media_buy` retains verbatim replay plus its domain unique-index
-  backstop.
-- `update_media_buy`, `sync_accounts`, and `sync_creatives` reserve the
-  `(tenant, principal, account, idempotency_key)` tuple in a committed
-  transaction before work begins.
+- Every supplied read key on every transport-exposed standard read is reserved
+  before execution, stores the canonical typed response durably, and returns
+  that immutable response with `replayed: true`. Read-key omission remains
+  accepted only under the explicit 3.1.x grace. Anonymous public reads use
+  `principal_id=NULL` inside the resolved tenant/account scope.
+- `create_media_buy`, `update_media_buy`, `sync_accounts`, and
+  `sync_creatives` reserve the
+  `(tenant, principal, account, idempotency_key)` tuple before work begins.
 - A live identical retry returns `IDEMPOTENCY_IN_FLIGHT`; a changed canonical
-  payload returns `IDEMPOTENCY_CONFLICT`; a completed identical retry returns
-  the original response with `replayed: true`.
+  payload or cross-tool reuse returns `IDEMPOTENCY_CONFLICT`; a completed
+  identical retry returns the immutable original response with
+  `replayed: true`.
 - Reservation takeover rotates the attempt ID as a fencing token, so a stale
   worker cannot complete or release its successor's claim.
-- Handler failures are not cached. An atomic `sync_accounts` rollback releases
-  its claim so a retry can re-execute; multi-unit-of-work or external-adapter
-  failures stay in flight until lease expiry because a side effect may already
-  have landed. Completion failures likewise fail closed.
+- Every execution or completion failure releases the attempt, as required by
+  rules 3 and 9. Consequential downstream evidence is stored in an independent
+  claim row, so releasing the buyer-facing attempt never erases the fact that a
+  provider invocation may have occurred.
+- Read and write insertion/active ceilings are counted independently. The
+  legacy single-budget environment settings remain fallbacks for deployments
+  that have not set the split controls.
 
 The canonical hash is computed from the pre-normalization wire payload on MCP,
 A2A, and REST. Per-scope admission limits apply before inserting a new
-reservation. Registered reads continue to treat a valid supplied key as inert
-envelope metadata under the 3.1 grace behavior.
+reservation. Context is excluded from the canonical hash but is overlaid from
+the current request on replay, preserving the buyer-opaque echo contract
+without mutating the cached payload.
+
+### Rule 10 downstream reconciliation runbook
+
+Rule 10 is reviewer-graded by the pinned spec. This implementation uses
+write-claim-before-invoke:
+
+1. The idempotency reservation and deterministic downstream-operation claim are
+   committed together.
+2. A PostgreSQL advisory transaction lock serializes the complete
+   reconcile/CAS/provider-call sequence for the deterministic downstream
+   request ID. A tenant-scoped compare-and-swap then moves a claim from
+   `planned` or `not_applied` to `invoked`; only the fenced worker may call.
+3. The seller-derived `downstream_request_id` is exposed to the adapter. The
+   buyer's raw key is never forwarded or logged.
+4. On retry, `APPLIED` reconstructs the stored/provider response,
+   `NOT_APPLIED` permits exactly one invocation using the same request ID, and
+   `UNKNOWN` is persisted and fails closed without another mutation.
+
+Provider behavior:
+
+- **GAM:** create orders carry the complete deterministic request ID in a
+  queryable order-name suffix (plus a 31-bit `externalOrderId` compatibility
+  marker); reconciliation queries the full suffix. Absence proves
+  `NOT_APPLIED`. Presence proves that the order was accepted but cannot prove
+  that every line item completed, so it remains `UNKNOWN` and fails closed.
+  Update actions lack a safe per-operation marker and are rejected before
+  provider invocation while idempotency reconciliation is required.
+- **Mock:** the deterministic request ID is the exact operation key and maps to
+  the recorded typed result, so all three outcomes are testable without
+  inference.
+- **Broadstreet and Kevel:** their documented APIs do not expose a native
+  idempotency key or exact queryable operation marker for these calls. Keyed
+  consequential mutations are rejected before provider invocation.
+- **Triton:** the official API exposes external IDs, but this repository's
+  current legacy endpoint contract does not yet use that API shape. Until that
+  adapter is migrated, keyed consequential mutations are rejected before
+  provider invocation.
+- **Xandr:** explicitly unsupported before invocation because the adapter has
+  no implemented exact reconciliation contract.
+
+This runbook deliberately does not infer causation from a provider resource
+whose current status or budget happens to match the requested value. That
+"best-effort response inspection" is the third pattern rule 10 expressly
+forbids. The cost of unavailable provider markers is a transient fail-closed
+result requiring operator reconciliation, never a duplicate provider mutation.
 
 ### Generated UC-002 status
 
@@ -199,10 +279,12 @@ published under `dist/compliance/3.1.1`; this repository's BR-UC-003 scenarios
 are local schema-derived coverage, not a claim that the upstream compliance
 runner grades this behavior.
 
-Decision for this PR: the seller does not yet implement the required atomic
-comparison. Every transport must preserve field presence and route any supplied
-`revision` to the shared fail-loud guard, which rejects the request without
-applying the update.
+Decision for this PR: each media-buy row persists a revision beginning at 1.
+The update transaction locks the tenant-scoped row, compares a supplied
+revision before any provider mutation, returns `CONFLICT` with the current
+revision on mismatch, and increments exactly once when an update is durably
+applied. Omission retains last-write-wins compatibility and successful updates
+still advance the stored revision.
 
 Omission remains valid and proceeds. Explicit JSON `null` is REJECTED as
 schema-invalid (`INVALID_REQUEST`) — it is not treated as a spelling of
@@ -218,9 +300,7 @@ serializes null." That premise is false: at the pinned adcp 6.6.0,
 rather than serializing it as `null`, so no conformant client emits `null` in
 the first place, and there is no compatibility reason to accept it. `null`
 therefore falls through to the same `INVALID_REQUEST` branch as `0` / `"7"` /
-`7.5`, consistently across MCP, A2A, and REST. This is a safety posture that
-prevents an unprotected lost update; it is an explicit implementation gap, not
-a claim of full revision conformance.
+`7.5`, consistently across MCP, A2A, and REST.
 
 ## Push-notification and reporting webhook delivery
 
@@ -236,10 +316,11 @@ Authoritative sources:
 
 Those sources define the buyer-facing configuration/payload and signed-webhook
 contract. The published webhook-emission storyboard grades emission and the
-normative signing contract. This implementation still lacks the signing-key
-infrastructure needed to claim RFC 9421 default-signing conformance; the legacy
-authentication/signing paths covered here are therefore not represented as
-full conformance to that portion of the storyboard.
+normative signing contract. When the optional legacy authentication selector is
+absent, delivery now uses the SDK's `adcp/webhook-signing/v1` RFC 9421 signer
+with `ADCP_WEBHOOK_SIGNING_JWK`; missing or incorrectly scoped key material
+fails closed instead of silently emitting an unsigned callback. Explicit
+Bearer and legacy HMAC selectors retain their pinned precedence.
 
 The following changes are **local security hardening, ungraded by the AdCP
 3.1.1 storyboard**: require HTTPS outside the explicit private-test opt-in,

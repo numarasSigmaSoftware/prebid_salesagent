@@ -24,7 +24,13 @@ class TestPgBouncerDetection:
         reset_engine()
 
         with (
-            patch.dict(os.environ, {"DATABASE_URL": "postgresql://user:pass@localhost:6543/test"}),
+            patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "postgresql://user:pass@localhost:6543/test",
+                    "COORDINATION_DATABASE_URL": "postgresql://user:pass@localhost:5432/test",
+                },
+            ),
             patch("src.core.database.database_session.create_engine") as mock_create_engine,
             patch("src.core.database.database_session.event.listens_for", side_effect=_mock_event_listener),
         ):
@@ -56,6 +62,7 @@ class TestPgBouncerDetection:
                 os.environ,
                 {
                     "DATABASE_URL": "postgresql://user:pass@localhost:5432/test",
+                    "COORDINATION_DATABASE_URL": "postgresql://user:pass@localhost:5432/coordination",
                     "USE_PGBOUNCER": "true",
                 },
             ),
@@ -115,7 +122,13 @@ class TestPgBouncerDetection:
         for url in pgbouncer_urls:
             reset_engine()
             with (
-                patch.dict(os.environ, {"DATABASE_URL": url}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "DATABASE_URL": url,
+                        "COORDINATION_DATABASE_URL": "postgresql://user:pass@host.internal:5432/db",
+                    },
+                ),
                 patch("src.core.database.database_session.create_engine") as mock_create_engine,
                 patch("src.core.database.database_session.event.listens_for", side_effect=_mock_event_listener),
             ):
@@ -141,6 +154,7 @@ class TestPgBouncerDetection:
                     os.environ,
                     {
                         "DATABASE_URL": "postgresql://user:pass@localhost:5432/test",
+                        "COORDINATION_DATABASE_URL": "postgresql://user:pass@localhost:5432/coordination",
                         "USE_PGBOUNCER": value,
                     },
                 ),

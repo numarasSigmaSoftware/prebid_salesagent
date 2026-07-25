@@ -67,6 +67,15 @@ class ProductRepository:
             )
         ).first()
 
+    def set_implementation_config(self, product_id: str, implementation_config: dict[str, Any]) -> bool:
+        """Persist generated adapter configuration for one tenant-scoped product."""
+        product = self.get_by_id(product_id)
+        if product is None:
+            return False
+        product.implementation_config = implementation_config
+        self._session.flush()
+        return True
+
     # ------------------------------------------------------------------
     # List queries
     # ------------------------------------------------------------------

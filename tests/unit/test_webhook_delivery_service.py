@@ -4,11 +4,14 @@ Tests the thread-safe webhook delivery service that's shared by all adapters.
 """
 
 import json
-import threading
+import logging
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
+import requests
 
 from src.services.webhook_delivery_service import CircuitState, WebhookDeliveryService
 
@@ -21,54 +24,140 @@ def webhook_service():
 
 @pytest.fixture
 def mock_db_session(mocker):
-    """Mock database session for SQLAlchemy 2.0 (select() + scalars())."""
-    mock_session = MagicMock()
+    """Mock the reporting-channel UoW and durable random event claims."""
+    media_buy = MagicMock(raw_request={})
+    media_buys = MagicMock()
+    media_buys.get_by_id.return_value = media_buy
+    events: dict[str, SimpleNamespace] = {}
+    payloads: dict[str, dict] = {}
 
-    # Mock SQLAlchemy 2.0 pattern: session.scalars(stmt).all()
-    mock_scalars = MagicMock()
-    mock_scalars.all.return_value = []  # No webhooks configured by default
-    mock_session.scalars.return_value = mock_scalars
+    def claim_event(**kwargs):
+        logical_key = kwargs["logical_event_key"]
+        if logical_key not in events:
+            events[logical_key] = SimpleNamespace(
+                idempotency_key=str(uuid4()),
+                sequence_number=len(events) + 1,
+                event_payload=None,
+            )
+        return events[logical_key]
 
-    # Mock the database session context manager
-    mock_context = MagicMock()
-    mock_context.__enter__.return_value = mock_session
-    mock_context.__exit__.return_value = None
+    webhook_delivery_logs = MagicMock()
+    webhook_delivery_logs.claim_event.side_effect = claim_event
+    webhook_delivery_logs.store_payload_if_absent.side_effect = lambda event_id, payload: payloads.setdefault(
+        event_id, payload
+    )
+    uow = MagicMock(media_buys=media_buys, webhook_delivery_logs=webhook_delivery_logs)
+    uow.__enter__.return_value = uow
+    uow.__exit__.return_value = None
+    mocker.patch("src.services.webhook_delivery_service.WebhookDeliveryUoW", return_value=uow)
+    return SimpleNamespace(
+        media_buy=media_buy,
+        media_buys=media_buys,
+        webhook_delivery_logs=webhook_delivery_logs,
+        events=events,
+        payloads=payloads,
+    )
 
-    mocker.patch("src.core.database.repositories.uow.get_db_session", return_value=mock_context)
-    return mock_session
+
+def _callback_config(media_buy_id: str) -> MagicMock:
+    config = MagicMock()
+    config.url = "https://example.com/webhook"
+    config.media_buy_id = media_buy_id
+    config.operation_id = "create-operation-123"
+    config.token = "callback-token-456"
+    config.application_context = {"trace_id": "trace-789", "nested": {"value": 1}}
+    config.last_event_key = None
+    config.last_event_sequence = 0
+    config.authentication_type = None
+    config.validation_token = None
+    config.webhook_secret = None
+    config.authentication_token = None
+    config.auth_blocked_at = None
+    return config
 
 
-def test_sequence_number_increments(webhook_service, mock_db_session):
-    """Test that sequence numbers increment correctly."""
+def _configure_reporting(harness, config: MagicMock) -> None:
+    harness.media_buy.raw_request = {
+        "reporting_webhook": {
+            "url": config.url,
+            "token": config.token,
+            "authentication": {
+                "schemes": [config.authentication_type] if config.authentication_type else [],
+                "credentials": config.authentication_token,
+            },
+            "reporting_frequency": "daily",
+        },
+        "context": config.application_context,
+    }
+
+
+def test_sequence_number_is_durable_and_retry_stable(webhook_service, mock_db_session):
+    """A retry reuses its persisted sequence; a distinct event advances it."""
     media_buy_id = "buy_123"
     start_time = datetime.now(UTC)
+    config = _callback_config(media_buy_id)
+    _configure_reporting(mock_db_session, config)
 
-    # Send 3 webhooks
-    for _ in range(3):
+    with patch("src.services.webhook_delivery_service.post_webhook_status", return_value=200) as mock_post:
+        for impressions in (1000, 1000, 2000):
+            webhook_service.send_delivery_webhook(
+                media_buy_id=media_buy_id,
+                tenant_id="tenant1",
+                principal_id="principal1",
+                reporting_period_start=start_time,
+                reporting_period_end=start_time,
+                impressions=impressions,
+                spend=100.0,
+            )
+
+    envelopes = [json.loads(call.kwargs["body"]) for call in mock_post.call_args_list]
+    assert [envelope["result"]["sequence_number"] for envelope in envelopes] == [1, 1, 2]
+    assert envelopes[0]["idempotency_key"] == envelopes[1]["idempotency_key"]
+    assert envelopes[2]["idempotency_key"] != envelopes[1]["idempotency_key"]
+    assert UUID(envelopes[0]["idempotency_key"]).version == 4
+    assert len(mock_db_session.events) == 2
+
+
+def test_same_reporting_event_reuses_exact_first_wire_payload(webhook_service, mock_db_session):
+    media_buy_id = "buy_retry"
+    instant = datetime.now(UTC)
+    config = _callback_config(media_buy_id)
+    _configure_reporting(mock_db_session, config)
+
+    with patch("src.services.webhook_delivery_service.post_webhook_status", return_value=200) as mock_post:
         webhook_service.send_delivery_webhook(
             media_buy_id=media_buy_id,
             tenant_id="tenant1",
             principal_id="principal1",
-            reporting_period_start=start_time,
-            reporting_period_end=start_time,
+            reporting_period_start=instant,
+            reporting_period_end=instant,
+            impressions=1000,
+            spend=100.0,
+        )
+        mock_db_session.media_buy.raw_request["context"] = {"trace_id": "changed"}
+        mock_db_session.media_buy.raw_request["reporting_webhook"]["token"] = "changed-token-credential-456"
+        webhook_service.send_delivery_webhook(
+            media_buy_id=media_buy_id,
+            tenant_id="tenant1",
+            principal_id="principal1",
+            reporting_period_start=instant,
+            reporting_period_end=instant,
             impressions=1000,
             spend=100.0,
         )
 
-    # Sequence should be at 3
-    with webhook_service._lock:
-        assert webhook_service._sequence_numbers[media_buy_id] == 3
+    first, retry = [json.loads(call.kwargs["body"]) for call in mock_post.call_args_list]
+    assert retry == first
 
 
-def test_thread_safety(webhook_service, mock_db_session):
-    """Test that service is thread-safe with concurrent calls."""
-    media_buy_id = "buy_concurrent"
+def test_delivery_uses_only_media_buy_bound_repository_claim(webhook_service, mock_db_session):
+    """The service scopes callback lookup to the originating media buy."""
     start_time = datetime.now(UTC)
-    num_threads = 10
+    _configure_reporting(mock_db_session, _callback_config("buy_origin"))
 
-    def send_webhook():
+    with patch.object(webhook_service, "_queue_and_deliver_target", return_value=1):
         webhook_service.send_delivery_webhook(
-            media_buy_id=media_buy_id,
+            media_buy_id="buy_origin",
             tenant_id="tenant1",
             principal_id="principal1",
             reporting_period_start=start_time,
@@ -77,16 +166,10 @@ def test_thread_safety(webhook_service, mock_db_session):
             spend=100.0,
         )
 
-    # Send webhooks from multiple threads
-    threads = [threading.Thread(target=send_webhook) for _ in range(num_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    # Should have exactly num_threads webhooks sent
-    with webhook_service._lock:
-        assert webhook_service._sequence_numbers[media_buy_id] == num_threads
+    mock_db_session.media_buys.get_by_id.assert_called_once_with("buy_origin")
+    claim = mock_db_session.webhook_delivery_logs.claim_event.call_args.kwargs
+    assert claim["principal_id"] == "principal1"
+    assert claim["media_buy_id"] == "buy_origin"
 
 
 def test_adcp_payload_structure(webhook_service, mock_db_session):
@@ -96,17 +179,10 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
 
     # Mock the shared pinned POST seam to capture the exact wire body.
     with patch("src.services.webhook_delivery_service.post_webhook_status", return_value=200) as mock_post:
-        # Mock webhook config
-        mock_config = MagicMock()
-        mock_config.url = "https://example.com/webhook"
-        mock_config.authentication_type = None
-        mock_config.validation_token = None
-        mock_config.webhook_secret = None  # No HMAC for this test
-        mock_config.authentication_token = None
-        mock_config.auth_blocked_at = None
+        mock_config = _callback_config(media_buy_id)
 
         # Update mock to return config for SQLAlchemy 2.0
-        mock_db_session.scalars.return_value.all.return_value = [mock_config]
+        _configure_reporting(mock_db_session, mock_config)
 
         # Send webhook
         webhook_service.send_delivery_webhook(
@@ -136,18 +212,24 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
         # Version should match what's reported by the adcp library
         from adcp import get_adcp_spec_version
 
-        payload = json.loads(call_args.kwargs["body"])
-        assert payload["adcp_version"] == get_adcp_spec_version()
+        envelope = json.loads(call_args.kwargs["body"])
+        assert envelope["task_type"] == "media_buy_delivery"
+        assert envelope["operation_id"].startswith("reporting:")
+        assert envelope["token"] == "callback-token-456"
+        assert envelope["context"] == {"trace_id": "trace-789", "nested": {"value": 1}}
+        payload = envelope["result"]
+        assert payload["adcp_version"] == ".".join(get_adcp_spec_version().split(".")[:2])
         assert payload["notification_type"] == "scheduled"
-        assert payload["is_adjusted"] is False  # NEW in PR #86
+        assert "aggregated_totals" not in payload
         assert payload["sequence_number"] == 1
         assert "reporting_period" in payload
-        assert payload["reporting_period"]["start"] == start_time.isoformat()
+        assert payload["reporting_period"]["start"] == start_time.isoformat().replace("+00:00", "Z")
         assert "media_buy_deliveries" in payload
         assert len(payload["media_buy_deliveries"]) == 1
 
         # Check delivery data
         delivery = payload["media_buy_deliveries"][0]
+        assert delivery["is_adjusted"] is False
         assert delivery["media_buy_id"] == media_buy_id
         assert delivery["status"] == "active"
         assert delivery["totals"]["impressions"] == 5000
@@ -162,14 +244,8 @@ def test_final_notification_type(webhook_service, mock_db_session):
     start_time = datetime.now(UTC)
 
     with patch("src.services.webhook_delivery_service.post_webhook_status", return_value=200) as mock_post:
-        mock_config = MagicMock()
-        mock_config.url = "https://example.com/webhook"
-        mock_config.authentication_type = None
-        mock_config.validation_token = None
-        mock_config.webhook_secret = None
-        mock_config.authentication_token = None
-        mock_config.auth_blocked_at = None
-        mock_db_session.scalars.return_value.all.return_value = [mock_config]
+        mock_config = _callback_config(media_buy_id)
+        _configure_reporting(mock_db_session, mock_config)
 
         # Send final webhook
         webhook_service.send_delivery_webhook(
@@ -185,35 +261,20 @@ def test_final_notification_type(webhook_service, mock_db_session):
         )
 
         # Check notification_type (direct payload structure in PR #86)
-        payload = json.loads(mock_post.call_args.kwargs["body"])
+        payload = json.loads(mock_post.call_args.kwargs["body"])["result"]
         assert payload["notification_type"] == "final"
-        assert payload["is_adjusted"] is False
-        assert "next_expected_at" not in payload
+        assert payload["media_buy_deliveries"][0]["is_adjusted"] is False
+        assert payload.get("next_expected_at") is None
 
 
-def test_reset_sequence(webhook_service, mock_db_session):
-    """Test that reset_sequence clears sequence numbers (PR #86)."""
-    media_buy_id = "buy_reset"
-    start_time = datetime.now(UTC)
-
-    # Send 3 webhooks
-    for _ in range(3):
-        webhook_service.send_delivery_webhook(
-            media_buy_id=media_buy_id,
-            tenant_id="tenant1",
-            principal_id="principal1",
-            reporting_period_start=start_time,
-            reporting_period_end=start_time,
-            impressions=1000,
-            spend=100.0,
-        )
-
-    # Reset
-    webhook_service.reset_sequence(media_buy_id)
-
-    # Verify sequence number cleared (PR #86: failure tracking is per-endpoint via circuit breakers)
-    with webhook_service._lock:
-        assert media_buy_id not in webhook_service._sequence_numbers
+def test_reset_sequence_does_not_discard_durable_state(webhook_service, mock_db_session):
+    """Legacy lifecycle resets cannot make persisted sequence numbers reusable."""
+    config = _callback_config("buy_reset")
+    config.last_event_key = "persisted-event"
+    config.last_event_sequence = 7
+    webhook_service.reset_sequence("buy_reset")
+    assert config.last_event_key == "persisted-event"
+    assert config.last_event_sequence == 7
 
 
 @patch("src.services.webhook_delivery_service.time.sleep")
@@ -230,14 +291,8 @@ def test_failure_tracking(mock_sleep, webhook_service, mock_db_session):
             500,
         ]
 
-        mock_config = MagicMock()
-        mock_config.url = "https://example.com/webhook"
-        mock_config.authentication_type = None
-        mock_config.validation_token = None
-        mock_config.webhook_secret = None
-        mock_config.authentication_token = None
-        mock_config.auth_blocked_at = None
-        mock_db_session.scalars.return_value.all.return_value = [mock_config]
+        mock_config = _callback_config(media_buy_id)
+        _configure_reporting(mock_db_session, mock_config)
 
         # First webhook - success
         result1 = webhook_service.send_delivery_webhook(
@@ -282,15 +337,12 @@ def test_authentication_headers(webhook_service, mock_db_session):
 
     with patch("src.services.webhook_delivery_service.post_webhook_status", return_value=200) as mock_post:
         # Test bearer auth
-        mock_config = MagicMock()
-        mock_config.url = "https://example.com/webhook"
+        mock_config = _callback_config(media_buy_id)
         # The AdCP scheme spelling (core/push_notification_config.json v3.1.1).
         mock_config.authentication_type = "Bearer"
-        mock_config.authentication_token = "secret_token"
+        mock_config.authentication_token = "secret_token_that_is_at_least_32_chars"
         mock_config.validation_token = "validation_token"
-        mock_config.webhook_secret = None
-        mock_config.auth_blocked_at = None
-        mock_db_session.scalars.return_value.all.return_value = [mock_config]
+        _configure_reporting(mock_db_session, mock_config)
 
         webhook_service.send_delivery_webhook(
             media_buy_id=media_buy_id,
@@ -305,7 +357,7 @@ def test_authentication_headers(webhook_service, mock_db_session):
         # Verify headers (PR #86 added X-ADCP-Timestamp, no longer uses X-Webhook-Token)
         call_args = mock_post.call_args
         headers = call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer secret_token"
+        assert headers["Authorization"] == "Bearer secret_token_that_is_at_least_32_chars"
         assert "X-ADCP-Timestamp" in headers  # NEW in PR #86
 
 
@@ -403,3 +455,38 @@ def test_deliver_disables_redirects(webhook_service, mock_db_session):
         )
 
     assert captured["kwargs"]["allow_redirects"] is False
+
+
+def test_network_error_logs_never_expose_webhook_query_secrets(
+    webhook_service,
+    mock_db_session,
+    caplog,
+):
+    """Request exceptions may embed their URL; logs retain only the error type."""
+    secret = "buyer-query-secret-that-must-not-leak"
+    config = _callback_config("buy_secret_log")
+    config.url = f"https://example.com/webhook?token={secret}"
+    _configure_reporting(mock_db_session, config)
+    start_time = datetime.now(UTC)
+
+    with (
+        patch(
+            "src.services.webhook_delivery_service.post_webhook_status",
+            side_effect=requests.ConnectionError(f"failed URL {config.url}"),
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = webhook_service.send_delivery_webhook(
+            media_buy_id="buy_secret_log",
+            tenant_id="tenant1",
+            principal_id="principal1",
+            reporting_period_start=start_time,
+            reporting_period_end=start_time,
+            impressions=1000,
+            spend=100.0,
+        )
+
+    assert result is False
+    assert secret not in caplog.text
+    assert config.url not in caplog.text
+    assert "ConnectionError" in caplog.text

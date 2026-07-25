@@ -99,6 +99,7 @@ class MockAdServer(AdServerAdapter):
     """
 
     adapter_name = "mock"
+    supports_media_buy_create_reconciliation = True
     supports_media_buy_update_reconciliation = True
 
     # Mock adapter supports all common channels for testing
@@ -111,6 +112,7 @@ class MockAdServer(AdServerAdapter):
         "notes": "Simulated delivery measurement for testing",
     }
     _media_buys: dict[str, dict[str, Any]] = {}
+    _mutation_results: dict[str, CreateMediaBuyResponse | UpdateMediaBuyResponse] = {}
 
     # Schema and capabilities
     connection_config_class = MockConnectionConfig
@@ -762,7 +764,12 @@ class MockAdServer(AdServerAdapter):
         # Generate a unique media_buy_id
         import uuid
 
-        media_buy_id = f"buy_{request.po_number}" if request.po_number else f"buy_{uuid.uuid4().hex[:8]}"
+        prepared = self._downstream_mutation
+        media_buy_id = (
+            f"buy_{prepared.downstream_request_id[:16]}"
+            if prepared is not None and prepared.action == "create_media_buy"
+            else (f"buy_{request.po_number}" if request.po_number else f"buy_{uuid.uuid4().hex[:8]}")
+        )
 
         # Use tenant_id from adapter instance (set during construction)
         tenant_id = self.tenant_id or "unknown"
@@ -900,6 +907,12 @@ class MockAdServer(AdServerAdapter):
             self.log("    }")
             self.log("  }")
 
+        create_result = self._build_create_success(
+            request,
+            media_buy_id,
+            packages,
+            include_product_id=True,
+        )
         if not self.dry_run:
             self._media_buys[media_buy_id] = {
                 "id": media_buy_id,
@@ -911,7 +924,10 @@ class MockAdServer(AdServerAdapter):
                 "end_time": end_time,
                 "creatives": [],
                 "test_scenario": scenario.__dict__ if scenario else None,
+                "response": create_result,
             }
+            if prepared is not None:
+                self._mutation_results[prepared.downstream_request_id] = create_result
             self.log("✓ Media buy created successfully")
             self.log(f"  Campaign ID: {media_buy_id}")
             self.log(f"  Campaign Name: {order_name}")
@@ -930,12 +946,7 @@ class MockAdServer(AdServerAdapter):
             self.log(f"Would return: Campaign ID '{media_buy_id}' with status 'pending_creative'")
 
         self.log(f"[DEBUG] MockAdapter: Returning {len(packages)} packages in response")
-        return self._build_create_success(
-            request,
-            media_buy_id,
-            packages,
-            include_product_id=True,
-        )
+        return create_result
 
     def add_creative_assets(
         self, media_buy_id: str, assets: list[dict[str, Any]], today: datetime
@@ -1479,27 +1490,32 @@ class MockAdServer(AdServerAdapter):
                     media_package.package_config["budget"] = float(budget)
                     # Flag the JSON field as modified so SQLAlchemy persists it
                     attributes.flag_modified(media_package, "package_config")
-                    session.commit()
                     logger.info(f"[MockAdapter] Updated package {package_id} budget to {budget} in database")
                 else:
                     logger.warning(f"[MockAdapter] Package {package_id} not found for media buy {media_buy_id}")
 
-        return UpdateMediaBuySuccess(
+        result = UpdateMediaBuySuccess(
             media_buy_id=media_buy_id,
             affected_packages=[],
             implementation_date=today,
         )
+        if self._downstream_mutation is not None:
+            self._mutation_results[self._downstream_mutation.downstream_request_id] = result
+        return result
+
+    def _reconcile_recorded_mutation(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        response = self._mutation_results.get(mutation.downstream_request_id)
+        if response is None:
+            return ReconciliationResult(ReconciliationOutcome.NOT_APPLIED)
+        return ReconciliationResult(ReconciliationOutcome.APPLIED, response)
+
+    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Reconcile the local mock by its exact deterministic request identifier."""
+        return self._reconcile_recorded_mutation(mutation)
 
     def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Reconcile the mock adapter's only persistent update from local state."""
-        from src.adapters.reconciliation import load_media_package_snapshots, reconcile_local_package_update
-
-        assert self.tenant_id is not None
-        result = reconcile_local_package_update(
-            mutation,
-            load_media_package_snapshots(self.tenant_id, mutation),
-        )
-        return result or ReconciliationResult(ReconciliationOutcome.NOT_APPLIED)
+        """Reconcile the local mock by its exact deterministic request identifier."""
+        return self._reconcile_recorded_mutation(mutation)
 
     def get_config_ui_endpoint(self) -> str | None:
         """Return the URL path for the mock adapter's configuration UI."""

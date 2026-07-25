@@ -206,7 +206,10 @@ def _get_media_buy_delivery_impl(
         principal, dry_run=testing_ctx.dry_run if testing_ctx else False, testing_context=testing_ctx, tenant=tenant
     )
 
-    # Determine reporting period
+    # Determine reporting period. When both dates are omitted, the pinned
+    # AdCP 3.1.1 request schema requires campaign-lifetime data; that range is
+    # derived after the selected buys are loaded below.
+    use_campaign_lifetime = not req.start_date and not req.end_date
     if req.start_date and req.end_date:
         # Use provided date range (make timezone-aware for AwareDatetime)
         start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").replace(tzinfo=UTC)
@@ -219,15 +222,17 @@ def _get_media_buy_delivery_impl(
                 suggestion="Set start_date to a date before end_date and resend.",
                 context=req.context,
             )
-    else:
+    elif not use_campaign_lifetime:
         # Default to last 30 days
         end_dt = datetime.now(UTC)
         start_dt = end_dt - timedelta(days=30)
-
-    reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
+    else:
+        end_dt = datetime.now(UTC)
+        start_dt = end_dt
 
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
+    status_reference_dt = end_dt
 
     # Determine which media buys to fetch from database
     # UoW scope encompasses all code that accesses MediaBuy ORM objects to prevent
@@ -238,6 +243,20 @@ def _get_media_buy_delivery_impl(
         repo = uow.media_buys
 
         target_media_buys = _get_target_media_buys(req, principal_id, repo, reference_date, testing_ctx)
+
+        if use_campaign_lifetime and target_media_buys:
+            campaign_starts = [
+                utc_flight_start(cast(date, buy.start_date))
+                for _, buy in target_media_buys
+                if buy.start_date is not None
+            ]
+            campaign_ends = [
+                utc_flight_end(cast(date, buy.end_date)) for _, buy in target_media_buys if buy.end_date is not None
+            ]
+            start_dt = min(campaign_starts) if campaign_starts else end_dt
+            end_dt = max(campaign_ends) if campaign_ends else end_dt
+
+        reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
 
         # Diff requested IDs vs found IDs to report missing ones (salesagent-mexj)
         not_found_errors: list[Error] = []
@@ -294,7 +313,7 @@ def _get_media_buy_delivery_impl(
                 # _simulation_clock is the SAME (clock, simulate) source the
                 # status_filter path uses, so the reported status can never
                 # contradict the filter that selected the buy.
-                simulation_datetime, simulate_time = _simulation_clock(buy, testing_ctx, end_dt)
+                simulation_datetime, simulate_time = _simulation_clock(buy, testing_ctx, status_reference_dt)
 
                 # Determine status from the persisted lifecycle column,
                 # date-refined only for serving states — the same single

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import NamedTuple, cast
 
@@ -57,6 +58,12 @@ class CreativeRepository:
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
+
+    def defer_until_after_commit(self, callback: Callable[[], None]) -> None:
+        """Register a non-database side effect on the owning transaction."""
+        from src.core.database.database_session import defer_until_after_commit
+
+        defer_until_after_commit(self._session, callback)
 
     # ------------------------------------------------------------------
     # Single Creative lookups

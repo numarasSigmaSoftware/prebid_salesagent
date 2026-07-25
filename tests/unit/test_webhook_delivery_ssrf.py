@@ -28,6 +28,11 @@ def _queue_target(
         {
             "config": PushNotificationTarget(
                 url="https://buyer.example/webhook",
+                media_buy_id="mb-1",
+                operation_id="operation-1",
+                token=None,
+                application_context=None,
+                sequence_number=1,
                 authentication_type=None,
                 authentication_token=None,
                 webhook_secret=secret,
@@ -134,9 +139,9 @@ def test_hmac_covers_the_exact_transmitted_body_bytes():
     )
     body = post.call_args.kwargs["body"]
     headers = post.call_args.kwargs["headers"]
-    signed = headers["X-ADCP-Timestamp"].encode() + b"." + body
+    signed = headers["X-AdCP-Timestamp"].encode() + b"." + body
     expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-    assert headers["X-ADCP-Signature"] == expected
+    assert headers["X-AdCP-Signature"] == f"sha256={expected}"
 
 
 def test_post_helper_transmits_exact_body_and_closes_response():

@@ -11,7 +11,7 @@ from tests.integration.migration_helpers import run_alembic_downgrade, run_alemb
 
 PRE_RESERVATION_REV = "823974a5553e"
 RESERVATION_REV = "f3a1c92b47de"
-COMPLETE_GUARANTEES_REV = "a4d7e8c91f20"
+COMPLETE_GUARANTEES_REV = "b5c8f1d20a37"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -30,6 +30,24 @@ def _seed_scope_and_attempts(engine) -> None:
                 "(principal_id, tenant_id, name, platform_mappings, access_token, created_at) "
                 "VALUES ('idem_migration_p', 'idem_migration_t', 'Principal', '{}', "
                 "'idem_migration_token', NOW())"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO media_buys "
+                "(media_buy_id, tenant_id, principal_id, order_name, advertiser_name, "
+                "start_date, end_date, status, raw_request) "
+                "VALUES ('idem-migration-buy', 'idem_migration_t', 'idem_migration_p', "
+                "'Migration Order', 'Migration Advertiser', CURRENT_DATE, "
+                "CURRENT_DATE + 1, 'active', '{}')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO push_notification_configs "
+                "(id, tenant_id, principal_id, url, is_active) "
+                "VALUES ('idem-migration-callback', 'idem_migration_t', "
+                "'idem_migration_p', 'https://buyer.example/callback', TRUE)"
             )
         )
         for attempt_id, status, response in (
@@ -68,6 +86,33 @@ def test_upgrade_downgrade_upgrade_preserves_documented_state(migration_db) -> N
             ).scalar_one()
             == "write"
         )
+        assert (
+            conn.execute(text("SELECT revision FROM media_buys WHERE media_buy_id='idem-migration-buy'")).scalar_one()
+            == 1
+        )
+        callback = conn.execute(
+            text(
+                "SELECT media_buy_id, operation_id, token, application_context, "
+                "last_event_key, last_event_sequence "
+                "FROM push_notification_configs WHERE id='idem-migration-callback'"
+            )
+        ).one()
+        assert callback.media_buy_id is None
+        assert callback.operation_id is None
+        assert callback.token is None
+        assert callback.application_context is None
+        assert callback.last_event_key is None
+        assert callback.last_event_sequence == 0
+        conn.execute(
+            text(
+                "UPDATE push_notification_configs SET "
+                "media_buy_id='idem-migration-buy', operation_id='create-op', "
+                "token='callback-token', application_context=CAST(:context AS jsonb), "
+                "last_event_key='event-1', last_event_sequence=1 "
+                "WHERE id='idem-migration-callback'"
+            ),
+            {"context": json.dumps({"trace_id": "migration-trace"})},
+        )
         conn.execute(
             text(
                 "INSERT INTO idempotency_attempts "
@@ -92,6 +137,54 @@ def test_upgrade_downgrade_upgrade_preserves_documented_state(migration_db) -> N
             ),
             {"result": json.dumps({"response": {"media_buy_id": "mb-1"}})},
         )
+        anonymous = conn.execute(
+            text(
+                "SELECT principal_id, operation_class, response_envelope "
+                "FROM idempotency_attempts WHERE attempt_id='anonymous-read'"
+            )
+        ).one()
+        assert anonymous.principal_id is None
+        assert anonymous.operation_class == "read"
+        assert anonymous.response_envelope["response"] == {"products": []}
+        claim = conn.execute(
+            text(
+                "SELECT status, downstream_request_id, request_hash, result_metadata "
+                "FROM downstream_mutation_claims WHERE claim_id='claim-1'"
+            )
+        ).one()
+        assert claim.status == "applied"
+        assert claim.downstream_request_id == "downstream-request"
+        assert claim.request_hash == "claim-hash"
+        assert claim.result_metadata == {"response": {"media_buy_id": "mb-1"}}
+
+    columns = {column["name"]: column for column in inspect(engine).get_columns("downstream_mutation_claims")}
+    assert str(columns["result_metadata"]["type"]) == "JSONB"
+    task_columns = {column["name"]: column for column in inspect(engine).get_columns("a2a_tasks")}
+    assert str(task_columns["task_payload"]["type"]) == "JSONB"
+    notification_columns = {
+        column["name"]: column for column in inspect(engine).get_columns("a2a_task_notification_events")
+    }
+    assert str(notification_columns["task_payload"]["type"]) == "JSONB"
+    workflow_notification_columns = {
+        column["name"]: column for column in inspect(engine).get_columns("workflow_notification_events")
+    }
+    assert str(workflow_notification_columns["response_data"]["type"]) == "JSONB"
+    webhook_log_columns = {column["name"]: column for column in inspect(engine).get_columns("webhook_delivery_log")}
+    assert str(webhook_log_columns["event_payload"]["type"]) == "JSONB"
+    assert "uq_a2a_tasks_workflow_step" in {index["name"] for index in inspect(engine).get_indexes("a2a_tasks")}
+    callback_columns = {column["name"]: column for column in inspect(engine).get_columns("push_notification_configs")}
+    assert str(callback_columns["application_context"]["type"]) == "JSONB"
+    workflow_columns = {column["name"] for column in inspect(engine).get_columns("workflow_steps")}
+    assert {
+        "processing_started_at",
+        "notifications_published_at",
+        "notification_claimed_at",
+        "notification_claim_token",
+        "notification_sequence",
+    } <= workflow_columns
+    assert "idx_push_notification_configs_media_buy" in {
+        index["name"] for index in inspect(engine).get_indexes("push_notification_configs")
+    }
 
     run_alembic_downgrade(db_url, PRE_RESERVATION_REV)
     with engine.connect() as conn:
@@ -114,6 +207,30 @@ def test_upgrade_downgrade_upgrade_preserves_documented_state(migration_db) -> N
             == 0
         )
     assert "downstream_mutation_claims" not in inspect(engine).get_table_names()
+    assert "a2a_tasks" not in inspect(engine).get_table_names()
+    assert "a2a_task_notification_events" not in inspect(engine).get_table_names()
+    assert "workflow_notification_events" not in inspect(engine).get_table_names()
+    assert "event_payload" not in {column["name"] for column in inspect(engine).get_columns("webhook_delivery_log")}
+    assert "revision" not in {column["name"] for column in inspect(engine).get_columns("media_buys")}
+    downgraded_workflow_columns = {column["name"] for column in inspect(engine).get_columns("workflow_steps")}
+    assert {
+        "processing_started_at",
+        "notifications_published_at",
+        "notification_claimed_at",
+        "notification_claim_token",
+        "notification_sequence",
+    }.isdisjoint(downgraded_workflow_columns)
+    downgraded_callback_columns = {
+        column["name"] for column in inspect(engine).get_columns("push_notification_configs")
+    }
+    assert {
+        "media_buy_id",
+        "operation_id",
+        "token",
+        "application_context",
+        "last_event_key",
+        "last_event_sequence",
+    }.isdisjoint(downgraded_callback_columns)
 
     run_alembic_upgrade(db_url, COMPLETE_GUARANTEES_REV)
     with engine.connect() as conn:
@@ -126,4 +243,23 @@ def test_upgrade_downgrade_upgrade_preserves_documented_state(migration_db) -> N
         assert row.status == "completed"
         assert row.operation_class == "write"
         assert row.response_envelope["response"] == {"ok": True}
+        assert (
+            conn.execute(text("SELECT revision FROM media_buys WHERE media_buy_id='idem-migration-buy'")).scalar_one()
+            == 1
+        )
+        callback = conn.execute(
+            text(
+                "SELECT media_buy_id, operation_id, token, application_context, "
+                "last_event_key, last_event_sequence "
+                "FROM push_notification_configs WHERE id='idem-migration-callback'"
+            )
+        ).one()
+        assert callback.media_buy_id is None
+        assert callback.operation_id is None
+        assert callback.token is None
+        assert callback.application_context is None
+        assert callback.last_event_key is None
+        assert callback.last_event_sequence == 0
     assert "downstream_mutation_claims" in inspect(engine).get_table_names()
+    assert "a2a_tasks" in inspect(engine).get_table_names()
+    assert "event_payload" in {column["name"] for column in inspect(engine).get_columns("webhook_delivery_log")}

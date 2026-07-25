@@ -35,6 +35,7 @@ from adcp.types import Format as LibraryFormat
 
 # Import types from stable API (per adcp 2.7.0+)
 from adcp.types import FormatId as LibraryFormatId
+from adcp.types import GetAdcpCapabilitiesResponse as LibraryGetAdcpCapabilitiesResponse
 from adcp.types import PackageRequest as LibraryPackageRequest
 
 # Import types from stable API (per adcp 2.9.0+ - all types now in stable)
@@ -257,6 +258,16 @@ class SalesAgentBaseModel(LibraryAdCPBaseModel):
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+
+class ReplayableResponseMixin:
+    """Typed, true-only replay metadata shared by idempotent read responses."""
+
+    replayed: bool = Field(default=False, exclude_if=lambda value: not value)
+
+
+class GetAdcpCapabilitiesResponse(ReplayableResponseMixin, LibraryGetAdcpCapabilitiesResponse):
+    """Extends the library capabilities response with standard replay metadata."""
 
 
 def _mirror_media_buy_status(model: Any) -> Any:
@@ -548,8 +559,8 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     # adcp 6.6 (spec 3.1.1) made status/revision required on the update success envelope.
     # Invariant for a synchronous applied update, so declare spec-correct defaults here
     # rather than threading identical literals through every constructor (see the twin
-    # note on CreateMediaBuySuccess). revision defaults to 1; real per-buy revision
-    # tracking is separate media-buy lifecycle work.
+    # note on CreateMediaBuySuccess). The update implementation replaces the
+    # default with the atomically incremented persisted media-buy revision.
     status: Literal["completed"] = "completed"
     revision: int = 1
 
@@ -1986,18 +1997,13 @@ RawOptionalIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pyd
     ),
 ]
 
-# ``revision`` is intentionally unsupported by this seller until optimistic
-# concurrency can be honored atomically.  Keep the raw wire value (including
-# explicit JSON null) intact until the shared update boundary can reject every
-# supplied value with the same fail-loud error.  ``SkipValidation`` does not
-# weaken discovery: MCP/OpenAPI still advertise the pinned integer/minimum-one
-# input shape, never null.
+# Preserve the raw wire value (including explicit JSON null) until the shared
+# update boundary can classify it consistently across MCP, A2A (whose Struct
+# decoder represents JSON integers as floats), and REST.
 RawUnsupportedRevision: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic need runtime Annotated metadata
     SkipValidation[int],
     Field(
-        description="Optimistic-concurrency revision. Not supported by this seller; rejected if supplied.",
-        # Discovery constraint only. Runtime values deliberately stay raw so
-        # explicit null and wrong types reach the shared unsupported guard.
+        description="Current media-buy revision used as an optimistic-concurrency precondition.",
         json_schema_extra={"minimum": 1},
     ),
 ]
@@ -2840,7 +2846,7 @@ class GetMediaBuysRequest(SalesAgentBaseModel):
     context: ContextObject | None = Field(default=None, description="Application-level context")
 
 
-class GetMediaBuysResponse(NestedModelSerializerMixin, SalesAgentBaseModel):
+class GetMediaBuysResponse(ReplayableResponseMixin, NestedModelSerializerMixin, SalesAgentBaseModel):
     """Response from get_media_buys.
 
     Matches the adcp 3.6.0 GetMediaBuysResponse spec.

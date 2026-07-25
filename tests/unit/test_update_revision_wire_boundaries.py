@@ -67,15 +67,9 @@ async def test_mcp_omitted_revision_reaches_impl(boundary: _BoundaryHarness) -> 
 
 
 @pytest.mark.asyncio
-async def test_mcp_valid_revision_is_rejected_as_unsupported_feature(boundary: _BoundaryHarness) -> None:
-    """A SCHEMA-VALID revision names an unimplemented field — UNSUPPORTED_FEATURE, not INVALID_REQUEST.
-
-    Per the pinned 3.1.1 enum descriptions: a valid ``revision: 5`` violates no
-    schema constraint (INVALID_REQUEST's definition) and is verbatim
-    UNSUPPORTED_FEATURE's ("a requested feature or field is not supported by
-    this seller"). Schema-invalid spellings (null / 0) keep INVALID_REQUEST —
-    pinned by the sibling tests below.
-    """
+async def test_mcp_valid_revision_reaches_impl(boundary: _BoundaryHarness) -> None:
+    """A schema-valid revision reaches the atomic implementation."""
+    boundary.impl.return_value = _success_result()
     async with Client(mcp) as client:
         result = await client.call_tool(
             "update_media_buy",
@@ -83,15 +77,13 @@ async def test_mcp_valid_revision_is_rejected_as_unsupported_feature(boundary: _
             raise_on_error=False,
         )
 
-    assert result.is_error
-    envelope = json.loads(result.content[0].text)
-    assert_envelope_shape(
-        envelope,
-        "UNSUPPORTED_FEATURE",
-        recovery="correctable",
-        message_substr="does not support optimistic-concurrency control",
+    assert not result.is_error, result.content
+    boundary.impl.assert_called_once_with(
+        req=UpdateMediaBuyRequest(**{**_VALID_REQUEST, "revision": 5}),
+        identity=_IDENTITY,
+        context_id=None,
+        raw_wire_payload={**_VALID_REQUEST, "revision": 5},
     )
-    boundary.impl.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -171,12 +163,9 @@ def test_rest_explicit_null_revision_is_invalid_request(boundary: _BoundaryHarne
     boundary.impl.assert_not_called()
 
 
-def test_rest_valid_revision_is_rejected_as_unsupported_feature(boundary: _BoundaryHarness) -> None:
-    """REST parity with MCP: a schema-valid positive-integer revision is UNSUPPORTED_FEATURE.
-
-    The prior suite covered only null + omitted on REST; this pins the
-    supplied-value path (the transport that floats/ints does not diverge).
-    """
+def test_rest_valid_revision_reaches_impl(boundary: _BoundaryHarness) -> None:
+    """REST forwards a valid optimistic-concurrency precondition."""
+    boundary.impl.return_value = _success_result()
     body = {key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"}
     body["revision"] = 5
     client = TestClient(app, raise_server_exceptions=False)
@@ -189,14 +178,17 @@ def test_rest_valid_revision_is_rejected_as_unsupported_feature(boundary: _Bound
     finally:
         client.close()
 
-    assert response.status_code == 422, response.text
-    assert_envelope_shape(
-        response.json(),
-        "UNSUPPORTED_FEATURE",
-        recovery="correctable",
-        message_substr="does not support optimistic-concurrency control",
+    assert response.status_code == 200, response.text
+    boundary.impl.assert_called_once_with(
+        req=UpdateMediaBuyRequest(**{**_VALID_REQUEST, "revision": 5}),
+        identity=boundary.rest_identity,
+        context_id=None,
+        raw_wire_payload={
+            "paused": True,
+            "idempotency_key": "revision-boundary-key-0001",
+            "revision": 5,
+        },
     )
-    boundary.impl.assert_not_called()
 
 
 def test_rest_below_minimum_revision_is_invalid_request(boundary: _BoundaryHarness) -> None:

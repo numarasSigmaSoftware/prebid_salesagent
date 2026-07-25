@@ -10,6 +10,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import WebhookDeliveryLog
 from src.core.schemas import GetMediaBuyDeliveryResponse
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+from src.services.webhook_event_identity import webhook_event_key
 from tests.integration.test_delivery_webhooks_integration import (
     _create_basic_media_buy_with_webhook,
     _create_test_tenant_and_principal,
@@ -98,7 +99,14 @@ async def test_force_trigger_delivery_webhook_bypasses_duplicate_check(integrati
                 tenant_id=tenant_id,
                 principal_id=principal_id,
                 media_buy_id=media_buy_id,
-                webhook_url="http://example.com",
+                webhook_url="https://example.com/webhook",
+                logical_event_key=webhook_event_key(
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    media_buy_id=media_buy_id,
+                    notification_type="scheduled",
+                    event_payload={"reporting_period": mock_response.reporting_period.model_dump(mode="json")},
+                ),
                 http_status_code=200,
                 created_at=datetime.now(UTC),
             )
@@ -126,8 +134,10 @@ async def test_force_trigger_delivery_webhook_bypasses_duplicate_check(integrati
             args, kwargs = mock_send.await_args
             payload = kwargs.get("payload")
             assert payload is not None
-            # Extract result from the McpWebhookPayload
-            assert payload.result["media_buy_deliveries"][0]["media_buy_id"] == media_buy_id
+            assert payload["task_type"] == "media_buy_delivery"
+            assert "aggregated_totals" not in payload["result"]
+            assert payload["result"]["sequence_number"] == kwargs["metadata"]["sequence_number"]
+            assert payload["result"]["media_buy_deliveries"][0]["media_buy_id"] == media_buy_id
 
 
 @pytest.mark.requires_db
@@ -141,8 +151,14 @@ async def test_trigger_report_for_media_buy_public_method(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    # Mock _send_report_for_media_buy to verify it receives force=True
-    with patch.object(scheduler, "_send_report_for_media_buy", new_callable=AsyncMock) as mock_send_internal:
+    calls = []
+
+    async def record_send(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True
+
+    # Record the internal call to verify force=True without a weak mock assertion.
+    with patch.object(scheduler, "_send_report_for_media_buy", side_effect=record_send):
         with get_db_session() as session:
             from src.core.database.models import MediaBuy
 
@@ -153,9 +169,11 @@ async def test_trigger_report_for_media_buy_public_method(integration_db):
 
             # 3. Verify result and call
             assert result is True
-            mock_send_internal.assert_called_once()
-            args, kwargs = mock_send_internal.call_args
-            assert kwargs.get("force") is True
+            assert len(calls) == 1
+            args, kwargs = calls[0]
+            assert args[0].media_buy_id == media_buy_id
+            assert args[1]["url"] == "https://example.com/webhook"
+            assert kwargs == {"force": True}
 
 
 @pytest.mark.requires_db

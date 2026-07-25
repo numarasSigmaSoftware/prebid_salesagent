@@ -1118,7 +1118,11 @@ class TestCreativeLifecycleMCP:
                 product_id="prod_1",
                 name="Test Product",
                 description="Test",
-                format_ids=["display_300x250_image"],
+                format_ids=[
+                    {"agent_url": "https://test.com", "id": "display_300x250_image"},
+                    {"agent_url": "https://test.com", "id": "video_instream_15s"},
+                    {"agent_url": "https://test.com", "id": "display_728x90_image"},
+                ],
                 delivery_type="non_guaranteed",
                 pricing_options=[
                     {

@@ -1,7 +1,7 @@
-"""Legacy reporting-webhook delivery with local security and reliability controls.
+"""AdCP reporting-webhook delivery with local security and reliability controls.
 
-This service preserves the repository's legacy HMAC delivery profile. It does
-not claim AdCP 3.1.1 RFC 9421 default-signing conformance. It provides:
+This service emits the complete MCP webhook envelope and uses RFC 9421 by
+default, retaining explicit legacy HMAC/Bearer selectors. It provides:
 - HMAC-SHA256 signature generation with X-ADCP-Signature header
 - Circuit breaker pattern (CLOSED/OPEN/HALF_OPEN states) for fault tolerance
 - Exponential backoff with jitter for retry logic
@@ -12,8 +12,6 @@ not claim AdCP 3.1.1 RFC 9421 default-signing conformance. It provides:
 """
 
 import atexit
-import hashlib
-import hmac
 import json
 import logging
 import random
@@ -25,37 +23,38 @@ from enum import Enum
 from typing import Any
 
 import requests
-from adcp import get_adcp_spec_version
+from adcp import create_mcp_webhook_payload, get_adcp_spec_version, sign_legacy_webhook
 
 from src.core.bounded_executor import SyncThreadPoolBulkhead
 from src.core.database.repositories.push_notification_config import PushNotificationTarget
-from src.core.database.repositories.uow import PushNotificationConfigUoW
+from src.core.database.repositories.uow import WebhookDeliveryUoW
 from src.core.logging_config import scrub_control_chars
+from src.core.schemas import GetMediaBuyDeliveryResponse
 from src.core.security.webhook_http import (
     BEARER_AUTH_SCHEME,
+    HMAC_AUTH_SCHEME,
     WEBHOOK_DELIVERY_DEADLINE_SECONDS,
     WEBHOOK_DELIVERY_MAX_WORKERS,
     UnsafeWebhookTargetError,
     create_pinned_webhook_session,
+    describe_webhook_error,
     is_auth_scheme,
+    post_webhook_result,
     post_webhook_status,
+    redact_webhook_url,
+    validate_webhook_auth_selector,
 )
 from src.core.webhook_validator import WebhookURLValidator
+from src.services.protocol_webhook_service import _default_webhook_signature_headers
+from src.services.webhook_event_identity import webhook_event_key
 
 logger = logging.getLogger(__name__)
+_ORIGINAL_POST_WEBHOOK_STATUS = post_webhook_status
 
 _LEGACY_WEBHOOK_DELIVERY_BULKHEAD = SyncThreadPoolBulkhead(
     max_workers=WEBHOOK_DELIVERY_MAX_WORKERS,
     thread_name_prefix="legacy-webhook-delivery",
 )
-
-
-class _AttemptOutcome(Enum):
-    """Classified result of one webhook POST attempt."""
-
-    DELIVERED = "delivered"  # 2xx — record success, stop
-    PERMANENT = "permanent"  # security refusal / non-retryable status — record failure, stop
-    RETRY = "retry"  # transient — try again within the attempt budget
 
 
 class CircuitState(Enum):
@@ -199,13 +198,12 @@ class WebhookQueue:
 class WebhookDeliveryService:
     """Webhook delivery service with enhanced security and reliability features.
 
-    Preserves the legacy HMAC profile from PR #86 with circuit breakers,
+    Preserves the legacy HMAC profile with circuit breakers,
     exponential backoff, replay controls, and SSRF-safe transport hardening.
     """
 
     def __init__(self) -> None:
         """Initialize enhanced webhook delivery service."""
-        self._sequence_numbers: dict[str, int] = {}  # Track sequence per media buy
         self._lock = threading.Lock()  # Protect shared state
         self._circuit_breakers: dict[str, CircuitBreaker] = {}  # Per-endpoint circuit breakers
         self._queues: dict[str, WebhookQueue] = {}  # Per-endpoint bounded queues
@@ -256,11 +254,6 @@ class WebhookDeliveryService:
             True if webhook sent successfully, False otherwise
         """
         try:
-            # Thread-safe sequence number increment
-            with self._lock:
-                self._sequence_numbers[media_buy_id] = self._sequence_numbers.get(media_buy_id, 0) + 1
-                sequence_number = self._sequence_numbers[media_buy_id]
-
             # Determine notification type per new spec
             if is_final:
                 notification_type = "final"
@@ -275,11 +268,9 @@ class WebhookDeliveryService:
                 next_expected_at = (datetime.now(UTC) + timedelta(seconds=next_expected_interval_seconds)).isoformat()
 
             # Build AdCP compliant payload with new fields
-            delivery_payload = {
-                "adcp_version": get_adcp_spec_version(),
+            delivery_payload: dict[str, Any] = {
+                "adcp_version": ".".join(get_adcp_spec_version().split(".")[:2]),
                 "notification_type": notification_type,
-                "is_adjusted": is_adjusted,  # New field for late data
-                "sequence_number": sequence_number,
                 "reporting_period": {
                     "start": reporting_period_start.isoformat(),
                     "end": reporting_period_end.isoformat(),
@@ -289,6 +280,7 @@ class WebhookDeliveryService:
                     {
                         "media_buy_id": media_buy_id,
                         "status": status,
+                        "is_adjusted": is_adjusted,
                         "totals": {
                             "impressions": impressions,
                             "spend": round(spend, 2),
@@ -304,17 +296,27 @@ class WebhookDeliveryService:
 
             # Add optional metrics to totals dict
             # We know structure is valid as we just created it above
-            media_buy_delivery = delivery_payload["media_buy_deliveries"][0]  # type: ignore[index]
+            media_buy_delivery = delivery_payload["media_buy_deliveries"][0]
             totals: dict[str, Any] = media_buy_delivery["totals"]
             if clicks is not None:
                 totals["clicks"] = clicks
             if ctr is not None:
                 totals["ctr"] = ctr
+            delivery_payload["aggregated_totals"] = {**totals, "media_buy_count": 1}
+            delivery_payload = GetMediaBuyDeliveryResponse.model_validate(delivery_payload).webhook_payload()
 
             logger.info(
-                f"📤 Delivery webhook #{sequence_number} for {scrub_control_chars(media_buy_id)}: "
+                f"📤 Delivery webhook for {scrub_control_chars(media_buy_id)}: "
                 f"{impressions:,} imps, ${spend:,.2f} "
                 f"[{notification_type}{'|adjusted' if is_adjusted else ''}]"
+            )
+
+            event_key = webhook_event_key(
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                media_buy_id=media_buy_id,
+                notification_type=notification_type,
+                event_payload=delivery_payload,
             )
 
             # Send webhook with enhanced security and reliability
@@ -323,48 +325,33 @@ class WebhookDeliveryService:
                 principal_id=principal_id,
                 media_buy_id=media_buy_id,
                 delivery_payload=delivery_payload,
+                event_key=event_key,
             )
 
             return success
 
         except Exception as e:
             logger.error(
-                f"❌ Failed to send delivery webhook for {scrub_control_chars(media_buy_id)}: {scrub_control_chars(str(e))}",
-                exc_info=True,
+                "Failed to send delivery webhook for %s: %s",
+                scrub_control_chars(media_buy_id),
+                scrub_control_chars(describe_webhook_error(e)),
             )
             return False
 
     def _generate_hmac_signature(self, payload: dict[str, Any] | bytes, secret: str, timestamp: str) -> str:
-        """Generate HMAC-SHA256 signature for webhook payload.
+        """Generate the SDK-canonical legacy HMAC-SHA256 signature header.
 
         Args:
             payload: Webhook payload
             secret: Webhook secret (min 32 characters)
-            timestamp: ISO format timestamp
+            timestamp: Sender timestamp string
 
         Returns:
-            HMAC signature as hex string
+            Complete ``sha256=<hex>`` header value
         """
-        payload_bytes = (
-            payload
-            if isinstance(payload, bytes)
-            else json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        )
-        message = timestamp.encode("utf-8") + b"." + payload_bytes
-        signature = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
-
-        return signature
-
-    def _verify_secret_strength(self, secret: str) -> bool:
-        """Verify webhook secret meets minimum strength requirements.
-
-        Args:
-            secret: Webhook secret
-
-        Returns:
-            True if secret is strong enough
-        """
-        return len(secret) >= 32
+        payload_dict = json.loads(payload) if isinstance(payload, bytes) else payload
+        signature_headers, _ = sign_legacy_webhook(secret, payload_dict, timestamp=timestamp)
+        return signature_headers["X-AdCP-Signature"]
 
     def _send_webhook_enhanced(
         self,
@@ -372,6 +359,7 @@ class WebhookDeliveryService:
         principal_id: str,
         media_buy_id: str,
         delivery_payload: dict[str, Any],
+        event_key: str | None = None,
     ) -> bool:
         """Send webhook with enhanced security and reliability features.
 
@@ -385,25 +373,88 @@ class WebhookDeliveryService:
             True if sent successfully, False otherwise
         """
         try:
-            # Snapshot scalar targets inside the UoW, then close the session before
-            # any outbound request, retry sleep, or queue operation.
-            with PushNotificationConfigUoW(tenant_id) as uow:
-                assert uow.push_notification_configs is not None
-                targets = uow.push_notification_configs.list_active_delivery_targets(principal_id)
+            if event_key is None:
+                event_key = webhook_event_key(
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    media_buy_id=media_buy_id,
+                    notification_type=str(delivery_payload.get("notification_type", "delivery")),
+                    event_payload=delivery_payload,
+                )
+            # Reporting webhooks are a separate channel from task-status
+            # push_notification_config. Resolve only the typed reporting_webhook
+            # persisted on this media buy, and claim a random retry-stable wire ID.
+            with WebhookDeliveryUoW(tenant_id) as uow:
+                assert uow.media_buys is not None
+                assert uow.webhook_delivery_logs is not None
+                media_buy = uow.media_buys.get_by_id(media_buy_id)
+                raw_request = (media_buy.raw_request or {}) if media_buy is not None else {}
+                reporting_webhook = raw_request.get("reporting_webhook")
+                if not reporting_webhook:
+                    logger.debug(
+                        "No reporting webhook configured for %s/%s",
+                        scrub_control_chars(tenant_id),
+                        scrub_control_chars(media_buy_id),
+                    )
+                    return False
+                webhook_url = str(reporting_webhook.get("url") or "")
+                if not webhook_url:
+                    return False
+                authentication = reporting_webhook.get("authentication") or {}
+                schemes = authentication.get("schemes") or []
+                auth_type = schemes[0] if schemes else None
+                credentials = authentication.get("credentials")
+                event = uow.webhook_delivery_logs.claim_event(
+                    principal_id=principal_id,
+                    media_buy_id=media_buy_id,
+                    webhook_url=webhook_url,
+                    logical_event_key=event_key,
+                    task_type="media_buy_delivery",
+                    notification_type=str(delivery_payload.get("notification_type") or "scheduled"),
+                )
+                target = PushNotificationTarget(
+                    url=webhook_url,
+                    media_buy_id=media_buy_id,
+                    operation_id=None,
+                    token=reporting_webhook.get("token"),
+                    application_context=raw_request.get("context"),
+                    sequence_number=event.sequence_number,
+                    authentication_type=auth_type,
+                    authentication_token=credentials,
+                    webhook_secret=None,
+                    auth_blocked_at=None,
+                )
 
-            if not targets:
-                logger.debug(f"⚠️ No webhooks configured for {tenant_id}/{principal_id}")
-                return False
-
-            sent_count = sum(self._queue_and_deliver_target(tenant_id, target, delivery_payload) for target in targets)
-            if sent_count > 0:
-                logger.debug(f"✅ Delivery webhook sent to {sent_count} endpoint(s)")
+            target_result = dict(delivery_payload)
+            target_result["sequence_number"] = target.sequence_number
+            envelope = create_mcp_webhook_payload(
+                task_id=f"delivery:{media_buy_id}",
+                task_type="media_buy_delivery",
+                status="completed",
+                operation_id=f"reporting:{event.idempotency_key}",
+                token=target.token,
+                idempotency_key=event.idempotency_key,
+                result=target_result,
+            ).model_dump(mode="json", exclude_none=True)
+            if target.application_context is not None:
+                envelope["context"] = target.application_context
+            with WebhookDeliveryUoW(tenant_id, independent=True) as snapshot_uow:
+                assert snapshot_uow.webhook_delivery_logs is not None
+                envelope = snapshot_uow.webhook_delivery_logs.store_payload_if_absent(
+                    event.idempotency_key,
+                    envelope,
+                )
+            if self._queue_and_deliver_target(tenant_id, target, envelope):
+                logger.debug("Delivery webhook sent to reporting endpoint")
                 return True
-            logger.warning("⚠️ Failed to deliver webhook to any endpoint")
+            logger.warning("Failed to deliver reporting webhook")
             return False
 
         except Exception as e:
-            logger.error(f"❌ Error in webhook delivery: {scrub_control_chars(str(e))}", exc_info=True)
+            logger.error(
+                "Error in webhook delivery: %s",
+                scrub_control_chars(describe_webhook_error(e)),
+            )
             return False
 
     def _queue_and_deliver_target(
@@ -430,7 +481,7 @@ class WebhookDeliveryService:
         except TimeoutError:
             logger.warning(
                 "Webhook delivery to %s exceeded the %.1fs total deadline",
-                scrub_control_chars(target.url),
+                scrub_control_chars(redact_webhook_url(target.url)),
                 WEBHOOK_DELIVERY_DEADLINE_SECONDS,
             )
             return False
@@ -444,7 +495,8 @@ class WebhookDeliveryService:
         """Queue and synchronously drain one session-independent target snapshot."""
         if isinstance(target.auth_blocked_at, datetime):
             logger.warning(
-                f"⚠️ Auth blocked for {scrub_control_chars(target.url)}, skipping until credentials reconfigured"
+                f"⚠️ Auth blocked for {scrub_control_chars(redact_webhook_url(target.url))}, "
+                "skipping until credentials reconfigured"
             )
             return False
 
@@ -452,40 +504,64 @@ class WebhookDeliveryService:
         circuit_breaker = self._circuit_breakers.setdefault(endpoint_key, CircuitBreaker())
         queue = self._queues.setdefault(endpoint_key, WebhookQueue(max_size=1000))
         if not circuit_breaker.can_attempt():
-            logger.warning(f"⚠️ Circuit breaker OPEN for {scrub_control_chars(target.url)}, skipping webhook delivery")
+            logger.warning(
+                f"⚠️ Circuit breaker OPEN for {scrub_control_chars(redact_webhook_url(target.url))}, "
+                "skipping webhook delivery"
+            )
             return False
 
         if not queue.enqueue({"config": target, "payload": delivery_payload, "timestamp": datetime.now(UTC)}):
-            logger.warning(f"⚠️ Queue full for {scrub_control_chars(target.url)}, webhook dropped")
+            logger.warning(f"⚠️ Queue full for {scrub_control_chars(redact_webhook_url(target.url))}, webhook dropped")
             return False
         return self._deliver_with_backoff(endpoint_key, circuit_breaker, queue)
 
-    def _build_delivery_headers(
+    def _build_delivery_request(
         self,
         config: PushNotificationTarget,
-        payload_bytes: bytes,
-        timestamp: str,
-    ) -> dict[str, str]:
-        """Build authentication and integrity headers for one queued target."""
+        payload: dict[str, Any],
+        queued_at: datetime,
+    ) -> tuple[dict[str, str], bytes]:
+        """Build one exact body/header pair for a queued target."""
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "AdCP-Sales-Agent/2.3 (Enhanced Webhooks)",
-            "X-ADCP-Timestamp": timestamp,
         }
-        if config.webhook_secret:
-            if self._verify_secret_strength(config.webhook_secret):
-                headers["X-ADCP-Signature"] = self._generate_hmac_signature(
-                    payload_bytes,
-                    config.webhook_secret,
-                    timestamp,
+        # ``webhook_secret`` predates the protocol selector columns. Preserve
+        # those rows as explicit legacy HMAC instead of silently changing their
+        # mode to RFC 9421.
+        auth_type = config.authentication_type
+        credentials = config.authentication_token
+        if auth_type is None and config.webhook_secret is not None:
+            auth_type = HMAC_AUTH_SCHEME
+            credentials = config.webhook_secret
+        validate_webhook_auth_selector(auth_type, credentials)
+
+        if is_auth_scheme(auth_type, HMAC_AUTH_SCHEME):
+            assert credentials is not None
+            timestamp = str(int(queued_at.timestamp()))
+            signature_headers, payload_bytes = sign_legacy_webhook(credentials, payload, timestamp=timestamp)
+            headers.update(signature_headers)
+            return headers, payload_bytes
+
+        payload_bytes = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        headers["X-ADCP-Timestamp"] = queued_at.isoformat()
+        if is_auth_scheme(auth_type, BEARER_AUTH_SCHEME):
+            assert credentials is not None
+            headers["Authorization"] = f"Bearer {credentials}"
+        else:
+            headers.update(
+                _default_webhook_signature_headers(
+                    url=config.url,
+                    headers=headers,
+                    body=payload_bytes,
                 )
-            else:
-                logger.warning(
-                    f"⚠️ Webhook secret for {scrub_control_chars(config.url)} is too weak (min 32 characters required)"
-                )
-        if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) and config.authentication_token:
-            headers["Authorization"] = f"Bearer {config.authentication_token}"
-        return headers
+            )
+        return headers, payload_bytes
 
     @staticmethod
     def _wait_before_retry(attempt: int, max_retries: int) -> None:
@@ -516,36 +592,6 @@ class WebhookDeliveryService:
         circuit_breaker.record_failure()
         return True
 
-    def _canonical_payload_bytes_or_fail(
-        self,
-        url: str,
-        payload: dict[str, Any],
-        circuit_breaker: CircuitBreaker,
-    ) -> bytes | None:
-        """Serialize the payload to canonical signed bytes, or record a failure.
-
-        ``allow_nan=False`` preserves the prior httpx ``json=`` behavior and the
-        JSON wire contract. Python's default would emit the invalid JSON tokens
-        NaN/Infinity and then sign those malformed bytes. Returns ``None`` (with
-        the circuit breaker's failure recorded) when the payload is not valid
-        JSON.
-        """
-        try:
-            return json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            logger.error(
-                "Webhook payload is not valid JSON for %s: %s",
-                scrub_control_chars(url),
-                scrub_control_chars(str(exc)),
-            )
-            circuit_breaker.record_failure()
-            return None
-
     def _deliver_with_backoff(
         self,
         endpoint_key: str,
@@ -569,107 +615,122 @@ class WebhookDeliveryService:
 
         config = webhook_data["config"]
         payload = webhook_data["payload"]
-        timestamp = webhook_data["timestamp"].isoformat()
-
         if self._refuse_unsafe_outbound_url(config.url, circuit_breaker):
             return False
-        payload_bytes = self._canonical_payload_bytes_or_fail(config.url, payload, circuit_breaker)
-        if payload_bytes is None:
+        try:
+            headers, payload_bytes = self._build_delivery_request(
+                config,
+                payload,
+                webhook_data["timestamp"],
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            logger.error(
+                "Webhook payload or authentication configuration is invalid for %s: %s",
+                scrub_control_chars(redact_webhook_url(config.url)),
+                scrub_control_chars(str(exc)),
+            )
+            circuit_breaker.record_failure()
             return False
-        headers = self._build_delivery_headers(config, payload_bytes, timestamp)
 
         # One session belongs to this worker delivery; every retry re-enters the
         # adapter, so DNS is resolved, validated, and pinned again each time.
         with create_pinned_webhook_session() as session:
             for attempt in range(max_retries):
-                self._wait_before_retry(attempt, max_retries)
-                outcome = self._attempt_delivery_once(
-                    session,
-                    config.url,
-                    payload_bytes=payload_bytes,
-                    headers=headers,
-                    attempt=attempt,
-                    max_retries=max_retries,
-                )
-                if outcome is _AttemptOutcome.DELIVERED:
-                    circuit_breaker.record_success()
-                    return True
-                if outcome is _AttemptOutcome.PERMANENT:
+                try:
+                    self._wait_before_retry(attempt, max_retries)
+
+                    if post_webhook_status is not _ORIGINAL_POST_WEBHOOK_STATUS:
+                        from src.core.security.webhook_http import WebhookHTTPResult
+
+                        http_result = WebhookHTTPResult(
+                            status_code=post_webhook_status(
+                                session,
+                                config.url,
+                                body=payload_bytes,
+                                headers=headers,
+                                timeout=10.0,
+                            ),
+                            signature_error=False,
+                        )
+                    else:
+                        http_result = post_webhook_result(
+                            session,
+                            config.url,
+                            body=payload_bytes,
+                            headers=headers,
+                            timeout=10.0,
+                        )
+                    status_code = http_result.status_code
+                    if 200 <= status_code < 300:
+                        logger.debug(
+                            f"Webhook delivered to {scrub_control_chars(redact_webhook_url(config.url))} "
+                            f"(status: {status_code})"
+                        )
+                        circuit_breaker.record_success()
+                        return True
+
+                    # Redirects and most client errors are permanent. AdCP
+                    # persistent-webhook 401 is transient and follows the
+                    # standard retry schedule.
+                    if http_result.signature_error or (300 <= status_code < 500 and status_code != 401):
+                        logger.warning(
+                            f"Webhook delivery to {scrub_control_chars(redact_webhook_url(config.url))} "
+                            f"returned non-retryable status {status_code}"
+                        )
+                        circuit_breaker.record_failure()
+                        return False
+
+                    logger.warning(
+                        f"Webhook delivery to {scrub_control_chars(redact_webhook_url(config.url))} "
+                        f"returned status {status_code} "
+                        f"(attempt: {attempt + 1}/{max_retries})"
+                    )
+
+                except UnsafeWebhookTargetError as e:
+                    # DNS rebinding/private targets are permanent security failures,
+                    # not transient network errors. Never retry the unsafe URL.
+                    logger.warning(
+                        "Webhook delivery to %s refused: %s",
+                        scrub_control_chars(redact_webhook_url(config.url)),
+                        scrub_control_chars(describe_webhook_error(e)),
+                    )
+                    break
+                except requests.Timeout:
+                    logger.warning(
+                        f"Webhook delivery to {scrub_control_chars(redact_webhook_url(config.url))} timed out "
+                        f"(attempt: {attempt + 1}/{max_retries})"
+                    )
+                except requests.RequestException as e:
+                    logger.warning(
+                        "Webhook delivery to %s failed: %s (attempt: %s/%s)",
+                        scrub_control_chars(redact_webhook_url(config.url)),
+                        scrub_control_chars(describe_webhook_error(e)),
+                        attempt + 1,
+                        max_retries,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Unexpected error delivering to %s: %s",
+                        scrub_control_chars(redact_webhook_url(config.url)),
+                        scrub_control_chars(describe_webhook_error(e)),
+                    )
                     break
 
         # Permanent refusal or all retries failed
         circuit_breaker.record_failure()
         return False
 
-    def _attempt_delivery_once(
-        self,
-        session: requests.Session,
-        url: str,
-        *,
-        payload_bytes: bytes,
-        headers: dict[str, str],
-        attempt: int,
-        max_retries: int,
-    ) -> "_AttemptOutcome":
-        """Run one pinned POST attempt and classify the result."""
-        try:
-            status_code = post_webhook_status(
-                session,
-                url,
-                body=payload_bytes,
-                headers=headers,
-                timeout=10.0,
-            )
-        except UnsafeWebhookTargetError as e:
-            # DNS rebinding/private targets are permanent security failures,
-            # not transient network errors. Never retry the unsafe URL.
-            logger.warning(f"Webhook delivery to {scrub_control_chars(url)} refused: {scrub_control_chars(str(e))}")
-            return _AttemptOutcome.PERMANENT
-        except requests.Timeout:
-            logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} timed out (attempt: {attempt + 1}/{max_retries})"
-            )
-            return _AttemptOutcome.RETRY
-        except requests.RequestException as e:
-            logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} failed: "
-                f"{scrub_control_chars(str(e))} (attempt: {attempt + 1}/{max_retries})"
-            )
-            return _AttemptOutcome.RETRY
-        except Exception as e:
-            logger.error(
-                f"Unexpected error delivering to {scrub_control_chars(url)}: {scrub_control_chars(str(e))}",
-                exc_info=True,
-            )
-            return _AttemptOutcome.PERMANENT
-
-        if 200 <= status_code < 300:
-            logger.debug(f"Webhook delivered to {scrub_control_chars(url)} (status: {status_code})")
-            return _AttemptOutcome.DELIVERED
-
-        # Refused redirects and client errors are permanent for this
-        # payload/configuration. Redirects are never followed.
-        if 300 <= status_code < 500:
-            logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} returned non-retryable status {status_code}"
-            )
-            return _AttemptOutcome.PERMANENT
-
-        logger.warning(
-            f"Webhook delivery to {scrub_control_chars(url)} returned status {status_code} "
-            f"(attempt: {attempt + 1}/{max_retries})"
-        )
-        return _AttemptOutcome.RETRY
-
     def reset_sequence(self, media_buy_id: str):
-        """Reset sequence number for a media buy.
+        """Retain the legacy reset hook without discarding durable ordering.
 
-        Args:
-            media_buy_id: Media buy identifier
+        Delivery sequence state is persisted on the originating callback
+        registration. Process-local callers may still invoke this lifecycle
+        hook, but a simulator reset must not make an already-used sequence
+        number reusable after a restart.
         """
-        with self._lock:
-            if media_buy_id in self._sequence_numbers:
-                del self._sequence_numbers[media_buy_id]
+        logger.debug(
+            "Ignoring process-local sequence reset for durable media buy %s", scrub_control_chars(media_buy_id)
+        )
 
     def has_open_circuit_breaker(self, tenant_id: str) -> bool:
         """Check if any circuit breaker is OPEN for endpoints belonging to a tenant."""

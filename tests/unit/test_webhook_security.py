@@ -14,7 +14,13 @@ from src.core.webhook_validator import (
     WebhookURLValidator,
     validate_webhook_task_type,
 )
-from tests.helpers.protocol_webhook import assert_protocol_webhook_post
+from tests.helpers.webhook_signing import webhook_signing_jwk_json
+
+
+@pytest.fixture(autouse=True)
+def _default_webhook_signing_key(monkeypatch):
+    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWK", webhook_signing_jwk_json())
+    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWKS_URI", "https://seller.example/.well-known/jwks.json")
 
 
 class TestValidateWebhookTaskType:
@@ -590,18 +596,17 @@ class TestPinnedOutboundClient:
             )
 
         assert delivered is False, "a 3xx response must be treated as a failed delivery"
-        assert_protocol_webhook_post(
-            mock_post,
-            url="https://buyer.example.com/webhook",
-            body=b'{"status":"completed"}',
-            host="buyer.example.com",
-        )
+        call = mock_post.call_args
+        assert call.args == ("https://buyer.example.com/webhook",)
+        assert call.kwargs["data"] == b'{"status":"completed"}'
+        assert call.kwargs["headers"]["Host"] == "buyer.example.com"
+        assert {"Signature", "Signature-Input", "Content-Digest"} <= call.kwargs["headers"].keys()
         mock_sleep.assert_not_awaited()
 
     def test_send_notification_does_not_retry_unsafe_target(self):
         """An SSRF/pinning policy refusal is permanent, not a network retry."""
         import asyncio
-        from unittest.mock import ANY, AsyncMock, patch
+        from unittest.mock import AsyncMock, patch
 
         from src.core.database.models import PushNotificationConfig
         from src.core.security.webhook_http import UnsafeWebhookTargetError
@@ -615,6 +620,7 @@ class TestPinnedOutboundClient:
             authentication_type=None,
             authentication_token=None,
         )
+        service = ProtocolWebhookService()
 
         with (
             patch(
@@ -625,20 +631,16 @@ class TestPinnedOutboundClient:
             patch("src.services.protocol_webhook_service.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             delivered = asyncio.run(
-                ProtocolWebhookService().send_notification(
-                    config, {"status": "completed"}, metadata={"task_type": "create_media_buy"}
-                )
+                service.send_notification(config, {"status": "completed"}, metadata={"task_type": "create_media_buy"})
             )
 
         assert delivered is False
-        mock_post.assert_awaited_once_with(
-            ANY,
-            "https://buyer.example.com/webhook",
-            body=b'{"status":"completed"}',
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "AdCP-Sales-Agent/1.0",
-            },
-            timeout=10.0,
-        )
+        mock_post.assert_awaited_once()
+        args = mock_post.await_args
+        assert args.args == (service._session, "https://buyer.example.com/webhook")
+        assert args.kwargs["body"] == b'{"status":"completed"}'
+        assert args.kwargs["timeout"] == 10.0
+        assert args.kwargs["headers"]["Content-Type"] == "application/json"
+        assert args.kwargs["headers"]["User-Agent"] == "AdCP-Sales-Agent/1.0"
+        assert {"Signature", "Signature-Input", "Content-Digest"} <= args.kwargs["headers"].keys()
         mock_sleep.assert_not_awaited()

@@ -80,17 +80,26 @@ async def test_read_replay_never_executes_work() -> None:
 
 
 def test_typed_read_replay_keeps_text_and_structured_content_identical() -> None:
-    original = ToolResult(structured_content={"products": [{"product_id": "p-1"}]})
+    original = ToolResult(
+        structured_content={
+            "products": [{"product_id": "p-1"}],
+            "context": {"correlation_id": "original"},
+        }
+    )
     replay = _decode_read_response(
         {"response": original.model_dump(mode="json")},
         ToolResult,
+        {"correlation_id": "retry"},
     )
 
     assert replay.structured_content == {
         "products": [{"product_id": "p-1"}],
+        "context": {"correlation_id": "retry"},
         "replayed": True,
     }
-    assert replay.content[0].text == '{"products":[{"product_id":"p-1"}],"replayed":true}'
+    assert replay.content[0].text == (
+        '{"products":[{"product_id":"p-1"}],"context":{"correlation_id":"retry"},"replayed":true}'
+    )
 
 
 def test_same_key_and_hash_cannot_be_reused_across_tools() -> None:

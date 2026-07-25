@@ -12,6 +12,7 @@ import pytest
 from src.core.exceptions import AdCPIdempotencyConflictError, build_two_layer_error_envelope
 from src.core.schemas.account import SyncAccountsRequest
 from tests.harness.account_sync import AccountSyncEnv
+from tests.harness.transport import Transport
 from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -135,3 +136,57 @@ def test_concurrent_same_key_executes_exactly_once(integration_db) -> None:
         with AccountUoW(tenant.tenant_id) as uow:
             assert uow.accounts is not None
             assert len(uow.accounts.list_by_principal(principal.principal_id)) == 1
+
+
+@pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+def test_sync_accounts_wire_retry_replays_without_second_upsert(integration_db, transport: Transport) -> None:
+    tenant_id = f"acct_wire_{transport.value}"
+    principal_id = f"agent_acct_wire_{transport.value}"
+    key = f"acct-wire-{transport.value}-{uuid.uuid4().hex}"
+
+    with AccountSyncEnv(tenant_id=tenant_id, principal_id=principal_id) as env:
+        env.setup_default_data()
+        first = env.call_via(
+            transport,
+            accounts=_accounts(),
+            idempotency_key=key,
+            context={"correlation_id": "original"},
+        )
+        second = env.call_via(
+            transport,
+            accounts=_accounts(),
+            idempotency_key=key,
+            context={"correlation_id": "retry"},
+        )
+
+    assert first.is_success, first.error
+    assert second.is_success, second.error
+    assert first.payload.replayed is False
+    assert second.payload.replayed is True
+    assert _action(first.payload.accounts[0].action) == "created"
+    assert _action(second.payload.accounts[0].action) == "created"
+    assert second.payload.context.model_dump(exclude_none=True) == {"correlation_id": "retry"}
+
+
+@pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+def test_sync_accounts_wire_conflict_has_exact_envelope(integration_db, transport: Transport) -> None:
+    tenant_id = f"acct_conflict_wire_{transport.value}"
+    principal_id = f"agent_acct_conflict_wire_{transport.value}"
+    key = f"acct-conflict-wire-{transport.value}-{uuid.uuid4().hex}"
+
+    with AccountSyncEnv(tenant_id=tenant_id, principal_id=principal_id) as env:
+        env.setup_default_data()
+        first = env.call_via(
+            transport,
+            accounts=_accounts("original.example.com"),
+            idempotency_key=key,
+        )
+        second = env.call_via(
+            transport,
+            accounts=_accounts("changed.example.com"),
+            idempotency_key=key,
+        )
+
+    assert first.is_success, first.error
+    assert second.is_error
+    assert_envelope_shape(second.wire_error_envelope, "IDEMPOTENCY_CONFLICT", recovery="correctable")

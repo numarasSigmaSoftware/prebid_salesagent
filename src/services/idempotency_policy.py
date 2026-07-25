@@ -87,6 +87,14 @@ def enforce_insert_ceiling(
     from src.core.exceptions import AdCPRateLimitError
 
     current = now or datetime.now(UTC)
+    # Serialize the scope until the surrounding reservation transaction
+    # commits. Without this lock, concurrent distinct keys can all observe
+    # limit-1 and exceed both ceilings.
+    attempts.lock_admission_scope(
+        principal_id=principal_id,
+        account_id=account_id,
+        operation_class=operation_class,
+    )
 
     # Insert-rate bound: rows CREATED inside the trailing window, expired or not.
     default_active, default_inserts, rate_window = _operation_limits(operation_class)

@@ -2,9 +2,25 @@
 
 from unittest.mock import Mock, call, patch
 
+import pytest
 import requests
 
 from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retry
+
+
+@pytest.fixture(autouse=True)
+def _valid_public_webhook(monkeypatch):
+    """Keep retry tests focused on delivery after the SSRF gate succeeds."""
+
+    def validate(url):
+        if not url.startswith("https://") or "localhost" in url:
+            return False, "URL is not a permitted public HTTPS endpoint"
+        return True, None
+
+    monkeypatch.setattr(
+        "src.core.webhook_delivery.WebhookURLValidator.validate_webhook_url",
+        validate,
+    )
 
 
 @patch("src.core.webhook_delivery.time.sleep")
@@ -34,6 +50,34 @@ class TestWebhookDelivery:
             assert result["response_code"] == 200
             assert "delivery_id" in result
             assert mock_post.call_count == 1
+
+    def test_signature_specific_401_is_terminal(self, mock_sleep):
+        """Signature taxonomy failures are not blindly retried."""
+        delivery = WebhookDelivery(
+            webhook_url="https://example.com/webhook",
+            payload={"test": "data"},
+            headers={"Content-Type": "application/json"},
+            max_retries=3,
+        )
+        with patch("requests.post") as mock_post:
+            response = Mock()
+            response.status_code = 401
+            response.headers = {"WWW-Authenticate": 'Signature realm="adcp", error="webhook_signature_invalid"'}
+            response.text = "Unauthorized"
+            mock_post.return_value = response
+
+            success, result = deliver_webhook_with_retry(delivery)
+
+        assert success is False
+        assert result["attempts"] == 1
+        assert result["error"] == "Webhook signature authentication rejected"
+        mock_post.assert_called_once_with(
+            "https://example.com/webhook",
+            json={"test": "data"},
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        mock_sleep.assert_not_called()
 
     def test_successful_delivery_after_retry(self, mock_sleep):
         """Test successful delivery after 5xx error retry."""

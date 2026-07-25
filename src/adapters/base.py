@@ -175,7 +175,7 @@ class ReconciliationResult:
     """Adapter reconciliation outcome and optional reconstructed wire result."""
 
     outcome: ReconciliationOutcome
-    response: UpdateMediaBuyResponse | None = None
+    response: BaseModel | None = None
 
 
 class BaseConnectionConfig(BaseModel):
@@ -209,6 +209,11 @@ class AdServerAdapter(ABC):
     # Default advertising channels supported by this adapter
     # Subclasses should override with their supported channels
     default_channels: list[str] = []
+    # Local adapters that do not cross a service boundary may opt out. External
+    # adapters keep this true and must implement an exact provider operation-ID
+    # contract before enabling either reconciliation capability below.
+    requires_downstream_reconciliation: bool = True
+    supports_media_buy_create_reconciliation: bool = False
     supports_media_buy_update_reconciliation: bool = False
 
     # Default delivery measurement provider for products created by this adapter.
@@ -238,6 +243,7 @@ class AdServerAdapter(ABC):
                 "tenant_id is required for adapter initialization. All tenant-scoped operations need a valid tenant_id."
             )
         self.config = config
+        self._downstream_mutation: DownstreamMutation | None = None
         self.principal = principal
         self.principal_id = principal.principal_id  # For backward compatibility
         self.dry_run = dry_run
@@ -260,6 +266,16 @@ class AdServerAdapter(ABC):
         self.manual_approval_operations = set(
             config.get("manual_approval_operations", ["create_media_buy", "update_media_buy", "add_creative_assets"])
         )
+
+    def prepare_downstream_mutation(self, mutation: DownstreamMutation) -> None:
+        """Expose the deterministic request identifier to the next provider call.
+
+        External adapters should attach ``mutation.downstream_request_id`` to a
+        provider-native idempotency/resource field when one exists. The
+        descriptor is request-local because adapters are constructed per tool
+        invocation.
+        """
+        self._downstream_mutation = mutation
 
     def _require_config(self, value: _ConfigT | None, *, field: str, message: str | None = None) -> _ConfigT:
         """Return ``value`` when present; otherwise raise ``AdCPConfigurationError``.
@@ -521,6 +537,14 @@ class AdServerAdapter(ABC):
 
         Adapters must override this when their provider exposes a stable
         operation/resource lookup. The safe default is fail-closed.
+        """
+        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+
+    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Prove whether a previously claimed create landed.
+
+        The safe default is UNKNOWN: never infer causation from a coincidentally
+        matching resource.
         """
         return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 

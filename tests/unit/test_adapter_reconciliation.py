@@ -1,70 +1,72 @@
-"""Provider reconciliation helpers classify observed state conservatively."""
+"""Provider-state inspection is never treated as operation identity."""
 
-from src.adapters.base import DownstreamMutation, ReconciliationOutcome
-from src.adapters.reconciliation import reconcile_campaign_flight_update
+from unittest.mock import MagicMock, call
+
+from src.adapters.base import AdServerAdapter, DownstreamMutation, ReconciliationOutcome
+from src.adapters.broadstreet.adapter import BroadstreetAdapter
+from src.adapters.google_ad_manager import GoogleAdManager
+from src.adapters.kevel import Kevel
+from src.adapters.mock_ad_server import MockAdServer
+from src.adapters.triton_digital import TritonDigital
+from src.adapters.xandr import XandrAdapter
 
 
-def _mutation(action: str, *, package_id: str | None = None, budget: int | None = None) -> DownstreamMutation:
-    return DownstreamMutation(
+def test_adapter_default_fails_closed_without_operation_lookup() -> None:
+    adapter = MagicMock()
+    mutation = DownstreamMutation(
         downstream_request_id="request-1",
         media_buy_id="campaign-1",
-        action=action,
-        package_id=package_id,
-        budget=budget,
+        action="pause_media_buy",
+        package_id=None,
+        budget=None,
     )
 
-
-def test_campaign_state_proves_applied_without_mutation() -> None:
-    result = reconcile_campaign_flight_update(
-        _mutation("pause_media_buy"),
-        dry_run=False,
-        get_campaign=lambda: {"active": False},
-        list_flights=lambda: [],
-        campaign_active=lambda item: item["active"],
-        flight_name=lambda item: item["name"],
-        flight_active=lambda item: item["active"],
-        flight_rate=lambda item: item["rate"],
-        flight_impressions=lambda item: item["impressions"],
-        default_rate=10,
-    )
-
-    assert result.outcome is ReconciliationOutcome.APPLIED
-    assert result.response is not None
-    assert result.response.media_buy_id == "campaign-1"
-
-
-def test_flight_state_proves_not_applied_when_value_differs() -> None:
-    result = reconcile_campaign_flight_update(
-        _mutation("update_package_impressions", package_id="pkg-1", budget=500),
-        dry_run=False,
-        get_campaign=lambda: {},
-        list_flights=lambda: [{"name": "pkg-1", "active": True, "rate": 10, "impressions": 400}],
-        campaign_active=lambda item: item["active"],
-        flight_name=lambda item: item["name"],
-        flight_active=lambda item: item["active"],
-        flight_rate=lambda item: item["rate"],
-        flight_impressions=lambda item: item["impressions"],
-        default_rate=10,
-    )
-
-    assert result.outcome is ReconciliationOutcome.NOT_APPLIED
-
-
-def test_provider_read_failure_is_unknown() -> None:
-    def fail() -> dict:
-        raise RuntimeError("provider unavailable")
-
-    result = reconcile_campaign_flight_update(
-        _mutation("resume_media_buy"),
-        dry_run=False,
-        get_campaign=fail,
-        list_flights=lambda: [],
-        campaign_active=lambda item: item["active"],
-        flight_name=lambda item: item["name"],
-        flight_active=lambda item: item["active"],
-        flight_rate=lambda item: item["rate"],
-        flight_impressions=lambda item: item["impressions"],
-        default_rate=10,
-    )
+    result = AdServerAdapter.reconcile_media_buy_update(adapter, mutation)
 
     assert result.outcome is ReconciliationOutcome.UNKNOWN
+    assert result.response is None
+
+
+def test_external_adapters_without_exact_markers_reject_before_invocation() -> None:
+    for adapter_type in (BroadstreetAdapter, Kevel, TritonDigital):
+        assert adapter_type.requires_downstream_reconciliation is True
+        assert adapter_type.supports_media_buy_create_reconciliation is False
+        assert adapter_type.supports_media_buy_update_reconciliation is False
+
+
+def test_gam_enables_only_its_exact_marked_create_contract() -> None:
+    assert GoogleAdManager.supports_media_buy_create_reconciliation is True
+    assert GoogleAdManager.supports_media_buy_update_reconciliation is False
+
+
+def test_gam_reconciliation_uses_full_marker_when_31_bit_prefix_collides() -> None:
+    adapter = object.__new__(GoogleAdManager)
+    adapter.orders_manager = MagicMock()
+    adapter.orders_manager.find_order_by_operation_marker.return_value = None
+    common = {
+        "media_buy_id": "mb-1",
+        "action": "create_media_buy",
+        "package_id": None,
+        "budget": None,
+    }
+    first = DownstreamMutation(downstream_request_id="deadbeef" + "1" * 56, **common)
+    second = DownstreamMutation(downstream_request_id="deadbeef" + "2" * 56, **common)
+
+    assert adapter.reconcile_media_buy_create(first).outcome is ReconciliationOutcome.NOT_APPLIED
+    assert adapter.reconcile_media_buy_create(second).outcome is ReconciliationOutcome.NOT_APPLIED
+    assert adapter.orders_manager.find_order_by_operation_marker.call_args_list == [
+        call(f"op_{first.downstream_request_id}"),
+        call(f"op_{second.downstream_request_id}"),
+    ]
+
+
+def test_xandr_remains_explicitly_unsupported_before_invocation() -> None:
+    assert XandrAdapter.requires_downstream_reconciliation is True
+    assert XandrAdapter.supports_media_buy_create_reconciliation is False
+    assert XandrAdapter.supports_media_buy_update_reconciliation is False
+
+
+def test_mock_uses_the_same_deterministic_reconciliation_contract() -> None:
+    assert MockAdServer.requires_downstream_reconciliation is True
+    assert MockAdServer.supports_media_buy_create_reconciliation is True
+    assert MockAdServer.supports_media_buy_update_reconciliation is True

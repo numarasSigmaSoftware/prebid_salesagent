@@ -9,7 +9,6 @@ from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT
 from src.core.idempotency_canonical import canonical_payload_hash
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import Principal, UpdateMediaBuyResult, UpdateMediaBuySuccess
-from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from src.services.idempotency_replay import ReservationResult
 from tests.factories import PrincipalFactory
@@ -76,6 +75,7 @@ def test_wire_retry_replays_without_executing_update(orchestration: _Orchestrati
     replay = _result(replayed=True)
     identity = _identity()
     request = _request()
+    request.context = {"correlation_id": "ctx-1"}
     orchestration.reserve.return_value = ReservationResult(replay=replay)
     result = _update_media_buy_impl(
         req=request,
@@ -94,7 +94,17 @@ def test_wire_retry_replays_without_executing_update(orchestration: _Orchestrati
         {"idempotency_key": "update-idem-key-0001", "media_buy_id": "mb-1", "paused": True}
     )
     assert args.kwargs["lease"] == DEFAULT_IN_FLIGHT_LEASE
-    assert args.kwargs["decode"] is media_buy_update._decode_update_media_buy_replay
+    decoded = args.kwargs["decode"](
+        {
+            "status": "completed",
+            "response": UpdateMediaBuySuccess(
+                media_buy_id="mb-1",
+                affected_packages=[],
+                context={"correlation_id": "original"},
+            ).model_dump(mode="json"),
+        }
+    )
+    assert decoded.response.context == {"correlation_id": "ctx-1"}
     assert args.kwargs["enforce_ceiling"] is True
     assert callable(args.kwargs["on_reserved"])
     orchestration.work.assert_not_called()
@@ -120,6 +130,10 @@ def test_fresh_wire_update_completes_the_owned_reservation(orchestration: _Orche
         adapter_override=orchestration.adapter,
         context_id=None,
         guard_downstream=True,
+        downstream_request_hash=canonical_payload_hash(
+            {"idempotency_key": "update-idem-key-0001", "media_buy_id": "mb-1", "paused": True}
+        ),
+        uow_override=orchestration.uow,
     )
     orchestration.complete.assert_called_once_with(
         orchestration.uow,

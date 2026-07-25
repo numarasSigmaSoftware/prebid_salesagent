@@ -17,9 +17,8 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
-from adcp.types import GetAdcpCapabilitiesResponse
-
 from src.core.request_compat import ADCP_NEGOTIATION_FIELDS
+from src.core.schemas import GetAdcpCapabilitiesResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness.transport import Transport
 

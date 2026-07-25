@@ -128,7 +128,11 @@ def test_simplified_context(integration_db):
 
         # Test 7: Get updated context
         console.print("\n[yellow]Test 7: Getting updated context[/yellow]")
-        updated_ctx = ctx_manager.get_context(ctx.context_id)
+        updated_ctx = ctx_manager.get_context(
+            ctx.context_id,
+            tenant_id="test_tenant",
+            principal_id="test_principal",
+        )
         console.print(f"✓ Retrieved context: {updated_ctx.context_id}")
         console.print(f"  - Conversation entries: {len(updated_ctx.conversation_history)}")
         console.print(f"  - Last activity: {updated_ctx.last_activity_at}")

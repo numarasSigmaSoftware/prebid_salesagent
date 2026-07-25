@@ -351,6 +351,34 @@ class TestA2AResponseShape:
             data = _extract_artifact_data(body["result"])
             assert "media_buy_id" in data, "create_media_buy response must have 'media_buy_id'"
 
+    @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
+    def test_pause_on_create_is_explicitly_unsupported(self, mock_resolve, client, auth_headers):
+        from tests.helpers import assert_envelope_shape
+
+        response = client.post(
+            "/a2a",
+            json=_build_jsonrpc(
+                "create_media_buy",
+                {
+                    "brand": {"domain": "testbrand.com"},
+                    "packages": [],
+                    "start_time": "2026-01-01T00:00:00Z",
+                    "end_time": "2026-02-01T00:00:00Z",
+                    "idempotency_key": "pause-create-a2a-0001",
+                    "paused": True,
+                    "context": {"test_case": "pause-on-create"},
+                },
+            ),
+            headers=auth_headers,
+        )
+        data = _extract_artifact_data(_extract_jsonrpc_result(response))
+
+        assert_envelope_shape(data, "UNSUPPORTED_FEATURE", recovery="correctable")
+        expected_suggestion = "Create the media buy, then call update_media_buy with paused=true."
+        assert data["adcp_error"]["suggestion"] == expected_suggestion
+        assert data["errors"][0]["suggestion"] == expected_suggestion
+        assert data["context"] == {"test_case": "pause-on-create"}
+
     def test_error_format_is_jsonrpc(self, client, auth_headers):
         """Error responses must use JSON-RPC error envelope, not {success: false}."""
         # Send a request that will fail (unknown skill)

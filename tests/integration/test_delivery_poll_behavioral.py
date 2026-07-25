@@ -98,7 +98,9 @@ class TestWebhookNotificationTypeFinal:
             response = env.call_impl(media_buy_ids=[buy.media_buy_id])
 
             dumped = response.model_dump(mode="json")
-            assert dumped["notification_type"] == "final"
+            assert dumped["notification_type"] == "final", [
+                delivery["status"] for delivery in dumped["media_buy_deliveries"]
+            ]
             assert dumped["next_expected_at"] is None
 
 

@@ -53,6 +53,7 @@ from src.core.tool_context import ToolContext
 from src.core.transport_helpers import get_mcp_raw_wire_payload, resolve_identity_from_context
 from src.services.idempotency_replay import (
     complete_idempotent,
+    mark_idempotent_replay,
     release_reservation_on_error,
     reserve_idempotent,
 )
@@ -493,6 +494,10 @@ async def _sync_accounts_impl(
     # Validate non-empty accounts array
     if not req.accounts:
         raise AdCPValidationError("accounts array must not be empty — at least one account is required.")
+    # The pinned 3.1 contract requires a full brand/operator/billing entry.
+    # Validate every entry before an idempotency admission lock or row insert.
+    for entry in req.accounts:
+        _extract_natural_key(entry)
     dry_run = bool(req.dry_run)
     delete_missing = bool(req.delete_missing)
 
@@ -510,7 +515,7 @@ async def _sync_accounts_impl(
             idempotency_key=req.idempotency_key,
             request_hash=request_hash,
             lease=DEFAULT_IN_FLIGHT_LEASE,
-            decode=_decode_sync_accounts_replay,
+            decode=lambda envelope: _decode_sync_accounts_replay(envelope, context=req.context),
             enforce_ceiling=True,
         )
         if reservation.replay is not None:
@@ -723,15 +728,18 @@ async def _sync_accounts_impl(
     return response
 
 
-def _decode_sync_accounts_replay(envelope: dict[str, Any]) -> SyncAccountsResponse | None:
+def _decode_sync_accounts_replay(
+    envelope: dict[str, Any],
+    *,
+    context: ContextObject | dict | None = None,
+) -> SyncAccountsResponse | None:
     """Reconstruct one cached success and mark the returned envelope as replayed."""
     try:
         response = SyncAccountsResponse.model_validate(envelope["response"])
     except (KeyError, TypeError, ValidationError):
         logger.warning("Cached sync_accounts envelope failed validation", exc_info=True)
         return None
-    response.replayed = True
-    return response
+    return mark_idempotent_replay(response, context=context)
 
 
 # ---------------------------------------------------------------------------

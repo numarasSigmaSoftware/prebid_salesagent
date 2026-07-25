@@ -492,13 +492,24 @@ def then_wire_error_code_with_suggestion(ctx: dict, error_code: str, field: str)
     """
     result = ctx.get("result")
     assert result is not None, "Expected the transport dispatcher result"
+    key = None if ctx.get("idempotency_key_absent") else ctx.get("idempotency_key")
+    if key is None:
+        expected_suggestion = (
+            "Provide a client-generated idempotency_key (16-255 characters, using only [A-Za-z0-9_.:-])."
+        )
+    elif len(key) < 16:
+        expected_suggestion = "Use an idempotency_key of at least 16 characters."
+    elif len(key) > 255:
+        expected_suggestion = "Use an idempotency_key of at most 255 characters."
+    else:
+        expected_suggestion = "Use only letters, digits, and the characters _ . : -"
     # `field=` pins BOTH envelope layers. This step used to hand-roll the check
     # and pinned only errors[0], so a boundary dropping adcp_error.field stayed
     # green here while the UC-002 copy caught it — the drift between the
     # hand-rolled copies was the hole, so the assertion now has one home.
     result.assert_wire_error(
         error_code,
-        require_suggestion=True,
+        exact_suggestion=expected_suggestion,
         message_substr=field,
         field=field,
     )

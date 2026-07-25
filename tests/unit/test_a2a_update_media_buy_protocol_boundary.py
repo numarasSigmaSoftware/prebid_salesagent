@@ -42,21 +42,6 @@ _MOCK_IDENTITY = PrincipalFactory.make_identity(
                 "media_buy_id": "mb-1",
                 "paused": True,
                 "idempotency_key": "a2a-update-key-0001",
-                "revision": 7,
-            },
-            # A2A's JSON-RPC/protobuf layer coerces the integer 7 to a float, but
-            # the guard classifies on numeric VALUE (not Python type), so this
-            # converges with MCP/REST on UNSUPPORTED_FEATURE — a schema-valid
-            # revision names a field this seller does not implement.
-            "UNSUPPORTED_FEATURE",
-            "does not support optimistic-concurrency control",
-            id="unsupported-revision",
-        ),
-        pytest.param(
-            {
-                "media_buy_id": "mb-1",
-                "paused": True,
-                "idempotency_key": "a2a-update-key-0001",
                 "revision": 0,
             },
             # Below minimum:1 is schema-invalid -> INVALID_REQUEST (BR-UC-003 below_min).
@@ -94,8 +79,9 @@ def test_update_media_buy_rejects_invalid_protocol_fields_before_core_call(
     mock_core.assert_not_called()
 
 
-def test_update_media_buy_accepts_omitted_revision_before_core_call() -> None:
-    """Omitted revision proceeds to core, proving the real A2A path preserves omission."""
+@pytest.mark.parametrize("revision", [None, 7], ids=["omitted", "supplied"])
+def test_update_media_buy_accepts_valid_revision_before_core_call(revision: int | None) -> None:
+    """Omitted and valid supplied revisions both reach the atomic core path."""
     from src.core.schemas import UpdateMediaBuyRequest, UpdateMediaBuyResult, UpdateMediaBuySuccess
 
     success = UpdateMediaBuyResult(
@@ -108,15 +94,18 @@ def test_update_media_buy_accepts_omitted_revision_before_core_call() -> None:
     ):
         client = TestClient(app, raise_server_exceptions=False)
         try:
+            request_parameters = {
+                "media_buy_id": "mb-1",
+                "paused": True,
+                "idempotency_key": "a2a-update-key-0001",
+            }
+            if revision is not None:
+                request_parameters["revision"] = revision
             response = client.post(
                 "/a2a",
                 json=_build_jsonrpc(
                     "update_media_buy",
-                    {
-                        "media_buy_id": "mb-1",
-                        "paused": True,
-                        "idempotency_key": "a2a-update-key-0001",
-                    },
+                    request_parameters,
                 ),
                 headers={
                     "Authorization": "Bearer update-boundary-token",
@@ -131,18 +120,10 @@ def test_update_media_buy_accepts_omitted_revision_before_core_call() -> None:
     data = _extract_artifact_data(_extract_jsonrpc_result(response))
     assert data["media_buy_id"] == "mb-1"
     mock_core.assert_called_once_with(
-        req=UpdateMediaBuyRequest(
-            media_buy_id="mb-1",
-            paused=True,
-            idempotency_key="a2a-update-key-0001",
-        ),
+        req=UpdateMediaBuyRequest(**request_parameters),
         identity=_MOCK_IDENTITY,
         context_id=None,
-        raw_wire_payload={
-            "media_buy_id": "mb-1",
-            "paused": True,
-            "idempotency_key": "a2a-update-key-0001",
-        },
+        raw_wire_payload=request_parameters,
     )
 
 

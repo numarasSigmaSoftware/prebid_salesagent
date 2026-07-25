@@ -14,6 +14,11 @@ from src.services.webhook_delivery_service import WebhookDeliveryService
 def _target(index: int) -> PushNotificationTarget:
     return PushNotificationTarget(
         url=f"https://buyer-{index}.example/callback",
+        media_buy_id=f"mb-{index}",
+        operation_id=f"operation-{index}",
+        token=None,
+        application_context=None,
+        sequence_number=1,
         authentication_type=None,
         authentication_token=None,
         webhook_secret=None,

@@ -13,10 +13,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from src.core.application_context_values import (
-    MAX_APPLICATION_CONTEXT_DEPTH,
-    MAX_APPLICATION_CONTEXT_NODES,
     ApplicationContextViolation,
     detach_context_value,
+    serialize_application_context,
     validate_context_value,
 )
 from src.core.exceptions import AdCPValidationError
@@ -35,46 +34,6 @@ def validate_application_context(context: Any) -> None:
             suggestion=exc.suggestion,
             context=None,
         ) from exc
-
-
-def serialize_application_context(context: Any) -> dict[str, Any] | None:
-    """Return a detached, JSON-safe context without deleting explicit nulls.
-
-    Plain dictionaries are detached directly. A ``ContextObject`` declares no
-    schema-owned fields at all — ``core/context.json`` types it as a bare
-    opaque object — so every buyer-supplied key lives in ``model_extra`` as
-    plain JSON containers already; reading it directly and detaching it
-    ourselves (rather than calling ``context.model_dump()``) avoids handing a
-    deeply nested structure to Pydantic's serializer, whose own internal
-    recursion guard is exactly the failure mode this function exists to avoid.
-    ``exclude=`` the extra keys so a future schema revision's declared fields
-    (currently none) still dump through Pydantic's ordinary — and shallow —
-    path, then merge the two: declared fields can never collide with extras by
-    construction. ``exclude_unset=True`` omits fields the model merely
-    declares; ``exclude_none=False`` preserves an explicit JSON ``null`` the
-    buyer actually supplied. Invalid non-object values return ``None``;
-    callers use this function while already handling another result/error and
-    must not mask it with a secondary serialization failure.
-    """
-    if context is None:
-        return None
-    try:
-        if isinstance(context, dict):
-            return detach_context_value(context)
-        if isinstance(context, BaseModel):
-            extra = context.model_extra or {}
-            declared = context.model_dump(
-                mode="json",
-                exclude=set(extra),
-                exclude_unset=True,
-                exclude_none=False,
-            )
-            return detach_context_value({**declared, **extra})
-    except (ApplicationContextViolation, ValueError, TypeError):
-        # Serialization is commonly part of an existing error path. Invalid
-        # caller context must be omitted rather than masking that primary error.
-        return None
-    return None
 
 
 def _response_context(response: Any) -> Any:
@@ -175,8 +134,6 @@ def dump_adcp_response(
 
 
 __all__ = [
-    "MAX_APPLICATION_CONTEXT_DEPTH",
-    "MAX_APPLICATION_CONTEXT_NODES",
     "dump_adcp_response",
     "serialize_application_context",
     "validate_application_context",

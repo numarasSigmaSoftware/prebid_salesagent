@@ -3584,6 +3584,14 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
 
             with _db_scope_for(request, e2e_config), MediaBuyCreateEnv(e2e_config=e2e_config) as env:
                 tenant, principal, product, pricing_option = env.setup_media_buy_data()
+                # These scenarios isolate authentication credential length, so
+                # their product must satisfy the independent reporting
+                # capability gate on every transport, including the live server.
+                product.reporting_capabilities = {
+                    "supports_webhooks": True,
+                    "available_reporting_frequencies": ["daily"],
+                }
+                env._commit_factory_data()
                 ctx["env"] = env
                 ctx["tenant"] = tenant
                 ctx["principal"] = principal

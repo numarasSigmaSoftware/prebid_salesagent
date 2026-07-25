@@ -55,6 +55,7 @@ from src.core.schemas._base import (
     ApprovalStatus,
     FormatId,
     NestedModelSerializerMixin,
+    ReplayableResponseMixin,
     SalesAgentBaseModel,
     Targeting,
     _upgrade_legacy_format_ids,
@@ -541,7 +542,11 @@ class ListCreativeFormatsRequest(LibraryListCreativeFormatsRequest):
         return _upgrade_legacy_format_ids(values)
 
 
-class ListCreativeFormatsResponse(NestedModelSerializerMixin, LibraryListCreativeFormatsResponse):
+class ListCreativeFormatsResponse(
+    ReplayableResponseMixin,
+    NestedModelSerializerMixin,
+    LibraryListCreativeFormatsResponse,
+):
     """Extends library ListCreativeFormatsResponse from AdCP spec.
 
     Inherits all AdCP-compliant fields from adcp library,
@@ -610,7 +615,7 @@ class Pagination(LibraryResponsePagination):
     pass  # Inherits all fields from library: cursor, has_more, total_count
 
 
-class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResponse):
+class ListCreativesResponse(ReplayableResponseMixin, NestedModelSerializerMixin, LibraryListCreativesResponse):
     """Extends library ListCreativesResponse with local subtypes.
 
     Library provides: context, creatives, ext, format_summary, pagination,

@@ -686,7 +686,7 @@ GET_DB_SESSION_IN_TESTS_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/admin/test_product_creation_integration.py", "test_list_products_json_parsing"),
     ("tests/admin/test_product_creation_integration.py", "test_tenant"),
     ("tests/admin/test_workflows_blueprint.py", "_create_context_and_step"),
-    ("tests/admin/test_workflows_blueprint.py", "test_approve_step_sets_status_approved"),
+    ("tests/admin/test_workflows_blueprint.py", "test_approve_step_sets_status_completed"),
     ("tests/admin/test_workflows_blueprint.py", "test_reject_step_sets_status_rejected"),
     ("tests/admin/test_workflows_blueprint.py", "test_reject_step_without_reason_uses_default"),
     ("tests/admin/test_workflows_blueprint.py", "test_tenant"),

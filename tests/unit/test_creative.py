@@ -2384,13 +2384,17 @@ class TestWorkflowStepCreation:
             assert create_call[1]["owner"] == "publisher"
             assert create_call[1]["status"] == "requires_approval"
 
-            # Verify ObjectWorkflowMapping created via repository
-            mock_uow.workflows.add_mapping.assert_called_once_with(
-                step_id="step_1",
-                object_type="creative",
-                object_id="c1",
-                action="approval_required",
-            )
+            # The context manager persists the step and mapping together so a
+            # crash cannot leave a durable step without its creative link.
+            assert create_call[1]["tenant_id"] == "t1"
+            assert create_call[1]["object_mappings"] == [
+                {
+                    "object_type": "creative",
+                    "object_id": "c1",
+                    "action": "approval_required",
+                }
+            ]
+            mock_uow.workflows.add_mapping.assert_not_called()
 
     def test_workflow_context_failure_recovery_is_transient(self):
         """Failed workflow context creation should be transient — adapter failures are retryable.
@@ -4501,7 +4505,6 @@ class TestA2ATransportGaps:
 
         with (
             patch("src.core.tools.creatives._sync.CreativeUoW") as mock_db,
-            patch("src.core.tools.creatives._sync.IdempotencyUoW") as mock_idempotency_uow,
             patch(
                 "src.core.tools.creatives._sync.reserve_idempotent",
                 return_value=ReservationResult(attempt_id="attempt-a2a-1"),
@@ -4536,8 +4539,6 @@ class TestA2ATransportGaps:
             mock_uow.creatives = mock_creative_repo
             mock_db.return_value.__enter__.return_value = mock_uow
             mock_db.return_value.__exit__.return_value = None
-            idempotency_uow = MagicMock()
-            mock_idempotency_uow.return_value.__enter__.return_value = idempotency_uow
 
             result = sync_creatives_raw(
                 creatives=[_make_creative_asset()],
@@ -4549,7 +4550,7 @@ class TestA2ATransportGaps:
             assert len(result.creatives) == 1
             assert result.creatives[0].creative_id == "c_test_1"
             complete_idempotent.assert_called_once_with(
-                idempotency_uow,
+                mock_uow,
                 attempt_id="attempt-a2a-1",
                 response_model=result,
                 protocol_status="completed",

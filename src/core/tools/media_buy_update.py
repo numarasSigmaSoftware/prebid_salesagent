@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import nullcontext
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -42,6 +43,7 @@ from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 from sqlalchemy import select
 
+from src.adapters.base import DownstreamMutation
 from src.core.application_context import dump_adcp_response
 from src.core.exceptions import (
     AdCPAdapterError,
@@ -49,10 +51,12 @@ from src.core.exceptions import (
     AdCPBudgetExceededError,
     AdCPBudgetTooLowError,
     AdCPCapabilityNotSupportedError,
+    AdCPConflictError,
     AdCPContextNotFoundError,
     AdCPCreativeRejectedError,
     AdCPGoneError,
     AdCPInvalidRequestError,
+    AdCPMediaBuyNotFoundError,
     AdCPValidationError,
 )
 from src.core.tool_context import ToolContext
@@ -113,9 +117,11 @@ from src.core.webhook_validator import require_valid_callback_config_urls, valid
 from src.services.downstream_reconciliation import (
     execute_reconciled_media_buy_update,
     plan_reconciled_media_buy_update,
+    planned_claim_release_callback,
 )
 from src.services.idempotency_replay import (
     complete_idempotent,
+    mark_idempotent_replay,
     release_reservation_on_error,
     reserve_idempotent,
 )
@@ -202,9 +208,8 @@ def validate_update_media_buy_protocol_fields(
     AdCP 3.1.1 requires the idempotency key and defines revision as an atomic
     optimistic-concurrency precondition (``update-media-buy-request.json``:
     ``{type: integer, minimum: 1}``, optional). This seller does not implement
-    optimistic concurrency yet (#1607), so a supplied revision is rejected
-    fail-loud — but with the code that matches its VALUE, uniformly across all
-    three transports.
+    optimistic-concurrency precondition. Valid values are retained for the
+    transaction-level comparison; malformed values fail uniformly at ingress.
     """
     require_idempotency_key(idempotency_key)
 
@@ -221,27 +226,10 @@ def validate_update_media_buy_protocol_fields(
     if _revision_was_omitted(revision):
         return
 
-    # A supplied value is rejected, but the WIRE CODE depends on its value, not
-    # its Python type — so A2A (which floats every JSON int) converges with
-    # MCP/REST. A schema-valid revision (integer >= 1, incl. 7.0) names a field
-    # this seller does not support: verbatim UNSUPPORTED_FEATURE ("a requested
-    # feature or field is not supported by this seller"). The pinned BR-UC-003
-    # partition rows grade the implemented-feature CONFLICT (unwired for this
-    # seller, #1607); revision 0 / "7" / 7.5 are schema-invalid -> INVALID_REQUEST,
-    # matching those rows' below_min / wrong_type outcomes.
+    # Classify on numeric value so A2A's integer-valued floats converge with
+    # MCP/REST. The request builder stores the normalized integer.
     if _revision_as_positive_int(revision) is not None:
-        raise AdCPCapabilityNotSupportedError(
-            "This seller does not support optimistic-concurrency control via `revision`; the update was not applied.",
-            # Same offending field as the INVALID_REQUEST branch below, so
-            # errors[0].field points at `revision` either way. Omitting it here
-            # gave the buyer a remediation pointer for a malformed value but a
-            # null one for a valid-but-unsupported value — same field, same
-            # request, two different answers.
-            field="revision",
-            suggestion=(
-                "Retry the update without a `revision` field, or re-read the media buy's current state before updating."
-            ),
-        )
+        return
     # A schema-INVALID value (below minimum:1, non-integer, wrong JSON type). The
     # message describes the malformed VALUE the buyer sent — not an unsupported
     # feature — which also keeps this raise textually distinct from the
@@ -448,6 +436,7 @@ def _verify_principal(
     repo: MediaBuyRepository,
     *,
     context: ContextObject | None = None,
+    media_buy: MediaBuy | None = None,
 ) -> None:
     """Verify that the principal from identity owns the media buy.
 
@@ -469,7 +458,7 @@ def _verify_principal(
     tenant = require_tenant(identity, context=context)
 
     # Fetch the media buy (raises AdCPMediaBuyNotFoundError if absent)
-    media_buy = repo.get_by_id_or_raise(media_buy_id, context=context)
+    media_buy = media_buy or repo.get_by_id_or_raise(media_buy_id, context=context)
 
     if media_buy.principal_id != principal_id:
         # Log security violation
@@ -489,7 +478,11 @@ def _verify_principal(
         )
 
 
-def _decode_update_media_buy_replay(envelope: dict[str, Any]) -> UpdateMediaBuyResult | None:
+def _decode_update_media_buy_replay(
+    envelope: dict[str, Any],
+    *,
+    context: ContextObject | dict | None = None,
+) -> UpdateMediaBuyResult | None:
     """Reconstruct a completed/submitted update response and mark it replayed."""
     try:
         protocol_status = envelope["status"]
@@ -502,7 +495,8 @@ def _decode_update_media_buy_replay(envelope: dict[str, Any]) -> UpdateMediaBuyR
     except (KeyError, TypeError, ValidationError):
         logger.warning("Cached update_media_buy envelope failed validation - treating as a miss", exc_info=True)
         return None
-    return UpdateMediaBuyResult(response=response, status=protocol_status, replayed=True)
+    result = UpdateMediaBuyResult(response=response, status=protocol_status)
+    return mark_idempotent_replay(result, context=context)
 
 
 def _adapter_update_specs(req: UpdateMediaBuyRequest, implementation_date: datetime) -> list[dict[str, Any]]:
@@ -573,6 +567,7 @@ def _update_media_buy_impl(
     require_idempotency_key(idempotency_key)
     assert idempotency_key is not None
     testing_ctx = resolved_identity.testing_context or AdCPTestContext()
+    full_request_hash = canonical_payload_hash(raw_wire_payload)
     implementation_date = utc_flight_start(req.today or date.today())
     downstream_specs = _adapter_update_specs(req, implementation_date)
     adapter = get_adapter(
@@ -581,15 +576,17 @@ def _update_media_buy_impl(
         testing_context=testing_ctx,
         tenant=tenant,
     )
+    guarded_downstream_specs = downstream_specs if adapter.requires_downstream_reconciliation else []
 
     def plan_downstream_claims(uow: Any) -> None:
-        for spec in downstream_specs:
+        for spec in guarded_downstream_specs:
             plan_reconciled_media_buy_update(
                 uow=uow,
                 adapter=adapter,
                 identity=resolved_identity,
                 idempotency_key=idempotency_key,
                 media_buy_id=req.media_buy_id,
+                request_hash=full_request_hash,
                 **spec,
             )
 
@@ -600,28 +597,45 @@ def _update_media_buy_impl(
         account_id=resolved_identity.account_id,
         tool_name="update_media_buy",
         idempotency_key=idempotency_key,
-        request_hash=canonical_payload_hash(raw_wire_payload),
+        request_hash=full_request_hash,
         lease=DEFAULT_IN_FLIGHT_LEASE,
-        decode=_decode_update_media_buy_replay,
+        decode=lambda envelope: _decode_update_media_buy_replay(envelope, context=req.context),
         enforce_ceiling=True,
-        on_reserved=plan_downstream_claims if downstream_specs else None,
+        on_reserved=plan_downstream_claims if guarded_downstream_specs else None,
     )
     if reservation.replay is not None:
         return reservation.replay
     assert reservation.attempt_id is not None
 
-    with release_reservation_on_error(MediaBuyUoW, tenant["tenant_id"], reservation.attempt_id):
-        result = _update_media_buy_work(
-            req=req,
+    release_claims = (
+        planned_claim_release_callback(
             identity=resolved_identity,
-            principal=principal,
-            adapter_override=adapter,
-            context_id=context_id,
-            guard_downstream=True,
+            idempotency_key=idempotency_key,
         )
-        response_model = result.response if isinstance(result, UpdateMediaBuyResult) else result
-        protocol_status = result.status if isinstance(result, UpdateMediaBuyResult) else AdcpTaskStatus.submitted.value
+        if guarded_downstream_specs
+        else None
+    )
+    with release_reservation_on_error(
+        MediaBuyUoW,
+        tenant["tenant_id"],
+        reservation.attempt_id,
+        on_release=release_claims,
+    ):
         with MediaBuyUoW(tenant["tenant_id"]) as uow:
+            result = _update_media_buy_work(
+                req=req,
+                identity=resolved_identity,
+                principal=principal,
+                adapter_override=adapter,
+                context_id=context_id,
+                guard_downstream=True,
+                downstream_request_hash=full_request_hash,
+                uow_override=uow,
+            )
+            response_model = result.response if isinstance(result, UpdateMediaBuyResult) else result
+            protocol_status = (
+                result.status if isinstance(result, UpdateMediaBuyResult) else AdcpTaskStatus.submitted.value
+            )
             complete_idempotent(
                 uow,
                 attempt_id=reservation.attempt_id,
@@ -637,7 +651,9 @@ def _update_media_buy_work(
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
     guard_downstream: bool = False,
+    downstream_request_hash: str | None = None,
     adapter_override: AdServerAdapter | None = None,
+    uow_override: MediaBuyUoW | None = None,
 ) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
@@ -678,7 +694,8 @@ def _update_media_buy_work(
 
     with ctx_manager.audit_workflow_step_failure_ctx(lambda: step):
         # Single UoW for entire update operation — one session, one transaction
-        with MediaBuyUoW(tenant["tenant_id"]) as uow:
+        uow_context = nullcontext(uow_override) if uow_override is not None else MediaBuyUoW(tenant["tenant_id"])
+        with uow_context as uow:
             assert uow.media_buys is not None
             # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
             assert uow.session is not None
@@ -690,16 +707,41 @@ def _update_media_buy_work(
             if not media_buy_id_to_use:
                 raise AdCPValidationError("media_buy_id is required")
 
-            # Verify principal owns this media buy
-            _verify_principal(media_buy_id_to_use, identity, uow.media_buys, context=req.context)
-
             # State-machine precondition: terminal states reject all mutations,
             # and non-terminal states only accept actions in their valid set.
             # ``AdCPGoneError`` carries the spec-mandated ``INVALID_STATE`` code
             # for both terminal states and disallowed actions — see
             # ``adcp.server.helpers.MEDIA_BUY_STATE_MACHINE`` for the source of truth.
-            _current_mb = uow.media_buys.get_by_id(media_buy_id_to_use)
-            _current_status = _current_mb.status if _current_mb else ""
+            _current_mb = uow.media_buys.get_by_id_for_update(media_buy_id_to_use)
+            if _current_mb is None:
+                raise AdCPMediaBuyNotFoundError(
+                    f"Media buy '{media_buy_id_to_use}' not found",
+                    suggestion="Verify the media_buy_id is correct and belongs to your account.",
+                    context=req.context,
+                )
+            _verify_principal(
+                media_buy_id_to_use,
+                identity,
+                uow.media_buys,
+                context=req.context,
+                media_buy=_current_mb,
+            )
+            current_revision = _current_mb.revision if isinstance(_current_mb.revision, int) else 1
+            if req.revision is not None and req.revision != current_revision:
+                raise AdCPConflictError(
+                    "The media buy changed after the requested revision; the update was not applied.",
+                    field="revision",
+                    details={
+                        "requested_revision": req.revision,
+                        "current_revision": current_revision,
+                    },
+                    suggestion=(
+                        "Re-read the media buy, apply your changes to its current state, "
+                        "and retry with the returned revision."
+                    ),
+                    context=req.context,
+                )
+            _current_status = _current_mb.status
             if is_terminal_status(_current_status):
                 raise AdCPGoneError(
                     f"Cannot update media buy in terminal state: {_current_status}",
@@ -726,6 +768,15 @@ def _update_media_buy_work(
 
             # Extract testing context early (needed for dry_run check)
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
+
+            def apply_next_revision(response: UpdateMediaBuySuccess) -> UpdateMediaBuySuccess:
+                """Advance the locked row exactly once for an applied update."""
+                next_revision = current_revision + 1
+                _current_mb.revision = next_revision
+                assert uow.media_buys is not None
+                uow.media_buys.set_revision(media_buy_id_to_use, next_revision)
+                response.revision = next_revision
+                return response
 
             # Create or get persistent context and workflow step
             # (ctx_manager + step were hoisted before the try block so the
@@ -781,17 +832,25 @@ def _update_media_buy_work(
                 budget: int | None,
             ) -> UpdateMediaBuyResponse:
                 def invoke() -> UpdateMediaBuyResponse:
+                    prepared_mutation = getattr(adapter, "_downstream_mutation", None)
+                    effective_date = (
+                        prepared_mutation.implementation_date
+                        if isinstance(prepared_mutation, DownstreamMutation)
+                        and prepared_mutation.implementation_date is not None
+                        else utc_flight_start(today)
+                    )
                     return adapter.update_media_buy(
                         media_buy_id=media_buy_id_to_use,
                         action=action,
                         package_id=package_id,
                         budget=budget,
-                        today=utc_flight_start(today),
+                        today=effective_date,
                     )
 
-                if not guard_downstream:
+                if not guard_downstream or not adapter.requires_downstream_reconciliation:
                     return invoke()
                 assert req.idempotency_key is not None
+                assert downstream_request_hash is not None
                 return execute_reconciled_media_buy_update(
                     adapter=adapter,
                     identity=identity,
@@ -802,8 +861,10 @@ def _update_media_buy_work(
                     package_id=package_id,
                     budget=budget,
                     implementation_date=utc_flight_start(today),
+                    request_hash=downstream_request_hash,
                     response_decoder=_UPDATE_RESPONSE_ADAPTER.validate_python,
                     work=invoke,
+                    is_applied=lambda result: not isinstance(result, UpdateMediaBuyError),
                 )
 
             # AdCP 3.0.0 spec (core/product.json `property_targeting_allowed`): reject property_list targeting
@@ -1041,7 +1102,7 @@ def _update_media_buy_work(
                 # Manual approval case - convert adapter result to appropriate Success/Error
                 # adcp v1.2.1 oneOf pattern: Check if result is Error variant (has errors field)
                 if isinstance(result, UpdateMediaBuyError) and result.errors:
-                    error_response = UpdateMediaBuyError(errors=result.errors)
+                    error_response = UpdateMediaBuyError(errors=result.errors, context=req.context)
                     ctx_manager.audit_workflow_step_result(
                         step.step_id,
                         error_response,
@@ -1065,12 +1126,15 @@ def _update_media_buy_work(
                     _post_action_mbs, _post_action_actions = _adcp_status_and_actions(
                         _post_action_mb, fallback_status=("paused" if req.paused else "active")
                     )
-                    success_response = UpdateMediaBuySuccess(
-                        media_buy_id=media_buy_id,
-                        media_buy_status=_post_action_mbs,  # AdCP 3.1: mirrors `status`
-                        affected_packages=affected_pkgs,
-                        valid_actions=_post_action_actions,
-                        errors=property_list_unsupported_advisories(req.packages, adapter),
+                    success_response = apply_next_revision(
+                        UpdateMediaBuySuccess(
+                            media_buy_id=media_buy_id,
+                            media_buy_status=_post_action_mbs,  # AdCP 3.1: mirrors `status`
+                            affected_packages=affected_pkgs,
+                            valid_actions=_post_action_actions,
+                            context=req.context,
+                            errors=property_list_unsupported_advisories(req.packages, adapter),
+                        )
                     )
                     # Log successful update_media_buy (pause/resume)
                     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
@@ -1108,7 +1172,7 @@ def _update_media_buy_work(
                                 if (result.errors and len(result.errors) > 0)
                                 else "Update failed"
                             )
-                            response_data = UpdateMediaBuyError(errors=result.errors)
+                            response_data = UpdateMediaBuyError(errors=result.errors, context=req.context)
                             ctx_manager.audit_workflow_step_result(
                                 step.step_id,
                                 response_data,
@@ -1174,7 +1238,7 @@ def _update_media_buy_work(
                                 if (result.errors and len(result.errors) > 0)
                                 else "Update failed"
                             )
-                            response_data = UpdateMediaBuyError(errors=result.errors)
+                            response_data = UpdateMediaBuyError(errors=result.errors, context=req.context)
                             ctx_manager.audit_workflow_step_result(
                                 step.step_id,
                                 response_data,
@@ -1715,13 +1779,15 @@ def _update_media_buy_work(
 
             _final_mb = uow.media_buys.get_by_id(req.media_buy_id)
             _final_mbs, _final_actions = _adcp_status_and_actions(_final_mb)
-            final_response = UpdateMediaBuySuccess(
-                media_buy_id=req.media_buy_id or "",
-                media_buy_status=_final_mbs,  # AdCP 3.1: mirrors `status`
-                affected_packages=affected_packages_list,
-                valid_actions=_final_actions,
-                context=req.context,
-                errors=property_list_unsupported_advisories(req.packages, adapter),
+            final_response = apply_next_revision(
+                UpdateMediaBuySuccess(
+                    media_buy_id=req.media_buy_id or "",
+                    media_buy_status=_final_mbs,  # AdCP 3.1: mirrors `status`
+                    affected_packages=affected_packages_list,
+                    valid_actions=_final_actions,
+                    context=req.context,
+                    errors=property_list_unsupported_advisories(req.packages, adapter),
+                )
             )
 
             # Log successful update_media_buy call
@@ -1836,6 +1902,7 @@ def _build_update_request(
             "reporting_webhook": reporting_webhook,
             "ext": ext,
             "idempotency_key": idempotency_key,
+            "revision": _revision_as_positive_int(revision) if not _revision_was_omitted(revision) else None,
         }.items()
         if value is not None
     }

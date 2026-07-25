@@ -41,6 +41,7 @@ from a2a.types import (
     SendMessageRequest,
     SubscribeToTaskRequest,
     Task,
+    TaskNotCancelableError,
     TaskNotFoundError,
     TaskPushNotificationConfig,
     TaskState,
@@ -48,18 +49,19 @@ from a2a.types import (
     UnsupportedOperationError,
 )
 from a2a.utils.errors import A2AError
-from adcp import create_a2a_webhook_payload
-from adcp.types import ContextObject, CreativeAsset, GeneratedTaskStatus
+from adcp.types import ContextObject, CreativeAsset
 from google.protobuf import json_format, struct_pb2
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from src.core.adcp_version import validate_adcp_version_pins
 from src.core.application_context import dump_adcp_response, validate_application_context
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import AUTH_REQUIRED_SUGGESTION
 from src.core.auth_context import AUTH_CONTEXT_STATE_KEY
-from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
-from src.core.database.repositories import PushNotificationConfigUoW
+from src.core.context_manager import publish_workflow_notifications
+from src.core.database.repositories import A2ATaskUoW, PushNotificationConfigUoW
+from src.core.database.repositories.push_notification_config import task_push_config_id
 from src.core.domain_config import get_a2a_server_url
 from src.core.exceptions import (
     AdCPAuthenticationError,
@@ -85,6 +87,11 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import coerce_creative_filters, to_account_reference, to_brand_reference
 from src.core.schemas import CreateMediaBuyRequest, CreativeStatusEnum
 from src.core.schemas._base import require_idempotency_key
+from src.core.security.webhook_http import (
+    redact_webhook_url,
+    validate_webhook_auth_selector,
+    validate_webhook_config_auth,
+)
 from src.core.tool_context import ToolContext
 from src.core.tool_error_logging import record_boundary_error, record_boundary_error_for_identity
 from src.core.tools import (
@@ -132,7 +139,7 @@ from src.core.webhook_validator import (
     validated_callback_url_scope,
     webhook_ssrf_suggestion,
 )
-from src.services.protocol_webhook_service import get_protocol_webhook_service
+from src.services.a2a_task_lifecycle import publish_task_notification, send_native_task_webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -341,8 +348,7 @@ class AdCPRequestHandler(RequestHandler):
 
     def __init__(self):
         """Initialize the AdCP A2A request handler."""
-        self.tasks: dict[str, Task] = {}  # In-memory task storage
-        self._task_push_configs: dict[str, TaskPushNotificationConfig] = {}
+        self.tasks: dict[str, Task] = {}  # Read-through cache; DB is authoritative.
         logger.info("AdCP Request Handler initialized for direct function calls")
 
     @staticmethod
@@ -520,7 +526,7 @@ class AdCPRequestHandler(RequestHandler):
             logger.warning("Failed to log A2A operation: %s", scrub_control_chars(str(e)))
 
     def _validate_push_callback(self, push_notification_config: Any, identity: ResolvedIdentity | None) -> None:
-        """Guard a client-supplied push callback before it is persisted (#1512 SSRF).
+        """Guard a client-supplied push callback before it is persisted.
 
         Two controls, both required:
 
@@ -547,14 +553,77 @@ class AdCPRequestHandler(RequestHandler):
                 "push_notification_config requires authentication; an unauthenticated request cannot register a callback.",
                 suggestion="Authenticate before supplying a push notification callback.",
             )
+        try:
+            validate_webhook_config_auth(push_notification_config)
+        except ValueError as exc:
+            raise AdCPValidationError(
+                str(exc),
+                suggestion="Configure a supported callback authentication mode before registering the URL.",
+            ) from exc
         require_valid_callback_config_urls(push_notification_config=push_notification_config)
+
+    @staticmethod
+    def _task_to_dict(task: Task) -> dict[str, Any]:
+        return json_format.MessageToDict(task, preserving_proto_field_name=True)
+
+    @staticmethod
+    def _task_from_dict(payload: dict[str, Any]) -> Task:
+        return json_format.ParseDict(payload, Task())
+
+    def _persist_task(
+        self,
+        task: Task,
+        identity: ResolvedIdentity | None,
+        *,
+        status: str,
+        workflow_step_id: str | None = None,
+    ) -> None:
+        if identity is None or not identity.tenant_id or not identity.principal_id:
+            return
+        try:
+            with A2ATaskUoW(identity.tenant_id) as uow:
+                assert uow.tasks is not None
+                uow.tasks.upsert(
+                    task_id=task.id,
+                    principal_id=identity.principal_id,
+                    context_id=task.context_id or None,
+                    workflow_step_id=workflow_step_id,
+                    status=status,
+                    task_payload=self._task_to_dict(task),
+                )
+        except IntegrityError:
+            # Task persistence is downstream of identity resolution. A stale or
+            # synthetic identity must not replace the protocol's real auth
+            # error with an auxiliary foreign-key/internal error.
+            logger.warning(
+                "Could not persist A2A task %s for %s/%s",
+                task.id,
+                identity.tenant_id,
+                identity.principal_id,
+                exc_info=True,
+            )
+            return
+        self.tasks[task.id] = task
+
+    def _require_owned_task(self, task_id: str, identity: ResolvedIdentity) -> Task:
+        """Load a task only within its durable tenant/principal scope."""
+        if not task_id or not identity.tenant_id or not identity.principal_id:
+            raise TaskNotFoundError(message=f"Task not found: {task_id}")
+        with A2ATaskUoW(identity.tenant_id) as uow:
+            assert uow.tasks is not None
+            record = uow.tasks.get_owned(task_id, identity.principal_id)
+            payload = dict(record.task_payload) if record is not None else None
+        if payload is None:
+            raise TaskNotFoundError(message=f"Task not found: {task_id}")
+        task = self._task_from_dict(payload)
+        self.tasks[task_id] = task
+        return task
 
     async def _send_protocol_webhook(
         self,
         task: Task,
         status: str,
-        result: dict[str, Any] | None = None,
-        error: str | None = None,
+        identity: ResolvedIdentity,
     ):
         """Send protocol-level push notification if configured.
 
@@ -564,92 +633,12 @@ class AdCPRequestHandler(RequestHandler):
 
         Uses create_a2a_webhook_payload from adcp library to automatically select correct type.
         """
-        try:
-            # Check if task has push notification config stored
-            webhook_config = self._task_push_configs.get(task.id)
-            if not webhook_config:
-                return
-
-            push_notification_service = get_protocol_webhook_service()
-
-            from uuid import uuid4
-
-            url = webhook_config.url
-            if not url:
-                logger.info("[red]No push notification URL present; skipping webhook[/red]")
-                return
-
-            # Defense-in-depth: re-validate at delivery time to catch a DNS-rebinding /
-            # TOCTOU change between registration and delivery, and to guard any callback
-            # that reached storage through a path other than on_message_send (#1512).
-            callback_config = {"url": url}
-            try:
-                async with validated_callback_url_scope(push_notification_config=callback_config):
-                    require_valid_callback_config_urls(push_notification_config=callback_config)
-            except AdCPValidationError as exc:
-                logger.error(
-                    "Push notification URL failed SSRF re-validation at delivery, skipping: %s",
-                    scrub_control_chars(str(exc)),
-                )
-                return
-
-            auth = webhook_config.authentication if webhook_config.HasField("authentication") else None
-            auth_type = auth.scheme if auth and auth.scheme else None
-            auth_token = auth.credentials if auth and auth.credentials else None
-
-            push_notification_config = DBPushNotificationConfig(
-                id=webhook_config.id or f"pnc_{uuid4().hex[:16]}",
-                tenant_id="",
-                principal_id="",
-                url=url,
-                authentication_type=auth_type,
-                authentication_token=auth_token,
-                is_active=True,
-            )
-
-            # Convert status string to GeneratedTaskStatus enum
-            try:
-                status_enum = GeneratedTaskStatus(status)
-            except ValueError:
-                # Fallback for unknown status values
-                logger.warning("Unknown status '%s', defaulting to 'working'", status)
-                status_enum = GeneratedTaskStatus.working
-
-            # Build result data for the webhook payload
-            # Include error information in result if status is failed
-            result_data: dict[str, Any] = result or {}
-            if error and status == "failed":
-                result_data["error"] = error
-
-            # Use create_a2a_webhook_payload to get the correct payload type:
-            # - Task for final states (completed, failed, canceled)
-            # - TaskStatusUpdateEvent for intermediate states (working, input-required, submitted)
-            payload = create_a2a_webhook_payload(
-                task_id=task.id,
-                status=status_enum,
-                context_id=task.context_id or "",
-                result=result_data,
-            )
-
-            # Extract skills_requested from protobuf Struct metadata
-            meta_dict = json_format.MessageToDict(task.metadata) if task.metadata.ByteSize() > 0 else {}
-            skills = list(meta_dict.get("skills_requested", []))
-            metadata = {
-                "task_type": skills[0] if skills else "unknown",
-            }
-
-            sent = await push_notification_service.send_notification(
-                push_notification_config=push_notification_config, payload=payload, metadata=metadata
-            )
-            if not sent:
-                logger.warning(
-                    "Protocol webhook not delivered for task %s (send_notification returned False)",
-                    task.id,
-                )
-        except Exception as e:
-            # Don't fail the task if webhook fails
-            logger.warning(
-                "Failed to send protocol-level webhook for task %s: %s", task.id, scrub_control_chars(str(e))
+        if identity.tenant_id and identity.principal_id:
+            await send_native_task_webhooks(
+                task,
+                tenant_id=identity.tenant_id,
+                principal_id=identity.principal_id,
+                status=status,
             )
 
     def _reconstruct_response_object(self, skill_name: str, data: dict) -> Any:
@@ -861,13 +850,14 @@ class AdCPRequestHandler(RequestHandler):
             else:
                 # Unauthenticated discovery request — resolve tenant from headers only
                 identity = self._resolve_a2a_identity(None, require_valid_token=False, context=context)
+            self._persist_task(task, identity, status="working")
 
             # Persist task/callback state only after authentication has resolved.
             # Otherwise an unauthenticated request could retain attacker-owned
             # callback state or reach the generic failure-webhook path. The guard
             # below enforces that: an anonymous caller cannot register a callback,
             # and any callback URL must pass SSRF validation before it is stored
-            # (#1512) — otherwise a discovery request could drive an outbound POST
+            # Otherwise a discovery request could drive an outbound POST
             # to an internal/metadata endpoint via the later status webhook.
             if push_notification_config:
                 try:
@@ -886,7 +876,7 @@ class AdCPRequestHandler(RequestHandler):
                     # carries it; the v0.3 adapter has been observed dropping it on
                     # E2E — reconciliation tracked upstream). The callback is never
                     # stored, so no
-                    # webhook can be driven (#1512). Boundary parity: the
+                    # webhook can be driven. Boundary parity: the
                     # per-skill AdCPError path records to the audit/activity sinks
                     # via record_boundary_error_for_identity, and MCP/REST record
                     # buyer validation errors uniformly — so this rejection does too
@@ -914,16 +904,38 @@ class AdCPRequestHandler(RequestHandler):
                             ],
                         )
                     )
-                    self.tasks[task_id] = task
+                    self._persist_task(task, identity, status="failed")
                     return task
-                self._task_push_configs[task_id] = push_notification_config
+                assert identity.tenant_id is not None and identity.principal_id is not None
+                config_id = task_push_config_id(
+                    identity.tenant_id,
+                    identity.principal_id,
+                    task_id,
+                    push_notification_config.id or None,
+                )
+                auth = (
+                    push_notification_config.authentication
+                    if push_notification_config.HasField("authentication")
+                    else None
+                )
+                with PushNotificationConfigUoW(identity.tenant_id) as uow:
+                    assert uow.push_notification_configs is not None
+                    uow.push_notification_configs.upsert(
+                        config_id=config_id,
+                        principal_id=identity.principal_id,
+                        url=push_notification_config.url,
+                        authentication_type=auth.scheme if auth and auth.scheme else None,
+                        authentication_token=auth.credentials if auth and auth.credentials else None,
+                        validation_token=push_notification_config.token or None,
+                        session_id=task_id,
+                    )
                 if push_notification_config.url:
                     logger.info(
                         "Protocol-level push notification config provided for task %s: %s",
                         task_id,
-                        scrub_control_chars(push_notification_config.url),
+                        scrub_control_chars(redact_webhook_url(push_notification_config.url)),
                     )
-            self.tasks[task_id] = task
+            self._persist_task(task, identity, status="working")
 
             # Route: Handle explicit skill invocations first, then natural language fallback
             if skill_invocations:
@@ -934,8 +946,10 @@ class AdCPRequestHandler(RequestHandler):
                     parameters = invocation["parameters"]
                     logger.info(
                         "Processing explicit skill: %s with parameter keys: %s",
-                        skill_name,
-                        sorted(parameters.keys()) if isinstance(parameters, dict) else type(parameters).__name__,
+                        scrub_control_chars(skill_name),
+                        scrub_control_chars(
+                            sorted(parameters.keys()) if isinstance(parameters, dict) else type(parameters).__name__
+                        ),
                     )
 
                     try:
@@ -998,12 +1012,16 @@ class AdCPRequestHandler(RequestHandler):
                         if result_status == "submitted":
                             task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
                             del task.artifacts[:]  # No artifacts for pending tasks
+                            workflow_step_id = res["result"].get("task_id")
+                            self._persist_task(
+                                task,
+                                identity,
+                                status="submitted",
+                                workflow_step_id=(str(workflow_step_id) if workflow_step_id is not None else None),
+                            )
                             logger.info(
                                 f"Task {task_id} requires manual approval, returning status=submitted with no artifacts"
                             )
-                            # Send protocol-level webhook notification
-                            await self._send_protocol_webhook(task, status="submitted")
-                            self.tasks[task_id] = task
                             return task
 
                 # Create artifacts for all skill results with human-readable text
@@ -1061,7 +1079,7 @@ class AdCPRequestHandler(RequestHandler):
                     error_messages = [
                         res["error_envelope"]["errors"][0]["message"] for res in results if not res["success"]
                     ]
-                    await self._send_protocol_webhook(task, status="failed", error="; ".join(error_messages))
+                    self._persist_task(task, identity, status="failed")
 
                     return task
                 elif successful_skills:
@@ -1263,7 +1281,7 @@ class AdCPRequestHandler(RequestHandler):
             task.status.CopyFrom(TaskStatus(state=task_state))
 
             # Send protocol-level webhook notification if configured
-            await self._send_protocol_webhook(task, status=task_status_str)
+            self._persist_task(task, identity, status=task_status_str)
 
         except AdCPAuthenticationError as e:
             # Authentication failures are JSON-RPC errors, not task failures.
@@ -1321,7 +1339,8 @@ class AdCPRequestHandler(RequestHandler):
                 )
             )
 
-            await self._send_protocol_webhook(task, status="failed")
+            if identity is not None:
+                self._persist_task(task, identity, status="failed")
 
             # Raise A2A error instead of creating failed task
             raise _internal_error_for(
@@ -1399,7 +1418,8 @@ class AdCPRequestHandler(RequestHandler):
         Raises ``TaskNotFoundError`` for an unknown task id — see
         ``_get_task_or_raise`` (and #1670 for why the wire code is still -32603).
         """
-        return self._get_task_or_raise(params.id)
+        identity = self._resolve_a2a_identity(self._get_auth_token(context), context=context)
+        return self._require_owned_task(params.id, identity)
 
     async def on_cancel_task(
         self,
@@ -1413,10 +1433,61 @@ class AdCPRequestHandler(RequestHandler):
         no-op. See ``_get_task_or_raise`` (and #1670 for why the wire code is
         still -32603).
         """
-        task = self._get_task_or_raise(params.id)
-        # CopyFrom mutates the stored Task in place — self.tasks already holds
-        # this exact reference, so re-storing it would rebind the same object.
-        task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
+        identity = self._resolve_a2a_identity(self._get_auth_token(context), context=context)
+        assert identity.tenant_id is not None and identity.principal_id is not None
+        task_notification_event_id: str | None = None
+        with A2ATaskUoW(identity.tenant_id) as uow:
+            assert uow.tasks is not None and uow.workflows is not None
+            record = uow.tasks.get_owned_for_update(params.id, identity.principal_id)
+            if record is None:
+                raise TaskNotFoundError(message=f"Task not found: {params.id}")
+            task = self._task_from_dict(dict(record.task_payload))
+            workflow_step_id = record.workflow_step_id
+            if task.status.state in {
+                TaskState.TASK_STATE_COMPLETED,
+                TaskState.TASK_STATE_FAILED,
+                TaskState.TASK_STATE_CANCELED,
+                TaskState.TASK_STATE_REJECTED,
+            }:
+                raise TaskNotCancelableError(message=f"Task is not cancelable: {task.id}")
+            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
+            if workflow_step_id:
+                workflow = uow.workflows.transition_status(
+                    workflow_step_id,
+                    status="canceled",
+                    allowed_from={
+                        "pending",
+                        "pending_approval",
+                        "requires_approval",
+                        "submitted",
+                        "input-required",
+                    },
+                    completed_at=datetime.now(UTC),
+                    response_data={"status": "canceled"},
+                )
+                if workflow is None:
+                    raise TaskNotCancelableError(message=f"Task is not cancelable: {task.id}")
+            uow.tasks.upsert(
+                task_id=task.id,
+                principal_id=identity.principal_id,
+                context_id=task.context_id or None,
+                workflow_step_id=workflow_step_id,
+                status="canceled",
+                task_payload=self._task_to_dict(task),
+            )
+            if workflow_step_id is None:
+                task_notification_event_id = uow.tasks.enqueue_notification(
+                    task_id=task.id,
+                    principal_id=identity.principal_id,
+                    status="canceled",
+                    task_payload=self._task_to_dict(task),
+                )
+        self.tasks[task.id] = task
+        if workflow_step_id:
+            publish_workflow_notifications(workflow_step_id, "canceled", identity.tenant_id)
+        else:
+            assert task_notification_event_id is not None
+            publish_task_notification(task_notification_event_id, identity.tenant_id)
         return task
 
     async def on_list_tasks(
@@ -1452,14 +1523,19 @@ class AdCPRequestHandler(RequestHandler):
             tool_context = self._make_tool_context(identity, "get_push_notification_config")
 
             config_id = params.get("id") if isinstance(params, dict) else getattr(params, "id", None)
+            task_id = params.get("task_id") if isinstance(params, dict) else getattr(params, "task_id", None)
             if not config_id:
                 raise InvalidParamsError(message="Missing required parameter: id")
+            if not task_id:
+                raise InvalidParamsError(message="Missing required parameter: task_id")
+            self._require_owned_task(task_id, identity)
 
             with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
                 assert uow.push_notification_configs is not None
-                config = uow.push_notification_configs.get_by_id(
-                    config_id,
+                config = uow.push_notification_configs.get_active_a2a_task_config(
+                    config_id=config_id,
                     principal_id=tool_context.principal_id,
+                    task_id=task_id,
                 )
 
                 if not config:
@@ -1478,7 +1554,7 @@ class AdCPRequestHandler(RequestHandler):
             )
             return TaskPushNotificationConfig(
                 id=response_id,
-                task_id=params.task_id,
+                task_id=task_id,
                 url=response_url,
                 authentication=auth_info,
                 token=response_validation_token,
@@ -1516,12 +1592,13 @@ class AdCPRequestHandler(RequestHandler):
             # with fields: tenant, id, task_id, url, token, authentication
             task_id = params.task_id
             url = params.url
-            config_id = params.id or f"pnc_{uuid.uuid4().hex[:16]}"
             validation_token = params.token
 
+            if not task_id:
+                raise InvalidParamsError(message="Missing required parameter: task_id")
+            self._require_owned_task(task_id, identity)
             if not url:
                 raise InvalidParamsError(message="Missing required parameter: url")
-
             # SSRF: validate the buyer-supplied callback URL before persisting it.
             # This is a public authenticated A2A entry point; without this gate a
             # metadata/loopback URL could be stored and later POSTed to by the
@@ -1538,10 +1615,32 @@ class AdCPRequestHandler(RequestHandler):
             if params.HasField("authentication"):
                 auth_type = params.authentication.scheme or None
                 auth_token_value = params.authentication.credentials or None
-
+            try:
+                validate_webhook_auth_selector(auth_type, auth_token_value)
+            except ValueError as exc:
+                raise InvalidParamsError(message=str(exc)) from exc
             try:
                 with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
                     assert uow.push_notification_configs is not None
+                    supplied_id = params.id or None
+                    existing = (
+                        uow.push_notification_configs.get_by_id(
+                            supplied_id,
+                            tool_context.principal_id,
+                            active_only=False,
+                        )
+                        if supplied_id
+                        else None
+                    )
+                    if supplied_id is not None and existing is not None and existing.session_id == task_id:
+                        config_id = supplied_id
+                    else:
+                        config_id = task_push_config_id(
+                            tool_context.tenant_id,
+                            tool_context.principal_id,
+                            task_id,
+                            supplied_id,
+                        )
                     _config, created = uow.push_notification_configs.upsert(
                         config_id=config_id,
                         principal_id=tool_context.principal_id,
@@ -1549,13 +1648,12 @@ class AdCPRequestHandler(RequestHandler):
                         authentication_type=auth_type,
                         authentication_token=auth_token_value,
                         validation_token=validation_token,
-                        session_id=None,
+                        session_id=task_id,
                     )
             except ValueError as e:
                 # Repository SSRF gate (defense in depth) — same enveloped path as
                 # the callback-scope validation above.
                 raise _invalid_params_from_ssrf_error(e) from e
-
             logger.info(
                 f"Push notification config {'created' if created else 'updated'}: {config_id} for tenant {tool_context.tenant_id}"
             )
@@ -1566,7 +1664,7 @@ class AdCPRequestHandler(RequestHandler):
                 else None
             )
             return TaskPushNotificationConfig(
-                task_id=task_id or "*",
+                task_id=task_id,
                 url=url,
                 authentication=auth_info,
                 id=config_id,
@@ -1599,11 +1697,16 @@ class AdCPRequestHandler(RequestHandler):
             auth_token = self._get_auth_token(context)
             identity = self._resolve_a2a_identity(auth_token, context=context)
             tool_context = self._make_tool_context(identity, "list_push_notification_configs")
+            task_id = params.task_id
+            if not task_id:
+                raise InvalidParamsError(message="Missing required parameter: task_id")
+            self._require_owned_task(task_id, identity)
 
             with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
                 assert uow.push_notification_configs is not None
-                configs = uow.push_notification_configs.list_active_by_principal(
+                configs = uow.push_notification_configs.list_active_for_task(
                     principal_id=tool_context.principal_id,
+                    task_id=task_id,
                 )
                 config_snapshots = [
                     (c.id, c.url, c.authentication_type, c.authentication_token, c.validation_token or "")
@@ -1613,7 +1716,7 @@ class AdCPRequestHandler(RequestHandler):
             configs_list = [
                 TaskPushNotificationConfig(
                     id=snap_id,
-                    task_id=params.task_id,
+                    task_id=task_id,
                     url=snap_url,
                     authentication=(
                         AuthenticationInfo(scheme=snap_auth_type, credentials=snap_auth_token)
@@ -1657,14 +1760,19 @@ class AdCPRequestHandler(RequestHandler):
             tool_context = self._make_tool_context(identity, "delete_push_notification_config")
 
             config_id = params.id
+            task_id = params.task_id
             if not config_id:
                 raise InvalidParamsError(message="Missing required parameter: id")
+            if not task_id:
+                raise InvalidParamsError(message="Missing required parameter: task_id")
+            self._require_owned_task(task_id, identity)
 
             with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
                 assert uow.push_notification_configs is not None
-                deleted = uow.push_notification_configs.soft_delete(
-                    config_id,
+                deleted = uow.push_notification_configs.soft_delete_a2a_task_config(
+                    config_id=config_id,
                     principal_id=tool_context.principal_id,
+                    task_id=task_id,
                 )
                 if not deleted:
                     raise TaskNotFoundError(message=f"Push notification config not found: {config_id}")
@@ -1741,12 +1849,17 @@ class AdCPRequestHandler(RequestHandler):
         wire_payload_kwargs = {"raw_wire_payload": raw_wire_payload} if skill_name in _RAW_WIRE_PAYLOAD_SKILLS else {}
 
         async def dispatch() -> Any:
-            return await handler(parameters, identity, **wire_payload_kwargs)
+            response = await handler(parameters, identity, **wire_payload_kwargs)
+            # Cache the canonical A2A success payload, including protocol
+            # siblings, so the first response and replay cross byte-identical
+            # boundary serialization (apart from replay/context metadata).
+            return self._serialize_for_a2a(response)
 
         if read_idempotency_key is None:
             return await dispatch()
         from src.services.idempotency_replay import execute_idempotent_read
 
+        self._validate_explicit_read_arguments(skill_name, parameters)
         return await execute_idempotent_read(
             tool_name=skill_name,
             idempotency_key=read_idempotency_key,
@@ -1755,6 +1868,32 @@ class AdCPRequestHandler(RequestHandler):
             response_type=None,
             work=dispatch,
         )
+
+    @staticmethod
+    def _validate_explicit_read_arguments(skill_name: str, parameters: dict[str, Any]) -> None:
+        """Validate a keyed read before its durable reservation is inserted."""
+        from src.core.callable_argument_validation import validate_callable_arguments
+        from src.core.tools.accounts import list_accounts
+        from src.core.tools.capabilities import get_adcp_capabilities
+        from src.core.tools.creative_formats import list_creative_formats
+        from src.core.tools.creatives.listing import list_creatives
+        from src.core.tools.media_buy_delivery import get_media_buy_delivery
+        from src.core.tools.media_buy_list import get_media_buys
+        from src.core.tools.products import get_products
+
+        read_callables: dict[str, Callable[..., Any]] = {
+            "get_adcp_capabilities": get_adcp_capabilities,
+            "get_media_buy_delivery": get_media_buy_delivery,
+            "get_media_buys": get_media_buys,
+            "get_products": get_products,
+            "list_accounts": list_accounts,
+            "list_creative_formats": list_creative_formats,
+            "list_creatives": list_creatives,
+        }
+        function = read_callables.get(skill_name)
+        if function is None:
+            raise RuntimeError(f"A2A read skill {skill_name!r} has no validation callable")
+        validate_callable_arguments(function, parameters)
 
     async def _handle_explicit_skill(
         self,
@@ -1814,7 +1953,7 @@ class AdCPRequestHandler(RequestHandler):
         # handler renders as a VERSION_UNSUPPORTED failed-Task envelope; it is
         # recorded here (not in the handler try-block below, which this raise
         # never reaches) so version rejections land on the same observability
-        # surface as every other boundary error. See #1512.
+        # surface as every other boundary error.
 
         # protobuf Struct decodes every JSON number as float. Reconstruct an
         # integral legacy major pin before validation; semantically the buyer
@@ -1841,28 +1980,20 @@ class AdCPRequestHandler(RequestHandler):
         # request: the strict request models (GetMediaBuysRequest, ...) use
         # extra="forbid" in dev/CI, so an undeclared adcp_major_version would
         # raise extra_forbidden and make the agent uncallable by conformant
-        # SDK clients (#1512).
+        # SDK clients.
         parameters, dropped_negotiation = strip_negotiation_fields(parameters)
         _log_dropped_fields(skill_name, DROPPED_FIELDS_NEGOTIATION, dropped_negotiation)
 
-        # Inject push_notification_config into parameters for skills that need it
-        # Serialize protobuf to dict at the transport boundary — _impl accepts dict
-        if push_notification_config and skill_name in ("create_media_buy", "sync_creatives"):
-            pnc_dict = json_format.MessageToDict(push_notification_config)
-            # Translate A2A protobuf authentication.scheme (singular) → AdCP schemes (plural list).
-            # A2A's protobuf AuthenticationInfo uses a single `scheme` field; AdCP's
-            # PushNotificationConfig schema uses a `schemes` array.
-            auth = pnc_dict.get("authentication") if isinstance(pnc_dict, dict) else None
-            if isinstance(auth, dict) and "scheme" in auth and "schemes" not in auth:
-                scheme_value = auth.pop("scheme")
-                auth["schemes"] = [scheme_value] if scheme_value else []
-            parameters = {**parameters, "push_notification_config": pnc_dict}
         # Normalize deprecated fields before any handler sees the parameters
 
         compat_result = normalize_request_params(skill_name, parameters)
         parameters = compat_result.params
 
-        logger.info("Handling explicit skill: %s with parameters: %s", skill_name, list(parameters.keys()))
+        logger.info(
+            "Handling explicit skill: %s with parameters: %s",
+            scrub_control_chars(skill_name),
+            scrub_control_chars(list(parameters.keys())),
+        )
 
         # Map skill names to handlers. Handler signatures are heterogeneous
         # (discovery skills accept ``identity: ResolvedIdentity | None``; the rest
@@ -2069,6 +2200,7 @@ class AdCPRequestHandler(RequestHandler):
             # typed/dict account — but resolving at the boundary keeps all three handlers uniform.
             account=to_account_reference(params.get("account")),
             idempotency_key=params.get("idempotency_key"),
+            paused=req.paused,
             identity=identity,
             # The DataPart params as sent, captured pre-normalization by
             # _handle_explicit_skill. Without it the impl falls back to
@@ -2274,7 +2406,7 @@ class AdCPRequestHandler(RequestHandler):
         from src.core.tools.capabilities import get_adcp_capabilities_raw
 
         # Call core function with identity, forwarding the buyer's request
-        # context so it is echoed unchanged on the response (#1512). The A2A path
+        # context so it is echoed unchanged on the response. The A2A path
         # strips only negotiation fields, so context survives in `parameters`.
         response = await get_adcp_capabilities_raw(
             protocols=parameters.get("protocols"),

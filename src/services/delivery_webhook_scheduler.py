@@ -16,23 +16,154 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
     NotificationType,
 )  # TODO: no stable alias — response-level NotificationType differs from top-level
-from sqlalchemy import func, select
 
-from src.core.database.database_session import get_db_session
+from src.core.database.database_session import get_db_session, get_independent_db_session
 from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
-from src.core.database.models import WebhookDeliveryLog
-from src.core.database.repositories import MediaBuyRepository
+from src.core.database.repositories import MediaBuyRepository, ProductRepository
+from src.core.database.repositories.webhook_delivery_log import WebhookDeliveryLogRepository
+from src.core.enum_helpers import enum_value
 from src.core.logging_config import scrub_control_chars
 from src.core.schemas import GetMediaBuyDeliveryRequest, GetMediaBuyDeliveryResponse
+from src.core.security.webhook_http import describe_webhook_error
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.core.utils import utc_flight_start
 from src.services.protocol_webhook_service import get_protocol_webhook_service
+from src.services.webhook_event_identity import webhook_event_key
 
 logger = logging.getLogger(__name__)
 
 # 1 hour because AdCP protocol has frequency options hourly, daily and monthly
 # Configurable via env var for testing
 SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or "3600")
+_TERMINAL_MEDIA_BUY_STATUSES = frozenset({"completed", "canceled", "rejected", "failed"})
+
+
+def _reporting_notification_type(media_buy_status: str, unavailable_count: int) -> NotificationType:
+    """Classify scheduled, delayed, and one-shot terminal reporting events."""
+    if unavailable_count:
+        return NotificationType.delayed
+    if media_buy_status in _TERMINAL_MEDIA_BUY_STATUSES:
+        return NotificationType.final
+    return NotificationType.scheduled
+
+
+def _reporting_event_identity(
+    notification_type: NotificationType,
+    media_buy_status: str,
+    reporting_period: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the stable semantic identity for one reporting event."""
+    if notification_type == NotificationType.final:
+        return {"terminal_status": media_buy_status}
+    return {"reporting_period": reporting_period}
+
+
+def _expected_delay_minutes(session: Any, media_buy: Any) -> int:
+    """Return the strictest declared product delay for this media buy."""
+    packages = (media_buy.raw_request or {}).get("packages") or []
+    product_ids = {
+        str(package["product_id"]) for package in packages if isinstance(package, dict) and package.get("product_id")
+    }
+    if not product_ids:
+        return 0
+    products = ProductRepository(session, media_buy.tenant_id).list_by_ids(sorted(product_ids))
+    return max(
+        (int((product.reporting_capabilities or {}).get("expected_delay_minutes") or 0) for product in products),
+        default=0,
+    )
+
+
+def _reporting_delivery_request(
+    media_buy_id: str,
+    *,
+    is_terminal: bool,
+    start_date: Any,
+    end_date: Any,
+) -> GetMediaBuyDeliveryRequest:
+    """Build the exact scheduled-period or terminal-lifetime delivery query."""
+    return GetMediaBuyDeliveryRequest(
+        media_buy_ids=[media_buy_id],
+        status_filter=None,
+        start_date=None if is_terminal else start_date.strftime("%Y-%m-%d"),
+        end_date=None if is_terminal else end_date.strftime("%Y-%m-%d"),
+        context=None,
+    )
+
+
+def _unavailable_delivery_ids(delivery_response: Any, media_buy_id: str) -> set[str]:
+    """Count delayed/failed rows and request-level errors without enum ambiguity."""
+    unavailable = {
+        str(delivery.media_buy_id)
+        for delivery in delivery_response.media_buy_deliveries
+        if enum_value(delivery.status) in {"reporting_delayed", "failed"}
+    }
+    if delivery_response.errors:
+        unavailable.add(media_buy_id)
+    return unavailable
+
+
+def _reporting_callback_config(
+    media_buy: Any,
+    reporting_webhook: dict[str, Any],
+    webhook_url: str,
+) -> DBPushNotificationConfig:
+    """Build the reporting channel from reporting_webhook, never task PNC."""
+    authentication = reporting_webhook.get("authentication") or {}
+    schemes = authentication.get("schemes") or []
+    return DBPushNotificationConfig(
+        id=f"temp_{media_buy.media_buy_id}",
+        tenant_id=media_buy.tenant_id,
+        principal_id=media_buy.principal_id,
+        media_buy_id=media_buy.media_buy_id,
+        url=webhook_url,
+        authentication_type=schemes[0] if schemes else None,
+        authentication_token=authentication.get("credentials"),
+        is_active=True,
+    )
+
+
+def _supports_reporting_frequency(raw_frequency: str, *, force: bool, media_buy_id: str) -> bool:
+    """Reject unsupported scheduled frequencies while preserving forced runs."""
+    if force or raw_frequency == "daily":
+        return True
+    logger.warning(
+        "Skipping reporting webhook with frequency '%s' for media buy %s – "
+        "only 'daily' frequency is supported for delivery webhooks at this time",
+        raw_frequency,
+        scrub_control_chars(media_buy_id),
+    )
+    return False
+
+
+def _reporting_period_dates(
+    media_buy: Any,
+    *,
+    is_terminal: bool,
+    force: bool,
+    session: Any,
+) -> tuple[Any, Any] | None:
+    """Resolve a report's campaign-lifetime or prior-day period when ready."""
+    today = datetime.now(UTC).date()
+    if not is_terminal and media_buy.start_date and media_buy.start_date > today:
+        logger.info(
+            "Skipping delivery report for media buy %s before its flight starts on %s",
+            scrub_control_chars(media_buy.media_buy_id),
+            media_buy.start_date,
+        )
+        return None
+    if is_terminal:
+        return media_buy.start_date or (today - timedelta(days=1)), media_buy.end_date or today
+
+    start_date = today - timedelta(days=1)
+    available_at = utc_flight_start(today) + timedelta(minutes=_expected_delay_minutes(session, media_buy))
+    if not force and datetime.now(UTC) < available_at:
+        logger.info(
+            "Reporting period for media buy %s is not expected to be available until %s",
+            scrub_control_chars(media_buy.media_buy_id),
+            available_at,
+        )
+        return None
+    return start_date, today
 
 
 class DeliveryWebhookScheduler:
@@ -82,7 +213,7 @@ class DeliveryWebhookScheduler:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in delivery webhook scheduler: {scrub_control_chars(str(e))}", exc_info=True)
+                logger.error("Error in delivery webhook scheduler: %s", scrub_control_chars(describe_webhook_error(e)))
             finally:
                 # Wait before next batch
                 await asyncio.sleep(SLEEP_INTERVAL_SECONDS)
@@ -94,36 +225,46 @@ class DeliveryWebhookScheduler:
         try:
             with get_db_session() as session:
                 # Find all active media buys (cross-tenant scheduler query)
-                media_buys = MediaBuyRepository.get_all_by_statuses(session, ["active", "approved"])
-
-                reports_sent = 0
-                errors = 0
-
+                media_buys = MediaBuyRepository.get_all_by_statuses(
+                    session,
+                    ["active", "approved", "completed", "canceled", "rejected", "failed"],
+                )
+                report_jobs: list[tuple[Any, dict[str, Any]]] = []
                 for media_buy in media_buys:
-                    try:
-                        # Check if this media buy has a reporting webhook configured
-                        raw_request = media_buy.raw_request or {}
-                        reporting_webhook = raw_request.get("reporting_webhook")
+                    raw_request = media_buy.raw_request or {}
+                    reporting_webhook = raw_request.get("reporting_webhook")
+                    if reporting_webhook:
+                        session.expunge(media_buy)
+                        report_jobs.append((media_buy, reporting_webhook))
 
-                        if not reporting_webhook:
-                            continue
+            reports_sent = 0
+            errors = 0
 
-                        # Send delivery report
-                        await self._send_report_for_media_buy(media_buy, reporting_webhook, session)
+            for media_buy, reporting_webhook in report_jobs:
+                try:
+                    # The independent session is closed by the callee before
+                    # outbound I/O, so no connection spans the await.
+                    with get_independent_db_session() as session:
+                        sent = await self._send_report_for_media_buy(media_buy, reporting_webhook, session)
+                    if sent:
                         reports_sent += 1
-
-                    except Exception as e:
-                        logger.error(
-                            f"Error sending report for media buy {scrub_control_chars(media_buy.media_buy_id)}: "
-                            f"{scrub_control_chars(str(e))}",
-                            exc_info=True,
-                        )
+                    else:
                         errors += 1
 
-                logger.info(f"Daily delivery report batch complete: {reports_sent} sent, {errors} errors")
+                except Exception as e:
+                    logger.error(
+                        f"Error sending report for media buy {scrub_control_chars(media_buy.media_buy_id)}: "
+                        f"{scrub_control_chars(describe_webhook_error(e))}",
+                    )
+                    errors += 1
+
+            logger.info(f"Daily delivery report batch complete: {reports_sent} sent, {errors} errors")
 
         except Exception as e:
-            logger.error(f"Error in daily delivery report batch: {scrub_control_chars(str(e))}", exc_info=True)
+            logger.error(
+                "Error in daily delivery report batch: %s",
+                scrub_control_chars(describe_webhook_error(e)),
+            )
 
     async def trigger_report_for_media_buy_by_id(self, media_buy_id: str, tenant_id: str) -> bool:
         """Manually trigger a delivery report for a single media buy by ID.
@@ -156,19 +297,22 @@ class DeliveryWebhookScheduler:
                     )
                     return False
 
-                # Force sending even if already sent today (for testing)
-                await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
-                return True
+                session.expunge(media_buy)
+
+            # Force sending even if already sent today (for testing). The
+            # callee returns the independent connection before it awaits I/O.
+            with get_independent_db_session() as session:
+                return await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
         except Exception as e:
             logger.error(
-                f"Error manually triggering report for {scrub_control_chars(media_buy_id)}: {scrub_control_chars(str(e))}",
-                exc_info=True,
+                f"Error manually triggering report for {scrub_control_chars(media_buy_id)}: "
+                f"{scrub_control_chars(describe_webhook_error(e))}",
             )
             return False
 
     async def _send_report_for_media_buy(
         self, media_buy: Any, reporting_webhook: dict, session: Any, force: bool = False
-    ) -> None:
+    ) -> bool:
         """Send a delivery report for a single media buy.
 
         Args:
@@ -177,44 +321,29 @@ class DeliveryWebhookScheduler:
             session: Database session
             force: If True, bypass frequency checks and duplicate checks
         """
+        media_buy_id_for_log = str(media_buy.media_buy_id)
         try:
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
-            raw_freq = str(reporting_webhook.get("frequency") or "daily").lower()
+            raw_freq = str(reporting_webhook.get("reporting_frequency") or "daily").lower()
 
-            if not force and raw_freq != "daily":
-                logger.warning(
-                    "Skipping reporting webhook with frequency '%s' for media buy %s – "
-                    "only 'daily' frequency is supported for delivery webhooks at this time",
-                    raw_freq,
-                    scrub_control_chars(media_buy.media_buy_id),
-                )
-                return
+            if not _supports_reporting_frequency(raw_freq, force=force, media_buy_id=media_buy_id_for_log):
+                return False
 
-            # Calculate reporting period for daily frequency: yesterday (full day)
-            start_date_obj = datetime.now(UTC).date() - timedelta(days=1)
-            end_date_obj = datetime.now(UTC)
+            media_buy_status = str(media_buy.status)
+            is_terminal = media_buy_status in _TERMINAL_MEDIA_BUY_STATUSES
 
-            # Check if we've already sent a scheduled delivery_report webhook for this media buy
-            # and reporting date. We use created_at::date as the period key.
-            if not force:
-                # Look back 24 hours to find recent successful webhooks
-                one_day_ago = datetime.now(UTC) - timedelta(hours=24)
-                existing_stmt = select(WebhookDeliveryLog).where(
-                    WebhookDeliveryLog.media_buy_id == media_buy.media_buy_id,
-                    WebhookDeliveryLog.task_type == "media_buy_delivery",
-                    WebhookDeliveryLog.notification_type == "scheduled",
-                    WebhookDeliveryLog.status == "success",
-                    WebhookDeliveryLog.created_at > one_day_ago,
-                )
-                existing_log = session.scalars(existing_stmt).first()
-                if existing_log:
-                    logger.info(
-                        "Skipping daily delivery webhook for media buy %s and date %s – already sent (log id %s)",
-                        scrub_control_chars(media_buy.media_buy_id),
-                        end_date_obj,
-                        existing_log.id,
-                    )
-                    return
+            # Scheduled daily reports cover the previous UTC day. A terminal
+            # report covers the campaign lifetime and has a stable logical key,
+            # so a later scheduler run can never produce a second final event.
+            reporting_dates = _reporting_period_dates(
+                media_buy,
+                is_terminal=is_terminal,
+                force=force,
+                session=session,
+            )
+            if reporting_dates is None:
+                return False
+            start_date_obj, end_date_obj = reporting_dates
 
             # Fetch delivery metrics
             # Create a ResolvedIdentity for the delivery call
@@ -233,14 +362,12 @@ class DeliveryWebhookScheduler:
             # than filtering them out and reporting "not found" errors.
             # We exclude "pending_start" (ready) to avoid returning delivery
             # data for future-dated campaigns that haven't started yet.
-            from adcp.types import MediaBuyStatus
 
-            req = GetMediaBuyDeliveryRequest(
-                media_buy_ids=[media_buy.media_buy_id],
-                status_filter=[MediaBuyStatus.active, MediaBuyStatus.completed],
-                start_date=start_date_obj.strftime("%Y-%m-%d"),
-                end_date=end_date_obj.strftime("%Y-%m-%d"),
-                context=None,
+            req = _reporting_delivery_request(
+                media_buy.media_buy_id,
+                is_terminal=is_terminal,
+                start_date=start_date_obj,
+                end_date=end_date_obj,
             )
 
             delivery_response = _get_media_buy_delivery_impl(req, identity)
@@ -250,122 +377,112 @@ class DeliveryWebhookScheduler:
                     f"`Couldn't get media_delivery` for {scrub_control_chars(media_buy.media_buy_id)}. "
                     f"Result is {scrub_control_chars(delivery_response.model_dump())}"
                 )
-                return
+                return False
 
-            if delivery_response.errors is not None:
-                logger.warning(
-                    f"`Couldn't get media_delivery` for {scrub_control_chars(media_buy.media_buy_id)}. "
-                    f"We have received an error in the result. "
-                    f"Result is {scrub_control_chars(delivery_response.model_dump())}"
-                )
-                return
-
-            # Get sequence number for this webhook (get max sequence + 1)
-            sequence_number = 1
-            try:
-                stmt = select(func.coalesce(func.max(WebhookDeliveryLog.sequence_number), 0)).where(
-                    WebhookDeliveryLog.media_buy_id == media_buy.media_buy_id,
-                    WebhookDeliveryLog.task_type == "media_buy_delivery",
-                )
-                max_seq = session.scalar(stmt)
-                sequence_number = (max_seq or 0) + 1
-            except Exception as e:
-                logger.warning(
-                    f"Could not get sequence number for media buy {scrub_control_chars(media_buy.media_buy_id)}: "
-                    f"{scrub_control_chars(str(e))}"
-                )
+            unavailable_ids = _unavailable_delivery_ids(delivery_response, str(media_buy.media_buy_id))
+            unavailable_count = len(unavailable_ids)
+            notification_type = _reporting_notification_type(media_buy_status, unavailable_count)
 
             # Calculate next_expected_at for daily frequency: start of next day (UTC)
             next_day = datetime.now(UTC).date() + timedelta(days=1)
-            next_expected_at = utc_flight_start(next_day)
+            next_expected_at = None if notification_type == NotificationType.final else utc_flight_start(next_day)
 
-            # Set webhook-specific metadata directly on the response model
-            # These fields are defined on the library's GetMediaBuyDeliveryResponse
-            delivery_response.notification_type = NotificationType.scheduled
-            delivery_response.next_expected_at = next_expected_at
-            delivery_response.partial_data = False  # TODO: Check for reporting_delayed status
-            delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries
-
-            # Extract webhook URL and authentication
+            reporting_period = delivery_response.reporting_period.model_dump(mode="json")
+            identity_payload = _reporting_event_identity(
+                notification_type,
+                media_buy_status,
+                reporting_period,
+            )
+            logical_event_key = webhook_event_key(
+                tenant_id=media_buy.tenant_id,
+                principal_id=media_buy.principal_id,
+                media_buy_id=media_buy.media_buy_id,
+                notification_type=notification_type.value,
+                event_payload=identity_payload,
+            )
             webhook_url = reporting_webhook.get("url")
             if not webhook_url:
                 logger.warning(f"No webhook URL configured for media buy {scrub_control_chars(media_buy.media_buy_id)}")
-                return
-
-            # Try to find existing push notification config or create a temporary one
-            auth_config = reporting_webhook.get("authentication", {})
-            auth_type = None
-            auth_token = None
-
-            if auth_config:
-                schemes = auth_config.get("schemes", [])
-                auth_type = schemes[0] if schemes else None
-                auth_token = auth_config.get("credentials")
-
-            # Query for existing push notification config for this media buy
-            config_stmt = select(DBPushNotificationConfig).where(
-                DBPushNotificationConfig.principal_id == media_buy.principal_id,
-                DBPushNotificationConfig.tenant_id == media_buy.tenant_id,
-                DBPushNotificationConfig.url == webhook_url,
-                DBPushNotificationConfig.is_active,
+                return False
+            event_repository = WebhookDeliveryLogRepository(session, media_buy.tenant_id)
+            event = event_repository.claim_event(
+                principal_id=media_buy.principal_id,
+                media_buy_id=media_buy.media_buy_id,
+                webhook_url=str(webhook_url),
+                logical_event_key=logical_event_key,
+                task_type="media_buy_delivery",
+                notification_type=notification_type.value,
             )
-            push_notification_config = session.scalars(config_stmt).first()
-
-            # Extract webhook config data before session closes
-            if push_notification_config:
-                # Detach from session and extract data
-                session.expunge(push_notification_config)
-            else:
-                # Create a detached temporary config (not attached to session)
-                push_notification_config = DBPushNotificationConfig(
-                    id=f"temp_{media_buy.media_buy_id}",
-                    tenant_id=media_buy.tenant_id,
-                    principal_id=media_buy.principal_id,
-                    url=webhook_url,
-                    authentication_type=auth_type,
-                    authentication_token=auth_token,
-                    is_active=True,
+            if not force and event.status == "success":
+                session.commit()
+                logger.info(
+                    "Skipping daily delivery webhook for media buy %s and reporting period %s – already sent",
+                    scrub_control_chars(media_buy.media_buy_id),
+                    scrub_control_chars(logical_event_key),
                 )
+                return False
+            sequence_number = event.sequence_number
 
-            # Wire vs internal task_type distinction:
-            # - metadata["task_type"] = "media_buy_delivery" -- internal logging/dedup label
-            #   used by protocol_webhook_service guards and WebhookDeliveryLog queries.
-            # - SDK task_type = "update_media_buy" -- AdCP spec TaskType enum value
-            #   for the wire payload (delivery reports are status updates on media buys).
-            # These are intentionally different: the internal label predates the SDK enum
-            # and is used for DB filtering, while the wire value must be spec-compliant.
-            # Renaming the metadata key is not safe without migrating DB records and
-            # updating all 6 protocol_webhook_service guard checks.
+            # Set webhook-specific metadata directly on the response model
+            # These fields are defined on the library's GetMediaBuyDeliveryResponse
+            delivery_response.notification_type = notification_type
+            delivery_response.sequence_number = sequence_number
+            delivery_response.next_expected_at = next_expected_at
+            delivery_response.partial_data = bool(unavailable_count)
+            delivery_response.unavailable_count = unavailable_count
+
+            push_notification_config = _reporting_callback_config(
+                media_buy,
+                reporting_webhook,
+                str(webhook_url),
+            )
+
+            # Keep the internal log classifier and wire task type identical so
+            # correlation, deduplication, and receiver dispatch describe the same
+            # normative media-buy-delivery event.
             metadata = {
                 "task_type": "media_buy_delivery",
                 "tenant_id": media_buy.tenant_id,
                 "principal_id": media_buy.principal_id,
                 "media_buy_id": media_buy.media_buy_id,
+                "event_id": event.idempotency_key,
+                "logical_event_key": logical_event_key,
+                "sequence_number": sequence_number,
             }
 
-            # SDK 5.7: returns McpWebhookPayload directly; 3rd arg is task_type.
-            # Delivery reports are status updates on existing media buys,
-            # so we use update_media_buy as the canonical task type.
             media_buy_delivery_payload = create_mcp_webhook_payload(
-                task_id=media_buy.media_buy_id,
-                task_type="update_media_buy",
-                result=delivery_response,
+                task_id=f"delivery:{media_buy.media_buy_id}",
+                task_type="media_buy_delivery",
+                result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
                 status=AdcpTaskStatus.completed,
+                operation_id=f"delivery:{media_buy.media_buy_id}:{reporting_period['end']}",
+                idempotency_key=event.idempotency_key,
+                token=reporting_webhook.get("token"),
             )
+            payload_dict = media_buy_delivery_payload.model_dump(mode="json", exclude_none=True)
+            application_context = (media_buy.raw_request or {}).get("context")
+            if application_context is not None:
+                payload_dict["context"] = application_context
+            payload_dict = event_repository.store_payload_if_absent(event.idempotency_key, payload_dict)
+            session.commit()
 
-            # Send webhook notification OUTSIDE the session context
-            # This ensures the session is closed before async webhook call
-            await self.webhook_service.send_notification(
-                push_notification_config=push_notification_config, payload=media_buy_delivery_payload, metadata=metadata
+            # Return the connection before outbound I/O. The surrounding
+            # independent-session context will perform idempotent final cleanup.
+            session.close()
+            sent = await self.webhook_service.send_notification(
+                push_notification_config=push_notification_config,
+                payload=payload_dict,
+                metadata=metadata,
             )
-
-            logger.info(f"Sent delivery report webhook for media buy {scrub_control_chars(media_buy.media_buy_id)}")
+            if not sent:
+                raise RuntimeError("Reporting webhook delivery returned false")
+            logger.info(f"Sent delivery report webhook for media buy {scrub_control_chars(media_buy_id_for_log)}")
+            return True
 
         except Exception as e:
             logger.error(
-                f"Error sending delivery report for media buy {scrub_control_chars(media_buy.media_buy_id)}: "
-                f"{scrub_control_chars(str(e))}",
-                exc_info=True,
+                f"Error sending delivery report for media buy {scrub_control_chars(media_buy_id_for_log)}: "
+                f"{scrub_control_chars(describe_webhook_error(e))}",
             )
             raise
 

@@ -6,25 +6,36 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
+from adcp import create_mcp_webhook_payload
 from adcp.types import McpWebhookPayload
 from adcp.webhooks import GeneratedTaskStatus
 from pydantic import BaseModel
 from rich.console import Console
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.core.async_utils import pin_task
-from src.core.database.database_session import DatabaseManager
+from src.core.database.database_session import DatabaseManager, defer_until_after_commit, get_independent_db_session
 from src.core.database.models import Context, ObjectWorkflowMapping, WorkflowStep
 from src.core.database.models import Context as DBContext
-from src.core.exceptions import AdCPError, build_two_layer_error_envelope, normalize_to_adcp_error
-from src.core.webhook_validator import (
-    validate_webhook_task_type,
-    webhook_url_for_log,
+from src.core.database.repositories.push_notification_config import (
+    PushNotificationConfigRepository,
+    task_push_config_id,
 )
+from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.exceptions import (
+    AdCPError,
+    build_two_layer_error_envelope,
+    is_guaranteed_wire_error_code,
+    normalize_to_adcp_error,
+)
+from src.core.logging_config import scrub_control_chars
+from src.core.security.webhook_http import redact_webhook_url
+from src.core.webhook_validator import validate_webhook_task_type
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
@@ -32,24 +43,36 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def _log_webhook_send_outcome(config_url: str, sent: bool) -> None:
-    """Log webhook delivery result; never treat ``False`` as success.
+def _add_object_workflow_mappings(
+    session: Any,
+    mappings: list[dict[str, str]] | None,
+    *,
+    step_id: str,
+    step_type: str,
+) -> None:
+    """Add optional workflow mappings without inflating orchestration branches."""
+    for mapping in mappings or []:
+        session.add(
+            ObjectWorkflowMapping(
+                object_type=mapping["object_type"],
+                object_id=mapping["object_id"],
+                step_id=step_id,
+                action=mapping.get("action", step_type),
+                created_at=datetime.now(UTC),
+            )
+        )
 
-    ``config_url`` is sanitized to ``scheme://host/path`` so credentials in
-    userinfo/query never reach the console (AdCP L1 SSRF log hygiene).
-    """
-    safe_url = webhook_url_for_log(config_url)
-    if sent:
-        console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
-    else:
-        console.print(f"[red]❌ Webhook not delivered for {safe_url} (send_notification returned False)[/red]")
 
-
-# Fire-and-forget webhook tasks are pinned against asyncio's weak-ref GC via
-# the shared src.core.async_utils.pin_task helper (single source of truth;
-# see its docstring). (Leak triage #6 from the production OOM-cycle
-# investigation: untracked create_task at context_manager.py was the smoking
-# gun.)
+def _serialize_workflow_request(
+    request_data: dict[str, Any] | Any | None,
+    request_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | Any | None:
+    """Serialize and enrich workflow input at the persistence boundary."""
+    if isinstance(request_data, BaseModel):
+        request_data = request_data.model_dump(mode="json")
+    if request_metadata and request_data is not None:
+        request_data.update(request_metadata)
+    return request_data
 
 
 class ContextManager(DatabaseManager):
@@ -62,7 +85,12 @@ class ContextManager(DatabaseManager):
         super().__init__()
 
     def create_context(
-        self, tenant_id: str, principal_id: str, initial_conversation: list[dict[str, Any]] | None = None
+        self,
+        tenant_id: str,
+        principal_id: str,
+        initial_conversation: list[dict[str, Any]] | None = None,
+        *,
+        context_id: str | None = None,
     ) -> Context:
         """Create a new context for asynchronous operations.
 
@@ -77,7 +105,7 @@ class ContextManager(DatabaseManager):
         Returns:
             The created Context object
         """
-        context_id = f"ctx_{uuid.uuid4().hex[:12]}"
+        context_id = context_id or f"ctx_{uuid.uuid4().hex[:12]}"
 
         context = Context(
             context_id=context_id,
@@ -87,43 +115,60 @@ class ContextManager(DatabaseManager):
             last_activity_at=datetime.now(UTC),
         )
 
+        session = self.session
         try:
-            self.session.add(context)
-            self.session.commit()
+            with session.begin_nested():
+                session.add(context)
+                session.flush()
+            if self._owns_session:
+                session.commit()
             console.print(f"[green]Created context {context_id} for principal {principal_id}[/green]")
             # Refresh to get any database-generated values
-            self.session.refresh(context)
+            session.refresh(context)
             # Detach from session
-            self.session.expunge(context)
+            session.expunge(context)
             return context
+        except IntegrityError:
+            if self._owns_session:
+                session.rollback()
+            existing = WorkflowRepository(session, tenant_id).get_context(
+                context_id,
+                principal_id=principal_id,
+            )
+            if existing is None:
+                raise
+            session.expunge(existing)
+            return existing
         except Exception as e:
-            self.session.rollback()
+            self.rollback()
             console.print(f"[red]Failed to create context: {e}[/red]")
             raise
         finally:
-            # DatabaseManager handles session cleanup differently
-            pass
+            self.close()
 
-    def get_context(self, context_id: str) -> Context | None:
-        """Get a context by ID.
+    def get_context(self, context_id: str, *, tenant_id: str, principal_id: str) -> Context | None:
+        """Get a context within its tenant and principal boundary.
 
         Args:
             context_id: The context ID
+            tenant_id: Tenant that must own the context
+            principal_id: Principal that must own the context
 
         Returns:
             The Context object or None if not found
         """
         session = self.session
         try:
-            stmt = select(Context).filter_by(context_id=context_id)
-
-            context = session.scalars(stmt).first()
+            context = WorkflowRepository(session, tenant_id).get_context(
+                context_id,
+                principal_id=principal_id,
+            )
             if context:
                 # Detach from session
                 session.expunge(context)
             return context
         finally:
-            session.close()
+            self.close()
 
     def get_or_create_context(
         self, tenant_id: str, principal_id: str, context_id: str | None = None, is_async: bool = False
@@ -146,7 +191,11 @@ class ContextManager(DatabaseManager):
             return None
 
         if context_id:
-            return self.get_context(context_id)
+            return self.get_context(
+                context_id,
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+            )
         else:
             return self.create_context(tenant_id, principal_id)
 
@@ -161,10 +210,9 @@ class ContextManager(DatabaseManager):
             context = self.session.scalars(stmt).first()
             if context:
                 context.last_activity_at = datetime.now(UTC)
-                self.session.commit()
+                self.commit()
         finally:
-            # DatabaseManager handles session cleanup differently
-            pass
+            self.close()
 
     def create_workflow_step(
         self,
@@ -181,6 +229,8 @@ class ContextManager(DatabaseManager):
         object_mappings: list[dict[str, str]] | None = None,
         initial_comment: str | None = None,
         request_metadata: dict[str, Any] | None = None,
+        step_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> WorkflowStep:
         """Create a workflow step in the database.
 
@@ -202,14 +252,8 @@ class ContextManager(DatabaseManager):
         Returns:
             The created WorkflowStep object
         """
-        # Serialize Pydantic models at the DB boundary
-        from pydantic import BaseModel
-
-        if isinstance(request_data, BaseModel):
-            request_data = request_data.model_dump(mode="json")
-        if request_metadata and request_data is not None:
-            request_data.update(request_metadata)
-        step_id = f"step_{uuid.uuid4().hex[:12]}"
+        request_data = _serialize_workflow_request(request_data, request_metadata)
+        step_id = step_id or f"step_{uuid.uuid4().hex[:12]}"
 
         # Initialize comments array with initial comment if provided
         comments = []
@@ -237,32 +281,42 @@ class ContextManager(DatabaseManager):
 
         session = self.session
         try:
-            session.add(step)
+            with session.begin_nested():
+                session.add(step)
 
-            # Create object mappings if provided
-            if object_mappings:
-                for mapping in object_mappings:
-                    obj_mapping = ObjectWorkflowMapping(
-                        object_type=mapping["object_type"],
-                        object_id=mapping["object_id"],
-                        step_id=step_id,
-                        action=mapping.get("action", step_type),
-                        created_at=datetime.now(UTC),
-                    )
-                    session.add(obj_mapping)
-
-            session.commit()
+                _add_object_workflow_mappings(
+                    session,
+                    object_mappings,
+                    step_id=step_id,
+                    step_type=step_type,
+                )
+                session.flush()
+            if self._owns_session:
+                session.commit()
             session.refresh(step)
             # Detach from session
             session.expunge(step)
             console.print(f"[green]Created workflow step {step_id} for context {context_id}[/green]")
             return step
+        except IntegrityError:
+            if self._owns_session:
+                session.rollback()
+            if tenant_id is None:
+                raise
+            existing = WorkflowRepository(session, tenant_id).get_by_step_and_context(
+                step_id,
+                context_id,
+            )
+            if existing is None:
+                raise
+            session.expunge(existing)
+            return existing
         except Exception as e:
-            session.rollback()
+            self.rollback()
             console.print(f"[red]Failed to create workflow step: {e}[/red]")
             raise
         finally:
-            session.close()
+            self.close()
 
     def update_workflow_step(
         self,
@@ -273,6 +327,7 @@ class ContextManager(DatabaseManager):
         transaction_details: dict[str, Any] | None = None,
         add_comment: dict[str, str] | None = None,
         tenant_id: str | None = None,
+        notify: bool = True,
     ) -> None:
         """Update a workflow step's status and data.
 
@@ -287,6 +342,8 @@ class ContextManager(DatabaseManager):
             add_comment: Optional comment to add {user, comment}
             tenant_id: Tenant scope — joins through Context for isolation.
                 If provided, the step must belong to this tenant or no update occurs.
+            notify: Emit an asynchronous callback for a genuine post-submission
+                status transition. Initial/terminal inline responses set this false.
         """
         # Infrastructure-boundary serialization: _impl functions pass Pydantic
         # models, this method serializes to dict for DB storage.
@@ -302,6 +359,7 @@ class ContextManager(DatabaseManager):
             stmt = select(WorkflowStep).filter_by(step_id=step_id)
             if tenant_id:
                 stmt = stmt.join(DBContext).where(DBContext.tenant_id == tenant_id)
+            stmt = stmt.with_for_update()
 
             step = session.scalars(stmt).first()
             if step:
@@ -347,7 +405,19 @@ class ContextManager(DatabaseManager):
                 console.print(f"[magenta]     step object exists? {step is not None}[/magenta]")
                 console.print(f"[magenta]     Will trigger webhook? {status and step}[/magenta]")
 
-                session.commit()
+                owns_transaction = self._owns_session
+                status_changed = bool(status and status != old_status)
+                if status_changed and notify:
+                    assert status is not None
+                    step_tenant_id = tenant_id or step.context.tenant_id
+                    WorkflowRepository(session, step_tenant_id).record_notification_transition(step, status)
+                if status_changed and notify and not owns_transaction:
+                    assert status is not None
+                    defer_until_after_commit(
+                        session,
+                        partial(_publish_workflow_notifications_after_commit, step_id, status, step_tenant_id),
+                    )
+                self.commit()
                 console.print(f"[green]✅ Updated workflow step {step_id} (committed to database)[/green]")
 
                 # DEBUG: Log the condition check values AFTER commit
@@ -358,13 +428,13 @@ class ContextManager(DatabaseManager):
                 console.print(f"[yellow]   Webhook trigger condition (status and step): {status and step}[/yellow]")
 
                 # Send push notifications if status changed
-                if status and step:
-                    console.print(f"[blue]🚀 WEBHOOK: Calling _send_push_notifications for step {step_id}[/blue]")
-                    self._send_push_notifications(step, status, session)
-                else:
+                if status_changed and notify and owns_transaction:
+                    assert status is not None
+                    publish_workflow_notifications(step.step_id, status, step.context.tenant_id)
+                elif not status:
                     console.print(f"[yellow]⚠️ WEBHOOK SKIPPED: status={status}, step={step is not None}[/yellow]")
         finally:
-            session.close()
+            self.close()
 
     def audit_workflow_step_failure(self, step_id: str, exc: Exception) -> None:
         """Mark a workflow step failed with the spec two-layer envelope as ``response_data``.
@@ -384,8 +454,6 @@ class ContextManager(DatabaseManager):
         hiccup during audit doesn't replace the original exception that the
         caller is about to re-raise.
         """
-        from src.core.exceptions import WIRE_STANDARD_CODES
-
         try:
             source = normalize_to_adcp_error(exc)
 
@@ -397,7 +465,7 @@ class ContextManager(DatabaseManager):
             # forward so buyer agents and webhook subscribers retain
             # machine-actionable correction context across the rewrite.
             wire_code = source.wire_error_code
-            if wire_code not in WIRE_STANDARD_CODES:
+            if not is_guaranteed_wire_error_code(wire_code):
                 source = AdCPError.synthesize(
                     source.message or str(source),
                     error_code="SERVICE_UNAVAILABLE",
@@ -565,7 +633,7 @@ class ContextManager(DatabaseManager):
                 session.expunge(step)
             return list(steps)
         finally:
-            session.close()
+            self.close()
 
     def get_object_lifecycle(
         self, object_type: str, object_id: str, tenant_id: str | None = None
@@ -620,7 +688,7 @@ class ContextManager(DatabaseManager):
 
             return lifecycle
         finally:
-            session.close()
+            self.close()
 
     def add_message(self, context_id: str, role: str, content: str) -> None:
         """Add a message to the conversation history.
@@ -646,9 +714,9 @@ class ContextManager(DatabaseManager):
                     {"role": role, "content": content, "timestamp": datetime.now(UTC).isoformat()}
                 )
                 context.last_activity_at = datetime.now(UTC)
-                session.commit()
+                self.commit()
         finally:
-            session.close()
+            self.close()
 
     def set_tool_state(self, context_id: str, tool_name: str, state: dict[str, Any]) -> None:
         """Set the current tool state in a context.
@@ -702,7 +770,7 @@ class ContextManager(DatabaseManager):
 
             return {"status": overall_status, "counts": status_counts, "total_steps": len(steps)}
         finally:
-            session.close()
+            self.close()
 
     def get_contexts_for_principal(self, tenant_id: str, principal_id: str, limit: int = 10) -> list[Context]:
         """Get recent contexts for a principal.
@@ -730,7 +798,7 @@ class ContextManager(DatabaseManager):
                 session.expunge(context)
             return list(contexts)
         finally:
-            session.close()
+            self.close()
 
     def link_workflow_to_object(
         self,
@@ -773,16 +841,24 @@ class ContextManager(DatabaseManager):
                 created_at=datetime.now(UTC),
             )
             session.add(obj_mapping)
-            session.commit()
+            self.commit()
             console.print(f"[green]✅ Linked {object_type} {object_id} to workflow step {step_id}[/green]")
         except Exception as e:
-            session.rollback()
+            self.rollback()
             console.print(f"[red]Failed to link object to workflow: {e}[/red]")
             raise
         finally:
-            session.close()
+            self.close()
 
-    def _send_push_notifications(self, step: WorkflowStep, new_status: str, session: Any) -> None:
+    def _send_push_notifications(
+        self,
+        step: WorkflowStep,
+        new_status: str,
+        session: Any,
+        *,
+        event_id: str | None = None,
+        response_data: dict | None = None,
+    ) -> bool:
         """Send push notifications via registered webhooks for workflow step status changes.
 
         Args:
@@ -801,172 +877,272 @@ class ContextManager(DatabaseManager):
 
             if not mappings:
                 console.print(f"[yellow]No object mappings found for step {step.step_id}[/yellow]")
-                return
+                return True
+            # A workflow transition is one logical task event even when the step
+            # maps to several domain objects.
+            mapping = mappings[0]
 
             # Get context to find tenant_id
             context_stmt = select(Context).filter_by(context_id=step.context_id)
             context = session.scalars(context_stmt).first()
             if not context:
                 console.print(f"[yellow]No context found for step {step.step_id}[/yellow]")
-                return
+                return True
 
             tenant_id = context.tenant_id
             principal_id = context.principal_id
 
-            # Find registered webhooks for this principal
-            # NOTE: PushNotificationConfig doesn't have object_type/object_id columns
-            # Those are in ObjectWorkflowMapping which we already have via 'mappings'
-            webhook_stmt = select(PushNotificationConfig).filter_by(
-                tenant_id=tenant_id,
+            cfg_dict = (step.request_data or {}).get("push_notification_config") or {}
+            if not cfg_dict.get("url"):
+                console.print("[yellow]No push notification config present; skipping webhook[/yellow]")
+                return True
+            config_id = task_push_config_id(
+                tenant_id,
+                principal_id,
+                step.context_id,
+                cfg_dict.get("id"),
+            )
+            registered = PushNotificationConfigRepository(session, tenant_id).get_active_for_task(
+                config_id=config_id,
                 principal_id=principal_id,
+                media_buy_id=mapping.object_id if mapping.object_type == "media_buy" else None,
+                session_id=step.context_id,
+            )
+            if registered is None:
+                console.print("[yellow]Task callback is not durably registered; skipping webhook[/yellow]")
+                return True
+            # The callback embedded in this durable workflow request is the
+            # originating task registration. Never fan a task transition out to
+            # unrelated active rows owned by the same principal.
+            console.print(
+                f"[cyan]📦 Processing mapping: {mapping.object_type} {mapping.object_id} action={mapping.action}[/cyan]"
+            )
+
+            url = registered.url
+            context_obj = getattr(step, "context", None)
+            derived_tenant_id = tenant_id or getattr(context_obj, "tenant_id", None)
+            derived_principal_id = principal_id or getattr(context_obj, "principal_id", None)
+            push_notification_config = PushNotificationConfig(
+                id=registered.id,
+                tenant_id=derived_tenant_id,
+                principal_id=derived_principal_id,
+                media_buy_id=mapping.object_id if mapping.object_type == "media_buy" else None,
+                url=url,
+                authentication_type=registered.authentication_type,
+                authentication_token=registered.authentication_token,
+                token=registered.token,
+                application_context=registered.application_context,
                 is_active=True,
             )
-            webhooks = session.scalars(webhook_stmt).all()
 
-            console.print(f"[cyan]🔍 Found {len(webhooks)} active webhook configs for principal {principal_id}[/cyan]")
+            service = get_protocol_webhook_service()
+            safe_url = scrub_control_chars(redact_webhook_url(push_notification_config.url))
+            console.print(
+                f"[cyan]📤 Sending webhook to {safe_url} for {mapping.object_type} {mapping.object_id}[/cyan]"
+            )
 
-            # Send notifications for each mapping (media buy, creative, etc.)
-            for mapping in mappings:
-                console.print(
-                    f"[cyan]📦 Processing mapping: {mapping.object_type} {mapping.object_id} action={mapping.action}[/cyan]"
+            task_type_str = step.tool_name or mapping.action or "unknown"
+            try:
+                wire_status = "input-required" if new_status == "requires_approval" else new_status
+                status_enum = GeneratedTaskStatus(wire_status)
+            except ValueError:
+                status_enum = GeneratedTaskStatus.unknown
+            wire_task_type = validate_webhook_task_type(task_type_str)
+
+            # This path is the AdCP task-argument registration, which always
+            # receives mcp-webhook-payload regardless of the inbound transport.
+            # Native A2A TaskPushNotificationConfig delivery is handled by the
+            # A2A server's task-bound registration path.
+            mcp_payload = create_mcp_webhook_payload(
+                task_id=step.step_id,
+                status=status_enum,
+                task_type=wire_task_type,
+                result=step.response_data if response_data is None else response_data,
+                operation_id=registered.operation_id,
+                context_id=step.context_id,
+                token=registered.token,
+            )
+            payload: Task | TaskStatusUpdateEvent | McpWebhookPayload | dict[str, Any]
+            payload = mcp_payload.model_dump(mode="json", exclude_none=True)
+            stable_event_id = event_id or f"workflow:{step.step_id}:{wire_status}"
+            payload["idempotency_key"] = stable_event_id
+            application_context = registered.application_context
+            if application_context is not None:
+                payload["context"] = application_context
+
+            metadata: dict[str, Any] = {
+                "task_type": task_type_str,
+                "tenant_id": derived_tenant_id,
+                "principal_id": derived_principal_id,
+                "event_id": f"{stable_event_id}:{registered.id}",
+            }
+
+            try:
+                notification = service.send_notification(
+                    push_notification_config=push_notification_config,
+                    payload=payload,
+                    metadata=metadata,
                 )
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    sent = asyncio.run(notification)
+                else:
+                    task = loop.create_task(notification)
 
-                for _webhook_config in webhooks:
-                    # build push notification config from step request data
-                    from uuid import uuid4
-
-                    cfg_dict = (step.request_data or {}).get("push_notification_config") or {}
-                    url = cfg_dict.get("url")
-                    if not url:
-                        console.print("[red]No push notification URL present; skipping webhook[/red]")
-                        continue
-
-                    authentication = cfg_dict.get("authentication") or {}
-                    schemes = authentication.get("schemes") or []
-                    auth_type = schemes[0] if isinstance(schemes, list) and schemes else None
-                    auth_token = authentication.get("credentials")
-
-                    # Derive principal/tenant from the step context if available
-                    context_obj = getattr(step, "context", None)
-                    derived_tenant_id = tenant_id or (getattr(context_obj, "tenant_id", None))
-                    derived_principal_id = getattr(context_obj, "principal_id", None)
-
-                    push_notification_config = PushNotificationConfig(
-                        id=cfg_dict.get("id") or f"pnc_{uuid4().hex[:16]}",
-                        tenant_id=derived_tenant_id,
-                        principal_id=derived_principal_id,
-                        url=url,
-                        authentication_type=auth_type,
-                        authentication_token=auth_token,
-                        is_active=True,
-                    )
-
-                    service = get_protocol_webhook_service()
-
-                    safe_webhook_url = webhook_url_for_log(push_notification_config.url)
-                    console.print(
-                        f"[cyan]📤 Sending webhook to {safe_webhook_url} for {mapping.object_type} {mapping.object_id}[/cyan]"
-                    )
-
-                    # Build webhook payload based on protocol type.
-                    # task_type_str is the ORIGINAL action label — it keys the
-                    # delivery-webhook guards + audit log and must NOT be rewritten
-                    # by the SDK fallback (salesagent-yi3s). wire_task_type is the
-                    # validated COPY passed to the SDK payload builder.
-                    task_type_str = step.tool_name or mapping.action or "unknown"
-                    protocol = (step.request_data or {}).get("protocol", "mcp")  # Default to MCP
-                    try:
-                        status_enum = GeneratedTaskStatus(new_status)
-                    except ValueError:
-                        status_enum = GeneratedTaskStatus.unknown
-
-                    # SDK 5.7 validates task_type against TaskType enum; coerce a
-                    # COPY for the payload while leaving task_type_str untouched.
-                    wire_task_type = validate_webhook_task_type(task_type_str)
-
-                    payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
-                    if protocol == "a2a":
-                        payload = create_a2a_webhook_payload(
-                            task_id=step.step_id,
-                            status=status_enum,
-                            context_id=step.context_id,
-                            result=step.response_data or {},
-                        )
-                    else:
-                        # SDK 5.7: returns McpWebhookPayload directly
-                        payload = create_mcp_webhook_payload(
-                            task_id=step.step_id,
-                            status=status_enum,
-                            task_type=wire_task_type,
-                            result=step.response_data,
-                        )
-
-                    metadata: dict[str, Any] = {
-                        "task_type": task_type_str,
-                        "tenant_id": derived_tenant_id,
-                        "principal_id": derived_principal_id,
-                    }
-
-                    try:
-                        # If we're already in an event loop, schedule the send; otherwise run it directly
+                    def _log_task_result(t: asyncio.Task) -> None:
                         try:
-                            loop = asyncio.get_running_loop()
-                            task = loop.create_task(
-                                service.send_notification(
-                                    push_notification_config=push_notification_config,
-                                    payload=payload,
-                                    metadata=metadata,
-                                )
-                            )
+                            t.result()
+                            console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
+                        except Exception as exc:
+                            console.print(f"[red]❌ Webhook failed for {safe_url}: {type(exc).__name__}[/red]")
 
-                            def _log_task_result(
-                                t: asyncio.Task,
-                                raw_url: str = push_notification_config.url,
-                                safe_url: str = safe_webhook_url,
-                            ) -> None:
-                                # Runs AFTER pin_task's discard (see pin_task
-                                # docstring), so this log-and-swallow can't hold
-                                # the strong ref past completion.
-                                # Pass raw URL — _log_webhook_send_outcome owns sanitize.
-                                try:
-                                    _log_webhook_send_outcome(raw_url, t.result())
-                                except Exception as e:
-                                    console.print(f"[red]❌ Webhook failed for {safe_url}: {str(e)}[/red]")
-
-                            # Strong-ref pin against asyncio's weak-ref task
-                            # tracker; discard runs before _log_task_result.
-                            pin_task(task, on_done=_log_task_result)
-                        except RuntimeError:
-                            # No running loop; safe to run synchronously
-                            sent = asyncio.run(
-                                service.send_notification(
-                                    push_notification_config=push_notification_config,
-                                    payload=payload,
-                                    metadata=metadata,
-                                )
-                            )
-                            _log_webhook_send_outcome(push_notification_config.url, sent)
-
-                    except requests.exceptions.Timeout:
-                        console.print(f"[red]❌ Webhook timeout for {safe_webhook_url}[/red]")
-                    except requests.exceptions.RequestException as e:
-                        console.print(f"[red]❌ Webhook failed for {safe_webhook_url}: {str(e)}[/red]")
+                    pin_task(task, on_done=_log_task_result)
+                    # A running event loop cannot be synchronously joined. The
+                    # durable outbox owns retries; scheduling the pinned task is
+                    # therefore a successful handoff, not proof of delivery.
+                    return True
+                if sent:
+                    console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
+                return sent
+            except requests.exceptions.Timeout:
+                console.print(f"[red]❌ Webhook timeout for {safe_url}[/red]")
+                return False
+            except requests.exceptions.RequestException as e:
+                console.print(f"[red]❌ Webhook failed for {safe_url}: {type(e).__name__}[/red]")
+                return False
 
         except Exception as e:
-            console.print(f"[red]Error sending push notifications: {e}[/red]")
+            console.print(f"[red]Error sending push notifications: {type(e).__name__}[/red]")
             # Don't fail the workflow update if notifications fail
             import traceback
 
             traceback.print_exc()
-
-
-# Singleton instance getter for compatibility
-_context_manager_instance = None
+            return False
 
 
 def get_context_manager() -> ContextManager:
-    """Get or create singleton ContextManager instance."""
-    global _context_manager_instance
-    if _context_manager_instance is None:
-        _context_manager_instance = ContextManager()
-    return _context_manager_instance
+    """Return a request-local manager; SQLAlchemy sessions are never shared."""
+    return ContextManager()
+
+
+def _publish_workflow_notifications_after_commit(step_id: str, status: str, tenant_id: str) -> None:
+    """After-commit callback adapter that intentionally discards delivery state."""
+    publish_workflow_notifications(step_id, status, tenant_id)
+
+
+def _publish_workflow_notifications_sync(
+    step_id: str,
+    status: str,
+    tenant_id: str,
+    *,
+    event_id: str | None = None,
+) -> bool:
+    """Publish one durable workflow-transition occurrence under a lease."""
+    from src.services.a2a_task_lifecycle import publish_workflow_task_transition
+
+    with get_independent_db_session() as session:
+        claimed = WorkflowRepository(session, tenant_id).claim_notification_publication(
+            step_id,
+            status,
+            event_id=event_id,
+        )
+        if claimed is None:
+            return False
+        claimed_event_id, claim_token, response_data = claimed
+        session.commit()
+        if claim_token is None:
+            return False
+
+    try:
+        native_succeeded = publish_workflow_task_transition(
+            step_id,
+            status,
+            tenant_id,
+            event_id=claimed_event_id,
+            response_data=response_data,
+        )
+        callback_succeeded = True
+        with get_independent_db_session() as session:
+            step = WorkflowRepository(session, tenant_id).get_by_step_id(step_id)
+            if step is not None:
+                callback_succeeded = ContextManager()._send_push_notifications(
+                    step,
+                    status,
+                    session,
+                    event_id=claimed_event_id,
+                    response_data=response_data,
+                )
+        succeeded = native_succeeded and callback_succeeded
+    except Exception:
+        logger.warning(
+            "Workflow notification publication failed for %s/%s",
+            tenant_id,
+            step_id,
+            exc_info=True,
+        )
+        succeeded = False
+    with get_independent_db_session() as session:
+        repository = WorkflowRepository(session, tenant_id)
+        if succeeded:
+            finalized = repository.mark_notifications_published(claimed_event_id, claim_token=claim_token)
+        else:
+            finalized = repository.release_notification_claim(claimed_event_id, claim_token=claim_token)
+        session.commit()
+    if not finalized:
+        logger.warning("Lost workflow notification claim for %s", claimed_event_id)
+    return succeeded and finalized
+
+
+def publish_workflow_notifications(
+    step_id: str,
+    status: str,
+    tenant_id: str,
+    *,
+    event_id: str | None = None,
+) -> bool:
+    """Publish an occurrence now, or hand it to a worker from an async loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return _publish_workflow_notifications_sync(
+            step_id,
+            status,
+            tenant_id,
+            event_id=event_id,
+        )
+
+    task = loop.create_task(
+        asyncio.to_thread(
+            _publish_workflow_notifications_sync,
+            step_id,
+            status,
+            tenant_id,
+            event_id=event_id,
+        )
+    )
+    pin_task(
+        task,
+        on_done=lambda completed: (
+            logger.exception(
+                "Asynchronous workflow notification publication failed for %s/%s",
+                tenant_id,
+                step_id,
+                exc_info=completed.exception(),
+            )
+            if not completed.cancelled() and completed.exception() is not None
+            else None
+        ),
+    )
+    return True
+
+
+def publish_pending_workflow_notifications() -> int:
+    """Drain terminal workflow notification outbox rows idempotently."""
+    with get_independent_db_session() as session:
+        pending = WorkflowRepository.list_pending_workflow_notifications(session)
+    published = 0
+    for item in pending:
+        if publish_workflow_notifications(item.step_id, item.status, item.tenant_id, event_id=item.event_id):
+            published += 1
+    return published

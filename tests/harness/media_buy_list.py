@@ -54,15 +54,13 @@ class MediaBuyListEnv(IntegrationEnv):
         return self._run_a2a_handler("get_media_buys", GetMediaBuysResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> Any:
-        """Call get_media_buys MCP wrapper."""
-        from src.core.tools.media_buy_list import get_media_buys
-
-        return self._run_mcp_wrapper(get_media_buys, GetMediaBuysResponse, **kwargs)
+        """Call get_media_buys through the full in-memory MCP client."""
+        return self._run_mcp_client("get_media_buys", GetMediaBuysResponse, **kwargs)
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Convert kwargs to GetMediaBuysBody shape for REST POST."""
         body: dict[str, Any] = {}
-        for key in ("media_buy_ids", "status_filter", "account_id", "context"):
+        for key in ("media_buy_ids", "status_filter", "account_id", "context", "idempotency_key"):
             if key in kwargs and kwargs[key] is not None:
                 body[key] = kwargs[key]
         if kwargs.get("include_snapshot"):

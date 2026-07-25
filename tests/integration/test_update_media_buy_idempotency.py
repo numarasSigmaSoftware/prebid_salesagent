@@ -61,11 +61,38 @@ def _adapter() -> MagicMock:
     return MagicMock(adapter_name="mock", supports_media_buy_update_reconciliation=True)
 
 
+def _assert_single_work_call(
+    work: MagicMock,
+    *,
+    request: UpdateMediaBuyRequest,
+    identity: ResolvedIdentity,
+    adapter: MagicMock,
+    raw_wire_payload: dict[str, object],
+) -> None:
+    call_uow = work.call_args.kwargs["uow_override"]
+    assert isinstance(call_uow, MediaBuyUoW)
+    work.assert_called_once_with(
+        req=request,
+        identity=identity,
+        principal=_principal(),
+        adapter_override=adapter,
+        context_id=None,
+        guard_downstream=True,
+        downstream_request_hash=canonical_payload_hash(raw_wire_payload),
+        uow_override=call_uow,
+    )
+
+
 def test_identical_wire_retry_replays_without_reexecuting_work(integration_db) -> None:
     with BareIntegrationEnv() as env:
         identity = _setup(env)
         first_request = _request()
         adapter = _adapter()
+        raw_wire_payload = {
+            "idempotency_key": "update-real-idem-0001",
+            "media_buy_id": "mb-idem-1",
+            "paused": True,
+        }
         with (
             patch("src.core.tools.media_buy_update.get_adapter", return_value=adapter),
             patch("src.core.tools.media_buy_update._update_media_buy_work", return_value=_success()) as work,
@@ -73,32 +100,23 @@ def test_identical_wire_retry_replays_without_reexecuting_work(integration_db) -
             first = _update_media_buy_impl(
                 req=first_request,
                 identity=identity,
-                raw_wire_payload={
-                    "idempotency_key": "update-real-idem-0001",
-                    "media_buy_id": "mb-idem-1",
-                    "paused": True,
-                },
+                raw_wire_payload=raw_wire_payload,
             )
             replay = _update_media_buy_impl(
                 req=_request(),
                 identity=identity,
-                raw_wire_payload={
-                    "idempotency_key": "update-real-idem-0001",
-                    "media_buy_id": "mb-idem-1",
-                    "paused": True,
-                },
+                raw_wire_payload=raw_wire_payload,
             )
 
     assert first.replayed is False
     assert replay.replayed is True
     assert replay.response.media_buy_id == first.response.media_buy_id
-    work.assert_called_once_with(
-        req=first_request,
+    _assert_single_work_call(
+        work,
+        request=first_request,
         identity=identity,
-        principal=_principal(),
-        adapter_override=adapter,
-        context_id=None,
-        guard_downstream=True,
+        adapter=adapter,
+        raw_wire_payload=raw_wire_payload,
     )
 
 
@@ -107,6 +125,11 @@ def test_changed_wire_payload_conflicts_before_work(integration_db) -> None:
         identity = _setup(env)
         first_request = _request()
         adapter = _adapter()
+        first_wire_payload = {
+            "idempotency_key": "update-real-idem-0001",
+            "media_buy_id": "mb-idem-1",
+            "paused": True,
+        }
         with (
             patch("src.core.tools.media_buy_update.get_adapter", return_value=adapter),
             patch("src.core.tools.media_buy_update._update_media_buy_work", return_value=_success()) as work,
@@ -114,11 +137,7 @@ def test_changed_wire_payload_conflicts_before_work(integration_db) -> None:
             _update_media_buy_impl(
                 req=first_request,
                 identity=identity,
-                raw_wire_payload={
-                    "idempotency_key": "update-real-idem-0001",
-                    "media_buy_id": "mb-idem-1",
-                    "paused": True,
-                },
+                raw_wire_payload=first_wire_payload,
             )
             with pytest.raises(AdCPIdempotencyConflictError):
                 _update_media_buy_impl(
@@ -131,13 +150,12 @@ def test_changed_wire_payload_conflicts_before_work(integration_db) -> None:
                     },
                 )
 
-    work.assert_called_once_with(
-        req=first_request,
+    _assert_single_work_call(
+        work,
+        request=first_request,
         identity=identity,
-        principal=_principal(),
-        adapter_override=adapter,
-        context_id=None,
-        guard_downstream=True,
+        adapter=adapter,
+        raw_wire_payload=first_wire_payload,
     )
 
 

@@ -210,6 +210,29 @@ class TestMCPBoundaryAdCPErrorTranslation:
 
         assert_envelope_shape(exc_info.value, "VALIDATION_ERROR", check_mcp_tool_error=True, recovery="correctable")
 
+    def test_primary_error_survives_request_serializer_failure(self):
+        """Application-context extraction must not serialize the failing request."""
+        from pydantic import BaseModel, field_serializer
+
+        from src.core.tool_error_logging import AdCPToolError, with_error_logging
+
+        class BrokenRequest(BaseModel):
+            context: dict[str, str]
+
+            @field_serializer("context")
+            def fail_serialization(self, value):
+                raise RuntimeError("secondary serializer failure")
+
+        def failing_tool(*, req: BrokenRequest):
+            raise ValueError("primary failure")
+
+        wrapped = with_error_logging(failing_tool)
+        with pytest.raises(AdCPToolError) as raised:
+            wrapped(req=BrokenRequest(context={"correlation_id": "current"}))
+
+        assert raised.value.envelope["adcp_error"]["message"] == "primary failure"
+        assert raised.value.envelope["context"] == {"correlation_id": "current"}
+
     def test_adcp_adapter_tool_error_carries_transient_recovery(self):
         """AdCPAdapterError → ToolError envelope carries 'transient' recovery."""
         from fastmcp.exceptions import ToolError

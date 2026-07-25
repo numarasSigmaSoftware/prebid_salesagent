@@ -369,7 +369,12 @@ def _handle_tool_exception(tool_func: Callable, error: Exception, args: tuple, k
     if application_context is None:
         request = kwargs.get("req")
         if isinstance(request, BaseModel) and "context" in type(request).model_fields:
-            application_context = request.model_dump(include={"context"}, mode="python").get("context")
+            try:
+                application_context = getattr(request, "context", None)
+            except Exception:
+                # Error translation must never replace the primary exception
+                # because a request property/serializer is itself malformed.
+                application_context = None
     translate_to_tool_error(error, context=application_context)
 
 

@@ -136,8 +136,8 @@ class TestWorkflowsList:
 class TestWorkflowApproval:
     """Test workflow step approval."""
 
-    def test_approve_step_sets_status_approved(self, client, test_tenant):
-        """POST approve sets the step status to 'approved'."""
+    def test_approve_step_sets_status_completed(self, client, test_tenant):
+        """POST approve completes the successfully processed workflow step."""
         _auth_session(client, test_tenant)
         context_id, step_id = _create_context_and_step(test_tenant, status="pending_approval")
 
@@ -153,7 +153,7 @@ class TestWorkflowApproval:
         with get_db_session() as session:
             step = session.get(WorkflowStep, step_id)
         assert step is not None
-        assert step.status == "approved"
+        assert step.status == "completed"
 
     def test_approve_nonexistent_step_returns_404(self, client, test_tenant):
         """POST approve for a nonexistent step returns 404."""
