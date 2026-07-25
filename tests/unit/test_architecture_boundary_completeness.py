@@ -114,6 +114,33 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
     function_nodes = {
         node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    imported_helpers = {
+        alias.asname or alias.name: (node.module, alias.name)
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+        for alias in node.names
+    }
+
+    def resolve_helper(helper_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        local = function_nodes.get(helper_name)
+        if local is not None:
+            return local
+        imported = imported_helpers.get(helper_name)
+        if imported is None:
+            return None
+        helper_module, original_name = imported
+        helper_path = _module_to_filepath(helper_module)
+        if not helper_path.exists():
+            return None
+        helper_tree = ast.parse(helper_path.read_text(), filename=str(helper_path))
+        return next(
+            (
+                child
+                for child in ast.walk(helper_tree)
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == original_name
+            ),
+            None,
+        )
 
     # Find the wrapper function node
     wrapper_node = None
@@ -142,7 +169,7 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
                 continue
             kwargs.update(nested.arg for nested in keyword.value.keywords if nested.arg is not None)
             helper_name = keyword.value.func.id if isinstance(keyword.value.func, ast.Name) else None
-            helper_node = function_nodes.get(helper_name or "")
+            helper_node = resolve_helper(helper_name or "")
             if helper_node is None:
                 continue
             for helper_child in ast.walk(helper_node):

@@ -1,7 +1,8 @@
 """Real-wire presence semantics for update_media_buy.revision."""
 
 import json
-from unittest.mock import patch
+from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 from fastmcp import Client
@@ -33,19 +34,31 @@ def _success_result() -> UpdateMediaBuyResult:
     )
 
 
+@dataclass
+class _BoundaryHarness:
+    impl: MagicMock
+    rest_identity: object
+
+
+@pytest.fixture
+def boundary(mocker) -> _BoundaryHarness:
+    rest_identity = _IDENTITY.model_copy(update={"protocol": "rest"})
+    mocker.patch("src.core.mcp_auth_middleware.resolve_identity_from_context", return_value=_IDENTITY)
+    mocker.patch("src.core.resolved_identity.resolve_identity", return_value=rest_identity)
+    impl = mocker.patch("src.core.tools.media_buy_update._update_media_buy_impl")
+    return _BoundaryHarness(impl=impl, rest_identity=rest_identity)
+
+
 @pytest.mark.asyncio
-async def test_mcp_omitted_revision_reaches_impl() -> None:
+async def test_mcp_omitted_revision_reaches_impl(boundary: _BoundaryHarness) -> None:
     """The real MCP TypeAdapter must preserve omission as the accepted path."""
-    with (
-        patch("src.core.mcp_auth_middleware.resolve_identity_from_context", return_value=_IDENTITY),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl", return_value=_success_result()) as mock_impl,
-    ):
-        async with Client(mcp) as client:
-            result = await client.call_tool("update_media_buy", _VALID_REQUEST, raise_on_error=False)
+    boundary.impl.return_value = _success_result()
+    async with Client(mcp) as client:
+        result = await client.call_tool("update_media_buy", _VALID_REQUEST, raise_on_error=False)
 
     assert not result.is_error, result.content
     assert result.structured_content["media_buy_id"] == "mb-revision-boundary"
-    mock_impl.assert_called_once_with(
+    boundary.impl.assert_called_once_with(
         req=UpdateMediaBuyRequest(**_VALID_REQUEST),
         identity=_IDENTITY,
         context_id=None,
@@ -54,7 +67,7 @@ async def test_mcp_omitted_revision_reaches_impl() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_valid_revision_is_rejected_as_unsupported_feature() -> None:
+async def test_mcp_valid_revision_is_rejected_as_unsupported_feature(boundary: _BoundaryHarness) -> None:
     """A SCHEMA-VALID revision names an unimplemented field — UNSUPPORTED_FEATURE, not INVALID_REQUEST.
 
     Per the pinned 3.1.1 enum descriptions: a valid ``revision: 5`` violates no
@@ -63,16 +76,12 @@ async def test_mcp_valid_revision_is_rejected_as_unsupported_feature() -> None:
     this seller"). Schema-invalid spellings (null / 0) keep INVALID_REQUEST —
     pinned by the sibling tests below.
     """
-    with (
-        patch("src.core.mcp_auth_middleware.resolve_identity_from_context", return_value=_IDENTITY),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl") as mock_impl,
-    ):
-        async with Client(mcp) as client:
-            result = await client.call_tool(
-                "update_media_buy",
-                {**_VALID_REQUEST, "revision": 5},
-                raise_on_error=False,
-            )
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "update_media_buy",
+            {**_VALID_REQUEST, "revision": 5},
+            raise_on_error=False,
+        )
 
     assert result.is_error
     envelope = json.loads(result.content[0].text)
@@ -82,11 +91,11 @@ async def test_mcp_valid_revision_is_rejected_as_unsupported_feature() -> None:
         recovery="correctable",
         message_substr="does not support optimistic-concurrency control",
     )
-    mock_impl.assert_not_called()
+    boundary.impl.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_mcp_explicit_null_revision_is_invalid_request() -> None:
+async def test_mcp_explicit_null_revision_is_invalid_request(boundary: _BoundaryHarness) -> None:
     """An explicit JSON null is schema-invalid, not a spelling of omission.
 
     ``update-media-buy-request.json`` (v3.1.1) types ``revision`` as
@@ -95,16 +104,12 @@ async def test_mcp_explicit_null_revision_is_invalid_request() -> None:
     from ``UpdateMediaBuyRequest.model_dump()``, not serialized as null. It
     therefore lands on INVALID_REQUEST with 0 / "7" / 7.5.
     """
-    with (
-        patch("src.core.mcp_auth_middleware.resolve_identity_from_context", return_value=_IDENTITY),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl") as mock_impl,
-    ):
-        async with Client(mcp) as client:
-            result = await client.call_tool(
-                "update_media_buy",
-                {**_VALID_REQUEST, "revision": None},
-                raise_on_error=False,
-            )
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "update_media_buy",
+            {**_VALID_REQUEST, "revision": None},
+            raise_on_error=False,
+        )
 
     assert result.is_error
     assert_envelope_shape(
@@ -113,31 +118,27 @@ async def test_mcp_explicit_null_revision_is_invalid_request() -> None:
         recovery="correctable",
         message_substr="must be an integer",
     )
-    mock_impl.assert_not_called()
+    boundary.impl.assert_not_called()
 
 
-def test_rest_omitted_revision_reaches_impl() -> None:
+def test_rest_omitted_revision_reaches_impl(boundary: _BoundaryHarness) -> None:
     """The real REST body model must preserve omission as the accepted path."""
-    rest_identity = _IDENTITY.model_copy(update={"protocol": "rest"})
-    with (
-        patch("src.core.resolved_identity.resolve_identity", return_value=rest_identity),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl", return_value=_success_result()) as mock_impl,
-    ):
-        client = TestClient(app)
-        try:
-            response = client.put(
-                "/api/v1/media-buys/mb-revision-boundary",
-                json={key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"},
-                headers={"Authorization": "Bearer revision-boundary-token"},
-            )
-        finally:
-            client.close()
+    boundary.impl.return_value = _success_result()
+    client = TestClient(app)
+    try:
+        response = client.put(
+            "/api/v1/media-buys/mb-revision-boundary",
+            json={key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"},
+            headers={"Authorization": "Bearer revision-boundary-token"},
+        )
+    finally:
+        client.close()
 
     assert response.status_code == 200, response.text
     assert response.json()["media_buy_id"] == "mb-revision-boundary"
-    mock_impl.assert_called_once_with(
+    boundary.impl.assert_called_once_with(
         req=UpdateMediaBuyRequest(**_VALID_REQUEST),
-        identity=rest_identity,
+        identity=boundary.rest_identity,
         context_id=None,
         raw_wire_payload={
             "paused": True,
@@ -146,24 +147,19 @@ def test_rest_omitted_revision_reaches_impl() -> None:
     )
 
 
-def test_rest_explicit_null_revision_is_invalid_request() -> None:
+def test_rest_explicit_null_revision_is_invalid_request(boundary: _BoundaryHarness) -> None:
     """REST parity: an explicit null is the schema violation MCP rejects too."""
-    rest_identity = _IDENTITY.model_copy(update={"protocol": "rest"})
     body = {key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"}
     body["revision"] = None
-    with (
-        patch("src.core.resolved_identity.resolve_identity", return_value=rest_identity),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl") as mock_impl,
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        try:
-            response = client.put(
-                "/api/v1/media-buys/mb-revision-boundary",
-                json=body,
-                headers={"Authorization": "Bearer revision-boundary-token"},
-            )
-        finally:
-            client.close()
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        response = client.put(
+            "/api/v1/media-buys/mb-revision-boundary",
+            json=body,
+            headers={"Authorization": "Bearer revision-boundary-token"},
+        )
+    finally:
+        client.close()
 
     assert response.status_code == 400, response.text
     assert_envelope_shape(
@@ -172,31 +168,26 @@ def test_rest_explicit_null_revision_is_invalid_request() -> None:
         recovery="correctable",
         message_substr="must be an integer",
     )
-    mock_impl.assert_not_called()
+    boundary.impl.assert_not_called()
 
 
-def test_rest_valid_revision_is_rejected_as_unsupported_feature() -> None:
+def test_rest_valid_revision_is_rejected_as_unsupported_feature(boundary: _BoundaryHarness) -> None:
     """REST parity with MCP: a schema-valid positive-integer revision is UNSUPPORTED_FEATURE.
 
     The prior suite covered only null + omitted on REST; this pins the
     supplied-value path (the transport that floats/ints does not diverge).
     """
-    rest_identity = _IDENTITY.model_copy(update={"protocol": "rest"})
     body = {key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"}
     body["revision"] = 5
-    with (
-        patch("src.core.resolved_identity.resolve_identity", return_value=rest_identity),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl") as mock_impl,
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        try:
-            response = client.put(
-                "/api/v1/media-buys/mb-revision-boundary",
-                json=body,
-                headers={"Authorization": "Bearer revision-boundary-token"},
-            )
-        finally:
-            client.close()
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        response = client.put(
+            "/api/v1/media-buys/mb-revision-boundary",
+            json=body,
+            headers={"Authorization": "Bearer revision-boundary-token"},
+        )
+    finally:
+        client.close()
 
     assert response.status_code == 422, response.text
     assert_envelope_shape(
@@ -205,27 +196,22 @@ def test_rest_valid_revision_is_rejected_as_unsupported_feature() -> None:
         recovery="correctable",
         message_substr="does not support optimistic-concurrency control",
     )
-    mock_impl.assert_not_called()
+    boundary.impl.assert_not_called()
 
 
-def test_rest_below_minimum_revision_is_invalid_request() -> None:
+def test_rest_below_minimum_revision_is_invalid_request(boundary: _BoundaryHarness) -> None:
     """revision 0 is schema-invalid (minimum 1) — INVALID_REQUEST, matching BR-UC-003 below_min."""
-    rest_identity = _IDENTITY.model_copy(update={"protocol": "rest"})
     body = {key: value for key, value in _VALID_REQUEST.items() if key != "media_buy_id"}
     body["revision"] = 0
-    with (
-        patch("src.core.resolved_identity.resolve_identity", return_value=rest_identity),
-        patch("src.core.tools.media_buy_update._update_media_buy_impl") as mock_impl,
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        try:
-            response = client.put(
-                "/api/v1/media-buys/mb-revision-boundary",
-                json=body,
-                headers={"Authorization": "Bearer revision-boundary-token"},
-            )
-        finally:
-            client.close()
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        response = client.put(
+            "/api/v1/media-buys/mb-revision-boundary",
+            json=body,
+            headers={"Authorization": "Bearer revision-boundary-token"},
+        )
+    finally:
+        client.close()
 
     assert response.status_code == 400, response.text
     assert_envelope_shape(
@@ -234,4 +220,4 @@ def test_rest_below_minimum_revision_is_invalid_request() -> None:
         recovery="correctable",
         message_substr="must be an integer",
     )
-    mock_impl.assert_not_called()
+    boundary.impl.assert_not_called()

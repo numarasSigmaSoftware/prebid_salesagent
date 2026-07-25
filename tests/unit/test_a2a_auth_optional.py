@@ -54,10 +54,19 @@ class TestAuthOptionalSkills:
         handler_name,
         parameters,
     ):
-        """All A2A-exposed reads see neither an omitted nor a valid inert key."""
+        """All A2A reads keep replay metadata out of strict handler schemas."""
         handler_stub = AsyncMock(return_value={"ok": True})
 
-        with patch.object(self.handler, handler_name, handler_stub):
+        async def execute_without_persistence(**kwargs):
+            return await kwargs["work"]()
+
+        with (
+            patch.object(self.handler, handler_name, handler_stub),
+            patch(
+                "src.services.idempotency_replay.execute_idempotent_read",
+                new=AsyncMock(side_effect=execute_without_persistence),
+            ) as replay_service,
+        ):
             result = await self.handler._handle_explicit_skill(
                 skill_name,
                 parameters,
@@ -66,6 +75,12 @@ class TestAuthOptionalSkills:
 
         assert result == {"ok": True}
         handler_stub.assert_awaited_once_with({}, self.mock_identity)
+        if parameters:
+            replay_service.assert_awaited_once()
+            assert replay_service.await_args.kwargs["tool_name"] == skill_name
+            assert replay_service.await_args.kwargs["idempotency_key"] == parameters["idempotency_key"]
+        else:
+            replay_service.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("skill_name", "handler_name"), _STANDARD_READ_HANDLERS)

@@ -24,7 +24,14 @@ if TYPE_CHECKING:
 
 from flask import Flask
 
-from src.adapters.base import AdapterCapabilities, AdServerAdapter, TargetingCapabilities
+from src.adapters.base import (
+    AdapterCapabilities,
+    AdServerAdapter,
+    DownstreamMutation,
+    ReconciliationOutcome,
+    ReconciliationResult,
+    TargetingCapabilities,
+)
 
 # Import modular components
 from src.adapters.gam.client import GAMClientManager
@@ -82,6 +89,7 @@ class GoogleAdManager(AdServerAdapter):
     """Google Ad Manager adapter using modular architecture."""
 
     adapter_name = "google_ad_manager"
+    supports_media_buy_update_reconciliation = True
 
     capabilities = AdapterCapabilities(
         supports_realtime_reporting=True,  # Snapshots via cached GAM line item stats
@@ -1605,6 +1613,41 @@ class GoogleAdManager(AdServerAdapter):
                 "action": action,
                 "supported_actions": ["approve_order", "activate_order", "update_package_budget"],
             },
+        )
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Read GAM line items and prove the requested status or goal update."""
+        from src.adapters.reconciliation import (
+            applied_update_result,
+            load_media_package_snapshots,
+            reconcile_gam_line_items,
+        )
+
+        if self.dry_run:
+            return applied_update_result(
+                mutation,
+                paused=mutation.action.startswith("pause_") if mutation.package_id else None,
+            )
+        assert self.tenant_id is not None
+        package_specs = [
+            (
+                package.package_id,
+                str(package.package_config.get("platform_line_item_id") or ""),
+                package.package_config.get("pricing", {}),
+            )
+            for package in load_media_package_snapshots(self.tenant_id, mutation)
+        ]
+
+        try:
+            line_items = self.orders_manager.get_order_line_items(mutation.media_buy_id)
+        except Exception:
+            logger.warning("GAM reconciliation read failed", exc_info=True)
+            return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
+        return reconcile_gam_line_items(
+            mutation,
+            package_specs,
+            line_items,
+            self.orders_manager._safe_get_nested,
         )
 
     def update_media_buy_performance_index(self, media_buy_id: str, package_performance: list) -> bool:

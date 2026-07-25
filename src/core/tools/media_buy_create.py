@@ -51,7 +51,6 @@ from src.core.exceptions import (
     AdCPCreativeRejectedError,
     AdCPError,
     AdCPFormatNotFoundError,
-    AdCPIdempotencyConflictError,
     AdCPIdempotencyExpiredError,
     AdCPInvalidRequestError,
     AdCPProductNotFoundError,
@@ -130,6 +129,7 @@ from src.core.helpers.creative_helpers import (
     extract_media_url_and_dimensions,
     process_and_upload_package_creatives,
 )
+from src.core.idempotency_logging import redact_idempotency_key
 from src.core.logging_config import log_safe
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import to_brand_reference, to_context_object, to_reporting_webhook
@@ -1715,25 +1715,15 @@ def _raise_degraded_replay_outcome(
         # Rule 5: same key + different canonical payload conflicts even on the
         # degraded path — never resolve a request to a buy it does not describe.
         # Legacy rows without a stored hash carry no conflict signal.
-        _raise_on_payload_conflict(existing.payload_hash, request_hash)
+        from src.services.idempotency_replay import raise_on_payload_conflict
+
+        raise_on_payload_conflict(existing.payload_hash, request_hash)
 
     raise AdCPServiceUnavailableError(
         "the verbatim replay for this idempotency_key is not yet available — "
         "the original response is still being committed; retry shortly",
         retry_after=1,
     )
-
-
-def _raise_on_payload_conflict(stored_hash: str | None, request_hash: str | None) -> None:
-    """Raise IDEMPOTENCY_CONFLICT when the same key carries a different canonical payload.
-
-    Applied at both lookup points — the probe and the post-race recovery — so a
-    conflicting duplicate can never be resolved to someone else's response.
-    Production writes always store a hash (``record_success`` requires it); a row
-    without one carries no conflict signal, so it never conflicts (legacy tolerance).
-    """
-    if stored_hash is not None and stored_hash != request_hash:
-        raise AdCPIdempotencyConflictError("idempotency_key was reused with a different request payload")
 
 
 def _replay_cached_success(envelope: dict[str, Any]) -> CreateMediaBuyResult | None:
@@ -1796,6 +1786,7 @@ def _lookup_cached_replay(
         tenant_id,
         principal_id=principal_id,
         account_id=account_id,
+        tool_name="create_media_buy",
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         decode=_replay_cached_success,
@@ -1899,14 +1890,14 @@ def _cache_and_return(
     except IntegrityError:
         logger.info(
             "Idempotency cache race for key %s (tenant %s, principal %s) — winner already stored",
-            req.idempotency_key,
+            redact_idempotency_key(req.idempotency_key),
             identity.tenant_id,
             identity.principal_id,
         )
     except Exception:
         logger.warning(
             "Best-effort idempotency cache write failed for key %s (tenant %s, principal %s)",
-            req.idempotency_key,
+            redact_idempotency_key(req.idempotency_key),
             identity.tenant_id,
             identity.principal_id,
             exc_info=True,
@@ -1999,7 +1990,7 @@ def _resolve_idempotency_race_or_raise(
         "Idempotency race: another request won the commit for key %s%s. "
         "Resolving via the winner's cached response (fail-closed transient if not "
         "yet visible). An orphan adapter-side order may exist.",
-        idempotency_key,
+        redact_idempotency_key(idempotency_key),
         f" ({media_buy_id})" if media_buy_id else "",
     )
     return _replay_after_race(
@@ -2115,7 +2106,10 @@ async def _create_media_buy_impl(
             enforce_ceiling=True,
         )
         if replay is not None:
-            logger.info("Idempotency replay: returning cached success for key %s", req.idempotency_key)
+            logger.info(
+                "Idempotency replay: returning cached success for key %s",
+                redact_idempotency_key(req.idempotency_key),
+            )
             return replay
         # Miss or unusable cached envelope — proceed as a fresh execution; the
         # MediaBuy backstop resolves any resulting duplicate to the degraded path.

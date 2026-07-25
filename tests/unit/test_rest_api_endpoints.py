@@ -17,7 +17,7 @@ from starlette.testclient import TestClient
 
 from src.app import app
 from src.core.resolved_identity import ResolvedIdentity
-from tests.helpers import assert_envelope_shape
+from tests.helpers import assert_envelope_field, assert_envelope_shape
 
 client = TestClient(app)
 
@@ -28,6 +28,11 @@ _MOCK_IDENTITY = ResolvedIdentity(
     auth_token="test-token",
     protocol="rest",
 )
+
+
+async def _execute_read_without_cache(**kwargs):
+    """Unit-test seam: exercise the route work without opening a real DB."""
+    return await kwargs["work"]()
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +79,17 @@ class TestCapabilitiesProtocolsQuery:
         assert response.status_code == 400
         assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
 
-    def test_valid_idempotency_key_is_inert(self):
-        response = client.get("/api/v1/capabilities?idempotency_key=valid-read-key-0001")
+    def test_valid_idempotency_key_reaches_replay_service(self):
+        with patch(
+            "src.routes.api_v1._execute_rest_read",
+            new_callable=AsyncMock,
+            side_effect=_execute_read_without_cache,
+        ) as execute_read:
+            response = client.get("/api/v1/capabilities?idempotency_key=valid-read-key-0001")
+
         assert response.status_code == 200
         assert response.json()["supported_protocols"] == ["media_buy"]
+        assert execute_read.await_args.kwargs["idempotency_key"] == "valid-read-key-0001"
 
     def test_malformed_idempotency_key_is_validation_error(self):
         response = client.get("/api/v1/capabilities?idempotency_key=short")
@@ -104,7 +116,7 @@ class TestCapabilitiesProtocolsQuery:
 
         assert response.status_code == 400, response.text
         assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-        assert response.json()["errors"][0]["field"] == "context"
+        assert_envelope_field(response.json(), "context")
         mock_core.assert_not_called()
 
 
@@ -183,6 +195,11 @@ class TestStandardReadIdempotencyRestBoundary:
                 "src.routes.api_v1.validate_standard_read_idempotency_key",
                 wraps=real_validator,
             ) as validate_key,
+            patch(
+                "src.routes.api_v1._execute_rest_read",
+                new_callable=AsyncMock,
+                side_effect=_execute_read_without_cache,
+            ) as execute_read,
         ):
             mock_core.return_value = {}
             response = client.post(url, json={**body, **key_fields}, headers=headers)
@@ -190,8 +207,10 @@ class TestStandardReadIdempotencyRestBoundary:
         assert response.status_code == 200, response.text
         if key_fields:
             validate_key.assert_called_once_with(tool_name, key_fields)
+            assert execute_read.await_args.kwargs["idempotency_key"] == key_fields["idempotency_key"]
         else:
             validate_key.assert_not_called()
+            assert execute_read.await_args.kwargs["idempotency_key"] is None
 
     @pytest.mark.parametrize(
         ("tool_name", "url", "body", "core_target", "auth_required"),

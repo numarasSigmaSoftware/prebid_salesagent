@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 if TYPE_CHECKING:
@@ -149,6 +150,34 @@ class AdapterCapabilities:
     supports_realtime_reporting: bool = False  # Supports real-time delivery reporting
 
 
+class ReconciliationOutcome(StrEnum):
+    """What an adapter can prove about a previously claimed mutation."""
+
+    APPLIED = "applied"
+    NOT_APPLIED = "not_applied"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class DownstreamMutation:
+    """Stable description used to reconcile a provider-side media-buy change."""
+
+    downstream_request_id: str
+    media_buy_id: str
+    action: str
+    package_id: str | None
+    budget: int | None
+    implementation_date: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """Adapter reconciliation outcome and optional reconstructed wire result."""
+
+    outcome: ReconciliationOutcome
+    response: UpdateMediaBuyResponse | None = None
+
+
 class BaseConnectionConfig(BaseModel):
     """Base schema for adapter connection configuration."""
 
@@ -180,6 +209,7 @@ class AdServerAdapter(ABC):
     # Default advertising channels supported by this adapter
     # Subclasses should override with their supported channels
     default_channels: list[str] = []
+    supports_media_buy_update_reconciliation: bool = False
 
     # Default delivery measurement provider for products created by this adapter.
     # Per AdCP spec, delivery_measurement is REQUIRED on all products.
@@ -485,6 +515,14 @@ class AdServerAdapter(ABC):
     ) -> UpdateMediaBuyResponse:
         """Updates a media buy with a specific action."""
         pass
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Prove whether a previously claimed update landed.
+
+        Adapters must override this when their provider exposes a stable
+        operation/resource lookup. The safe default is fail-closed.
+        """
+        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 
     def get_config_ui_endpoint(self) -> str | None:
         """

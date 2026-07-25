@@ -1,6 +1,6 @@
 """IdempotencyAttempt repository — tenant-scoped access to the verbatim success cache.
 
-AdCP 3.0.1 idempotency contract: retrying a mutating tool call with the same
+AdCP 3.1.1 idempotency contract: retrying a keyed tool call with the same
 idempotency_key must return the ORIGINAL success response byte-for-byte (marked
 ``replayed: true``), and errors are NEVER cached — a retry after an error
 re-executes. This repository stores and replays those cached successes, keyed by
@@ -81,6 +81,7 @@ class ReservationOutcome:
     response_envelope: dict | None = None
     stored_hash: str | None = None
     retry_after: int | None = None
+    stored_tool_name: str | None = None
 
 
 class IdempotencyAttemptRepository:
@@ -105,7 +106,7 @@ class IdempotencyAttemptRepository:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def _scope_prefix(self, principal_id: str, account_id: str | None) -> tuple[ColumnElement[bool], ...]:
+    def _scope_prefix(self, principal_id: str | None, account_id: str | None) -> tuple[ColumnElement[bool], ...]:
         """The (tenant, principal, account) isolation terms shared by EVERY scoped query.
 
         One home for the isolation prefix so a tenant/principal/account scoping
@@ -124,7 +125,7 @@ class IdempotencyAttemptRepository:
         )
 
     def _scope_filter(
-        self, principal_id: str, account_id: str | None, idempotency_key: str
+        self, principal_id: str | None, account_id: str | None, idempotency_key: str
     ) -> tuple[ColumnElement[bool], ...]:
         """The (tenant, principal, account, key) WHERE terms the keyed lookups share.
 
@@ -155,7 +156,7 @@ class IdempotencyAttemptRepository:
     def find_by_key(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         idempotency_key: str,
         account_id: str | None = None,
         now: datetime | None = None,
@@ -188,7 +189,7 @@ class IdempotencyAttemptRepository:
     def find_including_expired(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         idempotency_key: str,
         account_id: str | None = None,
     ) -> IdempotencyAttempt | None:
@@ -208,7 +209,7 @@ class IdempotencyAttemptRepository:
     def record_success(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         tool_name: str,
         idempotency_key: str,
         response_model: BaseModel,
@@ -217,6 +218,7 @@ class IdempotencyAttemptRepository:
         account_id: str | None = None,
         ttl: timedelta = DEFAULT_REPLAY_TTL,
         now: datetime | None = None,
+        operation_class: str = "write",
     ) -> IdempotencyAttempt:
         """Cache a successful response so future retries with the same key replay it verbatim.
 
@@ -247,6 +249,7 @@ class IdempotencyAttemptRepository:
             principal_id=principal_id,
             account_id=account_id,
             tool_name=tool_name,
+            operation_class=operation_class,
             idempotency_key=idempotency_key,
             # Best-effort single-phase write (create_media_buy path): the row is
             # inserted already COMPLETED. The two-phase reserve()/complete() path
@@ -281,13 +284,14 @@ class IdempotencyAttemptRepository:
     def reserve(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         account_id: str | None,
         tool_name: str,
         idempotency_key: str,
         payload_hash: str,
         lease: timedelta,
         now: datetime | None = None,
+        operation_class: str = "write",
     ) -> ReservationOutcome:
         """Attempt to reserve the idempotency key by INSERTing an in_flight row.
 
@@ -321,6 +325,7 @@ class IdempotencyAttemptRepository:
                 principal_id=principal_id,
                 account_id=account_id,
                 tool_name=tool_name,
+                operation_class=operation_class,
                 idempotency_key=idempotency_key,
                 status=_STATUS_IN_FLIGHT,
                 response_envelope=None,
@@ -353,7 +358,7 @@ class IdempotencyAttemptRepository:
     def _classify_collision(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         account_id: str | None,
         idempotency_key: str,
         payload_hash: str,
@@ -376,12 +381,14 @@ class IdempotencyAttemptRepository:
                     kind=EXPIRED,
                     attempt_id=existing.attempt_id,
                     stored_hash=existing.payload_hash,
+                    stored_tool_name=existing.tool_name,
                 )
             return ReservationOutcome(
                 kind=COMPLETED,
                 attempt_id=existing.attempt_id,
                 response_envelope=existing.response_envelope,
                 stored_hash=existing.payload_hash,
+                stored_tool_name=existing.tool_name,
             )
         # Payload identity applies while the first request is still running too:
         # the pinned rule requires a different-payload collision to be CONFLICT,
@@ -391,6 +398,7 @@ class IdempotencyAttemptRepository:
                 kind=IN_FLIGHT,
                 attempt_id=existing.attempt_id,
                 stored_hash=existing.payload_hash,
+                stored_tool_name=existing.tool_name,
             )
         # in_flight row: live → IN_FLIGHT; expired → attempt to steal the lease.
         if existing.expires_at > now:
@@ -400,13 +408,25 @@ class IdempotencyAttemptRepository:
                 attempt_id=existing.attempt_id,
                 stored_hash=existing.payload_hash,
                 retry_after=retry_after,
+                stored_tool_name=existing.tool_name,
             )
-        return self._steal_expired(existing.attempt_id, payload_hash=payload_hash, lease=lease, now=now)
+        return self._steal_expired(
+            existing.attempt_id,
+            principal_id=principal_id,
+            account_id=account_id,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            lease=lease,
+            now=now,
+        )
 
     def _steal_expired(
         self,
         attempt_id: str,
         *,
+        principal_id: str | None,
+        account_id: str | None,
+        idempotency_key: str,
         payload_hash: str,
         lease: timedelta,
         now: datetime,
@@ -417,6 +437,7 @@ class IdempotencyAttemptRepository:
             update(IdempotencyAttempt)
             .where(
                 IdempotencyAttempt.attempt_id == attempt_id,
+                IdempotencyAttempt.tenant_id == self._tenant_id,
                 IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
                 IdempotencyAttempt.expires_at <= now,
             )
@@ -437,7 +458,11 @@ class IdempotencyAttemptRepository:
         # the row is now a fresh in_flight owned by the winner (→ IN_FLIGHT) or
         # completed (→ COMPLETED). It is no longer expired, so no infinite steal.
         self._session.expire_all()
-        refreshed = self._session.get(IdempotencyAttempt, attempt_id)
+        refreshed = self._session.scalars(
+            select(IdempotencyAttempt).where(
+                *self._scope_filter(principal_id, account_id, idempotency_key),
+            )
+        ).first()
         if refreshed is None:
             return ReservationOutcome(
                 kind=IN_FLIGHT, attempt_id=attempt_id, retry_after=max(1, math.ceil(lease.total_seconds()))
@@ -448,6 +473,7 @@ class IdempotencyAttemptRepository:
                 attempt_id=refreshed.attempt_id,
                 response_envelope=refreshed.response_envelope,
                 stored_hash=refreshed.payload_hash,
+                stored_tool_name=refreshed.tool_name,
             )
         retry_after = max(1, math.ceil((refreshed.expires_at - now).total_seconds()))
         return ReservationOutcome(
@@ -455,13 +481,14 @@ class IdempotencyAttemptRepository:
             attempt_id=refreshed.attempt_id,
             stored_hash=refreshed.payload_hash,
             retry_after=retry_after,
+            stored_tool_name=refreshed.tool_name,
         )
 
     def complete(
         self,
         attempt_id: str,
         *,
-        response_model: BaseModel,
+        response_model: BaseModel | dict,
         protocol_status: str,
         replay_ttl: timedelta = DEFAULT_REPLAY_TTL,
         now: datetime | None = None,
@@ -475,11 +502,13 @@ class IdempotencyAttemptRepository:
         cached success and the side effect commit atomically.
         """
         current = now or datetime.now(UTC)
-        envelope = {"status": protocol_status, "response": response_model.model_dump(mode="json")}
+        response = response_model.model_dump(mode="json") if isinstance(response_model, BaseModel) else response_model
+        envelope = {"status": protocol_status, "response": response}
         stmt = (
             update(IdempotencyAttempt)
             .where(
                 IdempotencyAttempt.attempt_id == attempt_id,
+                IdempotencyAttempt.tenant_id == self._tenant_id,
                 IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
             )
             .values(status=_STATUS_COMPLETED, response_envelope=envelope, expires_at=current + replay_ttl)
@@ -496,6 +525,7 @@ class IdempotencyAttemptRepository:
         """
         stmt = delete(IdempotencyAttempt).where(
             IdempotencyAttempt.attempt_id == attempt_id,
+            IdempotencyAttempt.tenant_id == self._tenant_id,
             IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
         )
         self._session.execute(stmt)
@@ -503,9 +533,10 @@ class IdempotencyAttemptRepository:
     def count_inserts_since(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         account_id: str | None,
         since: datetime,
+        operation_class: str = "write",
     ) -> tuple[int, datetime | None]:
         """COUNT and MIN(created_at) of rows created after ``since`` in scope.
 
@@ -513,22 +544,31 @@ class IdempotencyAttemptRepository:
         about row creation, not liveness). Thresholds and the rejection
         decision live in :mod:`src.services.idempotency_policy`.
         """
-        scope = (*self._scope_prefix(principal_id, account_id), IdempotencyAttempt.created_at > since)
+        scope = (
+            *self._scope_prefix(principal_id, account_id),
+            IdempotencyAttempt.operation_class == operation_class,
+            IdempotencyAttempt.created_at > since,
+        )
         return self._count_and_oldest(scope, IdempotencyAttempt.created_at)
 
     def count_active(
         self,
         *,
-        principal_id: str,
+        principal_id: str | None,
         account_id: str | None,
         now: datetime,
+        operation_class: str = "write",
     ) -> tuple[int, datetime | None]:
         """COUNT and MIN(expires_at) of non-expired rows in scope.
 
         Pure scope query; the storage ceiling and ``retry_after`` derivation
         live in :mod:`src.services.idempotency_policy`.
         """
-        scope = (*self._scope_prefix(principal_id, account_id), IdempotencyAttempt.expires_at > now)
+        scope = (
+            *self._scope_prefix(principal_id, account_id),
+            IdempotencyAttempt.operation_class == operation_class,
+            IdempotencyAttempt.expires_at > now,
+        )
         return self._count_and_oldest(scope, IdempotencyAttempt.expires_at)
 
     def expire_old(self, *, now: datetime | None = None) -> int:

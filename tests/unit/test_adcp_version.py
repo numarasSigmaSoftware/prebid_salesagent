@@ -15,7 +15,7 @@ from src.core.adcp_version import (
 )
 from src.core.exceptions import AdCPConfigurationError, AdCPValidationError, AdCPVersionUnsupportedError
 from src.core.version import get_version
-from tests.helpers import assert_envelope_shape
+from tests.helpers import assert_envelope_field, assert_envelope_shape
 
 
 def _request_compat_log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -630,7 +630,7 @@ class TestRESTVersionNegotiation:
 
         assert response.status_code == 400
         assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
-        assert response.json()["errors"][0]["field"] == "context"
+        assert_envelope_field(response.json(), "context")
         assert response.json().get("context") is None
 
     def test_rest_query_major_pin_is_coerced_then_rejected(self):

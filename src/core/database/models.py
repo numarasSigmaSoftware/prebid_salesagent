@@ -1003,7 +1003,7 @@ class IdempotencyAttempt(Base):
     spec-defined scope tuples are implemented as written; extra dimensions may
     exist as columns but never in uniqueness/lookup semantics.)
 
-    AdCP 3.0.1 idempotency: retrying a mutating tool call with the same
+    AdCP 3.1.1 idempotency: retrying a keyed tool call with the same
     idempotency_key must return the ORIGINAL success response byte-for-byte
     (marked `replayed: true`), and errors are NEVER cached — a retry after an
     error re-executes. This table is the verbatim success cache: it stores the
@@ -1031,7 +1031,7 @@ class IdempotencyAttempt(Base):
     tenant_id: Mapped[str] = mapped_column(
         String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
     )
-    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     account_id: Mapped[str | None] = mapped_column(
         # String(100) matches accounts.account_id (and every other account_id
         # column) — the same logical value joins on the degraded-path lookup.
@@ -1043,6 +1043,12 @@ class IdempotencyAttempt(Base):
         String(50),
         nullable=False,
         comment="Tool that produced the cached success (observability only — NOT part of the unique scope)",
+    )
+    operation_class: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        server_default="write",
+        comment="Admission-control class: 'read' or 'write'",
     )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     # Two-phase reservation lifecycle: a row is INSERTed 'in_flight' (envelope
@@ -1083,6 +1089,7 @@ class IdempotencyAttempt(Base):
     tenant = relationship("Tenant")
 
     __table_args__ = (
+        CheckConstraint("operation_class IN ('read', 'write')", name="ck_idempotency_attempt_operation_class"),
         ForeignKeyConstraint(
             ["tenant_id", "principal_id"],
             ["principals.tenant_id", "principals.principal_id"],
@@ -1098,6 +1105,55 @@ class IdempotencyAttempt(Base):
             postgresql_nulls_not_distinct=True,
         ),
         Index("idx_idempotency_attempts_expires_at", "expires_at"),
+    )
+
+
+class DownstreamMutationClaim(Base):
+    """Durable reconciliation evidence for consequential provider mutations."""
+
+    __tablename__ = "downstream_mutation_claims"
+
+    claim_id: Mapped[str] = mapped_column(String(50), primary_key=True, default=lambda: str(uuid4()))
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    downstream_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="planned")
+    result_metadata: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('planned', 'invoked', 'applied', 'unknown')",
+            name="ck_downstream_mutation_claim_status",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"],
+            ["principals.tenant_id", "principals.principal_id"],
+            ondelete="CASCADE",
+        ),
+        Index(
+            "idx_downstream_mutation_claims_scope",
+            "tenant_id",
+            "principal_id",
+            "account_id",
+            "idempotency_key",
+            "provider",
+            "operation_key",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
+        Index("idx_downstream_mutation_claims_expires_at", "expires_at"),
     )
 
 

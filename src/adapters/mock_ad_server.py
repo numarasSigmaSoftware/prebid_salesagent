@@ -16,6 +16,9 @@ from src.adapters.base import (
     AdServerAdapter,
     BaseConnectionConfig,
     BaseProductConfig,
+    DownstreamMutation,
+    ReconciliationOutcome,
+    ReconciliationResult,
     TargetingCapabilities,
 )
 from src.core.exceptions import (
@@ -96,6 +99,7 @@ class MockAdServer(AdServerAdapter):
     """
 
     adapter_name = "mock"
+    supports_media_buy_update_reconciliation = True
 
     # Mock adapter supports all common channels for testing
     # V3 channel names: display, olv, streaming_audio, social
@@ -1485,6 +1489,17 @@ class MockAdServer(AdServerAdapter):
             affected_packages=[],
             implementation_date=today,
         )
+
+    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
+        """Reconcile the mock adapter's only persistent update from local state."""
+        from src.adapters.reconciliation import load_media_package_snapshots, reconcile_local_package_update
+
+        assert self.tenant_id is not None
+        result = reconcile_local_package_update(
+            mutation,
+            load_media_package_snapshots(self.tenant_id, mutation),
+        )
+        return result or ReconciliationResult(ReconciliationOutcome.NOT_APPLIED)
 
     def get_config_ui_endpoint(self) -> str | None:
         """Return the URL path for the mock adapter's configuration UI."""

@@ -20,7 +20,11 @@ from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
 from src.core.schemas._base import validate_idempotency_key_shape
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
 from src.core.webhook_validator import reject_unsafe_webhook_registration_url, webhook_url_for_log
-from src.services.idempotency_replay import complete_idempotent, reserve_idempotent
+from src.services.idempotency_replay import (
+    complete_idempotent,
+    release_reservation_on_error,
+    reserve_idempotent,
+)
 
 from ._assignments import _process_assignments
 from ._processing import _create_new_creative, _failed_sync_result, _update_existing_creative
@@ -91,6 +95,24 @@ def _append_warning(result: SyncCreativeResult, warning: str) -> None:
     before appending rather than assuming a list is present.
     """
     result.warnings = (result.warnings or []) + [warning]
+
+
+def _send_deferred_notifications(
+    notifications: list[dict[str, Any]],
+    tenant: dict[str, Any],
+    principal_id: str,
+) -> None:
+    """Send best-effort notifications only after the protocol result is durable."""
+    for notification in notifications:
+        try:
+            _send_creative_notifications(
+                creatives_needing_approval=notification["creatives_needing_approval"],
+                tenant=tenant,
+                approval_mode=notification["approval_mode"],
+                principal_id=principal_id,
+            )
+        except Exception:
+            logger.warning("Creative approval notification failed after durable completion", exc_info=True)
 
 
 def _sync_creatives_core_kwargs(
@@ -165,11 +187,17 @@ def _sync_creatives_impl(
             enforce_ceiling=True,
         )
         if reservation.replay is not None:
-            logger.info("Idempotency replay: returning cached sync_creatives success for key %s", idempotency_key)
+            from src.core.idempotency_logging import redact_idempotency_key
+
+            logger.info(
+                "Idempotency replay: returning cached sync_creatives success for key %s",
+                redact_idempotency_key(idempotency_key),
+            )
             return reservation.replay
         reservation_attempt_id = reservation.attempt_id
 
-    try:
+    with release_reservation_on_error(IdempotencyUoW, tenant["tenant_id"], reservation_attempt_id):
+        deferred_notifications: list[dict[str, Any]] = []
         response = _sync_creatives_work(
             **_sync_creatives_core_kwargs(
                 creatives,
@@ -182,33 +210,19 @@ def _sync_creatives_impl(
                 context,
                 idempotency_key,
                 resolved_identity,
-            )
+            ),
+            deferred_notifications=deferred_notifications,
         )
-    except Exception:
-        # Creative sync spans creative writes, assignments, workflows, and
-        # notifications. An exception can arrive after one of those effects
-        # committed, so retain the claim until lease expiry rather than enable
-        # an immediate duplicate run.
         if reservation_attempt_id is not None:
-            logger.warning(
-                "sync_creatives failed after reservation %s; leaving it in flight to fail closed",
-                reservation_attempt_id,
-                exc_info=True,
-            )
-        raise
-
-    # Completion is strict. A stale fencing token cannot overwrite a newer
-    # attempt, and a completion failure leaves the row in flight so a retry
-    # cannot repeat side effects immediately.
-    if reservation_attempt_id is not None:
-        with IdempotencyUoW(tenant["tenant_id"]) as uow:
-            complete_idempotent(
-                uow,
-                attempt_id=reservation_attempt_id,
-                response_model=response,
-                protocol_status="completed",
-            )
-    return response
+            with IdempotencyUoW(tenant["tenant_id"]) as uow:
+                complete_idempotent(
+                    uow,
+                    attempt_id=reservation_attempt_id,
+                    response_model=response,
+                    protocol_status="completed",
+                )
+        _send_deferred_notifications(deferred_notifications, tenant, principal_id)
+        return response
 
 
 def _sync_creatives_work(
@@ -222,6 +236,7 @@ def _sync_creatives_work(
     context: ContextObject | dict | None = None,
     idempotency_key: str | None = None,
     identity: ResolvedIdentity | None = None,
+    deferred_notifications: list[dict[str, Any]] | None = None,
 ) -> SyncCreativesResponse:
     """Sync creative assets to centralized library (AdCP v2.5 spec compliant endpoint).
 
@@ -601,12 +616,23 @@ def _sync_creatives_work(
             context=context,
             identity=identity,
         )
-        _send_creative_notifications(
-            creatives_needing_approval=creatives_needing_approval,
-            tenant=tenant,
-            approval_mode=approval_mode,
-            principal_id=principal_id,
-        )
+        if deferred_notifications is not None:
+            deferred_notifications.append(
+                {
+                    "creatives_needing_approval": list(creatives_needing_approval),
+                    "approval_mode": approval_mode,
+                }
+            )
+        else:
+            try:
+                _send_creative_notifications(
+                    creatives_needing_approval=creatives_needing_approval,
+                    tenant=tenant,
+                    approval_mode=approval_mode,
+                    principal_id=principal_id,
+                )
+            except Exception:
+                logger.warning("Creative approval notification failed after durable workflow creation", exc_info=True)
 
     # Audit logging
     _audit_log_sync(

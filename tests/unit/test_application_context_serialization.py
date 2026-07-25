@@ -11,7 +11,7 @@ from src.core.application_context import (
     serialize_application_context,
     validate_application_context,
 )
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import AdCPValidationError, build_two_layer_error_envelope
 from src.core.schemas._base import CreateMediaBuyResult, CreateMediaBuySuccess
 from src.core.schemas.product import GetProductsResponse
 
@@ -45,6 +45,43 @@ def test_plain_context_is_detached_recursively() -> None:
 
     raw["nested"]["value"] = "mutated"
     assert serialized == {"nested": {"value": None}}
+
+
+def test_cyclic_context_is_rejected_and_safe_serialization_drops_it() -> None:
+    raw: dict[str, Any] = {}
+    raw["self"] = raw
+
+    with pytest.raises(AdCPValidationError, match="acyclic"):
+        validate_application_context(raw)
+
+    assert serialize_application_context(raw) is None
+
+
+def test_cyclic_sequence_is_rejected_and_error_dump_cannot_hang() -> None:
+    sequence: list[Any] = []
+    sequence.append(sequence)
+    raw = {"sequence": sequence}
+
+    with pytest.raises(AdCPValidationError, match="acyclic"):
+        validate_application_context(raw)
+
+    assert serialize_application_context(raw) is None
+    assert dump_adcp_response(raw) == {}
+    error = AdCPValidationError("invalid request", field="context", context=raw)
+    envelope = build_two_layer_error_envelope(error)
+    assert "context" not in envelope
+    assert envelope["adcp_error"]["code"] == "VALIDATION_ERROR"
+    assert envelope["errors"][0]["code"] == "VALIDATION_ERROR"
+
+
+def test_shared_noncyclic_container_is_copied_per_occurrence() -> None:
+    shared = {"value": 1}
+    raw = {"left": shared, "right": shared}
+
+    serialized = serialize_application_context(raw)
+
+    assert serialized == raw
+    assert serialized["left"] is not serialized["right"]
 
 
 def test_deeply_nested_plain_context_survives_intact() -> None:

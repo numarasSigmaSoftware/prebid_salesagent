@@ -1,6 +1,6 @@
 """Integration tests for IdempotencyAttemptRepository.
 
-Backs the AdCP 3.0.1 idempotency contract: retrying a mutating tool call with
+Backs the AdCP 3.1.1 idempotency contract: retrying a keyed tool call with
 the same idempotency_key must replay the original SUCCESS verbatim (errors are
 never cached). The repository encapsulates the per-tenant, per-principal,
 per-account, per-tool, per-key uniqueness contract and TTL-driven expiry.
@@ -767,3 +767,87 @@ class TestReserve:
             assert row.attempt_id == outcome.attempt_id
             assert row.payload_hash == "hash-5"
             assert row.expires_at == later + timedelta(seconds=60)
+
+    def test_attempt_id_transitions_cannot_cross_tenants(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            _setup(env, tenant_id="idem_t2", principal_id="idem_p2")
+            owner = IdempotencyAttemptRepository(session, "idem_t1")
+            attacker = IdempotencyAttemptRepository(session, "idem_t2")
+            now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+            reserved = owner.reserve(
+                principal_id="idem_p1",
+                account_id=None,
+                tool_name="sync_accounts",
+                idempotency_key="tenant-fence-key",
+                payload_hash="hash",
+                lease=timedelta(seconds=1),
+                now=now,
+            )
+
+            assert (
+                attacker.complete(
+                    reserved.attempt_id,
+                    response_model=_model(ok=True),
+                    protocol_status="completed",
+                    now=now,
+                )
+                is False
+            )
+            attacker.release(reserved.attempt_id)
+            attacker._steal_expired(
+                reserved.attempt_id,
+                principal_id="idem_p2",
+                account_id=None,
+                idempotency_key="tenant-fence-key",
+                payload_hash="attacker-hash",
+                lease=timedelta(seconds=60),
+                now=now + timedelta(seconds=2),
+            )
+
+            row = owner.find_including_expired(
+                principal_id="idem_p1",
+                idempotency_key="tenant-fence-key",
+            )
+            assert row is not None
+            assert row.attempt_id == reserved.attempt_id
+            assert row.payload_hash == "hash"
+
+
+class TestOperationClassIsolation:
+    """Read traffic cannot consume the independently configured write allowance."""
+
+    def test_rate_aggregates_are_partitioned_by_operation_class(self, integration_db):
+        from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
+
+        with BareIntegrationEnv() as env:
+            session = _setup(env)
+            repo = IdempotencyAttemptRepository(session, "idem_t1")
+            now = datetime.now(UTC)
+            for operation_class, key in (("read", "read-key"), ("write", "write-key")):
+                repo.record_success(
+                    principal_id="idem_p1",
+                    tool_name="get_products" if operation_class == "read" else "create_media_buy",
+                    idempotency_key=key,
+                    response_model=_model(ok=True),
+                    protocol_status="completed",
+                    payload_hash=f"{operation_class}-hash",
+                    operation_class=operation_class,
+                )
+
+            for operation_class in ("read", "write"):
+                active, _ = repo.count_active(
+                    principal_id="idem_p1",
+                    account_id=None,
+                    now=now,
+                    operation_class=operation_class,
+                )
+                recent, _ = repo.count_inserts_since(
+                    principal_id="idem_p1",
+                    account_id=None,
+                    since=now - timedelta(minutes=1),
+                    operation_class=operation_class,
+                )
+                assert (active, recent) == (1, 1)

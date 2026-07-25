@@ -334,8 +334,8 @@ def then_details_build_version_equals(ctx: dict, build_version: str) -> None:
 )
 def then_suggestion_advises_supported_versions_repin(ctx: dict) -> None:
     suggestion = _wire_error(ctx).get("suggestion")
-    assert suggestion is not None, "Expected a suggestion on the wire error"
-    assert "supported_versions" in suggestion, f"Suggestion must point at supported_versions: {suggestion!r}"
+    expected = "Re-pin adcp_version to a supported_versions entry and retry the request."
+    assert suggestion == expected, f"Expected actionable re-pin guidance {expected!r}, got {suggestion!r}"
 
 
 # ── Then: buyer re-pin behavior ──────────────────────────────────────

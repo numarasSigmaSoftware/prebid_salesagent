@@ -492,7 +492,7 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
         if "creatives" in result and self.creatives:
             result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
         # `replayed=False` rides the default dump; strip it so the marker is present
-        # ONLY on a genuine replay (this dump is its single source, per #1546).
+        # ONLY on a genuine replay (this dump is its single source).
         return apply_replay_marker(result, self.replayed)
 
     def __str__(self) -> str:
