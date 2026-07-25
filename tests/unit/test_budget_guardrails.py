@@ -6,10 +6,11 @@ F-08 — Min-spend parity: package budget updates honor currency_limit.min_packa
 """
 
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
-from src.core.exceptions import AdCPBudgetExceededError, AdCPBudgetTooLowError
+from src.core.exceptions import AdCPBudgetExceededError, AdCPBudgetTooLowError, AdCPConflictError
 from src.core.schemas import Budget, UpdateMediaBuySuccess
 from src.core.tools.media_buy_update import MAX_CAMPAIGN_BUDGET, MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
 from tests.harness.media_buy_update import MediaBuyUpdateEnv
@@ -93,3 +94,30 @@ def test_invalid_update_does_not_claim_lease_and_a_corrected_retry_proceeds() ->
         media_buy_repo.claim_update_lease.assert_called_once_with(
             "mb-001", lease_ttl_seconds=MEDIA_BUY_UPDATE_LEASE_TTL_SECONDS
         )
+
+
+def test_expired_completion_rolls_back_before_persisting_manual_fence() -> None:
+    """A completion conflict must not commit staged local update data."""
+    with MediaBuyUpdateEnv() as env:
+        media_buy = env.set_media_buy()
+        media_buy.revision = 1
+        media_buy_repo = env.mock["uow"].return_value.media_buys
+        media_buy_repo.claim_update_lease.return_value = "lease_expired"
+        media_buy_repo.mark_update_adapter_invoked.return_value = True
+        media_buy_repo.complete_update_lease.return_value = False
+        env.mock["adapter"].return_value.update_media_buy.return_value = UpdateMediaBuySuccess(
+            media_buy_id="mb-001", affected_packages=[]
+        )
+        events: list[str] = []
+        env.mock["uow"].return_value.rollback.side_effect = lambda: events.append("rollback")
+
+        with patch(
+            "src.core.tools.media_buy_update._persist_expired_update_lease_reconciliation",
+            side_effect=lambda *_: events.append("persist_fence"),
+        ) as persist_fence:
+            with pytest.raises(AdCPConflictError):
+                env.call_impl(paused=True)
+
+        env.mock["uow"].return_value.rollback.assert_called_once_with()
+        persist_fence.assert_called_once_with(env.identity.tenant_id, "mb-001", "lease_expired")
+        assert events == ["rollback", "persist_fence"]

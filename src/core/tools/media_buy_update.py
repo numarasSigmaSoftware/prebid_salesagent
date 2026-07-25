@@ -129,6 +129,18 @@ def _require_current_buy(mb: MediaBuy | None) -> MediaBuy:
     return mb
 
 
+def _persist_expired_update_lease_reconciliation(tenant_id: str, media_buy_id: str, lease_id: str) -> None:
+    """Persist a completion-expiry fence after the update UoW has rolled back.
+
+    Only scalar IDs cross the UoW boundary.  The recovery UoW re-reads and
+    locks the row, so it cannot publish any staged state from the failed update
+    transaction or overwrite a fence established by a concurrent worker.
+    """
+    with MediaBuyUoW(tenant_id) as recovery_uow:
+        assert recovery_uow.media_buys is not None
+        recovery_uow.media_buys.persist_expired_update_lease_reconciliation(media_buy_id, lease_id)
+
+
 def _adcp_status_and_actions(
     buy: "MediaBuy | None", today: date | None = None, *, fallback_status: str | None = None
 ) -> tuple[MediaBuyStatus | None, list[str]]:
@@ -719,6 +731,12 @@ def _update_media_buy_impl(
                 if update_lease_id is None:
                     return
                 if not media_buy_repo.complete_update_lease(req.media_buy_id, update_lease_id):
+                    # Completion may fail after an adapter-backed call exceeded its
+                    # lease.  The repository has staged a manual fence in this
+                    # UoW, but this update also has local writes pending; roll those
+                    # back before using a fresh UoW to persist only the fence.
+                    uow.rollback()
+                    _persist_expired_update_lease_reconciliation(tenant["tenant_id"], req.media_buy_id, update_lease_id)
                     raise AdCPConflictError(
                         "Update ownership was lost before completion.",
                         field="media_buy_id",

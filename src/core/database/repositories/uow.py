@@ -99,6 +99,11 @@ class BaseUoW:
         assert self._session is not None
         self._session.commit()
 
+    def rollback(self) -> None:
+        """Discard the current unit of work before a separate recovery transaction."""
+        assert self._session is not None
+        self._session.rollback()
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,

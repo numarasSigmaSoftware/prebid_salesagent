@@ -252,6 +252,44 @@ class TestUpdateOperationLease:
             assert media_buy.update_recovery_mode == "manual_required"
             assert media_buy.update_reconcile_incident_at is not None
 
+    def test_expired_completion_persists_fence_after_worker_rollback(self, tenant_a, principal_a):
+        """A slow owner cannot roll back the manual fence with its local update.
+
+        ``complete_update_lease`` stages the fence in the worker transaction.
+        The update path must roll that transaction back rather than publishing
+        its local writes, then persist the fence in a separate recovery UoW.
+        """
+        media_buy_id = "mb_update_lease_rollback_fence"
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, media_buy_id))
+
+        clock = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock) as uow:
+            lease_id = uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1)
+            assert lease_id is not None
+            assert uow.media_buys.mark_update_adapter_invoked(media_buy_id, lease_id, lease_ttl_seconds=1)
+
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock + timedelta(seconds=2)) as worker_uow:
+            # Model the local part of an adapter-backed update.  It is flushed in
+            # the worker transaction but must not be committed with the recovery
+            # fence after ownership expires.
+            worker_uow.media_buys.update_fields(media_buy_id, order_name="must_not_commit")
+            assert not worker_uow.media_buys.complete_update_lease(media_buy_id, lease_id)
+            worker_uow.rollback()
+
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock + timedelta(seconds=2)) as recovery_uow:
+            assert recovery_uow.media_buys.persist_expired_update_lease_reconciliation(media_buy_id, lease_id)
+
+        with MediaBuyUoW(tenant_a) as uow:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            assert media_buy.update_lease_id == lease_id
+            assert media_buy.update_adapter_invoked_at is not None
+            assert media_buy.update_recovery_mode == "manual_required"
+            assert media_buy.update_reconcile_incident_at is not None
+            assert media_buy.update_reconcile_incident_reason == "update lease expired after adapter invocation"
+            assert media_buy.order_name == f"Order {media_buy_id}"
+
     def test_unexpired_invoked_lease_completes_and_clears_operation_state(self, tenant_a, principal_a):
         media_buy_id = "mb_update_lease_complete"
         with MediaBuyUoW(tenant_a) as uow:

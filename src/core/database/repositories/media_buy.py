@@ -835,6 +835,26 @@ class MediaBuyRepository:
         self._session.flush()
         return True
 
+    def persist_expired_update_lease_reconciliation(self, media_buy_id: str, lease_id: str) -> bool:
+        """Durably fence an expired, invoked update lease owned by ``lease_id``.
+
+        This method is deliberately called from a fresh recovery UoW after the
+        worker's update transaction has rolled back.  A slow adapter call can
+        leave local writes staged when completion discovers expiry, so committing
+        the original UoW would incorrectly publish those writes along with the
+        manual-reconciliation marker.
+        """
+        media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
+        if media_buy is None or media_buy.update_lease_id != lease_id:
+            return False
+        now = self._now()
+        if media_buy.update_adapter_invoked_at is None or media_buy.update_lease_expires_at is None:
+            return False
+        if media_buy.update_lease_expires_at > now:
+            return False
+        self._mark_update_manual_reconciliation(media_buy, now)
+        return True
+
     def claim_finalizing(
         self,
         media_buy_id: str,
