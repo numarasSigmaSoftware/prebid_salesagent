@@ -12,6 +12,86 @@ schema_version: 1
 #   storyboard: ungraded. The local scenarios grade the schema contract directly.
 overrides:
   - feature: BR-UC-003-update-media-buy.feature
+    scenario_id: T-UC-003-partition-targeting-overlay
+    authority: "AdCP 3.1.1 dist/schemas/3.1.1/core/targeting.json: additionalProperties=true"
+    reason: "Unknown targeting dimensions are forward-compatible extensions, so the seller accepts and ignores them consistently in development and production."
+    gherkin: |
+      @T-UC-003-partition-targeting-overlay @partition @targeting_overlay
+      Scenario Outline: Targeting overlay partition validation - <partition>
+        Given a valid update_media_buy request with:
+        | field        | value       |
+        | media_buy_id | mb_existing |
+        And the request includes 1 package update with:
+        | field             | value   |
+        | package_id        | pkg_001 |
+        And the package targeting_overlay is set to: <overlay_value>
+        And the package "pkg_001" exists in the media buy
+        And the tenant is configured for auto-approval
+        When the Buyer Agent sends the update_media_buy request
+        Then the result should be <outcome>
+
+        Examples: Valid partitions
+          | partition                          | overlay_value                                                                                                                 | outcome |
+          | absent_overlay                     | <not provided>                                                                                                                | success |
+          | valid_overlay                      | {"geo_countries": ["US", "CA"]}                                                                                               | success |
+          | empty_overlay                      | {}                                                                                                                            | success |
+          | single_geo_dimension               | {"geo_countries": ["US"]}                                                                                                     | success |
+          | multiple_dimensions                | {"geo_countries": ["US"], "device_platform": ["ios"]}                                                                          | success |
+          | unknown_extension                  | {"nonexistent_field": ["value"]}                                                                                              | success |
+          | frequency_cap_suppress_only        | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}                                                          | success |
+          | frequency_cap_max_impressions_only | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}}                       | success |
+          | frequency_cap_combined             | {"frequency_cap": {"suppress": {"interval": 60, "unit": "minutes"}, "max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}} | success |
+          | keyword_targeting                  | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                                                            | success |
+          | proximity_travel_time              | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]} | success |
+          | proximity_radius                   | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]}                                 | success |
+          | proximity_geometry                 | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]}                     | success |
+
+        Examples: Invalid partitions
+          | partition                    | overlay_value                                                                                                                                    | outcome                                      |
+          | managed_only_dimension       | {"key_value_pairs": {"aee_segment": "value"}}                                                                                                    | error "INVALID_REQUEST" with suggestion       |
+          | geo_overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                                                                                       | error "INVALID_REQUEST" with suggestion       |
+          | device_type_overlap          | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                                                                                   | error "INVALID_REQUEST" with suggestion       |
+          | proximity_method_conflict    | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving", "radius": {"value": 10, "unit": "km"}}]} | error "INVALID_REQUEST" with suggestion |
+          | frequency_cap_missing_fields | {"frequency_cap": {"max_impressions": 3}}                                                                                                        | error "INVALID_REQUEST" with suggestion       |
+          | keyword_duplicate            | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]}                                | error "INVALID_REQUEST" with suggestion       |
+  - feature: BR-UC-003-update-media-buy.feature
+    scenario_id: T-UC-003-boundary-targeting-overlay
+    authority: "AdCP 3.1.1 dist/schemas/3.1.1/core/targeting.json: additionalProperties=true"
+    reason: "An unknown targeting property is a valid extension boundary, not an INVALID_REQUEST."
+    gherkin: |
+      @T-UC-003-boundary-targeting-overlay @boundary @targeting_overlay
+      Scenario Outline: Targeting overlay boundary validation - <boundary_point>
+        Given a valid update_media_buy request with:
+        | field        | value       |
+        | media_buy_id | mb_existing |
+        And the request includes 1 package update with:
+        | field             | value   |
+        | package_id        | pkg_001 |
+        And the package targeting_overlay is set to: <overlay_value>
+        And the package "pkg_001" exists in the media buy
+        And the tenant is configured for auto-approval
+        When the Buyer Agent sends the update_media_buy request
+        Then the result should be <outcome>
+
+        Examples: Boundary values
+          | boundary_point                               | overlay_value                                                                                                                                    | outcome                                  |
+          | absent overlay                               | <not provided>                                                                                                                                   | success                                  |
+          | empty {} overlay                             | {}                                                                                                                                               | success                                  |
+          | valid known fields                           | {"geo_countries": ["US"]}                                                                                                                        | success                                  |
+          | unknown extension field                      | {"nonexistent_field": ["value"]}                                                                                                                 | success                                  |
+          | managed-only dimension                       | {"key_value_pairs": {"aee_segment": "value"}}                                                                                                    | error "INVALID_REQUEST" with suggestion  |
+          | geo include/exclude overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                                                                                       | error "INVALID_REQUEST" with suggestion  |
+          | device_type include/exclude overlap          | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                                                                                   | error "INVALID_REQUEST" with suggestion  |
+          | geo_proximity with travel_time only          | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]}                  | success                                  |
+          | geo_proximity with radius only               | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]}                                                    | success                                  |
+          | geo_proximity with geometry only             | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]}                                        | success                                  |
+          | geo_proximity with travel_time AND radius    | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving", "radius": {"value": 10, "unit": "km"}}]} | error "INVALID_REQUEST" with suggestion |
+          | frequency_cap suppress only                  | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}                                                                             | success                                  |
+          | frequency_cap max_impressions with per+window | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}}                                         | success                                  |
+          | frequency_cap max_impressions without per    | {"frequency_cap": {"max_impressions": 3}}                                                                                                        | error "INVALID_REQUEST" with suggestion  |
+          | keyword_targets with unique tuples           | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                                                                               | success                                  |
+          | keyword_targets with duplicate (keyword, match_type) | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]}                        | error "INVALID_REQUEST" with suggestion  |
+  - feature: BR-UC-003-update-media-buy.feature
     scenario_id: T-UC-003-partition-revision
     authority: "AdCP 3.1.1 dist/schemas/3.1.1/media-buy/update-media-buy-request.json: revision is an integer with minimum 1; revision_optimistic_concurrency storyboard: a mismatch is CONFLICT."
     reason: "Protocol wrappers preserve raw values until the shared request boundary, so numeric strings are rejected identically instead of being transport-coerced."

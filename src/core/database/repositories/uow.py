@@ -272,12 +272,13 @@ class SignalsAgentUoW(BaseUoW):
 
 
 class StrategyUoW(BaseUoW):
-    """Unit of Work for globally keyed strategies and simulation state."""
+    """Unit of Work for tenant- and principal-scoped strategy state."""
 
     strategies: StrategyRepository | None
 
-    def __init__(self) -> None:
-        super().__init__("")
+    def __init__(self, tenant_id: str, principal_id: str | None) -> None:
+        super().__init__(tenant_id)
+        self._principal_id = principal_id
 
     def __enter__(self) -> Self:
         super().__enter__()
@@ -290,7 +291,7 @@ class StrategyUoW(BaseUoW):
 
     def _init_repos(self) -> None:
         assert self._session is not None
-        self.strategies = StrategyRepository(self._session)
+        self.strategies = StrategyRepository(self._session, self._tenant_id, self._principal_id)
 
     def _clear_repos(self) -> None:
         self.strategies = None

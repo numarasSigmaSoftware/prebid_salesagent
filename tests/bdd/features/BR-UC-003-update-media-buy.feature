@@ -1572,29 +1572,29 @@ Feature: BR-UC-003 Update Media Buy
     Then the result should be <outcome>
 
     Examples: Valid partitions
-      | partition                        | overlay_value                                                                     | outcome |
-      | absent_overlay                   | <not provided>                                                                    | success |
-      | valid_overlay                    | {"geo_countries": ["US", "CA"]}                                                   | success |
-      | empty_overlay                    | {}                                                                                | success |
-      | single_geo_dimension             | {"geo_countries": ["US"]}                                                         | success |
-      | multiple_dimensions              | {"geo_countries": ["US"], "device_platform": ["ios"]}                              | success |
-      | frequency_cap_suppress_only      | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}              | success |
-      | frequency_cap_max_impressions_only | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}} | success |
-      | frequency_cap_combined           | {"frequency_cap": {"suppress": {"interval": 60, "unit": "minutes"}, "max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}} | success |
-      | keyword_targeting                | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                | success |
-      | proximity_travel_time            | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]} | success |
-      | proximity_radius                 | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]} | success |
-      | proximity_geometry               | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]} | success |
+      | partition                          | overlay_value                                                                                                                 | outcome |
+      | absent_overlay                     | <not provided>                                                                                                                | success |
+      | valid_overlay                      | {"geo_countries": ["US", "CA"]}                                                                                               | success |
+      | empty_overlay                      | {}                                                                                                                            | success |
+      | single_geo_dimension               | {"geo_countries": ["US"]}                                                                                                     | success |
+      | multiple_dimensions                | {"geo_countries": ["US"], "device_platform": ["ios"]}                                                                          | success |
+      | unknown_extension                  | {"nonexistent_field": ["value"]}                                                                                              | success |
+      | frequency_cap_suppress_only        | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}                                                          | success |
+      | frequency_cap_max_impressions_only | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}}                       | success |
+      | frequency_cap_combined             | {"frequency_cap": {"suppress": {"interval": 60, "unit": "minutes"}, "max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}} | success |
+      | keyword_targeting                  | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                                                            | success |
+      | proximity_travel_time              | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]} | success |
+      | proximity_radius                   | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]}                                 | success |
+      | proximity_geometry                 | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]}                     | success |
 
     Examples: Invalid partitions
-      | partition                    | overlay_value                                                                          | outcome                                      |
-      | unknown_field                | {"nonexistent_field": ["value"]}                                                       | error "INVALID_REQUEST" with suggestion       |
-      | managed_only_dimension       | {"publisher_managed_dim": ["value"]}                                                   | error "INVALID_REQUEST" with suggestion       |
-      | geo_overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                              | error "INVALID_REQUEST" with suggestion       |
-      | device_type_overlap          | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                         | error "INVALID_REQUEST" with suggestion       |
+      | partition                    | overlay_value                                                                                                                                    | outcome                                      |
+      | managed_only_dimension       | {"key_value_pairs": {"aee_segment": "value"}}                                                                                                    | error "INVALID_REQUEST" with suggestion       |
+      | geo_overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                                                                                       | error "INVALID_REQUEST" with suggestion       |
+      | device_type_overlap          | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                                                                                   | error "INVALID_REQUEST" with suggestion       |
       | proximity_method_conflict    | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving", "radius": {"value": 10, "unit": "km"}}]} | error "INVALID_REQUEST" with suggestion |
-      | frequency_cap_missing_fields | {"frequency_cap": {"max_impressions": 3}}                                              | error "INVALID_REQUEST" with suggestion       |
-      | keyword_duplicate            | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]} | error "INVALID_REQUEST" with suggestion |
+      | frequency_cap_missing_fields | {"frequency_cap": {"max_impressions": 3}}                                                                                                        | error "INVALID_REQUEST" with suggestion       |
+      | keyword_duplicate            | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]}                                | error "INVALID_REQUEST" with suggestion       |
 
   @T-UC-003-boundary-targeting-overlay @boundary @targeting_overlay
   Scenario Outline: Targeting overlay boundary validation - <boundary_point>
@@ -1611,23 +1611,23 @@ Feature: BR-UC-003 Update Media Buy
     Then the result should be <outcome>
 
     Examples: Boundary values
-      | boundary_point                               | overlay_value                                                                          | outcome                                  |
-      | absent overlay                               | <not provided>                                                                         | success                                  |
-      | empty {} overlay                             | {}                                                                                     | success                                  |
-      | valid known fields                           | {"geo_countries": ["US"]}                                                              | success                                  |
-      | unknown field name                           | {"nonexistent_field": ["value"]}                                                       | error "INVALID_REQUEST" with suggestion  |
-      | managed-only dimension                       | {"publisher_managed_dim": ["value"]}                                                   | error "INVALID_REQUEST" with suggestion  |
-      | geo include/exclude overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                              | error "INVALID_REQUEST" with suggestion  |
-      | device_type include/exclude overlap           | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                        | error "INVALID_REQUEST" with suggestion  |
-      | geo_proximity with travel_time only          | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]} | success |
-      | geo_proximity with radius only               | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]} | success |
-      | geo_proximity with geometry only             | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]} | success |
+      | boundary_point                               | overlay_value                                                                                                                                    | outcome                                  |
+      | absent overlay                               | <not provided>                                                                                                                                   | success                                  |
+      | empty {} overlay                             | {}                                                                                                                                               | success                                  |
+      | valid known fields                           | {"geo_countries": ["US"]}                                                                                                                        | success                                  |
+      | unknown extension field                      | {"nonexistent_field": ["value"]}                                                                                                                 | success                                  |
+      | managed-only dimension                       | {"key_value_pairs": {"aee_segment": "value"}}                                                                                                    | error "INVALID_REQUEST" with suggestion  |
+      | geo include/exclude overlap                  | {"geo_countries": ["US"], "geo_countries_exclude": ["US"]}                                                                                       | error "INVALID_REQUEST" with suggestion  |
+      | device_type include/exclude overlap          | {"device_type": ["mobile"], "device_type_exclude": ["mobile"]}                                                                                   | error "INVALID_REQUEST" with suggestion  |
+      | geo_proximity with travel_time only          | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving"}]}                  | success                                  |
+      | geo_proximity with radius only               | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "radius": {"value": 10, "unit": "km"}}]}                                                    | success                                  |
+      | geo_proximity with geometry only             | {"geo_proximity": [{"geometry": {"type": "Polygon", "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]}                                        | success                                  |
       | geo_proximity with travel_time AND radius    | {"geo_proximity": [{"lat": 40.7128, "lng": -74.006, "travel_time": {"value": 30, "unit": "min"}, "transport_mode": "driving", "radius": {"value": 10, "unit": "km"}}]} | error "INVALID_REQUEST" with suggestion |
-      | frequency_cap suppress only                  | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}                  | success                                  |
-      | frequency_cap max_impressions with per+window | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}} | success               |
-      | frequency_cap max_impressions without per    | {"frequency_cap": {"max_impressions": 3}}                                              | error "INVALID_REQUEST" with suggestion  |
-      | keyword_targets with unique tuples           | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                     | success                                  |
-      | keyword_targets with duplicate (keyword, match_type) | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]} | error "INVALID_REQUEST" with suggestion |
+      | frequency_cap suppress only                  | {"frequency_cap": {"suppress": {"interval": 30, "unit": "minutes"}}}                                                                             | success                                  |
+      | frequency_cap max_impressions with per+window | {"frequency_cap": {"max_impressions": 3, "per": "devices", "window": {"interval": 1, "unit": "days"}}}                                         | success                                  |
+      | frequency_cap max_impressions without per    | {"frequency_cap": {"max_impressions": 3}}                                                                                                        | error "INVALID_REQUEST" with suggestion  |
+      | keyword_targets with unique tuples           | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}]}                                                                               | success                                  |
+      | keyword_targets with duplicate (keyword, match_type) | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]}                        | error "INVALID_REQUEST" with suggestion  |
 
   @T-UC-003-partition-start-time @partition @start_time
   Scenario Outline: Start time partition validation - <partition>

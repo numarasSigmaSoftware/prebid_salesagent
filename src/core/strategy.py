@@ -81,7 +81,9 @@ class StrategyManager:
 
     def get_or_create_strategy(self, strategy_id: str, create_if_missing: bool = True) -> "StrategyContext":
         """Get existing strategy or create new one."""
-        with StrategyUoW() as uow:
+        if self.tenant_id is None:
+            raise StrategyError("Strategy operations require a tenant")
+        with StrategyUoW(self.tenant_id, self.principal_id) as uow:
             assert uow.strategies is not None
             strategy = uow.strategies.get_by_id(strategy_id)
 
@@ -252,6 +254,10 @@ class StrategyContext:
     def __init__(self, strategy_model: StrategyModel):
         self.strategy = strategy_model
         self.strategy_id = strategy_model.strategy_id
+        if strategy_model.tenant_id is None:
+            raise StrategyError("Strategy context requires tenant ownership")
+        self.tenant_id = strategy_model.tenant_id
+        self.principal_id = strategy_model.principal_id
         self.is_simulation = strategy_model.is_simulation
         self._config = dict(strategy_model.config or {})
 
@@ -280,6 +286,8 @@ class SimulationContext:
     def __init__(self, strategy: StrategyContext):
         self.strategy = strategy
         self.strategy_id = strategy.strategy_id
+        self.tenant_id = strategy.tenant_id
+        self.principal_id = strategy.principal_id
         self.current_time = datetime.now(UTC)
         self.events_triggered: list[dict[str, Any]] = []
         self.media_buy_states: dict[str, dict[str, Any]] = {}
@@ -287,7 +295,7 @@ class SimulationContext:
 
     def _load_state(self):
         """Load persistent simulation state."""
-        with StrategyUoW() as uow:
+        with StrategyUoW(self.tenant_id, self.principal_id) as uow:
             assert uow.strategies is not None
             states = uow.strategies.list_states(self.strategy_id)
 
@@ -301,7 +309,7 @@ class SimulationContext:
 
     def _save_state(self):
         """Save simulation state to database."""
-        with StrategyUoW() as uow:
+        with StrategyUoW(self.tenant_id, self.principal_id) as uow:
             assert uow.strategies is not None
             uow.strategies.upsert_state(self.strategy_id, "current_time", {"time": self.current_time.isoformat()})
             uow.strategies.upsert_state(self.strategy_id, "events_triggered", {"events": self.events_triggered})
@@ -404,7 +412,7 @@ class SimulationContext:
         self.media_buy_states = {}
 
         # Clear persistent state
-        with StrategyUoW() as uow:
+        with StrategyUoW(self.tenant_id, self.principal_id) as uow:
             assert uow.strategies is not None
             uow.strategies.clear_states(self.strategy_id)
 
@@ -418,7 +426,7 @@ class SimulationContext:
     def set_scenario(self, scenario: str) -> dict[str, Any]:
         """Change simulation scenario."""
         # Update strategy config with new scenario
-        with StrategyUoW() as uow:
+        with StrategyUoW(self.tenant_id, self.principal_id) as uow:
             assert uow.strategies is not None
             uow.strategies.set_scenario(self.strategy_id, scenario)
 

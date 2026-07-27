@@ -1,24 +1,23 @@
-"""Tests for unknown targeting field rejection.
+"""Tests for AdCP targeting extension handling.
 
-Regression tests for salesagent-duu: ensures unknown buyer-submitted targeting
-fields (typos, bogus fields) are rejected. With extra='forbid' in dev mode,
-unknown fields are caught at construction time via ValidationError.
+AdCP 3.1.1 ``core/targeting.json`` declares ``additionalProperties: true``.
+Unknown buyer-submitted dimensions are accepted and ignored consistently,
+while known managed-only fields remain available to access-control validation.
 """
-
-import pytest
 
 from src.core.schemas import Targeting
 
 
-class TestForbidRejectsUnknownFields:
-    """extra='forbid' should reject unknown fields at construction time."""
+class TestTargetingExtensions:
+    """Unknown targeting extensions are accepted but not persisted."""
 
-    def test_unknown_field_rejected(self):
-        with pytest.raises(Exception, match="Extra inputs are not permitted"):
-            Targeting(totally_bogus="hello", geo_countries=["US"])
+    def test_unknown_field_ignored(self):
+        targeting = Targeting(totally_bogus="hello", geo_countries=["US"])
+
+        assert targeting.model_dump(exclude_none=True) == {"geo_countries": ["US"]}
 
     def test_known_field_accepted(self):
-        """Known model fields must be accepted, model_extra stays None (extra='forbid')."""
+        """Known model fields remain accepted and extensions are not retained."""
         t = Targeting(geo_countries=["US"], device_type_any_of=["mobile"])
         assert t.geo_countries is not None
         assert t.model_extra is None
@@ -35,17 +34,17 @@ class TestForbidRejectsUnknownFields:
         assert t.geo_countries is not None
         assert t.model_extra is None
 
-    def test_multiple_unknown_fields_rejected(self):
-        with pytest.raises(Exception, match="Extra inputs are not permitted"):
-            Targeting(bogus_one="a", bogus_two="b")
+    def test_multiple_unknown_fields_ignored(self):
+        targeting = Targeting(bogus_one="a", bogus_two="b")
+
+        assert targeting.model_dump(exclude_none=True) == {}
 
 
 class TestValidateUnknownTargetingFields:
     """validate_unknown_targeting_fields should report model_extra keys.
 
-    With extra='forbid', unknown fields are rejected at parse time, so
-    model_extra is always empty/None. These tests verify the validator
-    handles both modes correctly.
+    Unknown extension fields are ignored at parse time, so ``model_extra``
+    remains empty and capability validation sees only recognized dimensions.
     """
 
     def test_accepts_all_known_fields(self):

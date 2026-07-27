@@ -1216,7 +1216,14 @@ class Targeting(TargetingOverlay):
     that converts flat DB fields to v3 structured format.
     """
 
-    model_config = ConfigDict(extra=get_pydantic_extra_mode())
+    # AdCP 3.1.1 ``dist/schemas/3.1.1/core/targeting.json`` explicitly sets
+    # ``additionalProperties: true``. Targeting extensions are therefore a
+    # protocol-level exception to the repo's development ``extra="forbid"``
+    # default: accept and ignore unknown dimensions consistently in every
+    # environment, matching the production forward-compatibility boundary.
+    # Storyboard: UC-003's generated unknown-field rejection rows conflict with
+    # the schema and are replaced by grounded local overrides.
+    model_config = ConfigDict(extra="ignore")
 
     # --- Inherited from TargetingOverlay (7 fields): ---
     # geo_countries: list[GeoCountry] | None

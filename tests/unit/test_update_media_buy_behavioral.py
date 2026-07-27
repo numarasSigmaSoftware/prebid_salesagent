@@ -1725,27 +1725,23 @@ class TestUC003UpdateTargetingOverlay:
             assert stored is not None
 
     def test_targeting_overlay_validated_at_boundary(self):
-        """Targeting overlay rejects unknown fields at the request boundary now that
-        AdCPPackageUpdate.targeting_overlay uses local Targeting (extra="forbid")
-        instead of library TargetingOverlay (extra="allow"). Closes gap G36.
+        """Targeting overlay accepts and ignores AdCP extension fields at the boundary.
 
         Covers: UC-003-ALT-UPDATE-TARGETING-OVERLAY-02
         """
-        with MediaBuyUpdateEnv(principal_id="principal_test", tenant_id="tenant_test") as env:
-            from pydantic import ValidationError
+        request = UpdateMediaBuyRequest(
+            media_buy_id="mb_validate",
+            packages=[
+                {
+                    "package_id": "pkg_1",
+                    "targeting_overlay": {"unknown_field": "value"},
+                }
+            ],
+        )
 
-            # Bogus field names should now be caught at the boundary in dev/CI.
-            with pytest.raises(ValidationError) as exc:
-                UpdateMediaBuyRequest(
-                    media_buy_id="mb_validate",
-                    packages=[
-                        {
-                            "package_id": "pkg_1",
-                            "targeting_overlay": {"unknown_field": "value"},
-                        }
-                    ],
-                )
-            assert "unknown_field" in str(exc.value)
+        targeting = request.packages[0].targeting_overlay
+        assert targeting is not None
+        assert targeting.model_dump(exclude_none=True) == {}
 
     def test_targeting_update_no_adapter_call(self):
         """Targeting changes are database-only; no adapter call.

@@ -8,10 +8,12 @@ from src.core.database.repositories.strategy import StrategyRepository
 
 def test_set_scenario_reassigns_json_config_for_dirty_tracking() -> None:
     session = MagicMock()
-    repository = StrategyRepository(session)
+    repository = StrategyRepository(session, "tenant-1", "principal-1")
     original_config = {"scenario": "normal", "other": "preserved"}
     strategy = Strategy(
         strategy_id="strategy-1",
+        tenant_id="tenant-1",
+        principal_id="principal-1",
         name="Test strategy",
         description="Repository unit test",
         config=original_config,

@@ -14,25 +14,45 @@ from src.core.database.models import Strategy, StrategyState
 class StrategyRepository:
     """Access strategy definitions and their associated simulation state."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, tenant_id: str, principal_id: str | None) -> None:
         self._session = session
+        self._tenant_id = tenant_id
+        self._principal_id = principal_id
+
+    def _owned_strategy(self, strategy_id: str) -> tuple[Any, Any, Any]:
+        """Return the ownership predicates shared by strategy operations."""
+        return (
+            Strategy.strategy_id == strategy_id,
+            Strategy.tenant_id == self._tenant_id,
+            Strategy.principal_id == self._principal_id,
+        )
 
     def get_by_id(self, strategy_id: str) -> Strategy | None:
-        """Return a strategy by its globally unique ID."""
-        return self._session.scalars(select(Strategy).where(Strategy.strategy_id == strategy_id)).first()
+        """Return a strategy only when it belongs to this repository scope."""
+        return self._session.scalars(select(Strategy).where(*self._owned_strategy(strategy_id))).first()
 
     def create(self, strategy: Strategy) -> Strategy:
-        """Add a new strategy to the active unit of work."""
+        """Add a strategy whose ownership matches this repository scope."""
+        if strategy.tenant_id != self._tenant_id or strategy.principal_id != self._principal_id:
+            raise ValueError("strategy ownership must match the repository scope")
         self._session.add(strategy)
         self._session.flush()
         return strategy
 
     def list_states(self, strategy_id: str) -> list[StrategyState]:
-        """Return all persisted state entries for a strategy."""
-        return list(self._session.scalars(select(StrategyState).where(StrategyState.strategy_id == strategy_id)).all())
+        """Return state only when the strategy belongs to this repository scope."""
+        return list(
+            self._session.scalars(
+                select(StrategyState)
+                .join(Strategy, Strategy.strategy_id == StrategyState.strategy_id)
+                .where(*self._owned_strategy(strategy_id))
+            ).all()
+        )
 
     def upsert_state(self, strategy_id: str, key: str, value: dict[str, Any]) -> None:
-        """Create or update one persisted simulation state entry."""
+        """Create or update state for a strategy owned by this scope."""
+        if self.get_by_id(strategy_id) is None:
+            raise ValueError("strategy does not belong to the repository scope")
         state = self._session.scalars(
             select(StrategyState).where(
                 StrategyState.strategy_id == strategy_id,
@@ -46,8 +66,9 @@ class StrategyRepository:
         state.updated_at = datetime.now(UTC)
 
     def clear_states(self, strategy_id: str) -> None:
-        """Delete all persisted simulation state for a strategy."""
-        self._session.execute(delete(StrategyState).where(StrategyState.strategy_id == strategy_id))
+        """Delete state only when the strategy belongs to this scope."""
+        owned_strategy_id = select(Strategy.strategy_id).where(*self._owned_strategy(strategy_id)).scalar_subquery()
+        self._session.execute(delete(StrategyState).where(StrategyState.strategy_id == owned_strategy_id))
 
     def set_scenario(self, strategy_id: str, scenario: str) -> None:
         """Update the scenario value when the strategy exists."""

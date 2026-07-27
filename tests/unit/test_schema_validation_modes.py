@@ -41,7 +41,7 @@ _VALID_PACKAGE_DATA = {"product_id": "prod_1", "budget": 5000.0, "pricing_option
 
 
 class TestBuyerModelRejectsExtraInDev:
-    """All buyer-facing request models reject unknown fields in dev mode (default)."""
+    """Buyer models are strict unless their AdCP schema permits extensions."""
 
     def test_create_media_buy_request_rejects_extra(self):
         with pytest.raises(ValidationError, match="bogus"):
@@ -51,9 +51,10 @@ class TestBuyerModelRejectsExtraInDev:
         with pytest.raises(ValidationError, match="bogus"):
             PackageRequest(**_VALID_PACKAGE_DATA, bogus="injected")
 
-    def test_targeting_rejects_extra(self):
-        with pytest.raises(ValidationError, match="bogus"):
-            Targeting(geo_country_any_of=["US"], bogus="injected")
+    def test_targeting_ignores_extension(self):
+        targeting = Targeting(geo_country_any_of=["US"], bogus="injected")
+
+        assert "bogus" not in targeting.model_dump(exclude_none=True)
 
     def test_creative_rejects_extra(self):
         with pytest.raises(ValidationError, match="bogus"):
@@ -78,8 +79,8 @@ class TestBuyerModelRejectsExtraInDev:
             GetMediaBuyDeliveryRequest(bogus="injected")
 
 
-class TestNestedModelRejectsExtraInDev:
-    """Extra fields on nested models within CreateMediaBuyRequest are rejected."""
+class TestNestedModelExtraFieldsInDev:
+    """Nested models follow their authoritative additional-properties contracts."""
 
     def test_nested_package_rejects_extra(self):
         """Bogus field on PackageRequest within CMR.packages is rejected."""
@@ -87,8 +88,8 @@ class TestNestedModelRejectsExtraInDev:
         with pytest.raises(ValidationError, match="bogus_pkg_field"):
             CreateMediaBuyRequest(**data)
 
-    def test_nested_targeting_rejects_extra(self):
-        """Bogus field on targeting_overlay within a package is rejected."""
+    def test_nested_targeting_ignores_extension(self):
+        """Targeting additional properties are accepted and ignored by AdCP 3.1.1."""
         data = {
             **_VALID_CMR_DATA,
             "packages": [
@@ -98,8 +99,10 @@ class TestNestedModelRejectsExtraInDev:
                 }
             ],
         }
-        with pytest.raises(ValidationError, match="bogus_targeting"):
-            CreateMediaBuyRequest(**data)
+        request = CreateMediaBuyRequest(**data)
+
+        assert request.packages[0].targeting_overlay is not None
+        assert "bogus_targeting" not in request.packages[0].targeting_overlay.model_dump(exclude_none=True)
 
 
 class TestExtFieldAccepted:
@@ -264,3 +267,11 @@ class TestProductionModeBehavior:
         )
 
         assert result.returncode == 0, result.stderr
+
+    def test_development_targeting_ignores_future_nested_field(self):
+        """AdCP Targeting extensions are accepted consistently in strict development."""
+        from src.core.schemas import Targeting
+
+        targeting = Targeting.model_validate({"future_dimension": ["value"]})
+
+        assert targeting.model_dump(exclude_none=True) == {}
