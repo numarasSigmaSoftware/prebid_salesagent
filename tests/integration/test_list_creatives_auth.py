@@ -36,7 +36,7 @@ class TestInvalidTokenAtTransportBoundary:
                 "x-adcp-auth": "bad-token-xyz-not-a-real-token",
                 "x-adcp-tenant": tenant.tenant_id,
             }
-            with pytest.raises(AdCPAuthenticationError, match="invalid"):
+            with pytest.raises(AdCPAuthenticationError, match="rejected"):
                 resolve_identity(headers, require_valid_token=True)
 
 

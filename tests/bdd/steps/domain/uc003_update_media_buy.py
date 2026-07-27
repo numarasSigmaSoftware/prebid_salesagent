@@ -816,7 +816,9 @@ def when_send_update_request(ctx: dict) -> None:
         ctx["error"] = e
         return
 
-    if ctx.get("has_auth") is False:
+    if "presented_auth_token" in ctx:
+        dispatch_request(ctx, req=req, presented_auth_token=ctx["presented_auth_token"])
+    elif ctx.get("has_auth") is False:
         dispatch_request(ctx, req=req, identity=None)
     else:
         dispatch_request(ctx, req=req)

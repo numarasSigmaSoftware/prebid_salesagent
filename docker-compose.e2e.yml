@@ -153,6 +153,9 @@ services:
       # network alias (requires `docker compose run --use-aliases`). 'tests' is
       # not 'localhost', so the server does NOT rewrite it to host.docker.internal.
       ADCP_WEBHOOK_HOST: tests
+      # Exact in-network callback host allowed only by the development-mode
+      # protocol-webhook validator. Production has no private-host override.
+      ADCP_WEBHOOK_TEST_HOST: tests
       # Pinned reference creative agent, reachable in-network by service name
       # (no host :9999). Clears the 18 test_creative_agent_live integration tests.
       CREATIVE_AGENT_URL: http://creative-agent:8080/api/creative-agent

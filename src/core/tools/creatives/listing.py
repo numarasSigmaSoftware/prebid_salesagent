@@ -105,7 +105,7 @@ def _build_list_creatives_request(
             created_after_dt = datetime.fromisoformat(created_after.replace("Z", "+00:00"))
         except ValueError:
             raise AdCPValidationError(
-                f"Invalid created_after date format: {created_after}",
+                "Invalid created_after date format.",
                 field="created_after",
                 suggestion="Provide 'created_after' as an ISO 8601 datetime (e.g. 2026-01-01T00:00:00Z) and resend.",
             )
@@ -114,7 +114,7 @@ def _build_list_creatives_request(
             created_before_dt = datetime.fromisoformat(created_before.replace("Z", "+00:00"))
         except ValueError:
             raise AdCPValidationError(
-                f"Invalid created_before date format: {created_before}",
+                "Invalid created_before date format.",
                 field="created_before",
                 suggestion="Provide 'created_before' as an ISO 8601 datetime (e.g. 2026-01-01T00:00:00Z) and resend.",
             )

@@ -6,15 +6,20 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
+from types import SimpleNamespace
+from typing import Any, cast
 
 from adcp.types import ContextObject
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.database.repositories import ApprovalUoW, WorkflowUoW
+from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
+from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_STATUSES, MediaBuyRepository
 from src.core.exceptions import build_two_layer_error_envelope, safe_adcp_error
 from src.core.schemas import CreateMediaBuySuccess, Package
+from src.core.tools._media_buy_status import resolve_canonical_status
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,28 @@ class ApprovalFinalization:
 
     applied: bool
     result: CreateMediaBuySuccess | None = None
+
+
+class ApprovalExecutionStatus(StrEnum):
+    """Business states returned by the shared approval execution flow."""
+
+    READY = "ready"
+    WAITING_FOR_CREATIVES = "waiting_for_creatives"
+    CLAIM_REFUSED = "claim_refused"
+    PENDING_RECONCILIATION = "pending_reconciliation"
+    FAILED = "failed"
+    SUCCEEDED = "succeeded"
+    FINALIZATION_FAILED = "finalization_failed"
+
+
+@dataclass(frozen=True)
+class ApprovalExecutionOutcome:
+    """Typed outcome rendered independently by each admin transport."""
+
+    status: ApprovalExecutionStatus
+    finalization: ApprovalFinalization | None = None
+    error_message: str | None = None
+    blocking_creative_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -167,6 +194,7 @@ def _finalize_media_buy_approval_once(
     mark_media_buy_failed: bool,
     mark_media_buy_unknown: bool,
     media_buy_expected_updated_at: datetime | None,
+    apply_flight_status: bool,
 ) -> ApprovalFinalization:
     """Attempt one atomic terminal transition in a fresh UoW."""
     with ApprovalUoW(tenant_id) as uow:
@@ -205,6 +233,19 @@ def _finalize_media_buy_approval_once(
             )
         if not succeeded and media_buy_id is not None and mark_media_buy_failed and not mark_media_buy_unknown:
             uow.media_buys.update_status(media_buy_id, "failed")
+        elif succeeded and media_buy_id is not None and apply_flight_status:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            if media_buy is None:
+                raise SQLAlchemyError("approved media buy disappeared during terminal finalization")
+            uow.media_buys.update_status(
+                media_buy_id,
+                media_buy_status_from_flight_dates(
+                    start_time=media_buy.start_time,
+                    end_time=media_buy.end_time,
+                    start_date=cast(date, media_buy.start_date),
+                    end_date=cast(date, media_buy.end_date),
+                ),
+            )
         return ApprovalFinalization(applied=True, result=payload.result)
 
 
@@ -219,6 +260,7 @@ def finalize_media_buy_approval_step(
     mark_media_buy_failed: bool = True,
     mark_media_buy_unknown: bool = False,
     media_buy_expected_updated_at: datetime | None = None,
+    apply_flight_status: bool = False,
 ) -> ApprovalFinalization:
     """Persist the durable terminal outcome of an approval execution.
 
@@ -239,6 +281,7 @@ def finalize_media_buy_approval_step(
             mark_media_buy_failed=mark_media_buy_failed,
             mark_media_buy_unknown=mark_media_buy_unknown,
             media_buy_expected_updated_at=media_buy_expected_updated_at,
+            apply_flight_status=apply_flight_status,
         )
 
     result = _run_database_operation_with_retries(
@@ -274,6 +317,7 @@ def finalize_latest_media_buy_approval_step(
     media_buy_id: str,
     succeeded: bool,
     error_message: str | None = None,
+    apply_flight_status: bool = False,
 ) -> ApprovalFinalization:
     """Finalize the latest claimed approval mapped to a creative-unblocked buy."""
     claimed = _run_database_operation_with_retries(
@@ -291,6 +335,199 @@ def finalize_latest_media_buy_approval_step(
         succeeded=succeeded,
         error_message=error_message,
         context=request_data.get("context") if isinstance(request_data.get("context"), dict) else None,
+        apply_flight_status=apply_flight_status,
+    )
+
+
+def media_buy_status_from_flight_dates(
+    *,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    start_date: date | None,
+    end_date: date | None,
+    now: datetime | None = None,
+) -> str:
+    """Resolve an approved buy's persisted flight status through the canonical lifecycle resolver."""
+    current = now or datetime.now(UTC)
+    current_utc = current.replace(tzinfo=UTC) if current.tzinfo is None else current.astimezone(UTC)
+
+    def normalize_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    flight = SimpleNamespace(
+        status="active",
+        start_time=normalize_utc(start_time),
+        end_time=normalize_utc(end_time),
+        start_date=start_date,
+        end_date=end_date,
+        is_paused=False,
+    )
+    canonical = resolve_canonical_status(flight, current_utc.date())
+    # Persistence calls this pre-flight state ``scheduled``; the wire lifecycle
+    # resolver calls the same state ``pending_start``.
+    return "scheduled" if canonical == "pending_start" else canonical
+
+
+def _approval_creative_gate(
+    *,
+    assignments: CreativeAssignmentRepository,
+    creatives: CreativeRepository,
+    media_buy_id: str,
+    principal_id: str,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return whether the buy has at least one assignment and all are approved."""
+    creative_ids = list(
+        dict.fromkeys(assignment.creative_id for assignment in assignments.get_by_media_buy(media_buy_id))
+    )
+    if not creative_ids:
+        return False, ()
+    creative_rows = creatives.get_by_ids(creative_ids, principal_id)
+    status_by_id = {creative.creative_id: creative.status for creative in creative_rows}
+    blocking_ids = tuple(
+        creative_id for creative_id in creative_ids if status_by_id.get(creative_id) not in {"approved", "active"}
+    )
+    return not blocking_ids, blocking_ids
+
+
+def prepare_media_buy_approval_execution(
+    *,
+    media_buys: MediaBuyRepository,
+    assignments: CreativeAssignmentRepository,
+    creatives: CreativeRepository,
+    media_buy_id: str,
+    approved_by: str | None,
+) -> ApprovalExecutionOutcome:
+    """Apply the creative gate and atomically claim one adapter execution.
+
+    The caller owns the surrounding UoW so the human workflow decision and
+    the irreversible domain claim can commit together.
+    """
+    media_buy = media_buys.get_by_id(media_buy_id)
+    if media_buy is None or media_buy.status not in APPROVED_EXECUTION_SOURCE_STATUSES:
+        return ApprovalExecutionOutcome(ApprovalExecutionStatus.CLAIM_REFUSED)
+
+    gate_satisfied, blocking_ids = _approval_creative_gate(
+        assignments=assignments,
+        creatives=creatives,
+        media_buy_id=media_buy_id,
+        principal_id=media_buy.principal_id,
+    )
+    approval_fields: dict[str, Any] = {}
+    if approved_by is not None:
+        approval_fields = {"approved_at": datetime.now(UTC), "approved_by": approved_by}
+    if not gate_satisfied:
+        media_buys.update_status(
+            media_buy_id,
+            "pending_creatives",
+            **approval_fields,
+        )
+        return ApprovalExecutionOutcome(
+            ApprovalExecutionStatus.WAITING_FOR_CREATIVES,
+            blocking_creative_ids=blocking_ids,
+        )
+
+    if not media_buys.claim_approved_execution(media_buy_id):
+        return ApprovalExecutionOutcome(ApprovalExecutionStatus.CLAIM_REFUSED)
+    if approval_fields:
+        media_buys.update_fields(media_buy_id, **approval_fields)
+    return ApprovalExecutionOutcome(ApprovalExecutionStatus.READY)
+
+
+def _finalize_approval_execution(
+    *,
+    tenant_id: str,
+    media_buy_id: str,
+    step_id: str | None,
+    succeeded: bool,
+    error_message: str | None,
+    context: ContextObject | dict[str, Any] | None,
+    apply_flight_status: bool,
+) -> ApprovalFinalization:
+    """Finalize either an explicitly identified or creative-unblocked step."""
+    if step_id is None:
+        return finalize_latest_media_buy_approval_step(
+            tenant_id=tenant_id,
+            media_buy_id=media_buy_id,
+            succeeded=succeeded,
+            error_message=error_message,
+            apply_flight_status=apply_flight_status,
+        )
+    return finalize_media_buy_approval_step(
+        tenant_id=tenant_id,
+        step_id=step_id,
+        media_buy_id=media_buy_id,
+        succeeded=succeeded,
+        error_message=error_message,
+        context=context,
+        apply_flight_status=apply_flight_status,
+    )
+
+
+def apply_media_buy_execution_outcome(
+    *,
+    tenant_id: str,
+    media_buy_id: str,
+    step_id: str | None,
+    success: bool | None,
+    error_message: str | None,
+    context: ContextObject | dict[str, Any] | None = None,
+    apply_flight_status: bool = False,
+) -> ApprovalExecutionOutcome:
+    """Own the adapter tri-state to durable workflow-finalization mapping."""
+    if success is None:
+        return ApprovalExecutionOutcome(
+            ApprovalExecutionStatus.PENDING_RECONCILIATION,
+            error_message=error_message,
+        )
+
+    finalization = _finalize_approval_execution(
+        tenant_id=tenant_id,
+        media_buy_id=media_buy_id,
+        step_id=step_id,
+        succeeded=success,
+        error_message=error_message,
+        context=context,
+        apply_flight_status=apply_flight_status,
+    )
+    if not finalization.applied or (success and finalization.result is None):
+        return ApprovalExecutionOutcome(
+            ApprovalExecutionStatus.FINALIZATION_FAILED,
+            finalization=finalization,
+            error_message=error_message,
+        )
+    return ApprovalExecutionOutcome(
+        ApprovalExecutionStatus.SUCCEEDED if success else ApprovalExecutionStatus.FAILED,
+        finalization=finalization,
+        error_message=error_message,
+    )
+
+
+def execute_and_finalize_media_buy_approval(
+    *,
+    tenant_id: str,
+    media_buy_id: str,
+    step_id: str | None,
+    context: ContextObject | dict[str, Any] | None = None,
+    apply_flight_status: bool = False,
+) -> ApprovalExecutionOutcome:
+    """Execute one claimed media buy and publish its durable tri-state result."""
+    from src.core.tools.media_buy_create import execute_approved_media_buy
+
+    success, error_message = execute_approved_media_buy(
+        media_buy_id,
+        tenant_id,
+        execution_claimed=True,
+    )
+    return apply_media_buy_execution_outcome(
+        tenant_id=tenant_id,
+        media_buy_id=media_buy_id,
+        step_id=step_id,
+        success=success,
+        error_message=error_message,
+        context=context,
+        apply_flight_status=apply_flight_status,
     )
 
 
@@ -340,6 +577,7 @@ def _reconcile_approval_state(
             media_buy_id=media_buy_id,
             succeeded=True,
             context=_approval_context(state.request_data),
+            apply_flight_status=True,
         )
     if state.media_buy_status == "failed":
         return finalize_media_buy_approval_step(

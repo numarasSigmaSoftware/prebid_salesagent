@@ -6,11 +6,13 @@ Requires PostgreSQL (integration_db fixture).
 
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, select
 
 from src.admin.app import create_app
+from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE
 from src.core.context_manager import ContextManager
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Context, Principal, Tenant, WorkflowStep
@@ -116,6 +118,46 @@ def _create_context_and_step(tenant_id: str, status: str = "pending_approval") -
     return context_id, step_id
 
 
+def _create_mapped_media_buy_approval(factory_session, tenant_id: str) -> tuple[str, str]:
+    """Create an executable pending media buy with a mapped approval step."""
+    from tests.factories import CreativeAssignmentFactory, CreativeFactory, MediaBuyFactory
+
+    tenant = factory_session.get(Tenant, tenant_id)
+    principal = factory_session.get(Principal, (tenant_id, "wf_test_principal"))
+    media_buy = MediaBuyFactory(
+        tenant=tenant,
+        principal=principal,
+        status="pending_approval",
+    )
+    creative = CreativeFactory(
+        tenant=tenant,
+        principal=principal,
+        status="approved",
+    )
+    CreativeAssignmentFactory(
+        creative=creative,
+        media_buy=media_buy,
+    )
+    manager = ContextManager()
+    context = manager.create_context(tenant_id=tenant_id, principal_id=principal.principal_id)
+    step = manager.create_workflow_step(
+        context_id=context.context_id,
+        step_type="approval",
+        owner="publisher",
+        status="requires_approval",
+        tool_name="create_media_buy",
+        request_data={},
+        object_mappings=[
+            {
+                "object_type": "media_buy",
+                "object_id": media_buy.media_buy_id,
+                "action": "approve",
+            }
+        ],
+    )
+    return context.context_id, step.step_id
+
+
 class TestWorkflowsList:
     """Test the workflows list page."""
 
@@ -155,9 +197,9 @@ class TestWorkflowApproval:
         with WorkflowUoW(test_tenant) as uow:
             assert uow.workflows is not None
             step = uow.workflows.get_by_step_id(step_id)
-        assert step is not None
-        assert step.status == "completed"
-        assert step.response_data == {"approved": True}
+            assert step is not None
+            assert step.status == "completed"
+            assert step.response_data == {"approved": True}
 
     def test_plain_approval_completion_failure_rolls_back_claim(self, client, test_tenant):
         """A refused same-transaction completion leaves the step reclaimable."""
@@ -178,8 +220,8 @@ class TestWorkflowApproval:
         with WorkflowUoW(test_tenant) as uow:
             assert uow.workflows is not None
             step = uow.workflows.get_by_step_id(step_id)
-        assert step is not None
-        assert step.status == "pending_approval"
+            assert step is not None
+            assert step.status == "pending_approval"
 
     def test_approve_nonexistent_step_returns_404(self, client, test_tenant):
         """POST approve for a nonexistent step returns 404."""
@@ -198,43 +240,18 @@ class TestWorkflowApproval:
         factory_session,
     ):
         """Workflow approval preserves an unknown post-dispatch outcome."""
-        from tests.factories import MediaBuyFactory
-
         _auth_session(client, test_tenant)
-        tenant = factory_session.get(Tenant, test_tenant)
-        principal = factory_session.get(Principal, (test_tenant, "wf_test_principal"))
-        media_buy = MediaBuyFactory(
-            tenant=tenant,
-            principal=principal,
-            status="pending_approval",
-        )
-        manager = ContextManager()
-        context = manager.create_context(tenant_id=test_tenant, principal_id=principal.principal_id)
-        step = manager.create_workflow_step(
-            context_id=context.context_id,
-            step_type="approval",
-            owner="publisher",
-            status="requires_approval",
-            tool_name="create_media_buy",
-            request_data={},
-            object_mappings=[
-                {
-                    "object_type": "media_buy",
-                    "object_id": media_buy.media_buy_id,
-                    "action": "approve",
-                }
-            ],
-        )
+        context_id, step_id = _create_mapped_media_buy_approval(factory_session, test_tenant)
 
         with (
             patch(
                 "src.core.tools.media_buy_create.execute_approved_media_buy",
                 return_value=(None, "adapter outcome unknown"),
             ),
-            patch("src.admin.blueprints.workflows.finalize_media_buy_approval_step") as mock_finalize,
+            patch("src.core.workflow_finalization.finalize_media_buy_approval_step") as mock_finalize,
         ):
             response = client.post(
-                f"/tenant/{test_tenant}/workflows/{context.context_id}/steps/{step.step_id}/approve",
+                f"/tenant/{test_tenant}/workflows/{context_id}/steps/{step_id}/approve",
                 content_type="application/json",
                 json={},
             )
@@ -244,9 +261,46 @@ class TestWorkflowApproval:
         mock_finalize.assert_not_called()
         with WorkflowUoW(test_tenant) as uow:
             assert uow.workflows is not None
-            persisted = uow.workflows.get_by_step_id(step.step_id)
+            persisted = uow.workflows.get_by_step_id(step_id)
             assert persisted is not None
             assert persisted.status == "approved"
+
+    def test_adapter_failure_response_does_not_disclose_internal_error(
+        self,
+        client,
+        test_tenant,
+        factory_session,
+    ):
+        """Adapter exception details stay out of the admin response and durable result."""
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+
+        _auth_session(client, test_tenant)
+        context_id, step_id = _create_mapped_media_buy_approval(factory_session, test_tenant)
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=(False, SECRET_BEARING_MESSAGE),
+        ):
+            response = client.post(
+                f"/tenant/{test_tenant}/workflows/{context_id}/steps/{step_id}/approve",
+                content_type="application/json",
+                json={},
+            )
+
+        assert response.status_code == 500
+        assert response.get_json() == {
+            "success": False,
+            "error": APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE,
+        }
+        assert_no_secret_leak(response.get_data(as_text=True), context="admin approval response")
+
+        with WorkflowUoW(test_tenant) as uow:
+            assert uow.workflows is not None
+            persisted = uow.workflows.get_by_step_id(step_id)
+            assert persisted is not None
+            assert persisted.status == "failed"
+            assert_no_secret_leak(persisted.response_data, context="durable approval result")
+            assert_no_secret_leak(persisted.error_message, context="durable approval error")
 
 
 class TestWorkflowRejection:

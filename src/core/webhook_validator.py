@@ -5,7 +5,9 @@ Server-Side Request Forgery (SSRF) attacks where malicious users could
 trick the server into making requests to internal services.
 """
 
+import os
 from typing import Any
+from urllib.parse import urlparse
 
 from adcp.types import TaskType
 
@@ -74,6 +76,39 @@ class WebhookURLValidator:
             (is_valid, error_message) - is_valid is True if safe, error_message explains failures
         """
         return check_url_ssrf(url)
+
+    @classmethod
+    def validate_protocol_webhook_url(cls, url: str) -> tuple[bool, str]:
+        """Validate a protocol callback, with one explicit in-network test seam.
+
+        Production callbacks require HTTPS because notification payloads and
+        legacy Bearer credentials must not cross a plaintext connection. The
+        E2E Docker stack may use HTTP only for its exact runner hostname while
+        in development mode so delivery can be exercised without a public
+        relay. Arbitrary private hosts are never enabled by this seam.
+        """
+        environment = os.getenv("ENVIRONMENT", "").lower()
+        is_development = environment == "development"
+        is_valid, error = check_url_ssrf(url, require_https=not is_development)
+        if is_valid:
+            return True, ""
+
+        test_host = os.getenv("ADCP_WEBHOOK_TEST_HOST")
+        parsed = urlparse(url)
+        try:
+            _port = parsed.port
+        except ValueError:
+            return False, error
+        if (
+            is_development
+            and test_host
+            and parsed.hostname == test_host
+            and parsed.scheme in {"http", "https"}
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            return True, ""
+        return False, error
 
     @classmethod
     def validate_for_testing(cls, url: str, allow_localhost: bool = False) -> tuple[bool, str]:

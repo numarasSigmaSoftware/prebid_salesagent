@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from tests.helpers.pinned_schema import pinned_error_code_metadata
+from tests.helpers.pinned_schema import pinned_error_code_metadata, pinned_error_code_suggestion
 
 
 def extract_wire_suggestion(envelope: dict | None) -> str | None:
@@ -161,5 +161,10 @@ class TransportResult:
         )
         assert_envelope_shape(envelope, code, recovery=expected_recovery, message_substr=message_substr)
         if require_suggestion:
-            suggestion = extract_wire_suggestion(envelope)
-            assert suggestion, f"Expected a non-empty suggestion in the {code} wire envelope: {envelope}"
+            expected_suggestion = pinned_error_code_suggestion(code)
+            assert envelope["adcp_error"].get("suggestion") == expected_suggestion, (
+                f"adcp_error.suggestion drifted from pinned {code} guidance: {envelope}"
+            )
+            assert envelope["errors"][0].get("suggestion") == expected_suggestion, (
+                f"errors[0].suggestion drifted from pinned {code} guidance: {envelope}"
+            )

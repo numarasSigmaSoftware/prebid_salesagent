@@ -117,6 +117,7 @@ from src.core.validation_helpers import (
     adcp_validation_boundary,
 )
 from src.core.version import get_version
+from src.core.webhook_validator import WebhookURLValidator
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 if TYPE_CHECKING:
@@ -125,6 +126,13 @@ if TYPE_CHECKING:
     from src.core.database.models import WorkflowStep
 
 logger = logging.getLogger(__name__)
+
+
+def _require_safe_push_notification_url(url: str) -> None:
+    """Reject protocol callback URLs that can reach seller-internal services."""
+    is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
+    if not is_safe:
+        raise InvalidParamsError(message="Push notification URL must resolve to a public HTTPS endpoint")
 
 
 def _dict_to_value(d: dict) -> struct_pb2.Value:
@@ -301,6 +309,11 @@ def _record_a2a_boundary_error(op_key: str, identity: ResolvedIdentity | None, e
         tenant_id=tenant_id,
         principal_id=principal_id,
     )
+
+
+def _a2a_activity_scope(identity: ResolvedIdentity | None) -> tuple[str | None, str | None]:
+    """Derive one fail-closed identity scope for every A2A activity record."""
+    return best_effort_boundary_identity(lambda: identity, transport="a2a")
 
 
 def _boundary_internal_error(
@@ -627,15 +640,15 @@ class AdCPRequestHandler(RequestHandler):
     def _log_a2a_operation(
         self,
         operation: str,
-        tenant_id: str,
-        principal_id: str,
+        tenant_id: str | None,
+        principal_id: str | None,
         success: bool = True,
         details: dict[str, Any] | None = None,
         error: str | None = None,
     ):
         """Log A2A operations to audit system for visibility in activity feed."""
         try:
-            if not tenant_id:
+            if not tenant_id or not principal_id:
                 return
 
             audit_logger = get_audit_logger("A2A", tenant_id)
@@ -873,9 +886,8 @@ class AdCPRequestHandler(RequestHandler):
         if params.HasField("configuration") and params.configuration.HasField("task_push_notification_config"):
             push_notification_config = params.configuration.task_push_notification_config
             if push_notification_config.url:
-                logger.info(
-                    f"Protocol-level push notification config provided for task {task_id}: {push_notification_config.url}"
-                )
+                _require_safe_push_notification_url(push_notification_config.url)
+                logger.info("Protocol-level push notification config provided for task %s", task_id)
 
         # Prepare task metadata (JSON-serializable only — protobuf Struct)
         task_metadata: dict[str, Any] = {
@@ -1084,8 +1096,7 @@ class AdCPRequestHandler(RequestHandler):
 
                 # Completed synchronously — log the successful invocation with rich context.
                 try:
-                    tenant_id = (identity.tenant_id or "unknown") if identity else "unknown"
-                    principal_id = (identity.principal_id or "unknown") if identity else "unknown"
+                    tenant_id, principal_id = _a2a_activity_scope(identity)
 
                     log_details = {"skills": [outcome["skill"]], "count": 1}
                     result_data = outcome.get("result")
@@ -1123,8 +1134,7 @@ class AdCPRequestHandler(RequestHandler):
             # Natural language fallback (existing keyword-based routing)
             elif any(word in combined_text for word in ["product", "inventory", "available", "catalog"]):
                 result = await self._get_products(combined_text, identity)
-                tenant_id = (identity.tenant_id or "unknown") if identity else "unknown"
-                principal_id = (identity.principal_id or "unknown") if identity else "unknown"
+                tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
                     "get_products",
@@ -1150,8 +1160,7 @@ class AdCPRequestHandler(RequestHandler):
                     {"brief": combined_text},
                     identity,
                 )
-                tenant_id = (identity.tenant_id or "unknown") if identity else "unknown"
-                principal_id = (identity.principal_id or "unknown") if identity else "unknown"
+                tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
                     "get_products",
@@ -1175,8 +1184,7 @@ class AdCPRequestHandler(RequestHandler):
             elif any(word in combined_text for word in ["target", "audience"]):
                 # Redirect targeting queries to get_adcp_capabilities which has real targeting info
                 result = await self._handle_get_adcp_capabilities_skill({}, identity)
-                tenant_id = (identity.tenant_id or "unknown") if identity else "unknown"
-                principal_id = (identity.principal_id or "unknown") if identity else "unknown"
+                tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
                     "get_adcp_capabilities",
@@ -1221,8 +1229,7 @@ class AdCPRequestHandler(RequestHandler):
                         "How do I create a media buy?",
                     ],
                 }
-                tenant_id = (identity.tenant_id or "unknown") if identity else "unknown"
-                principal_id = (identity.principal_id or "unknown") if identity else "unknown"
+                tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
                     "get_capabilities",
@@ -1728,6 +1735,7 @@ class AdCPRequestHandler(RequestHandler):
 
             if not url:
                 raise InvalidParamsError(message="Missing required parameter: url")
+            _require_safe_push_notification_url(url)
 
             auth_type = None
             auth_token_value = None
@@ -2388,26 +2396,15 @@ class AdCPRequestHandler(RequestHandler):
         """
         # Identity already resolved at transport boundary (on_message_send)
 
-        # Build request from parameters (all optional).
-        from src.core.tools.creative_formats import build_list_creative_formats_request
+        # Validate the complete parameter object so unknown wire fields are
+        # rejected instead of being silently dropped by individual .get()
+        # calls. This is the same request model used by REST and MCP.
+        from src.core.schemas import ListCreativeFormatsRequest
 
         # Same context string as the REST route's boundary so buyer-invalid
         # input produces a byte-identical envelope on every transport (klkg).
         with adcp_validation_boundary(context="list_creative_formats request"):
-            req = build_list_creative_formats_request(
-                format_ids=parameters.get("format_ids"),
-                output_format_ids=parameters.get("output_format_ids"),
-                input_format_ids=parameters.get("input_format_ids"),
-                is_responsive=parameters.get("is_responsive"),
-                name_search=parameters.get("name_search"),
-                asset_types=parameters.get("asset_types"),
-                wcag_level=parameters.get("wcag_level"),
-                min_width=parameters.get("min_width"),
-                max_width=parameters.get("max_width"),
-                min_height=parameters.get("min_height"),
-                max_height=parameters.get("max_height"),
-                context=parameters.get("context"),
-            )
+            req = ListCreativeFormatsRequest.model_validate(parameters)
 
         # Call core function with identity
         response = core_list_creative_formats_tool(req=req, identity=identity)

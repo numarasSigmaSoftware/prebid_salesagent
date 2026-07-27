@@ -19,7 +19,6 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
-from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import requests
@@ -33,6 +32,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
+from src.core.webhook_validator import WebhookURLValidator
 
 logger = logging.getLogger(__name__)
 
@@ -103,25 +103,6 @@ def _to_wire_dict(payload: Any) -> dict[str, Any]:
     )
 
 
-def _normalize_localhost_for_docker(url: str) -> str:
-    """Replace localhost host with host.docker.internal while preserving userinfo and port."""
-    try:
-        parsed = urlparse(url)
-        if parsed.hostname and parsed.hostname.lower() == "localhost":
-            userinfo = ""
-            if parsed.username:
-                userinfo = parsed.username
-                if parsed.password:
-                    userinfo += f":{parsed.password}"
-                userinfo += "@"
-            port = f":{parsed.port}" if parsed.port else ""
-            new_netloc = f"{userinfo}host.docker.internal{port}"
-            return urlunparse(parsed._replace(netloc=new_netloc))
-    except Exception:
-        logger.debug("Docker URL rewrite failed, using original URL", exc_info=True)
-    return url
-
-
 class ProtocolWebhookService:
     """
     Service for sending protocol-level push notifications to clients.
@@ -160,14 +141,14 @@ class ProtocolWebhookService:
             )
             return False
 
-        url = _normalize_localhost_for_docker(push_notification_config.url)
+        url = push_notification_config.url
 
         # Prepare headers
         headers = {"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"}
 
         # Log sanitized config (exclude sensitive authentication_token)
         safe_config = {
-            "url": push_notification_config.url if hasattr(push_notification_config, "url") else None,
+            "url_configured": bool(push_notification_config.url),
             "authentication_type": (
                 push_notification_config.authentication_type
                 if hasattr(push_notification_config, "authentication_type")
@@ -289,13 +270,28 @@ class ProtocolWebhookService:
             audit_logger.log_info(f"Sending {task_type} webhook for task {task_id} (sequence #{sequence_number})")
 
         for attempt in range(max_attempts):
+            is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
+            if not is_safe:
+                logger.warning("Refusing protocol webhook delivery to an unsafe URL")
+                return False
             try:
-                logger.info(f"Sending webhook for task {task_id} to {url} (attempt {attempt + 1}/{max_attempts})")
+                logger.info("Sending webhook for task %s (attempt %s/%s)", task_id, attempt + 1, max_attempts)
 
                 def _post() -> requests.Response:
-                    return self._session.post(url, json=payload, headers=headers, timeout=10.0)
+                    return self._session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=10.0,
+                        allow_redirects=False,
+                    )
 
                 response = await asyncio.to_thread(_post)
+                if 300 <= response.status_code < 400:
+                    raise requests.HTTPError(
+                        "Redirect responses are not accepted for protocol webhooks",
+                        response=response,
+                    )
                 response.raise_for_status()
 
                 # Calculate response time
@@ -341,9 +337,14 @@ class ProtocolWebhookService:
                 response_time_ms = int((time.time() - start_time) * 1000)
                 error_message = f"HTTP {status_code}: {str(e)}"
 
-                # Don't retry on 4xx errors (client errors - permanent failures)
-                if status_code and 400 <= status_code < 500:
-                    logger.error(f"Webhook failed for task {task_id} with client error {status_code} - not retrying")
+                # Don't retry redirects or 4xx errors. Redirects are never
+                # followed because the Location target has not been validated.
+                if status_code and 300 <= status_code < 500:
+                    logger.error(
+                        "Webhook failed for task %s with non-retryable HTTP status %s",
+                        task_id,
+                        status_code,
+                    )
 
                     # Write to webhook_delivery_log (failed)
                     if (

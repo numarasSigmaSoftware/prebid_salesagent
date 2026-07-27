@@ -476,20 +476,18 @@ Feature: BR-UC-003 Update Media Buy
     # POST-F3: Suggestion to obtain valid credentials
 
   @T-UC-003-ext-a-unknown @extension @ext-a @error @post-f1 @post-f2 @post-f3
-  Scenario: Authentication error -- principal not found in database
-    Given the Buyer is authenticated as principal "unknown_principal"
-    And the principal "unknown_principal" does not exist in the database
+  Scenario: Authentication error -- rejected credentials resolve no principal
+    Given the Buyer Agent's token resolves no principal
     And a valid update_media_buy request with:
     | field        | value       |
     | media_buy_id | mb_existing |
     | paused       | true        |
     When the Buyer Agent sends the update_media_buy request
     Then the operation should fail
-    And the error code should be "AUTH_REQUIRED"
-    And the error should include "suggestion" field
+    And the authentication error should match invalid credentials for the active transport
     # POST-F1: System state unchanged
-    # POST-F2: Error explains principal not found
-    # POST-F3: Suggestion for recovery
+    # POST-F2: Rejected credentials traverse production token resolution
+    # POST-F3: Exact code, recovery, and suggestion match the pinned contract
 
   @T-UC-003-ext-b @extension @ext-b @error @post-f1 @post-f2 @post-f3
   Scenario: Media buy not found -- by media_buy_id

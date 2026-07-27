@@ -4,8 +4,11 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from a2a.types import TaskState, TaskStatus, TaskStatusUpdateEvent
 from adcp.types import TaskType
 
 from src.core.webhook_authenticator import WebhookAuthenticator
@@ -127,6 +130,45 @@ class TestWebhookURLValidator:
         is_valid, error = WebhookURLValidator.validate_webhook_url("not-a-url")
         assert not is_valid
         assert error != ""
+
+    def test_blocks_embedded_url_credentials(self, public_dns):
+        """Authentication belongs in the config, never in a loggable URL."""
+        is_valid, error = WebhookURLValidator.validate_webhook_url("https://svc:hunter2@example.com/webhook")
+        assert not is_valid
+        assert "credentials" in error.lower()
+
+    def test_protocol_test_host_override_is_exact_and_development_only(self, monkeypatch):
+        """The Docker callback seam cannot admit arbitrary private destinations."""
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", "tests")
+        monkeypatch.setattr(
+            "src.core.security.url_validator.socket.gethostbyname",
+            lambda hostname: "172.18.0.5",
+        )
+
+        assert WebhookURLValidator.validate_protocol_webhook_url("http://tests:8080/webhook") == (True, "")
+        is_valid, _error = WebhookURLValidator.validate_protocol_webhook_url("http://internal-service:8080/webhook")
+        assert not is_valid
+        malformed_is_valid, _error = WebhookURLValidator.validate_protocol_webhook_url(
+            "http://tests:not-a-port/webhook"
+        )
+        assert not malformed_is_valid
+
+    def test_protocol_callback_requires_https_outside_development(self, monkeypatch, public_dns):
+        """Production never sends payloads or legacy credentials over plaintext HTTP."""
+        monkeypatch.setenv("ENVIRONMENT", "production")
+
+        is_valid, error = WebhookURLValidator.validate_protocol_webhook_url("http://example.com/webhook")
+
+        assert not is_valid
+        assert "https" in error.lower()
+        assert WebhookURLValidator.validate_protocol_webhook_url("https://example.com/webhook") == (True, "")
+
+    def test_protocol_public_http_is_allowed_in_development(self, monkeypatch, public_dns):
+        """Development may use public HTTP independently of the private-host E2E seam."""
+        monkeypatch.setenv("ENVIRONMENT", "development")
+
+        assert WebhookURLValidator.validate_protocol_webhook_url("http://example.com/webhook") == (True, "")
 
     def test_validate_for_testing_allows_localhost(self):
         """Testing mode should allow localhost when enabled."""
@@ -294,3 +336,82 @@ class TestWebhookAuthenticator:
             tampered_str, headers["X-Webhook-Signature"], headers["X-Webhook-Timestamp"], secret
         )
         assert not is_valid
+
+
+class TestProtocolWebhookDeliverySecurity:
+    """The actual protocol sender enforces URL safety at the connection seam."""
+
+    @staticmethod
+    def _event() -> TaskStatusUpdateEvent:
+        return TaskStatusUpdateEvent(
+            task_id="task_security",
+            context_id="ctx_security",
+            status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+        )
+
+    @pytest.mark.asyncio
+    async def test_private_destination_never_reaches_http_client(self):
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        service._session.post = MagicMock()
+        config = SimpleNamespace(
+            url="http://127.0.0.1:8999/internal",
+            authentication_type=None,
+            authentication_token=None,
+        )
+
+        sent = await service.send_notification(config, self._event(), {"task_type": "create_media_buy"})
+
+        assert sent is False
+        service._session.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delivery_disables_redirect_following(self):
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        response = MagicMock(status_code=204)
+        service._session.post = MagicMock(return_value=response)
+        config = SimpleNamespace(
+            url="https://buyer.example/webhook",
+            authentication_type=None,
+            authentication_token=None,
+        )
+
+        with patch.object(WebhookURLValidator, "validate_protocol_webhook_url", return_value=(True, "")):
+            sent = await service.send_notification(config, self._event(), {"task_type": "create_media_buy"})
+
+        assert sent is True
+        service._session.post.assert_called_once_with(
+            "https://buyer.example/webhook",
+            json=ANY,
+            headers=ANY,
+            timeout=10.0,
+            allow_redirects=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_redirect_response_is_not_reported_as_success(self):
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        response = MagicMock(status_code=302)
+        service._session.post = MagicMock(return_value=response)
+        config = SimpleNamespace(
+            url="https://buyer.example/webhook",
+            authentication_type=None,
+            authentication_token=None,
+        )
+
+        with patch.object(WebhookURLValidator, "validate_protocol_webhook_url", return_value=(True, "")):
+            sent = await service.send_notification(config, self._event(), {"task_type": "create_media_buy"})
+
+        assert sent is False
+        service._session.post.assert_called_once_with(
+            "https://buyer.example/webhook",
+            json=ANY,
+            headers=ANY,
+            timeout=10.0,
+            allow_redirects=False,
+        )

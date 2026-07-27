@@ -10,13 +10,20 @@ from flask import Blueprint, request
 from sqlalchemy import select
 
 from src.admin.utils import echo_context, require_auth, require_tenant_access, session_user_email
+from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE
 from src.core.database.models import PushNotificationConfig
+from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.exceptions import AdCPMediaBuyRejectedError
+from src.core.logging_config import log_safe
 from src.core.schemas import CreateMediaBuyError
 from src.core.webhook_validator import resolve_webhook_task_id, validate_webhook_task_type
-from src.core.workflow_finalization import finalize_media_buy_approval_step
+from src.core.workflow_finalization import (
+    ApprovalExecutionStatus,
+    execute_and_finalize_media_buy_approval,
+    prepare_media_buy_approval_execution,
+)
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
@@ -410,31 +417,40 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # Commit the human decision and irreversible domain claim
                     # atomically. A crash after this commit is recoverable from
                     # ``activating``; no second request may dispatch the adapter.
-                    if not approve_repo.claim_approved_execution(media_buy_id):
+                    preparation = prepare_media_buy_approval_execution(
+                        media_buys=approve_repo,
+                        assignments=CreativeAssignmentRepository(db_session, tenant_id),
+                        creatives=CreativeRepository(db_session, tenant_id),
+                        media_buy_id=media_buy_id,
+                        approved_by=user_email,
+                    )
+                    if preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+                        db_session.commit()
+                        flash(
+                            f"Media buy approved! Waiting for {len(preparation.blocking_creative_ids)} "
+                            "creative(s) to be approved before creating in the ad server.",
+                            "info",
+                        )
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
+                    if preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
                         db_session.rollback()
                         return _refused_media_buy_redirect(
                             tenant_id,
                             media_buy_id,
                             "This media buy is already executing or no longer pending approval.",
                         )
-                    assert media_buy is not None
-                    media_buy.approved_at = datetime.now(UTC)
-                    media_buy.approved_by = user_email
                     db_session.commit()
 
-                    # Execute adapter creation for approved media buy
-                    # This creates the order/line items in GAM (or other adapter)
-                    # Uses the same logic as auto-approved media buys
-                    from src.core.tools.media_buy_create import execute_approved_media_buy
-
                     logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
-                    success, error_msg = execute_approved_media_buy(
-                        media_buy_id,
-                        tenant_id,
-                        execution_claimed=True,
+                    outcome = execute_and_finalize_media_buy_approval(
+                        tenant_id=tenant_id,
+                        media_buy_id=media_buy_id,
+                        step_id=step_data["step_id"],
+                        context=echo_context(request_data),
                     )
-                    approve_context = echo_context(request_data)
-                    if success is None:
+                    if outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
                         logger.error(
                             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
                             media_buy_id,
@@ -447,21 +463,18 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )
-                    finalization = finalize_media_buy_approval_step(
-                        tenant_id=tenant_id,
-                        step_id=step_data["step_id"],
-                        media_buy_id=media_buy_id,
-                        succeeded=success,
-                        error_message=error_msg,
-                        context=approve_context,
-                    )
 
-                    if success is False:
-                        flash(f"Media buy approved but adapter creation failed: {error_msg}", "error")
+                    if outcome.status is ApprovalExecutionStatus.FAILED:
+                        logger.error(
+                            "[APPROVAL] Adapter creation failed for %s: %s",
+                            log_safe(media_buy_id),
+                            log_safe(outcome.error_message),
+                        )
+                        flash(APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE, "error")
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )
-                    if not finalization.applied or finalization.result is None:
+                    if outcome.status is ApprovalExecutionStatus.FINALIZATION_FAILED:
                         logger.error(
                             "[APPROVAL] Adapter succeeded but workflow step %s could not be finalized",
                             step_data["step_id"],
@@ -489,7 +502,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         webhook_config = db_session.scalars(stmt_webhook).first()
 
                     if webhook_config and media_buy_data:
-                        create_media_buy_approved_result = finalization.result
+                        assert outcome.finalization is not None
+                        assert outcome.finalization.result is not None
+                        create_media_buy_approved_result = outcome.finalization.result
                         metadata = _media_buy_webhook_metadata(step_data, tenant_id, media_buy_id, media_buy_data)
 
                         # Determine protocol type from workflow step request_data

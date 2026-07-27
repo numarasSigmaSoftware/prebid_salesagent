@@ -285,6 +285,103 @@ class TestBaseClassContract:
         assert result.is_success
         assert result.payload.ok is True
 
+    def test_impl_synthesized_envelope_applies_production_sanitizer(self):
+        """The no-wire IMPL oracle mirrors boundary scrubbing without claiming wire coverage."""
+        from src.core.exceptions import AdCPServiceUnavailableError
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+        from tests.helpers import assert_envelope_shape
+
+        class _TestEnv(BaseTestEnv):
+            def call_impl(self, **kwargs):
+                raise AdCPServiceUnavailableError("agent unreachable")
+
+        result = _TestEnv().call_via(Transport.IMPL)
+
+        assert result.wire_error_envelope is None
+        assert_envelope_shape(result.synthesized_error_envelope, "SERVICE_UNAVAILABLE", recovery="transient")
+        assert "unreachable" not in str(result.synthesized_error_envelope).lower()
+
+    def test_a2a_raw_exception_is_not_mislabeled_as_wire_coverage(self):
+        """A raw-wrapper exception has no Task artifact and therefore no wire envelope."""
+        from src.core.exceptions import AdCPServiceUnavailableError
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        class _TestEnv(BaseTestEnv):
+            def call_a2a(self, **kwargs):
+                raise AdCPServiceUnavailableError("agent unreachable")
+
+        result = _TestEnv().call_via(Transport.A2A)
+
+        assert result.is_error
+        assert result.wire_error_envelope is None
+        assert result.synthesized_error_envelope is None
+
+    def test_a2a_captures_only_handler_artifact_envelope(self):
+        """The A2A dispatcher forwards the exact envelope reconstructed from a failed Task."""
+        from src.core.exceptions import AdCPServiceUnavailableError
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        envelope = {
+            "adcp_error": {
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "safe",
+                "recovery": "transient",
+            },
+            "errors": [
+                {
+                    "code": "SERVICE_UNAVAILABLE",
+                    "message": "safe",
+                    "recovery": "transient",
+                }
+            ],
+        }
+
+        class _TestEnv(BaseTestEnv):
+            def call_a2a(self, **kwargs):
+                error = AdCPServiceUnavailableError("reconstructed")
+                error.__dict__["_wire_error_envelope"] = envelope
+                raise error
+
+        result = _TestEnv().call_via(Transport.A2A)
+
+        assert result.wire_error_envelope is envelope
+        assert result.synthesized_error_envelope is None
+
+    def test_mcp_captures_only_tool_error_envelope(self):
+        """The MCP dispatcher never adds a synthesized competitor to real wire data."""
+        from src.core.exceptions import AdCPServiceUnavailableError
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        envelope = {
+            "adcp_error": {
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "safe",
+                "recovery": "transient",
+            },
+            "errors": [
+                {
+                    "code": "SERVICE_UNAVAILABLE",
+                    "message": "safe",
+                    "recovery": "transient",
+                }
+            ],
+        }
+
+        class _TestEnv(BaseTestEnv):
+            def call_mcp(self, **kwargs):
+                error = AdCPServiceUnavailableError("reconstructed")
+                error.__dict__["_wire_error_envelope"] = envelope
+                raise error
+
+        result = _TestEnv().call_via(Transport.MCP)
+
+        assert result.wire_error_envelope is envelope
+        assert result.synthesized_error_envelope is None
+
     def test_presented_auth_token_disables_identity_injection(self):
         """Real-auth mode forwards the token seam without a resolved identity."""
         from tests.harness._base import BaseTestEnv

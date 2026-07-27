@@ -88,6 +88,7 @@ def _authed_media_buy_awaiting_approval(
     *,
     external_task_id: str | None = None,
     request_data: dict | None = None,
+    with_approved_creative: bool = True,
 ):
     """A uniquely-suffixed tenant/principal/media-buy plus an authed session and an approval step.
 
@@ -95,7 +96,7 @@ def _authed_media_buy_awaiting_approval(
     under xdist. Extracted because the identical block appeared verbatim in the route-level tests
     below — the clone checker cannot see an intra-file duplicate, so it has to be caught by hand.
     """
-    from tests.factories import MediaBuyFactory
+    from tests.factories import CreativeAssignmentFactory, CreativeFactory, MediaBuyFactory
 
     suffix = uuid.uuid4().hex[:8]
     media_buy = MediaBuyFactory(
@@ -106,6 +107,17 @@ def _authed_media_buy_awaiting_approval(
         media_buy_id=f"mb_{suffix}",
         status="pending_approval",
     )
+    if with_approved_creative:
+        creative = CreativeFactory(
+            tenant=media_buy.tenant,
+            principal=media_buy.principal,
+            status="approved",
+        )
+        CreativeAssignmentFactory(
+            creative=creative,
+            media_buy=media_buy,
+            package_id=f"pkg_{suffix}",
+        )
     _auth(client, media_buy.tenant_id)
     step_id = _make_step(
         media_buy.tenant_id,
@@ -299,6 +311,64 @@ class TestOperationsApproveAtomicity:
             "a successful adapter execution must terminalize the claimed step"
         )
 
+    def test_media_buy_detail_approval_honors_shared_creative_gate(self, client, factory_session):
+        """The detail route must not bypass the creative gate used by workflow approval."""
+        from src.core.database.models import MediaBuy
+        from tests.factories import CreativeAssignmentFactory, CreativeFactory
+
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(client)
+        media_buy = factory_session.get(MediaBuy, media_buy_id)
+        assert media_buy is not None
+        creative = CreativeFactory(
+            tenant=media_buy.tenant,
+            principal=media_buy.principal,
+            status="pending_review",
+        )
+        CreativeAssignmentFactory(
+            creative=creative,
+            media_buy=media_buy,
+            package_id="pkg_creative_gate",
+        )
+
+        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+            response = client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        assert response.status_code in (302, 303)
+        mock_execute.assert_not_called()
+        assert _status(tenant_id, step_id) == "approved"
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted is not None
+            assert persisted.status == "pending_creatives"
+
+    def test_media_buy_detail_approval_without_assignments_waits_for_creatives(self, client, factory_session):
+        """The detail route cannot execute a buy that has no creative assignment."""
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
+            client,
+            with_approved_creative=False,
+        )
+
+        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+            response = client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        assert response.status_code in (302, 303)
+        mock_execute.assert_not_called()
+        assert _status(tenant_id, step_id) == "approved"
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted is not None
+            assert persisted.status == "pending_creatives"
+
     def test_media_buy_is_claimed_before_adapter_dispatch(self, client, factory_session):
         """The route commits ``activating`` before entering the execution helper."""
         from src.core.database.repositories import MediaBuyUoW
@@ -414,7 +484,7 @@ class TestOperationsApproveAtomicity:
         assert task.artifacts and task.artifacts[0].name == "media_buy_result"
         result = extract_data_from_artifact(task.artifacts[0])
         assert result["media_buy_id"] == media_buy_id
-        assert result["status"] == "confirmed"
+        assert result["status"] == "completed"
         assert result["context"] == request_context
 
     def test_failed_approve_is_durably_failed_for_fresh_a2a_handler(self, client, factory_session):
@@ -769,6 +839,25 @@ class TestWorkflowsRouteConflict:
         _auth(client, tenant_id)
         resp = client.post(f"/tenant/{tenant_id}/workflows/wf_x/steps/step_missing/approve")
         assert resp.status_code == 404
+
+    def test_mapped_buy_without_assignments_waits_for_creatives(self, client, factory_session):
+        """The generic workflow route shares the zero-assignment creative gate."""
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
+            client,
+            with_approved_creative=False,
+        )
+
+        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+            response = client.post(f"/tenant/{tenant_id}/workflows/wf_x/steps/{step_id}/approve")
+
+        assert response.status_code == 200
+        mock_execute.assert_not_called()
+        assert _status(tenant_id, step_id) == "approved"
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted is not None
+            assert persisted.status == "pending_creatives"
 
     def test_reject_of_approved_step_returns_409(self, client, sample_tenant, sample_principal):
         tenant_id = sample_tenant["tenant_id"]

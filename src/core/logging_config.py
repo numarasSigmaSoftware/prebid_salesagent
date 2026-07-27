@@ -229,11 +229,10 @@ def setup_oauth_logging() -> None:
 
 
 def log_safe(value: object) -> str:
-    """Neutralize CR/LF in request-provided values before logging.
+    """Neutralize CR/LF in untrusted values before logging.
 
-    Buyer-supplied ids (creative_id, package_id) flow into log lines; a
-    newline embedded in one would forge log entries (CodeQL py/log-injection).
-    Response payloads and exception messages are NOT sanitized — buyers
-    correlate on exact ids.
+    Buyer-supplied ids and downstream exception messages can flow into log
+    lines; a newline embedded in either would forge entries (CodeQL
+    py/log-injection). Structured-log redaction remains a separate concern.
     """
     return str(value).replace("\r", "").replace("\n", "")

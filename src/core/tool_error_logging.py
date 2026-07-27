@@ -21,6 +21,7 @@ from src.core.exceptions import (
     RecoveryHint,
     build_two_layer_error_envelope,
     safe_adcp_error,
+    synthesize_safe_adcp_error,
 )
 from src.core.tool_context import ToolContext
 
@@ -485,11 +486,9 @@ def handle_tool_error(e: ToolError) -> JSONResponse:
         # so we copy to preserve the envelope-builder's immutability contract.
         return JSONResponse(status_code=e.status_code, content=dict(e.envelope))
 
-    error_code, error_message, recovery = extract_error_info(e)
-    synthetic = AdCPError.synthesize(
-        error_message,
+    error_code, _error_message, _recovery = extract_error_info(e)
+    synthetic = synthesize_safe_adcp_error(
         error_code=error_code,
         status_code=_ERROR_CODE_TO_STATUS.get(error_code, 500),
-        recovery=recovery,
     )
     return JSONResponse(status_code=synthetic.status_code, content=build_two_layer_error_envelope(synthetic))

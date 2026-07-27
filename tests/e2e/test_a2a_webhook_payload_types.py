@@ -14,6 +14,7 @@ import uuid
 from threading import Event
 from time import sleep
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -710,7 +711,13 @@ class TestProtocolWebhookWireFormat:
                 authentication_token=None,
             )
             service = ProtocolWebhookService()
-            sent = asyncio.run(service.send_notification(config, payload, metadata={"task_type": "create_media_buy"}))
+            with patch(
+                "src.services.protocol_webhook_service.WebhookURLValidator.validate_protocol_webhook_url",
+                return_value=(True, ""),
+            ):
+                sent = asyncio.run(
+                    service.send_notification(config, payload, metadata={"task_type": "create_media_buy"})
+                )
             assert sent is True, "ProtocolWebhookService.send_notification should report success"
 
             received = list(info["received"])

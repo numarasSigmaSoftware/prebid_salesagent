@@ -1,16 +1,21 @@
 """Approval finalization retries DB commits without repeating adapter work."""
 
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
-from flask import Flask
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_STATUSES
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.workflow_finalization import (
+    ApprovalExecutionStatus,
+    ApprovalFinalization,
+    execute_and_finalize_media_buy_approval,
     finalize_media_buy_approval_step,
+    media_buy_status_from_flight_dates,
+    prepare_media_buy_approval_execution,
     reconcile_claimed_media_buy_approval_step,
 )
 from tests.factories import PrincipalFactory
@@ -52,8 +57,8 @@ class _MediaBuyRepo:
 
 
 class _FailureMediaBuyRepo(_MediaBuyRepo):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, media_buy=None) -> None:
+        super().__init__(media_buy=media_buy)
         self.status_updates = []
         self.unknown_updates = []
         self.expected_lease_versions = []
@@ -163,6 +168,42 @@ def test_transient_finalization_commit_failure_retries_without_rerunning_adapter
     assert successful_uow.workflows.transitions == 1
 
 
+def test_success_finalization_applies_requested_flight_status_atomically():
+    """Workflow completion resolves creative-unblock status in the terminal UoW."""
+    media_buy = SimpleNamespace(
+        start_time=None,
+        end_time=None,
+        start_date=date(2099, 1, 1),
+        end_date=date(2099, 1, 31),
+    )
+    media_buys = _FailureMediaBuyRepo(media_buy=media_buy)
+    uow = _ApprovalUoW(fail_commit=False, media_buys=media_buys)
+
+    with (
+        patch("src.core.workflow_finalization.ApprovalUoW", return_value=uow),
+        patch(
+            "src.core.workflow_finalization.media_buy_status_from_flight_dates",
+            return_value="scheduled",
+        ) as resolve_status,
+    ):
+        result = finalize_media_buy_approval_step(
+            tenant_id="tenant_1",
+            step_id="step_1",
+            media_buy_id="mb_1",
+            succeeded=True,
+            apply_flight_status=True,
+        )
+
+    assert result.applied is True
+    resolve_status.assert_called_once_with(
+        start_time=None,
+        end_time=None,
+        start_date=date(2099, 1, 1),
+        end_date=date(2099, 1, 31),
+    )
+    assert media_buys.status_updates == [("mb_1", "scheduled")]
+
+
 def test_permanent_finalization_outage_returns_retryable_pending_without_rerunning_adapter():
     """A sustained outage releases the request worker and leaves reconciliation work."""
     adapter = Mock(return_value=(True, None))
@@ -222,7 +263,7 @@ def test_post_commit_unknown_verifies_stored_terminal_result():
 
 
 def test_reconciliation_uses_persisted_domain_state_without_adapter_call():
-    """tasks/get recovery terminalizes an active buy using stored state only."""
+    """tasks/get recovery terminalizes success and re-derives its flight status."""
     claimed_step = SimpleNamespace(
         step_id="step_1",
         request_data={"context": {"trace_id": "trace_1"}},
@@ -232,10 +273,20 @@ def test_reconciliation_uses_persisted_domain_state_without_adapter_call():
         workflows=_WorkflowRepo(existing=claimed_step),
         media_buys=_MediaBuyRepo(media_buy=SimpleNamespace(status="active")),
     )
-    finalization_uow = _ApprovalUoW(fail_commit=False)
+    finalization_media_buy = SimpleNamespace(
+        start_time=None,
+        end_time=None,
+        start_date=date(2099, 1, 1),
+        end_date=date(2099, 1, 31),
+    )
+    finalization_media_repo = _FailureMediaBuyRepo(media_buy=finalization_media_buy)
+    finalization_uow = _ApprovalUoW(fail_commit=False, media_buys=finalization_media_repo)
     uows = iter((lookup_uow, finalization_uow))
 
-    with patch("src.core.workflow_finalization.ApprovalUoW", side_effect=lambda _tenant_id: next(uows)):
+    with (
+        patch("src.core.workflow_finalization.ApprovalUoW", side_effect=lambda _tenant_id: next(uows)),
+        patch("src.core.workflow_finalization.media_buy_status_from_flight_dates", return_value="scheduled"),
+    ):
         result = reconcile_claimed_media_buy_approval_step(
             tenant_id="tenant_1",
             media_buy_id="mb_1",
@@ -246,6 +297,7 @@ def test_reconciliation_uses_persisted_domain_state_without_adapter_call():
     assert result.result.media_buy_id == "mb_1"
     assert result.result.context is not None
     assert result.result.context.trace_id == "trace_1"
+    assert finalization_media_repo.status_updates == [("mb_1", "scheduled")]
 
 
 def test_reconciliation_keeps_pre_adapter_pending_state_nonterminal():
@@ -460,43 +512,265 @@ def test_live_execution_lease_stop_prevents_renewal_and_joins_thread():
     assert thread.join_timeout == 1.0
 
 
-def test_workflow_success_preserves_active_media_buy_status():
-    """Workflow metadata publication must not undo the execution CAS."""
-    from src.admin.blueprints.workflows import _complete_executed_media_buy
-
-    app = Flask(__name__)
-    app.secret_key = "test-secret"
-    db = Mock()
+def test_shared_preparation_applies_creative_gate_before_execution_claim():
+    """Every admin entry point uses the same blocking-creative business rule."""
     media_buy_repo = Mock()
-    media_buy_repo.get_by_id.return_value = SimpleNamespace(status="active")
-    media_buy_repo.update_status.return_value = SimpleNamespace(status="active")
+    media_buy_repo.get_by_id.return_value = SimpleNamespace(
+        status="pending_approval",
+        principal_id="principal_1",
+    )
+    assignments = Mock()
+    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
+    creatives = Mock()
+    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="pending_review")]
 
-    with (
-        app.test_request_context(),
-        patch(
-            "src.admin.blueprints.workflows.finalize_media_buy_approval_step",
-            return_value=SimpleNamespace(applied=True),
-        ),
-    ):
-        response, status = _complete_executed_media_buy(
-            db=db,
-            media_buy_repo=media_buy_repo,
-            tenant_id="tenant_1",
-            step_id="step_1",
-            media_buy_id="mb_1",
-            request_data={},
-            user_email="approver@example.com",
-        )
+    outcome = prepare_media_buy_approval_execution(
+        media_buys=media_buy_repo,
+        assignments=assignments,
+        creatives=creatives,
+        media_buy_id="mb_1",
+        approved_by="approver@example.com",
+    )
 
-    assert status == 200
-    assert response.get_json() == {"success": True}
+    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
+    assert outcome.blocking_creative_ids == ("creative_1",)
     media_buy_repo.update_status.assert_called_once_with(
         "mb_1",
-        "active",
+        "pending_creatives",
         approved_at=ANY,
         approved_by="approver@example.com",
     )
-    db.commit.assert_called_once_with()
+    creatives.get_by_ids.assert_called_once_with(["creative_1"], "principal_1")
+    media_buy_repo.claim_approved_execution.assert_not_called()
+
+
+def test_shared_preparation_uses_repository_execution_source_statuses():
+    """The precheck and atomic CAS share one exact eligibility vocabulary."""
+    assert APPROVED_EXECUTION_SOURCE_STATUSES == ("pending_approval", "pending_creatives", "draft")
+
+    for status in APPROVED_EXECUTION_SOURCE_STATUSES:
+        media_buy_repo = Mock()
+        media_buy_repo.get_by_id.return_value = SimpleNamespace(
+            status=status,
+            principal_id="principal_1",
+        )
+        media_buy_repo.claim_approved_execution.return_value = True
+        assignments = Mock()
+        assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
+        creatives = Mock()
+        creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
+
+        outcome = prepare_media_buy_approval_execution(
+            media_buys=media_buy_repo,
+            assignments=assignments,
+            creatives=creatives,
+            media_buy_id="mb_1",
+            approved_by=None,
+        )
+
+        assert outcome.status is ApprovalExecutionStatus.READY
+        media_buy_repo.claim_approved_execution.assert_called_once_with("mb_1")
+
+
+def test_shared_preparation_blocks_buy_without_creative_assignments():
+    """No-assignment buys remain pending_creatives and never claim execution."""
+    media_buy_repo = Mock()
+    media_buy_repo.get_by_id.return_value = SimpleNamespace(
+        status="pending_approval",
+        principal_id="principal_1",
+    )
+    assignments = Mock()
+    assignments.get_by_media_buy.return_value = []
+    creatives = Mock()
+
+    outcome = prepare_media_buy_approval_execution(
+        media_buys=media_buy_repo,
+        assignments=assignments,
+        creatives=creatives,
+        media_buy_id="mb_1",
+        approved_by="approver@example.com",
+    )
+
+    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
+    assert outcome.blocking_creative_ids == ()
+    creatives.get_by_ids.assert_not_called()
+    media_buy_repo.update_status.assert_called_once_with(
+        "mb_1",
+        "pending_creatives",
+        approved_at=ANY,
+        approved_by="approver@example.com",
+    )
+    media_buy_repo.claim_approved_execution.assert_not_called()
+
+
+def test_shared_preparation_treats_missing_creative_rows_as_blocking():
+    """A dangling assignment cannot satisfy the canonical creative gate."""
+    media_buy_repo = Mock()
+    media_buy_repo.get_by_id.return_value = SimpleNamespace(
+        status="pending_approval",
+        principal_id="principal_1",
+    )
+    assignments = Mock()
+    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_missing")]
+    creatives = Mock()
+    creatives.get_by_ids.return_value = []
+
+    outcome = prepare_media_buy_approval_execution(
+        media_buys=media_buy_repo,
+        assignments=assignments,
+        creatives=creatives,
+        media_buy_id="mb_1",
+        approved_by=None,
+    )
+
+    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
+    assert outcome.blocking_creative_ids == ("creative_missing",)
+    creatives.get_by_ids.assert_called_once_with(["creative_missing"], "principal_1")
+    media_buy_repo.claim_approved_execution.assert_not_called()
+
+
+def test_flight_status_uses_canonical_pre_active_and_completed_lifecycle():
+    """Creative unblocking preserves the buy's flight-aware status semantics."""
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = datetime(2026, 8, 31, 23, 59, tzinfo=UTC)
+
+    assert (
+        media_buy_status_from_flight_dates(
+            start_time=start,
+            end_time=end,
+            start_date=None,
+            end_date=None,
+            now=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        == "scheduled"
+    )
+    assert (
+        media_buy_status_from_flight_dates(
+            start_time=None,
+            end_time=None,
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 31),
+            now=datetime(2026, 8, 15, tzinfo=UTC),
+        )
+        == "active"
+    )
+    assert (
+        media_buy_status_from_flight_dates(
+            start_time=start,
+            end_time=end,
+            start_date=None,
+            end_date=None,
+            now=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+        == "completed"
+    )
+    # UTC normalization happens before the canonical date resolver: this end
+    # instant is September 1 UTC even though its source-zone date is August 31.
+    assert (
+        media_buy_status_from_flight_dates(
+            start_time=datetime.fromisoformat("2026-08-01T00:00:00-03:00"),
+            end_time=datetime.fromisoformat("2026-08-31T23:30:00-03:00"),
+            start_date=None,
+            end_date=None,
+            now=datetime(2026, 9, 1, 1, tzinfo=UTC),
+        )
+        == "active"
+    )
+    assert (
+        media_buy_status_from_flight_dates(
+            start_time=None,
+            end_time=None,
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 31),
+            now=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+        == "completed"
+    )
+
+
+def test_shared_execution_success_finalizes_exact_step_once():
+    """The L2 orchestration owns adapter tri-state interpretation and finalization."""
+    result = SimpleNamespace(media_buy_id="mb_1")
+    with (
+        patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=(True, None),
+        ) as execute,
+        patch(
+            "src.core.workflow_finalization.finalize_media_buy_approval_step",
+            return_value=ApprovalFinalization(applied=True, result=result),
+        ) as finalize,
+    ):
+        outcome = execute_and_finalize_media_buy_approval(
+            tenant_id="tenant_1",
+            media_buy_id="mb_1",
+            step_id="step_1",
+            context={"trace_id": "trace_1"},
+        )
+
+    assert outcome.status is ApprovalExecutionStatus.SUCCEEDED
+    assert outcome.finalization == ApprovalFinalization(applied=True, result=result)
+    execute.assert_called_once_with("mb_1", "tenant_1", execution_claimed=True)
+    finalize.assert_called_once_with(
+        tenant_id="tenant_1",
+        step_id="step_1",
+        media_buy_id="mb_1",
+        succeeded=True,
+        error_message=None,
+        context={"trace_id": "trace_1"},
+        apply_flight_status=False,
+    )
+
+
+def test_shared_execution_persists_flight_aware_status_with_terminal_step():
+    """The creative-unblock status correction is part of terminal finalization."""
+    result = SimpleNamespace(media_buy_id="mb_1")
+    with (
+        patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=(True, None),
+        ),
+        patch(
+            "src.core.workflow_finalization.finalize_latest_media_buy_approval_step",
+            return_value=ApprovalFinalization(applied=True, result=result),
+        ) as finalize,
+    ):
+        outcome = execute_and_finalize_media_buy_approval(
+            tenant_id="tenant_1",
+            media_buy_id="mb_1",
+            step_id=None,
+            apply_flight_status=True,
+        )
+
+    assert outcome.status is ApprovalExecutionStatus.SUCCEEDED
+    finalize.assert_called_once_with(
+        tenant_id="tenant_1",
+        media_buy_id="mb_1",
+        succeeded=True,
+        error_message=None,
+        apply_flight_status=True,
+    )
+
+
+def test_shared_execution_ambiguous_outcome_stays_nonterminal():
+    """A post-dispatch unknown never enters either terminal finalizer."""
+    with (
+        patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=(None, "adapter outcome unknown"),
+        ),
+        patch("src.core.workflow_finalization.finalize_media_buy_approval_step") as finalize_exact,
+        patch("src.core.workflow_finalization.finalize_latest_media_buy_approval_step") as finalize_latest,
+    ):
+        outcome = execute_and_finalize_media_buy_approval(
+            tenant_id="tenant_1",
+            media_buy_id="mb_1",
+            step_id="step_1",
+        )
+
+    assert outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION
+    finalize_exact.assert_not_called()
+    finalize_latest.assert_not_called()
 
 
 def test_tasks_get_reconciles_approved_step_before_building_terminal_artifact():

@@ -15,7 +15,6 @@ Validates the two contracts the helper exists to enforce:
    failure.
 """
 
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -43,24 +42,7 @@ def _new_ctx_manager_with_mocked_update() -> tuple[ContextManager, MagicMock]:
     return cm, cm.update_workflow_step
 
 
-def _expected_response_data(
-    code: str, message: str, *, recovery: str, field: str | None = None, details: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Build the two-layer wire-shape ``response_data`` the helper must emit.
-
-    Constructs a temporary ``AdCPError`` and calls
-    ``build_two_layer_error_envelope`` — the same function the production code
-    now uses — so the test asserts on EXACTLY the dict shape
-    ``update_workflow_step`` will receive.
-    """
-    from src.core.exceptions import AdCPError
-
-    exc = AdCPError(message, field=field, details=details, recovery=recovery)
-    exc.error_code = code
-    return build_two_layer_error_envelope(exc)
-
-
-def _scrubbed_response_data(exc: Exception) -> dict[str, Any]:
+def _scrubbed_response_data(exc: Exception) -> dict:
     """The scrubbed two-layer ``response_data`` the audit helper must emit for an INTERNAL
     error — built through the exact production policy (``safe_adcp_error`` →
     ``build_two_layer_error_envelope``, on the ORIGINAL exception, NOT pre-normalized). If the
@@ -75,13 +57,15 @@ def _scrubbed_response_data(exc: Exception) -> dict[str, Any]:
 class TestFailWorkflowStepForExceptionWebhookPayload:
     """Webhook subscribers must receive the two-layer envelope, not just error_message."""
 
-    def test_adcp_error_threads_envelope_into_response_data(self):
+    def test_adcp_validation_error_threads_scrubbed_envelope_into_response_data(self):
+        """Typed validation errors are fail-closed unless explicitly audited as static."""
         cm, mock_update = _new_ctx_manager_with_mocked_update()
         exc = AdCPValidationError(
-            "bad budget",
+            f"bad budget: {SECRET_BEARING_MESSAGE}",
             field="packages[].budget",
-            details={"violations": ["below minimum"]},
+            details={"rejected": SECRET_BEARING_MESSAGE},
         )
+        expected = safe_adcp_error(exc)
 
         cm.audit_workflow_step_failure("step_abc", exc)
 
@@ -92,15 +76,11 @@ class TestFailWorkflowStepForExceptionWebhookPayload:
         mock_update.assert_called_once_with(
             "step_abc",
             status="failed",
-            error_message="bad budget",
-            response_data=_expected_response_data(
-                "VALIDATION_ERROR",
-                "bad budget",
-                recovery="correctable",
-                field="packages[].budget",
-                details={"violations": ["below minimum"]},
-            ),
+            error_message=expected.message,
+            response_data=_scrubbed_response_data(exc),
         )
+        assert_no_secret_leak(expected.message)
+        assert_no_secret_leak(_scrubbed_response_data(exc))
 
     def test_untyped_internal_error_scrubs_secret_from_webhook_payload(self):
         """An untyped/internal exception's raw message — which may embed a connection string —

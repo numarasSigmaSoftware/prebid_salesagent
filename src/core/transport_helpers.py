@@ -34,7 +34,7 @@ def _make_lazy_tenant(tenant_id: str) -> LazyTenantContext:
     return LazyTenantContext(tenant_id)
 
 
-def extract_headers_from_context(ctx: Context | ToolContext | None) -> dict:
+def extract_headers_from_context(ctx: Context | ToolContext | None) -> dict[str, str]:
     """Read request headers once from FastMCP dependencies or context fallback."""
     headers = None
     try:

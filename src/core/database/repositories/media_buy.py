@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from adcp.types import ContextObject
 
 
+APPROVED_EXECUTION_SOURCE_STATUSES = ("pending_approval", "pending_creatives", "draft")
+
+
 class MediaBuyRepository:
     """Tenant-scoped data access for MediaBuy and MediaPackage.
 
@@ -464,7 +467,7 @@ class MediaBuyRepository:
         """
         return self._transition_approved_execution(
             media_buy_id,
-            source_statuses=("pending_approval", "pending_creatives", "draft"),
+            source_statuses=APPROVED_EXECUTION_SOURCE_STATUSES,
             target_status="activating",
         )
 

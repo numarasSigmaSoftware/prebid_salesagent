@@ -3,12 +3,12 @@
 The wire error code is the identity of a typed AdCPError subclass. Passing
 ``error_code=`` to an ``AdCP*Error(...)`` constructor bypasses that hierarchy and
 can leak a code that is neither standard nor mapped (the original A1 defect). The
-only sanctioned override is ``AdCPError.synthesize(error_code=...)``, used by the two
-boundary helpers that must construct a wire code the class hierarchy does not model.
+only sanctioned override is ``AdCPError.synthesize(error_code=...)``, used by the
+shared scrub constructor for wire codes the class hierarchy does not model.
 
 This guard scans ``src/core/`` and ``src/adapters/`` for any call that passes
 ``error_code=`` to an ``AdCP*Error`` constructor OR to ``.synthesize()``. After the
-error-emission migration, the only such calls are the two ``synthesize()`` sites —
+error-emission migration, the only such call is the shared ``_scrubbed_error`` site —
 pinned in the allowlist so a new bypass (or a new synthesize caller) fails the build.
 """
 
@@ -21,12 +21,11 @@ from tests.unit._architecture_helpers import assert_violations_match_allowlist, 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIRS = [REPO_ROOT / "src" / "core", REPO_ROOT / "src" / "adapters"]
 
-# The only sanctioned error_code= sites: the two boundary helpers that call
+# The only sanctioned error_code= site: the shared scrub constructor that calls
 # AdCPError.synthesize(). Keyed by (relative_path, enclosing_function_name) so the
-# allowlist survives line-number shifts. This cap is exactly two.
+# allowlist survives line-number shifts.
 KNOWN_VIOLATIONS = {
     ("src/core/exceptions.py", "_scrubbed_error"),
-    ("src/core/tool_error_logging.py", "handle_tool_error"),
 }
 
 
@@ -94,10 +93,10 @@ def _find_error_code_in_details() -> list[tuple[str, str, int]]:
 
 
 class TestNoErrorCodeKwargInImpl:
-    """error_code= on AdCPError constructors/synthesize is allowlisted to two sites."""
+    """error_code= on AdCPError constructors/synthesize is allowlisted to one site."""
 
     def test_no_new_error_code_kwargs(self):
-        """No NEW error_code= bypass beyond the two sanctioned synthesize() callers."""
+        """No NEW error_code= bypass beyond the shared scrub constructor."""
         new_violations = [
             f"  {rel}:{lineno} in {func}()"
             for rel, func, lineno in _find_error_code_kwargs()
@@ -106,7 +105,7 @@ class TestNoErrorCodeKwargInImpl:
         assert not new_violations, (
             f"Found {len(new_violations)} NEW error_code= site(s) on AdCP*Error/synthesize.\n"
             "Raise a typed AdCPError subclass instead; the only sanctioned override is "
-            "AdCPError.synthesize() at the two allowlisted boundary helpers.\n" + "\n".join(new_violations)
+            "AdCPError.synthesize() at the allowlisted shared scrub constructor.\n" + "\n".join(new_violations)
         )
 
     def test_known_violations_not_stale(self):
@@ -118,8 +117,8 @@ class TestNoErrorCodeKwargInImpl:
             fix_hint="Remove fixed entries from KNOWN_VIOLATIONS.",
         )
 
-    def test_violation_count_capped_at_two(self):
-        """Exactly two sanctioned error_code= sites exist (the synthesize() callers)."""
+    def test_violation_count_capped_at_one(self):
+        """Exactly one sanctioned error_code= site exists."""
         all_sites = {(rel, func) for rel, func, _ in _find_error_code_kwargs()}
         msg = f"error_code= sites changed.\nFound: {sorted(all_sites)}\nAllowlist: {sorted(KNOWN_VIOLATIONS)}"
         assert all_sites == KNOWN_VIOLATIONS, msg

@@ -190,19 +190,9 @@ class CreativeSyncEnv(IntegrationEnv):
         return _sync_creatives_impl(**kwargs)
 
     def call_a2a(self, **kwargs: Any) -> SyncCreativesResponse:
-        """Call sync_creatives_raw (A2A wrapper) with real DB.
-
-        Note: uses _raw() path instead of _run_a2a_handler because the real
-        A2A handler's _handle_sync_creatives_skill constructs CreativeAsset
-        from raw dicts, which fails validation (assets field required).
-        That handler bug needs a separate fix.
-        """
-        from src.core.tools.creatives.sync_wrappers import sync_creatives_raw
-
-        self._commit_factory_data()
-        kwargs.setdefault("identity", self.identity)
+        """Call the real A2A handler and parse its Task artifact."""
         kwargs.setdefault("creatives", [])
-        return sync_creatives_raw(**kwargs)
+        return self._run_a2a_handler("sync_creatives", SyncCreativesResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> SyncCreativesResponse:
         """Call sync_creatives via Client(mcp) — full pipeline dispatch.

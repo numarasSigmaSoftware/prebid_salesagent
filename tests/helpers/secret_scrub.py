@@ -17,6 +17,17 @@ SECRET_BEARING_MESSAGE = "postgresql://svc:hunter2@db.internal/prod TOKEN=abc123
 _SECRET_TOKENS = ("hunter2", "postgresql://", "svc", "db.internal", "TOKEN=abc123", "SELECT", "principals")
 
 
+def serialize_wire_error(wire: object) -> str:
+    """Serialize one SDK wire-error carrier through the shared test oracle."""
+    if isinstance(wire, dict):
+        payload = wire
+    else:
+        model_dump = getattr(wire, "model_dump", None)
+        assert callable(model_dump), f"Unsupported wire-error carrier: {type(wire).__name__}"
+        payload = model_dump()
+    return json.dumps(payload, default=str)
+
+
 def assert_no_secret_leak(blob: object, *, context: str = "") -> None:
     """Assert no ``SECRET_BEARING_MESSAGE`` token appears in ``blob`` (a str, or a JSON-able
     envelope/dict). Raises with the offending token and a truncated haystack.

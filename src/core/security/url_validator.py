@@ -62,6 +62,8 @@ def check_url_ssrf(url: str, *, require_https: bool = False) -> tuple[bool, str]
         hostname = parsed.hostname
         if not hostname:
             return False, "URL must have a valid hostname"
+        if parsed.username is not None or parsed.password is not None:
+            return False, "URL must not contain embedded credentials"
 
         if hostname.lower() in BLOCKED_HOSTNAMES:
             return False, f"URL hostname '{hostname}' is blocked (internal/private)"

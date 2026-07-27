@@ -86,7 +86,25 @@ class CreativeListEnv(IntegrationEnv):
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Convert kwargs to ListCreativesBody shape for REST POST."""
         body: dict[str, Any] = {}
-        for key in ("media_buy_id", "media_buy_ids", "status", "format"):
+        for key in (
+            "media_buy_id",
+            "media_buy_ids",
+            "status",
+            "format",
+            "tags",
+            "created_after",
+            "created_before",
+            "search",
+            "fields",
+            "include_performance",
+            "include_assignments",
+            "include_sub_assets",
+            "page",
+            "limit",
+            "sort_by",
+            "sort_order",
+            "context",
+        ):
             if key in kwargs and kwargs[key] is not None:
                 body[key] = kwargs[key]
         # The structured filters travel over REST as a JSON dict — the body field is

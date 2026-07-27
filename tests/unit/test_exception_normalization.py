@@ -106,6 +106,32 @@ def test_boundary_wrapped_extra_field_value_is_wire_safe():
     }
 
 
+def test_unexpected_keyword_argument_is_reported_as_unrecognized_field():
+    """MCP call-signature errors use the same safe field label as Pydantic extras."""
+    error = ValidationError.from_exception_data(
+        title="call[list_creative_formats]",
+        line_errors=[
+            {
+                "type": "unexpected_keyword_argument",
+                "loc": (SECRET_BEARING_MESSAGE,),
+                "input": SECRET_BEARING_MESSAGE,
+            }
+        ],
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert_no_secret_leak(envelope)
+    assert envelope["errors"][0]["field"] == "unrecognized_field"
+    assert envelope["errors"][0]["details"]["validation_errors"] == [
+        {
+            "loc": ["unrecognized_field"],
+            "msg": "Extra field is not allowed by the AdCP request schema.",
+            "type": "unexpected_keyword_argument",
+        }
+    ]
+
+
 def test_raw_pydantic_projection_preserves_safe_multi_field_details():
     """Raw TypeAdapter validation keeps every field without raw values."""
     error = ValidationError.from_exception_data(
@@ -167,8 +193,12 @@ def test_identifier_shaped_mapping_key_location_is_redacted():
 
 
 def test_untrusted_typed_validation_preserves_transient_recovery():
-    """Sanitizing request-derived text must not alter retry semantics."""
-    error = AdCPValidationError(SECRET_BEARING_MESSAGE, recovery="transient")
+    """Explicitly untrusted typed text is scrubbed without changing retry semantics."""
+    error = AdCPValidationError(
+        SECRET_BEARING_MESSAGE,
+        recovery="transient",
+        _wire_safe_message=False,
+    )
 
     envelope = build_two_layer_error_envelope(safe_adcp_error(error))
 
@@ -178,7 +208,7 @@ def test_untrusted_typed_validation_preserves_transient_recovery():
 
 
 def test_untrusted_typed_validation_message_is_scrubbed():
-    """Typing an exception does not make interpolated request data trustworthy."""
+    """Typed validation text is untrusted unless a caller explicitly opts in."""
     error = AdCPValidationError(
         f"Invalid created_after date format: {SECRET_BEARING_MESSAGE}",
         field="created_after",
@@ -209,3 +239,38 @@ def test_string_length_projection_retains_numeric_schema_constraint():
     envelope = build_two_layer_error_envelope(safe_adcp_error(error))
     assert_no_secret_leak(envelope)
     assert "at least 32 characters" in envelope["errors"][0]["message"]
+
+
+def test_numeric_range_projection_retains_safe_schema_bound():
+    """Numeric constraint metadata is actionable without echoing rejected input."""
+    error = ValidationError.from_exception_data(
+        title="Package",
+        line_errors=[
+            {
+                "type": "greater_than_equal",
+                "loc": ("budget",),
+                "input": SECRET_BEARING_MESSAGE,
+                "ctx": {"ge": 0},
+            }
+        ],
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert_no_secret_leak(envelope)
+    assert envelope["errors"][0]["message"] == "Value must be greater than or equal to 0."
+
+
+def test_deliberate_typed_validation_message_requires_explicit_wire_safe_opt_in():
+    """Audited static business guidance remains actionable after explicit opt-in."""
+    error = AdCPValidationError(
+        "At least one field must be provided for update.",
+        field="request",
+        suggestion="Provide a field to update and resend.",
+        _wire_safe_message=True,
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert envelope["errors"][0]["message"] == "At least one field must be provided for update."
+    assert envelope["errors"][0]["suggestion"] == "Provide a field to update and resend."

@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from src.admin.app import create_app
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, Principal, Tenant
+from src.core.database.repositories import MediaBuyUoW, WorkflowUoW
 from tests.utils.database_helpers import create_tenant_with_timestamps
 
 app = create_app()
@@ -256,7 +257,7 @@ def _create_assignment(session, tenant_id: str, creative_id: str, media_buy_id: 
 # Patch at the use site: creatives.py binds this name via `from ... import`, so the
 # definition module (src.core.tools.media_buy_create) is not where the call resolves.
 _PUSH_PATCH = "src.admin.blueprints.creatives.push_creative_to_existing_buy"
-_EXECUTE_PATCH = "src.admin.blueprints.creatives.execute_approved_media_buy"
+_EXECUTE_PATCH = "src.core.tools.media_buy_create.execute_approved_media_buy"
 
 
 def _create_claimed_a2a_approval(
@@ -359,6 +360,14 @@ class TestCreativeApprovalRetroactivePush:
             status="pending_creatives",
         )
         _create_assignment(factory_session, test_tenant, creative_id, media_buy_id, package_id)
+        original_approved_at = datetime(2026, 1, 15, 12, tzinfo=UTC)
+        with MediaBuyUoW(test_tenant) as uow:
+            assert uow.media_buys is not None
+            uow.media_buys.update_fields(
+                media_buy_id,
+                approved_at=original_approved_at,
+                approved_by="human-approver@example.com",
+            )
         external_task_id = f"task_creative_unblock_{uuid.uuid4().hex[:8]}"
         request_context = {"trace_id": f"trace_{uuid.uuid4().hex[:8]}"}
         _create_claimed_a2a_approval(
@@ -393,11 +402,17 @@ class TestCreativeApprovalRetroactivePush:
             assert task.artifacts and task.artifacts[0].name == "media_buy_result"
             result = extract_data_from_artifact(task.artifacts[0])
             assert result["media_buy_id"] == media_buy_id
-            assert result["status"] == "confirmed"
+            assert result["status"] == "completed"
             assert result["context"] == request_context
         else:
             assert_failed_task_envelope(task, code="SERVICE_UNAVAILABLE", recovery="transient")
             assert_failed_task_no_secret_leak(task)
+        with MediaBuyUoW(test_tenant) as uow:
+            assert uow.media_buys is not None
+            persisted_media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted_media_buy is not None
+            assert persisted_media_buy.approved_by == "human-approver@example.com"
+            assert persisted_media_buy.approved_at == original_approved_at
 
     def test_creative_unblock_leaves_ambiguous_execution_nonterminal(
         self,
@@ -414,7 +429,7 @@ class TestCreativeApprovalRetroactivePush:
             status="pending_creatives",
         )
         _create_assignment(factory_session, test_tenant, creative_id, media_buy_id, package_id)
-        _create_claimed_a2a_approval(
+        step_id = _create_claimed_a2a_approval(
             test_tenant,
             media_buy_id,
             f"task_creative_pending_{uuid.uuid4().hex[:8]}",
@@ -424,7 +439,7 @@ class TestCreativeApprovalRetroactivePush:
             patch(_SIDE_EFFECTS_PATCH),
             patch(_EXECUTE_PATCH, return_value=(None, "adapter outcome unknown")),
             patch(_PUSH_PATCH, return_value=(True, None)),
-            patch("src.admin.blueprints.creatives.finalize_latest_media_buy_approval_step") as mock_finalize,
+            patch("src.core.workflow_finalization.finalize_latest_media_buy_approval_step") as mock_finalize,
         ):
             response = client.post(
                 f"/tenant/{test_tenant}/creatives/review/{creative_id}/approve",
@@ -433,6 +448,11 @@ class TestCreativeApprovalRetroactivePush:
             )
 
         assert response.status_code == 200
+        with WorkflowUoW(test_tenant) as uow:
+            assert uow.workflows is not None
+            persisted = uow.workflows.get_by_step_id(step_id)
+            assert persisted is not None
+            assert persisted.status == "approved"
         mock_finalize.assert_not_called()
 
     def test_push_failure_returns_200_with_warnings(self, client, test_tenant, factory_session):

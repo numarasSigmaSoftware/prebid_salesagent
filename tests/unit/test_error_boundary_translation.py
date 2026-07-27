@@ -30,7 +30,7 @@ from src.core.exceptions import (
 # ---------------------------------------------------------------------------
 from tests.helpers import assert_envelope_shape  # noqa: E402
 from tests.helpers.pinned_schema import pinned_error_code_metadata
-from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak, serialize_wire_error
 
 # Per-boundary assertion wrappers were removed in favor of the canonical
 # `assert_envelope_shape` helper. Call sites use keyword flags directly:
@@ -67,6 +67,12 @@ class TestBestEffortBoundaryIdentity:
         identity = SimpleNamespace(tenant_id="header-selected-tenant", principal_id=None)
 
         assert best_effort_boundary_identity(lambda: identity, transport="rest") == (None, None)
+
+    def test_a2a_activity_scope_does_not_fabricate_unknown_tenant(self):
+        """Anonymous discovery activity remains unscoped like A2A boundary errors."""
+        from src.a2a_server.adcp_a2a_server import _a2a_activity_scope
+
+        assert _a2a_activity_scope(None) == (None, None)
 
 
 class TestBoundaryObservabilitySanitization:
@@ -1029,7 +1035,7 @@ class TestA2ADispatcherFailedSkillResult:
         err = exc_info.value
         # Serialize through the SDK's real JSON-RPC error builder (the dispatcher's path).
         wire_dict = build_error_response("req-1", err)
-        serialized = json.dumps(wire_dict if isinstance(wire_dict, dict) else wire_dict.model_dump(), default=str)
+        serialized = serialize_wire_error(wire_dict)
         assert_no_secret_leak(serialized)
         assert wire_dict["error"]["data"]["adcp_error"]["code"] == "SERVICE_UNAVAILABLE"
 
@@ -1064,7 +1070,7 @@ class TestA2ADispatcherFailedSkillResult:
 
         err = exc_info.value
         wire_dict = build_error_response("req-1", err)
-        serialized = json.dumps(wire_dict if isinstance(wire_dict, dict) else wire_dict.model_dump(), default=str)
+        serialized = serialize_wire_error(wire_dict)
         assert_no_secret_leak(serialized, context=f"{method_name} JSON-RPC wire")
         assert wire_dict["error"]["data"]["adcp_error"]["code"] == "SERVICE_UNAVAILABLE"
 
@@ -1235,6 +1241,23 @@ class TestRESTBoundaryAdCPErrorTranslation:
             assert_envelope_shape(
                 response.json(), "VALIDATION_ERROR", recovery="correctable", message_substr="invalid request"
             )
+
+    def test_untyped_impl_failure_returns_sanitized_two_layer_envelope(self):
+        """Unexpected REST crashes stay typed without exposing raw exception text."""
+        from starlette.testclient import TestClient
+
+        from src.app import app
+
+        with patch(
+            "src.core.tools.capabilities.get_adcp_capabilities_raw",
+            side_effect=RuntimeError(SECRET_BEARING_MESSAGE),
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.get("/api/v1/capabilities")
+
+        assert response.status_code == 500
+        assert_envelope_shape(response.json(), "SERVICE_UNAVAILABLE", recovery="transient")
+        assert_no_secret_leak(response.json(), context="REST untyped failure envelope")
 
     def test_adcp_not_found_from_impl_returns_404(self):
         """AdCPNotFoundError raised in _impl → REST returns 404 with correctable recovery.
@@ -1451,13 +1474,14 @@ class TestHandleToolErrorPreservesStatusCode:
         assert response.status_code == expected_status
 
     def test_plain_tool_error_falls_back_to_500(self):
-        """Plain ToolError with no recognized wire code defaults to 500."""
+        """Plain ToolError defaults to a scrubbed 500 envelope."""
         from fastmcp.exceptions import ToolError
 
         from src.core.tool_error_logging import handle_tool_error
 
-        response = handle_tool_error(ToolError("unstructured failure"))
+        response = handle_tool_error(ToolError(SECRET_BEARING_MESSAGE))
         assert response.status_code == 500
+        assert_no_secret_leak(response.body)
 
     def test_plain_tool_error_with_known_code_uses_status_map(self):
         """Plain ToolError("VALIDATION_ERROR", "msg") → 400 via _ERROR_CODE_TO_STATUS.
@@ -1471,8 +1495,9 @@ class TestHandleToolErrorPreservesStatusCode:
 
         from src.core.tool_error_logging import handle_tool_error
 
-        response = handle_tool_error(ToolError("VALIDATION_ERROR", "missing required field"))
+        response = handle_tool_error(ToolError("VALIDATION_ERROR", SECRET_BEARING_MESSAGE))
         assert response.status_code == 400
+        assert_no_secret_leak(response.body)
 
     def test_plain_tool_error_with_auth_code_returns_403(self):
         """Plain ToolError("AUTH_REQUIRED", "msg") → 403 via _ERROR_CODE_TO_STATUS.
@@ -1508,6 +1533,29 @@ class TestHandleToolErrorPreservesStatusCode:
 
         response = handle_tool_error(ToolError("WEIRD_LEGACY_CODE", "what is this"))
         assert response.status_code == 500
+
+    @pytest.mark.parametrize(
+        ("error_code", "contradictory_recovery", "expected_recovery"),
+        [
+            ("SERVICE_UNAVAILABLE", "terminal", "transient"),
+            ("CONFIGURATION_ERROR", "transient", "terminal"),
+        ],
+    )
+    def test_plain_tool_error_recovery_is_canonicalized(
+        self,
+        error_code,
+        contradictory_recovery,
+        expected_recovery,
+    ):
+        """An untyped positional hint cannot contradict standardized code metadata."""
+        from fastmcp.exceptions import ToolError
+
+        from src.core.tool_error_logging import handle_tool_error
+        from tests.helpers import assert_envelope_shape
+
+        response = handle_tool_error(ToolError(error_code, SECRET_BEARING_MESSAGE, contradictory_recovery))
+        assert_envelope_shape(json.loads(response.body), error_code, recovery=expected_recovery)
+        assert_no_secret_leak(response.body)
 
 
 # ---------------------------------------------------------------------------

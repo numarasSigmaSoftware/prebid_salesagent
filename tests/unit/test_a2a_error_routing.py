@@ -28,8 +28,10 @@ from a2a.types import (
     CancelTaskRequest,
     GetTaskRequest,
     InternalError,
+    InvalidParamsError,
     InvalidRequestError,
     Part,
+    SendMessageConfiguration,
     SendMessageRequest,
     Task,
     TaskPushNotificationConfig,
@@ -50,7 +52,7 @@ from tests.a2a_helpers import make_a2a_context
 from tests.factories import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.pinned_schema import pinned_error_code_suggestion
-from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak, serialize_wire_error
 from tests.utils.a2a_helpers import (
     assert_failed_task_envelope,
     assert_failed_task_no_secret_leak,
@@ -79,6 +81,48 @@ def _make_handler() -> tuple[AdCPRequestHandler, object]:
     handler._get_auth_token = MagicMock(return_value="test-token")
     ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
     return handler, ctx
+
+
+@pytest.mark.asyncio
+async def test_message_send_rejects_private_push_notification_url_before_storage():
+    """A message-scoped callback cannot target seller-internal services."""
+    handler, ctx = _make_handler()
+    params = SendMessageRequest(
+        message=create_a2a_message_with_skill("get_products", {"brief": "video"}),
+        configuration=SendMessageConfiguration(
+            task_push_notification_config=TaskPushNotificationConfig(
+                id="pnc_private",
+                url="http://169.254.169.254/latest/meta-data",
+            )
+        ),
+    )
+
+    with pytest.raises(InvalidParamsError, match="public HTTP"):
+        await handler.on_message_send(params, context=ctx)
+
+    assert handler._task_push_configs == {}
+    assert handler.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_standalone_push_config_rejects_private_url_before_repository_write():
+    """The durable A2A config endpoint rejects unsafe URLs before opening its UoW."""
+    handler, ctx = _make_handler()
+    handler._authenticated_tool_context = MagicMock(return_value=SimpleNamespace(tenant_id="tenant_1"))
+
+    with (
+        patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW") as uow,
+        pytest.raises(InvalidParamsError, match="public HTTP"),
+    ):
+        await handler.on_create_task_push_notification_config(
+            TaskPushNotificationConfig(
+                id="pnc_private",
+                url="http://10.0.0.5/internal",
+            ),
+            context=ctx,
+        )
+
+    uow.assert_not_called()
 
 
 def _boundary_recording_spy():
@@ -719,7 +763,7 @@ async def test_task_management_auth_failures_stay_on_json_rpc_wire(handler_metho
         await getattr(handler, handler_method)(params, context=None)
 
     wire = build_error_response("req-auth", exc_info.value)
-    serialized = json.dumps(wire if isinstance(wire, dict) else wire.model_dump(), default=str)
+    serialized = serialize_wire_error(wire)
     assert "Authentication" in serialized or "authentication" in serialized
     assert "task_auth" not in serialized, "auth failures must not be downgraded to task-not-found output"
 

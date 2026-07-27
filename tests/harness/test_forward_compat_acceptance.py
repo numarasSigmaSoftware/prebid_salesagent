@@ -19,6 +19,7 @@ Each payload is tested through all three transport paths:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ import pytest
 
 from src.core.request_compat import normalize_request_params
 from tests.helpers import assert_envelope_shape
+from tests.helpers.pinned_schema import pinned_error_code_suggestion
 
 # ---------------------------------------------------------------------------
 # Payloads: each is a (tool_name, params) tuple
@@ -651,13 +653,23 @@ class TestErrorPropagation:
                             raise_on_error=False,
                         )
                         assert result.is_error, "Empty get_products should return an error, not succeed silently"
-                        # The error should mention what's missing
-                        error_text = str(result.content) if result.content else ""
-                        assert (
-                            "brief" in error_text.lower()
-                            or "brand" in error_text.lower()
-                            or "filter" in error_text.lower()
-                        ), f"Error should mention missing brief/brand/filters, got: {error_text[:200]}"
+                        assert result.content and len(result.content) == 1
+                        envelope = json.loads(result.content[0].text)
+                        expected_error = {
+                            "code": "VALIDATION_ERROR",
+                            "message": (
+                                "The request could not be validated; review the submitted fields and resubmit."
+                            ),
+                            "recovery": "correctable",
+                            "suggestion": pinned_error_code_suggestion("VALIDATION_ERROR"),
+                        }
+                        assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+                        assert envelope == {
+                            "adcp_error": expected_error,
+                            "errors": [expected_error],
+                        }
+                        serialized = json.dumps(envelope, sort_keys=True).lower()
+                        assert all(raw_text not in serialized for raw_text in ("brief", "brand", "filter"))
                 finally:
                     for p in patches:
                         p.stop()

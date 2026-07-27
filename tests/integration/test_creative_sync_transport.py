@@ -753,7 +753,13 @@ class TestFormatValidationUnreachable:
             )
 
             assert result.is_error, f"[{transport.value}] transient agent failure must fail the request"
-            envelope = result.wire_error_envelope or result.synthesized_error_envelope
+            if transport is Transport.IMPL:
+                assert result.wire_error_envelope is None
+                envelope = result.synthesized_error_envelope
+            else:
+                assert result.synthesized_error_envelope is None
+                envelope = result.wire_error_envelope
+                assert envelope is not None, f"[{transport.value}] must capture a real serialized wire envelope"
             assert_envelope_shape(
                 envelope,
                 "SERVICE_UNAVAILABLE",

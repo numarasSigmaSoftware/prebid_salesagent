@@ -94,6 +94,24 @@ This behavior is **ungraded** by the official conformance storyboards:
 cross-transport wire tests and the pinned fixture at
 `tests/fixtures/adcp_schemas_pinned/enums/error-code.json`.
 
+## Protocol callback URL transport policy
+
+The pinned AdCP **v3.1.1** source defines
+`static/schemas/source/core/push-notification-config.json#properties/url` as a
+generic URI. It does not mandate acceptance of plaintext HTTP callback URLs.
+The authoritative
+`dist/compliance/3.1.1/universal/webhook-emission.yaml` storyboard (version
+1.3.0) uses an operator-supplied **HTTPS** receiver in `proxy_url` mode and
+grades payload idempotency, operation correlation, retry behavior, and RFC 9421
+signing. It does not grade whether an implementation accepts HTTP callback
+registration.
+
+Prebid Sales Agent therefore treats HTTPS-only production callbacks as an
+implementation security policy: production rejects HTTP before persisting or
+sending a callback, while the exact-host development seam remains available
+for the Docker E2E receiver. This restriction is **ungraded** by the 3.1.1
+storyboard and does not replace its signing or idempotency requirements.
+
 ## Wire negotiation
 
 AdCP wire values for `adcp_version` are release-precision (`"3.0"`,

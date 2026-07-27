@@ -47,27 +47,26 @@ def _envelope_from_adcp_error(exc: Exception) -> dict[str, Any] | None:
         - REST: the HTTP response body, captured directly by RestDispatcher.
         - MCP: the JSON string in ``ToolError``, parsed by McpDispatcher.
     """
-    from src.core.exceptions import AdCPError, build_two_layer_error_envelope
+    from src.core.exceptions import AdCPError, build_two_layer_error_envelope, safe_adcp_error
 
     if isinstance(exc, AdCPError):
-        return build_two_layer_error_envelope(exc)
+        return build_two_layer_error_envelope(safe_adcp_error(exc))
     return None
 
 
 def _wire_envelope_from_exception(exc: Exception) -> dict[str, Any] | None:
-    """Prefer the REAL wire envelope stashed by the harness; fall back to synthesized.
+    """Return only the REAL wire envelope stashed by the A2A harness.
 
     When the A2A pipeline reconstructs an AdCPError from a failed Task's
     artifact DataPart, ``tests.harness._base._envelope_to_adcp_error``
     attaches the captured envelope to the exception as
-    ``_wire_error_envelope``. This helper returns that real wire envelope
-    if present; otherwise falls back to ``_envelope_from_adcp_error``
-    (synthesized — same helper production calls).
+    ``_wire_error_envelope``. A raw-wrapper exception has no wire bytes and
+    must stay ``None`` instead of being mislabeled as A2A wire coverage.
     """
     real_wire = getattr(exc, "_wire_error_envelope", None)
     if isinstance(real_wire, dict):
         return real_wire
-    return _envelope_from_adcp_error(exc)
+    return None
 
 
 def _envelope_from_mcp_error(exc: Exception) -> dict[str, Any] | None:
@@ -215,9 +214,6 @@ class McpDispatcher:
             return TransportResult(
                 error=error,
                 wire_error_envelope=wire,
-                # What production WOULD emit for the same exception — see the
-                # ImplDispatcher caveat; never a substitute for the wire field.
-                synthesized_error_envelope=_envelope_from_adcp_error(exc),
             )
         # Real MCP wire: the structured_content dict stashed by _run_mcp_client
         # (declared on BaseTestEnv, reset per call_via — read directly).

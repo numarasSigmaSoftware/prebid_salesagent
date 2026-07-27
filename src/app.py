@@ -305,6 +305,13 @@ async def tool_error_handler(request: Request, exc: ToolError) -> JSONResponse:
     return handle_tool_error(exc)
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Keep unexpected REST failures on the same sanitized AdCP wire contract."""
+    logger.exception("Unhandled REST request failure")
+    return _envelope_response(request, safe_adcp_error(exc))
+
+
 # ---------------------------------------------------------------------------
 # A2A Integration — add routes directly to the FastAPI app (not as sub-app)
 # so middleware and scope["state"] propagate correctly within the same ASGI app.

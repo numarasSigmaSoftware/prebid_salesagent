@@ -1187,7 +1187,7 @@ def safe_validation_error_location(error: Mapping[str, Any]) -> list[str | int]:
         safe_segment, annotations = _safe_validation_location_segment(segment, annotations)
         location.append(safe_segment)
 
-    if "extra_forbidden" in str(error.get("type", "")) and location:
+    if str(error.get("type", "")) in {"extra_forbidden", "unexpected_keyword_argument"} and location:
         location[-1] = "unrecognized_field"
     return location
 
@@ -1233,6 +1233,22 @@ def _safe_length_error_message(error_type: str, context: object) -> str:
     return "Value does not satisfy the permitted length constraints."
 
 
+def _safe_numeric_range_error_message(context: object) -> str:
+    """Retain only trusted numeric bounds from a Pydantic range error."""
+    if isinstance(context, Mapping):
+        relation_by_key = {
+            "ge": "greater than or equal to",
+            "gt": "greater than",
+            "le": "less than or equal to",
+            "lt": "less than",
+        }
+        for key, relation in relation_by_key.items():
+            bound = context.get(key)
+            if isinstance(bound, int | float) and not isinstance(bound, bool):
+                return f"Value must be {relation} {bound}."
+    return "Value is outside the permitted range."
+
+
 def safe_validation_error_message(error: Mapping[str, Any]) -> str:
     """Return static, actionable text for one Pydantic error.
 
@@ -1244,7 +1260,7 @@ def safe_validation_error_message(error: Mapping[str, Any]) -> str:
     error_type = str(error.get("type", ""))
     if "missing" in error_type:
         return "Required field is missing."
-    if "extra_forbidden" in error_type:
+    if error_type in {"extra_forbidden", "unexpected_keyword_argument"}:
         return "Extra field is not allowed by the AdCP request schema."
     if "string_type" in error_type:
         return "Expected a string value."
@@ -1259,7 +1275,7 @@ def safe_validation_error_message(error: Mapping[str, Any]) -> str:
     if "too_short" in error_type or "too_long" in error_type:
         return _safe_length_error_message(error_type, error.get("ctx"))
     if error_type.startswith(("greater_than", "less_than")):
-        return "Value is outside the permitted range."
+        return _safe_numeric_range_error_message(error.get("ctx"))
     return _STATIC_VALIDATION_MESSAGES.get(error_type, "Value does not satisfy the field constraints.")
 
 
@@ -1505,6 +1521,31 @@ def _scrubbed_error(
     )
 
 
+def synthesize_safe_adcp_error(
+    *,
+    error_code: str,
+    status_code: int,
+    context: ContextObject | dict[str, Any] | None = None,
+) -> AdCPError:
+    """Build a synthetic wire error without trusting an untyped source message.
+
+    Boundary fallbacks sometimes have a legacy machine code and HTTP status but
+    no typed ``AdCPError`` instance. They must preserve those semantics without
+    copying ``str(exc)`` into a buyer-visible envelope. The machine code is
+    authoritative for recovery; an untyped source's positional recovery hint
+    is never trusted because it can contradict the standardized code metadata.
+    """
+    wire_code = to_wire_error_code(error_code)
+    resolved_recovery = _canonical_recovery_for(wire_code)
+    return _scrubbed_error(
+        error_code=wire_code,
+        wire_code=wire_code,
+        recovery=resolved_recovery,
+        status_code=status_code,
+        context=context,
+    )
+
+
 def safe_adcp_error(exc: Exception) -> AdCPError:
     """Return a wire-safe ``AdCPError`` — THE sanitization policy for MCP, A2A, REST, and the
     webhook push path via ``ContextManager.audit_workflow_step_failure``.
@@ -1572,10 +1613,9 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         # allowing raw validator messages or rejected values onto the wire.
         return normalized
     if isinstance(exc, AdCPValidationError) and not exc._wire_safe_message:
-        # A typed validation exception is not automatically safe: business
-        # validators historically interpolated rejected request values into
-        # their messages. Only the shared Pydantic/FastAPI projectors opt in
-        # after replacing raw msg/input/ctx data with static diagnostics.
+        # Typed validation text is untrusted by default because business
+        # validators frequently interpolate rejected request values. Only
+        # audited static messages opt in with ``_wire_safe_message=True``.
         safe_message, safe_suggestion = _SANITIZED_BY_WIRE_CODE.get(
             wire_code,
             (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(normalized.recovery)),

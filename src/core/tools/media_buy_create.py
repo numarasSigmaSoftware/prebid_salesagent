@@ -2283,14 +2283,22 @@ async def _create_media_buy_impl(
         if push_notification_config:
             # Lazy: tests patch src.core.database.repositories.MediaBuyUoW; the call-time import binds the patched object (hoisting would bind the unpatched one at module load).
             from src.core.database.repositories import MediaBuyUoW
+            from src.core.webhook_validator import WebhookURLValidator
 
-            logger.info(f"[MCP/A2A] Registering push notification config from request: {push_notification_config}")
+            logger.info("[MCP/A2A] Registering push notification config from request")
 
             # Extract config details
             url = push_notification_config.get("url")
             authentication = push_notification_config.get("authentication", {})
 
             if url:
+                is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
+                if not is_safe:
+                    raise AdCPValidationError(
+                        "Push notification URL must resolve to a public HTTPS endpoint",
+                        field="push_notification_config.url",
+                        _wire_safe_message=True,
+                    )
                 # Extract authentication details (A2A format: schemes + credentials)
                 schemes = authentication.get("schemes", []) if authentication else []
                 auth_type = schemes[0] if schemes else None

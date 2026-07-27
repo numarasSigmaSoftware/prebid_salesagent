@@ -76,6 +76,7 @@ class TestValidationSecretScrubTransportParity:
 
     @pytest.mark.parametrize("transport", ["a2a", "mcp", "rest"])
     def test_mapping_key_is_never_echoed(self, integration_db, transport):
+        from src.core.product_conversion import convert_pricing_option_to_adcp
         from tests.harness.media_buy_create import MediaBuyCreateEnv
         from tests.harness.transport import Transport
         from tests.helpers.secret_scrub import assert_no_secret_leak
@@ -83,6 +84,7 @@ class TestValidationSecretScrubTransportParity:
         identifier_secret = "hunter2"
         with MediaBuyCreateEnv() as env:
             _tenant, _principal, product, pricing = env.setup_media_buy_data()
+            pricing_option_id = convert_pricing_option_to_adcp(pricing).pricing_option_id
             result = env.call_via(
                 Transport(transport),
                 brand={"domain": "acme.example"},
@@ -90,7 +92,7 @@ class TestValidationSecretScrubTransportParity:
                     {
                         "product_id": product.product_id,
                         "budget": 5000.0,
-                        "pricing_option_id": pricing.pricing_option_id,
+                        "pricing_option_id": pricing_option_id,
                         "targeting_overlay": {
                             "key_value_pairs": {
                                 identifier_secret: {"invalid": "value"},
@@ -319,9 +321,9 @@ class TestListCreativeFormatsA2ASuggestionParity:
         produce the AdCP two-layer VALIDATION_ERROR envelope WITH a top-level
         ``suggestion`` — parity with ``/api/v1/creative-formats``.
 
-        Pins that ``_handle_list_creative_formats_skill`` calls
-        ``build_list_creative_formats_request`` inside the boundary; a bare
-        call drops the suggestion.
+        Pins that ``_handle_list_creative_formats_skill`` validates the complete
+        ``ListCreativeFormatsRequest`` inside ``adcp_validation_boundary``; a
+        bare model-validation call drops the canonical suggestion.
         """
         from tests.harness import CreativeFormatsEnv
         from tests.harness.transport import Transport
