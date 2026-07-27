@@ -175,33 +175,23 @@ PENDING_PERSISTED_STATUSES: frozenset[str] = frozenset(
 # because it describes the read tool's contract, not the scheduler's.
 REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_SERVING, CANONICAL_COMPLETED})
 
-# The PERSISTED statuses the delivery webhook batch must SELECT — every persisted
-# value that resolves to a reportable canonical (serving OR completed). Derived
-# from the map (not a hardcoded partial copy, #1556 class) so it tracks the
-# canonical set. This MUST include persisted "completed": the status scheduler
-# flips an ended buy to persisted "completed" within ~60s, long before the hourly
-# delivery batch runs, so selecting only the serving set would drop the ended buy
-# and the spec-required FINAL webhook ("one final notification when the campaign
-# completes", optimization-reporting.mdx §Publisher Commitment) would never be
-# sent. Selecting completed too lets the batch send the final, de-duplicated on
-# a best-effort basis by DeliveryRepository.has_successful_final (a true
-# exactly-once final under concurrency/crash needs the outbox tracked in #1606).
-#
+# Persisted counterpart of the polling delivery tool's reportable vocabulary.
 REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in REPORTABLE_CANONICAL_STATUSES
 )
-
-# The reportable-but-not-serving remainder: the PERSISTED status(es) a buy carries once
-# its flight has ended. The delivery scheduler passes BOTH halves of REPORTABLE into
-# MediaBuyRepository.get_reportable_for_delivery, so the entire selection derives from
-# PERSISTED_STATUS_TO_CANONICAL and neither arm can drift a partial copy (#1556).
-#
-# PERSISTED, not canonical: the query filters MediaBuy.status, which holds a map KEY.
-# CANONICAL_COMPLETED is a map VALUE (the wire status, pinned to the SDK enum). The two
-# read as "completed" today only because the map has an identity row for it — filtering
-# the column by the canonical constant would silently select nothing the day a persisted
-# key is renamed. Membership is pinned in test_media_buy_status_consistency.py.
 COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
+
+# Reporting webhooks are persistent channels. AdCP 3.1.1 requires their final
+# delivery after completed, canceled, or rejected, so the scheduler has a wider
+# terminal vocabulary than the polling delivery tool.
+WEBHOOK_TERMINAL_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_COMPLETED, "canceled", "rejected"})
+WEBHOOK_REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset(
+    {CANONICAL_SERVING, *WEBHOOK_TERMINAL_CANONICAL_STATUSES}
+)
+WEBHOOK_REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
+    k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in WEBHOOK_REPORTABLE_CANONICAL_STATUSES
+)
+WEBHOOK_TERMINAL_PERSISTED_STATUSES: frozenset[str] = WEBHOOK_REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
 # The FIVE webhook-only response fields — every field whose schema description
 # says "only present in webhook deliveries" (get-media-buy-delivery-response.json

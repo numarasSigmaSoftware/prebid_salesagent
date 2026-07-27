@@ -59,6 +59,7 @@ from src.core.exceptions import (
 )
 from src.core.helpers import enum_value
 from src.core.idempotency_canonical import canonical_payload_hash, canonical_request_hash
+from src.core.tools._reporting_webhook import validate_reporting_webhook_frequency
 
 
 class PackageAssignmentDict(TypedDict):
@@ -2028,17 +2029,6 @@ async def _create_media_buy_impl(
     """
     request_start_time = time.time()
 
-    # Warn if unsupported reporting_webhook frequency is requested
-    if req.reporting_webhook:
-        raw_freq = str(getattr(req.reporting_webhook, "reporting_frequency", None) or "daily").lower()
-        if raw_freq != "daily":
-            logger.warning(
-                "CreateMediaBuy requested reporting webhook frequency '%s', "
-                "but only 'daily' frequency is currently supported. "
-                "Hourly and monthly reporting will be ignored until implemented.",
-                raw_freq,
-            )
-
     # Extract testing context first
     identity = require_identity(identity, context=req.context)
 
@@ -2049,6 +2039,8 @@ async def _create_media_buy_impl(
 
     # Tenant is resolved at the transport boundary (resolve_identity_from_context)
     tenant = require_tenant(identity, context=req.context)
+
+    validate_reporting_webhook_frequency(req.reporting_webhook)
 
     # Validate setup completion (only in production, skip for testing)
     if not testing_ctx.dry_run and not testing_ctx.test_session_id:

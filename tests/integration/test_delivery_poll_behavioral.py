@@ -304,6 +304,33 @@ class TestWebhookNotificationTypeFinal:
             assert dumped["media_buy_deliveries"][0]["status"] == "completed"
             assert_omits_webhook_only_fields(dumped, context="final webhook poll")
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("terminal_status", ["canceled", "rejected"])
+    async def test_persistent_channel_terminal_status_sends_final(self, integration_db, terminal_status):
+        """Canceled and rejected buys receive the required final report."""
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            buy.status = terminal_status
+            env.get_session().commit()
+
+            scheduler = DeliveryWebhookScheduler()
+            with mock_send_notification(scheduler) as mock_send:
+                await scheduler._send_reports()
+                await scheduler._send_reports()
+
+            (send_call,) = mock_send.await_args_list
+            payload = send_call.kwargs["payload"]
+            assert payload.result["media_buy_deliveries"][0]["status"] == terminal_status
+            assert payload.result["notification_type"] == "final"
+            assert_next_expected_at_shape(
+                payload.result,
+                present=False,
+                context=f"{terminal_status} final webhook",
+            )
+
 
 @pytest.mark.requires_db
 class TestSimulationReachesFinalThroughRealHook:
@@ -693,7 +720,7 @@ class TestConcurrentFinalWebhookClaim:
     async def test_ancient_completed_buys_age_out_of_selection(self, integration_db):
         """The batch's completed arm is bounded by the updated_at recency horizon.
 
-        A completed buy last touched beyond FINAL_WEBHOOK_COMPLETED_HORIZON is not
+        A completed buy last touched beyond FINAL_WEBHOOK_TERMINAL_HORIZON is not
         selected (its would-be final would otherwise SEND — no success log exists —
         so this reddens if the horizon is removed). A recently-touched completed buy
         is still selected and gets its final: the bound trims the ever-growing

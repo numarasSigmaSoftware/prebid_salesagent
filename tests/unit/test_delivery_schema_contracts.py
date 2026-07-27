@@ -306,12 +306,51 @@ class TestGetMediaBuyDeliveryResponseMethods:
         assert "media_buy_deliveries" in payload
 
     def test_webhook_payload_filters_metrics(self):
-        resp = _make_delivery_response()
+        resp = _make_delivery_response(
+            media_buy_deliveries=[
+                {
+                    "media_buy_id": "buy_1",
+                    "status": "active",
+                    "totals": {"impressions": 1000, "spend": 5.0},
+                    "by_package": [
+                        {
+                            "package_id": "pkg_1",
+                            "impressions": 1000,
+                            "spend": 5.0,
+                            "clicks": 12,
+                            "by_placement": [
+                                {
+                                    "placement_id": "placement_1",
+                                    "impressions": 600,
+                                    "spend": 3.0,
+                                    "clicks": 7,
+                                }
+                            ],
+                        }
+                    ],
+                    "daily_breakdown": [
+                        {
+                            "date": "2025-01-01",
+                            "impressions": 1000,
+                            "spend": 5.0,
+                        }
+                    ],
+                }
+            ]
+        )
         payload = resp.webhook_payload(requested_metrics=["impressions"])
-        for delivery in payload["media_buy_deliveries"]:
-            totals = delivery["totals"]
-            assert "impressions" in totals
-            assert "spend" not in totals
+        delivery = payload["media_buy_deliveries"][0]
+        package = delivery["by_package"][0]
+        placement = package["by_placement"][0]
+        daily = delivery["daily_breakdown"][0]
+
+        for metrics in (delivery["totals"], package, placement, daily):
+            assert "impressions" in metrics
+            assert "spend" not in metrics
+            assert "clicks" not in metrics
+        assert package["package_id"] == "pkg_1"
+        assert placement["placement_id"] == "placement_1"
+        assert daily["date"] == "2025-01-01"
 
     def test_round_trip_serialization(self):
         resp = _make_delivery_response()

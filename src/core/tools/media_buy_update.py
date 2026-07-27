@@ -20,6 +20,7 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
 from pydantic import Field
 
+from src.core.tools._reporting_webhook import validate_reporting_webhook_frequency
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
 
 if TYPE_CHECKING:
@@ -372,6 +373,8 @@ def _update_media_buy_impl(
 
     # Tenant is resolved at the transport boundary (resolve_identity_from_context)
     tenant = require_tenant(identity, context=req.context)
+
+    validate_reporting_webhook_frequency(req.reporting_webhook)
 
     # ── Workflow-step bookkeeping fence ──────────────────────────────────
     # Hoist ``ctx_manager`` and ``step`` out of the try below so the

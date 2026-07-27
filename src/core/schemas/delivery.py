@@ -9,12 +9,13 @@ from enum import StrEnum
 from typing import Any
 
 from adcp.types import AggregatedTotals as LibraryAggregatedTotals
-from adcp.types import DeliveryMeasurement as LibraryDeliveryMeasurement
-from adcp.types import DeliveryMetrics as LibraryDeliveryMetrics
 from adcp.types import (
+    AvailableMetric,
     DeliveryStatus,  # noqa: F401 — re-exported for backward compat
     PricingModel,
 )
+from adcp.types import DeliveryMeasurement as LibraryDeliveryMeasurement
+from adcp.types import DeliveryMetrics as LibraryDeliveryMetrics
 from adcp.types import GetCreativeDeliveryResponse as LibraryGetCreativeDeliveryResponse
 from adcp.types import GetMediaBuyDeliveryRequest as LibraryGetMediaBuyDeliveryRequest
 from adcp.types import GetMediaBuyDeliveryResponse as LibraryGetMediaBuyDeliveryResponse
@@ -366,12 +367,19 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
         data = self.model_dump(mode="json", exclude={"aggregated_totals"})
 
         if requested_metrics is not None:
-            metrics_set = set(requested_metrics)
-            for delivery in data.get("media_buy_deliveries", []):
-                totals = delivery.get("totals")
-                if totals is not None:
-                    filtered = {k: v for k, v in totals.items() if k in metrics_set}
-                    delivery["totals"] = filtered
+            requested = set(requested_metrics)
+            all_metrics = {metric.value for metric in AvailableMetric}
+
+            def project(value: Any) -> Any:
+                if isinstance(value, list):
+                    return [project(item) for item in value]
+                if isinstance(value, dict):
+                    return {
+                        key: project(item) for key, item in value.items() if key not in all_metrics or key in requested
+                    }
+                return value
+
+            data = project(data)
 
         return data
 

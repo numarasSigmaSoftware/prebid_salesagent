@@ -27,10 +27,10 @@ from src.core.database.repositories.push_notification_config import PushNotifica
 from src.core.helpers import enum_value
 from src.core.schemas import GetMediaBuyDeliveryRequest, GetMediaBuyDeliveryResponse
 from src.core.tools._media_buy_status import (
-    CANONICAL_COMPLETED,
-    COMPLETED_PERSISTED_STATUSES,
-    REPORTABLE_CANONICAL_STATUSES,
     SERVING_PERSISTED_STATUSES,
+    WEBHOOK_REPORTABLE_CANONICAL_STATUSES,
+    WEBHOOK_TERMINAL_CANONICAL_STATUSES,
+    WEBHOOK_TERMINAL_PERSISTED_STATUSES,
     derive_notification_type,
     resolve_canonical_status,
 )
@@ -56,14 +56,14 @@ SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or str(DEFAU
 # batch so a failed/crashed final is retried on the next batch.
 FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 
-# Recency horizon bounding which persisted-"completed" buys the batch selects
-# (see MediaBuyRepository.get_reportable_for_delivery). "completed" is permanent,
-# so an unbounded selection would scan every completed buy that ever existed on
+# Recency horizon bounding which persisted terminal buys the batch selects
+# (see MediaBuyRepository.get_reportable_for_delivery). Terminal states are permanent,
+# so an unbounded selection would scan every ended buy that ever existed on
 # every hourly batch. INVARIANT (pinned by a unit test): the horizon must be much
 # longer than both FINAL_WEBHOOK_CLAIM_LEASE (so stale-lease recovery always
 # happens on a still-selected buy) and the batch interval (so the ~60s status
 # flip is always caught) — 2 days gives ~48x margin over the hourly batch.
-FINAL_WEBHOOK_COMPLETED_HORIZON = timedelta(days=2)
+FINAL_WEBHOOK_TERMINAL_HORIZON = timedelta(days=2)
 
 
 class DeliveryWebhookScheduler:
@@ -131,14 +131,14 @@ class DeliveryWebhookScheduler:
                 # within ~60s, long before this hourly batch, so a serving-only
                 # selection would drop it and the buy's spec-required FINAL webhook
                 # would never be sent. The per-buy final gate below de-dups it on a
-                # best-effort basis (true exactly-once is #1606). The completed arm
+                # best-effort basis (true exactly-once is #1606). The terminal arm
                 # is bounded by a recency horizon on updated_at so the hourly scan
                 # doesn't grow forever (see get_reportable_for_delivery).
                 media_buys = MediaBuyRepository.get_reportable_for_delivery(
                     session,
                     serving_statuses=sorted(SERVING_PERSISTED_STATUSES),
-                    completed_statuses=sorted(COMPLETED_PERSISTED_STATUSES),
-                    completed_horizon=FINAL_WEBHOOK_COMPLETED_HORIZON,
+                    terminal_statuses=sorted(WEBHOOK_TERMINAL_PERSISTED_STATUSES),
+                    terminal_horizon=FINAL_WEBHOOK_TERMINAL_HORIZON,
                 )
 
                 reports_sent = 0
@@ -160,7 +160,7 @@ class DeliveryWebhookScheduler:
                         # every hour only to misread its MEDIA_BUY_NOT_FOUND
                         # advisory as a warning-worthy failure.
                         canonical = resolve_canonical_status(media_buy, datetime.now(UTC).date())
-                        if canonical not in REPORTABLE_CANONICAL_STATUSES:
+                        if canonical not in WEBHOOK_REPORTABLE_CANONICAL_STATUSES:
                             continue
 
                         # Send delivery report; only count it when a webhook
@@ -334,7 +334,9 @@ class DeliveryWebhookScheduler:
                 )
                 return False
 
-            is_final = resolve_canonical_status(media_buy, datetime.now(UTC).date()) == CANONICAL_COMPLETED
+            is_final = (
+                resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
+            )
 
             # Best-effort read-only de-dup (no claim here — the atomic concurrency
             # claim is taken inside _deliver_report, just before the POST).
@@ -389,15 +391,11 @@ class DeliveryWebhookScheduler:
             protocol="rest",
         )
 
-        # The impl reports on exactly REPORTABLE_CANONICAL_STATUSES: the
-        # scheduler already filters by persisted DB status
-        # (the serving set plus recent persisted "completed") at query time
-        # and skips buys that resolve outside the reportable set, so both
-        # still-serving and ended (persisted "completed") campaigns are
-        # included rather than filtered out and reported as "not found" errors.
+        # The scheduler requests serving plus every recent terminal state in
+        # the reporting-webhook termination contract.
         req = GetMediaBuyDeliveryRequest(
             media_buy_ids=[media_buy.media_buy_id],
-            status_filter=[MediaBuyStatus(s) for s in sorted(REPORTABLE_CANONICAL_STATUSES)],
+            status_filter=[MediaBuyStatus(s) for s in sorted(WEBHOOK_REPORTABLE_CANONICAL_STATUSES)],
             start_date=start_date_obj.strftime("%Y-%m-%d"),
             end_date=end_date_obj.strftime("%Y-%m-%d"),
             context=None,

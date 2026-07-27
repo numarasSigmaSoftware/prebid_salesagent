@@ -28,6 +28,8 @@ from src.core.tools._media_buy_status import (
     SERVING_PERSISTED_STATUSES,
     TERMINAL_STATUSES,
     WEBHOOK_ONLY_FIELDS,
+    WEBHOOK_REPORTABLE_CANONICAL_STATUSES,
+    WEBHOOK_TERMINAL_PERSISTED_STATUSES,
     resolve_canonical_status,
 )
 from src.core.tools.media_buy_list import _PERSISTED_STATUS_TO_ADCP, _compute_status
@@ -234,6 +236,20 @@ class TestCanonicalVocabularyPinnedToSdk:
             COMPLETED_PERSISTED_STATUSES
             == {k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == "completed"} - SERVING_PERSISTED_STATUSES
         )
+
+    def test_webhook_terminal_statuses_cover_persistent_channel_termination(self):
+        """Pin the AdCP 3.1.1 completed/canceled/rejected termination set."""
+        assert WEBHOOK_REPORTABLE_CANONICAL_STATUSES == {
+            "active",
+            "completed",
+            "canceled",
+            "rejected",
+        }
+        assert WEBHOOK_TERMINAL_PERSISTED_STATUSES == {
+            "completed",
+            "canceled",
+            "rejected",
+        }
 
     def test_webhook_only_fields_grounded_on_the_pinned_sdk(self):
         """Ground WEBHOOK_ONLY_FIELDS on the PINNED SDK's schema, not a re-typed literal.
@@ -468,7 +484,7 @@ class TestSchedulerPassesDerivedStatusVocabulary:
 
         from src.services import delivery_webhook_scheduler as sched
         from src.services.delivery_webhook_scheduler import (
-            FINAL_WEBHOOK_COMPLETED_HORIZON,
+            FINAL_WEBHOOK_TERMINAL_HORIZON,
             DeliveryWebhookScheduler,
         )
 
@@ -480,7 +496,7 @@ class TestSchedulerPassesDerivedStatusVocabulary:
         with (
             patch.object(sched, "get_db_session", return_value=cm),
             patch.object(sched, "SERVING_PERSISTED_STATUSES", frozenset({"SENTINEL_SERVING"})),
-            patch.object(sched, "COMPLETED_PERSISTED_STATUSES", frozenset({"SENTINEL_COMPLETED"})),
+            patch.object(sched, "WEBHOOK_TERMINAL_PERSISTED_STATUSES", frozenset({"SENTINEL_TERMINAL"})),
             patch.object(sched.MediaBuyRepository, "get_reportable_for_delivery", return_value=[]) as select_rows,
         ):
             asyncio.run(DeliveryWebhookScheduler()._send_reports())
@@ -488,8 +504,8 @@ class TestSchedulerPassesDerivedStatusVocabulary:
         select_rows.assert_called_once_with(
             session,
             serving_statuses=["SENTINEL_SERVING"],
-            completed_statuses=["SENTINEL_COMPLETED"],
-            completed_horizon=FINAL_WEBHOOK_COMPLETED_HORIZON,
+            terminal_statuses=["SENTINEL_TERMINAL"],
+            terminal_horizon=FINAL_WEBHOOK_TERMINAL_HORIZON,
         )
 
 

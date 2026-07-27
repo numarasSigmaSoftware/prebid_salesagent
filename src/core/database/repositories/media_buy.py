@@ -654,27 +654,26 @@ class MediaBuyRepository:
         session: Session,
         *,
         serving_statuses: list[str],
-        completed_statuses: list[str],
-        completed_horizon: datetime.timedelta,
+        terminal_statuses: list[str],
+        terminal_horizon: datetime.timedelta,
     ) -> list[MediaBuy]:
-        """Select the delivery webhook batch's buys: serving (unbounded) + recent ``completed``.
+        """Select delivery-webhook buys: serving (unbounded) + recent terminal.
 
         Args:
             serving_statuses: PERSISTED statuses (``PERSISTED_STATUS_TO_CANONICAL`` keys)
                 that mean "still serving" — selected unbounded.
-            completed_statuses: PERSISTED statuses that mean "flight ended"
-                (``COMPLETED_PERSISTED_STATUSES``) — selected only within
-                ``completed_horizon``. Both arms take the persisted vocabulary because
+            terminal_statuses: PERSISTED completed/canceled/rejected statuses,
+                selected only within ``terminal_horizon``. Both arms take the persisted vocabulary because
                 ``MediaBuy.status`` stores a map key, never a canonical/wire value.
-            completed_horizon: how far back an already-``completed`` buy stays selectable,
+            terminal_horizon: how far back a terminal buy stays selectable,
                 measured on ``updated_at``.
 
         System-level cross-tenant query for the delivery webhook scheduler ONLY (the
         status scheduler keeps the unbounded ``get_all_by_statuses`` — its selection
-        is lifecycle-bounded by construction). ``completed`` is a permanent terminal
-        status, so an unbounded selection would materialize every completed buy that
-        ever existed on every hourly batch; bound it to rows touched within
-        ``completed_horizon`` via ``updated_at``, which the status scheduler's flip,
+        is lifecycle-bounded by construction). Terminal statuses are permanent, so
+        an unbounded selection would materialize every ended buy that ever existed
+        on every hourly batch; bound them to rows touched within
+        ``terminal_horizon`` via ``updated_at``, which the status scheduler's flip,
         the final-webhook claim, AND the claim release all bump (``onupdate``) — so:
           - the flip starts the clock even after scheduler downtime (flip time, not
             flight end);
@@ -689,7 +688,7 @@ class MediaBuyRepository:
         intentionally excluded — a final months after campaign end is more surprising
         than none; the durable answer is the #1606 outbox.
         """
-        cutoff = datetime.datetime.now(datetime.UTC) - completed_horizon
+        cutoff = datetime.datetime.now(datetime.UTC) - terminal_horizon
         return list(
             session.scalars(
                 select(MediaBuy).where(
@@ -700,7 +699,7 @@ class MediaBuyRepository:
                         # neither can drift a partial copy (#1556). Passing the CANONICAL
                         # "completed" here would be a vocabulary error: it is a map VALUE and
                         # would stop matching the day a persisted key is renamed.
-                        and_(MediaBuy.status.in_(completed_statuses), MediaBuy.updated_at >= cutoff),
+                        and_(MediaBuy.status.in_(terminal_statuses), MediaBuy.updated_at >= cutoff),
                     )
                 )
             ).all()

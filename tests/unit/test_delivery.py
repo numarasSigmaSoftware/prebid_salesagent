@@ -2548,19 +2548,19 @@ class TestFinalWebhookSchedulingInvariants:
     either bound would silently strand finals.
     """
 
-    def test_completed_horizon_dwarfs_lease_and_batch_interval(self):
+    def test_terminal_horizon_dwarfs_lease_and_batch_interval(self):
         from datetime import timedelta
 
         from src.services.delivery_webhook_scheduler import (
             FINAL_WEBHOOK_CLAIM_LEASE,
-            FINAL_WEBHOOK_COMPLETED_HORIZON,
+            FINAL_WEBHOOK_TERMINAL_HORIZON,
         )
 
-        assert FINAL_WEBHOOK_COMPLETED_HORIZON >= 10 * FINAL_WEBHOOK_CLAIM_LEASE
+        assert FINAL_WEBHOOK_TERMINAL_HORIZON >= 10 * FINAL_WEBHOOK_CLAIM_LEASE
         # Bind to the SHIPPED default cadence, not the env-resolved SLEEP_INTERVAL_SECONDS:
         # test runs export DELIVERY_WEBHOOK_INTERVAL=5, which would collapse this bound to
-        # seconds and make the invariant vacuous. FINAL_WEBHOOK_COMPLETED_HORIZON is not
+        # seconds and make the invariant vacuous. FINAL_WEBHOOK_TERMINAL_HORIZON is not
         # env-configurable, so it is pinned against the constant, not the resolved value.
         from src.services.delivery_webhook_scheduler import DEFAULT_SLEEP_INTERVAL_SECONDS
 
-        assert FINAL_WEBHOOK_COMPLETED_HORIZON >= 24 * timedelta(seconds=DEFAULT_SLEEP_INTERVAL_SECONDS)
+        assert FINAL_WEBHOOK_TERMINAL_HORIZON >= 24 * timedelta(seconds=DEFAULT_SLEEP_INTERVAL_SECONDS)

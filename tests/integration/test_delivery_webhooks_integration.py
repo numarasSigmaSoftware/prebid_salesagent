@@ -379,7 +379,8 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
     ) as mock_send:
         await scheduler._send_reports()
 
-    payload = mock_send.await_args.kwargs["payload"]
+    (send_call,) = mock_send.await_args_list
+    payload = send_call.kwargs["payload"]
     assert payload.token == "buyer-validation-token-0001"
     totals = payload.result["media_buy_deliveries"][0]["totals"]
     assert set(totals) == {"impressions", "clicks"}
