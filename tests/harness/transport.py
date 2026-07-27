@@ -181,6 +181,54 @@ class TransportResult:
         harness-provided way to verify an error on the wire — step definitions
         must not hand-roll envelope parsing.
         """
+        self._assert_error_envelope(
+            self.wire_error_envelope,
+            code,
+            source="wire",
+            recovery=recovery,
+            require_suggestion=require_suggestion,
+            message_substr=message_substr,
+        )
+
+    def assert_synthesized_error(
+        self,
+        code: str,
+        *,
+        recovery: str | None = None,
+        require_suggestion: bool = False,
+        message_substr: str | None = None,
+    ) -> None:
+        """Assert an explicitly non-wire diagnostic error envelope.
+
+        This method is for in-process A2A paths that raise before a Task
+        artifact exists. It first proves that no real wire envelope was
+        captured, preventing the synthesized builder output from silently
+        replacing buyer-visible bytes.
+        """
+        assert self.wire_error_envelope is None, (
+            "A real wire_error_envelope was captured; assert_wire_error() must "
+            "be used instead of grading synthesized diagnostic output"
+        )
+        self._assert_error_envelope(
+            self.synthesized_error_envelope,
+            code,
+            source="synthesized",
+            recovery=recovery,
+            require_suggestion=require_suggestion,
+            message_substr=message_substr,
+        )
+
+    def _assert_error_envelope(
+        self,
+        envelope: dict[str, Any] | None,
+        code: str,
+        *,
+        source: str,
+        recovery: str | None,
+        require_suggestion: bool,
+        message_substr: str | None,
+    ) -> None:
+        """Shared code/recovery/suggestion assertion for an explicit source."""
         from tests.helpers import assert_envelope_shape
 
         meta = _pinned_error_metadata()
@@ -191,13 +239,12 @@ class TransportResult:
         )
         expected_recovery = recovery if recovery is not None else spec["recovery"]
 
-        envelope = self.wire_error_envelope
         assert envelope is not None, (
-            f"Expected a wire rejection with {code}, but no wire_error_envelope was captured "
+            f"Expected a {source} rejection with {code}, but no {source}_error_envelope was captured "
             f"(is_error={self.is_error}, payload={self.payload!r}). The operation either "
             "succeeded or errored before reaching a transport."
         )
         assert_envelope_shape(envelope, code, recovery=expected_recovery, message_substr=message_substr)
         if require_suggestion:
             suggestion = extract_wire_suggestion(envelope)
-            assert suggestion, f"Expected a non-empty suggestion in the {code} wire envelope: {envelope}"
+            assert suggestion, f"Expected a non-empty suggestion in the {code} {source} envelope: {envelope}"

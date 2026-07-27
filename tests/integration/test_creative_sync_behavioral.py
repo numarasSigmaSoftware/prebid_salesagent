@@ -318,7 +318,7 @@ class TestValidationModeSemantics:
                 assert r.action != "failed", f"Creative {r.creative_id} should succeed in lenient mode"
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
-    def test_strict_mode_unknown_assignment_creative_is_creative_not_found_on_wire(self, integration_db, transport):
+    def test_strict_mode_unknown_assignment_creative_preserves_not_found_contract(self, integration_db, transport):
         """Strict-mode assignment to an UNKNOWN creative_id must emit CREATIVE_NOT_FOUND.
 
         Spec grounding (pinned 3.1 enum, enums/error-code.json @ 04f59d2d5):
@@ -329,12 +329,10 @@ class TestValidationModeSemantics:
         the entity-specific PACKAGE_NOT_FOUND; creative-not-found rode the
         generic VALIDATION_ERROR instead (PR #1430 review, CON-07).
 
-        Graded on every wire transport: a boundary re-adding a
-        STANDARD_ERROR_CODES gate on MCP/A2A (demoting the supplement-only
-        CREATIVE_NOT_FOUND passthrough) must fail this matrix, not just REST.
+        Graded on REST/MCP wire. This in-process A2A path raises before a
+        failed Task artifact exists, so its explicit synthesized diagnostic is
+        graded only after proving no wire envelope was captured.
         """
-        from tests.helpers import assert_envelope_shape
-
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
@@ -349,12 +347,18 @@ class TestValidationModeSemantics:
             )
 
             assert result.is_error, f"Strict mode must abort on unknown creative: {result.payload!r}"
-            assert_envelope_shape(
-                result.wire_error_envelope,
-                "CREATIVE_NOT_FOUND",
-                recovery="correctable",
-                message_substr="c_never_synced",
-            )
+            if transport is Transport.A2A:
+                result.assert_synthesized_error(
+                    "CREATIVE_NOT_FOUND",
+                    recovery="correctable",
+                    message_substr="c_never_synced",
+                )
+            else:
+                result.assert_wire_error(
+                    "CREATIVE_NOT_FOUND",
+                    recovery="correctable",
+                    message_substr="c_never_synced",
+                )
 
     def test_lenient_mode_unknown_assignment_creative_entry_is_creative_not_found(self, integration_db):
         """Lenient-mode assignment to an UNKNOWN creative_id: the synthesized

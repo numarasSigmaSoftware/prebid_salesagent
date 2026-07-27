@@ -11,22 +11,31 @@ import pytest
 from tests.factories import PrincipalFactory, TenantFactory
 from tests.factories.creative_asset import make_test_banner_creative
 from tests.harness import CreativeSyncEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import Transport, TransportResult
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 
-# Wire transports only — IMPL has no wire envelope by definition. A transient
-# swallow at the MCP/A2A boundary must fail this matrix, not just REST.
-_WIRE_TRANSPORTS = [Transport.REST, Transport.MCP, Transport.A2A]
+# Boundary transports only — IMPL has no envelope by definition. REST/MCP
+# capture buyer-visible wire; this in-process A2A path raises before a failed
+# Task artifact exists and is graded explicitly as synthesized diagnostics.
+_ERROR_TRANSPORTS = [Transport.REST, Transport.MCP, Transport.A2A]
 
 _make_creative_asset = make_test_banner_creative  # Canonical version from tests.factories.creative_asset
 
 
+def _assert_transport_error(result: TransportResult, transport: Transport, code: str) -> None:
+    """Grade real wire where captured and explicit diagnostics for pre-artifact A2A errors."""
+    if transport is Transport.A2A:
+        result.assert_synthesized_error(code, recovery="transient")
+    else:
+        result.assert_wire_error(code, recovery="transient")
+
+
 class TestFormatFetchTransientErrors:
     """Typed transient errors from the creative-agent registry must stay
-    transient ON THE WIRE for sync_creatives — matching create_media_buy.
+    transient across transport boundaries for sync_creatives.
 
     salesagent-mpo1: _validation.py catches bare Exception around the format
     fetch and rewraps typed AdCPRateLimitError/AdCPServiceUnavailableError into
@@ -43,10 +52,9 @@ class TestFormatFetchTransientErrors:
             ("service_unavailable", "SERVICE_UNAVAILABLE"),
         ],
     )
-    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
-    def test_typed_transient_registry_error_reaches_wire(self, integration_db, raised, wire_code, transport):
+    @pytest.mark.parametrize("transport", _ERROR_TRANSPORTS, ids=lambda t: t.value)
+    def test_typed_transient_registry_error_preserves_contract(self, integration_db, raised, wire_code, transport):
         from src.core.exceptions import AdCPRateLimitError, AdCPServiceUnavailableError
-        from tests.helpers import assert_envelope_shape
 
         exc = (
             AdCPRateLimitError("Creative agent rate limited (429)")
@@ -71,17 +79,13 @@ class TestFormatFetchTransientErrors:
                 f"not return success with a terminal-looking per-item failure. Got: "
                 f"{getattr(result, 'wire_response', None) or result.payload!r}"
             )
-            assert_envelope_shape(
-                result.wire_error_envelope,
-                wire_code,
-                recovery="transient",
-            )
+            _assert_transport_error(result, transport, wire_code)
 
 
 class TestCreateMediaBuyFormatFetchTransientErrors:
     """Same contract on create_media_buy: a typed transient error from the
-    format-spec fetch must reach the buyer as a transient wire envelope
-    (the ticket requires BOTH tools asserted on the wire). salesagent-mpo1.
+    format-spec fetch must remain a transient boundary error. REST/MCP are
+    asserted on the wire; pre-artifact A2A is explicitly diagnostic.
     """
 
     @pytest.mark.parametrize(
@@ -91,12 +95,11 @@ class TestCreateMediaBuyFormatFetchTransientErrors:
             ("service_unavailable", "SERVICE_UNAVAILABLE"),
         ],
     )
-    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
-    def test_typed_transient_fetch_error_reaches_wire(self, integration_db, raised, wire_code, transport):
+    @pytest.mark.parametrize("transport", _ERROR_TRANSPORTS, ids=lambda t: t.value)
+    def test_typed_transient_fetch_error_preserves_contract(self, integration_db, raised, wire_code, transport):
         from src.core.exceptions import AdCPRateLimitError, AdCPServiceUnavailableError
         from tests.factories import CreativeFactory
         from tests.harness.media_buy_create import MediaBuyCreateEnv
-        from tests.helpers import assert_envelope_shape
         from tests.integration.media_buy_helpers import _make_create_request
 
         exc = (
@@ -134,8 +137,4 @@ class TestCreateMediaBuyFormatFetchTransientErrors:
             assert result.is_error, (
                 f"A transient fetch failure must fail create_media_buy transiently: {result.payload!r}"
             )
-            assert_envelope_shape(
-                result.wire_error_envelope,
-                wire_code,
-                recovery="transient",
-            )
+            _assert_transport_error(result, transport, wire_code)

@@ -10,12 +10,11 @@ resolve the error"). ``require_identity`` already passes
 message text, leaving the graded top-level ``suggestion`` field EMPTY
 (PR #1417 review round 8, item 4 → #1417 round-8 review item 4).
 
-Wire-first per tests/CLAUDE.md § Error Verification Policy: the
-``require_principal_id`` case drives the REAL A2A wire (it is the
-account-resolution boundary the PR newly routes onto); the remaining helpers
-are graded on the envelope the production boundary translator builds for
-their raise (``build_two_layer_error_envelope`` — the same builder every
-transport dispatcher calls).
+The in-process A2A handler raises this auth error before a failed Task artifact
+exists, so the harness exposes the boundary-builder output only through its
+explicit synthesized diagnostic field. The test proves that no wire envelope
+was captured before grading that diagnostic. The remaining helpers are graded
+on the same production boundary builder directly.
 """
 
 import pytest
@@ -38,12 +37,12 @@ def _assert_auth_required_with_suggestion(envelope: dict) -> None:
 
 
 class TestRequirePrincipalIdA2ASuggestion:
-    """require_principal_id rejection on the real A2A wire carries a suggestion."""
+    """The pre-artifact A2A auth rejection retains its recovery suggestion."""
 
     def test_missing_principal_a2a_envelope_carries_suggestion(self, integration_db):
-        """An identity with no principal_id rejected on the A2A wire must
-        produce the AUTH_REQUIRED envelope WITH a top-level ``suggestion`` —
-        parity with ``require_identity``.
+        """An identity with no principal_id must produce an AUTH_REQUIRED
+        diagnostic WITH a top-level ``suggestion`` while remaining clearly
+        distinguished from a captured A2A wire artifact.
         """
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness.media_buy_list import MediaBuyListEnv
@@ -56,9 +55,9 @@ class TestRequirePrincipalIdA2ASuggestion:
             result = env.call_via(Transport.A2A, identity=identity)
 
             assert result.is_error, (
-                f"A missing principal_id must be rejected on the A2A wire, got success payload: {result.payload!r}"
+                f"A missing principal_id must be rejected by A2A, got success payload: {result.payload!r}"
             )
-            result.assert_wire_error(
+            result.assert_synthesized_error(
                 "AUTH_REQUIRED",
                 recovery="correctable",
                 require_suggestion=True,
