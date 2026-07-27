@@ -2216,6 +2216,9 @@ class WebhookDeliveryRecord(Base):
     )
 
 
+DELIVERY_TASK_TYPE = "media_buy_delivery"
+
+
 class WebhookDeliveryLog(Base):
     """Tracks delivery report webhook sends for AdCP compliance.
 
@@ -2233,7 +2236,7 @@ class WebhookDeliveryLog(Base):
         String, ForeignKey("media_buys.media_buy_id", ondelete="CASCADE"), nullable=False
     )
     webhook_url: Mapped[str] = mapped_column(String, nullable=False)
-    task_type: Mapped[str] = mapped_column(String, nullable=False)  # "media_buy_delivery"
+    task_type: Mapped[str] = mapped_column(String, nullable=False)  # DELIVERY_TASK_TYPE
 
     # AdCP webhook metadata
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")

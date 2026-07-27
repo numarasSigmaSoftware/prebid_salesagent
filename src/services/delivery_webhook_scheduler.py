@@ -20,7 +20,7 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
 from sqlalchemy.orm import Session
 
 from src.core.database.database_session import get_db_session
-from src.core.database.models import MediaBuy
+from src.core.database.models import DELIVERY_TASK_TYPE, MediaBuy
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
@@ -240,7 +240,7 @@ class DeliveryWebhookScheduler:
             re-send a fresh periodic report on demand.
         """
         if is_final:
-            if delivery_repo.has_successful_final(media_buy.media_buy_id, task_type="media_buy_delivery"):
+            if delivery_repo.has_successful_final(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE):
                 logger.info("Final delivery webhook already sent for media buy %s – skipping", media_buy.media_buy_id)
                 return True
             return False
@@ -248,7 +248,7 @@ class DeliveryWebhookScheduler:
             return False
         one_day_ago = datetime.now(UTC) - timedelta(hours=24)
         existing_log = delivery_repo.get_recent_successful_log(
-            media_buy.media_buy_id, task_type="media_buy_delivery", since=one_day_ago
+            media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE, since=one_day_ago
         )
         if existing_log:
             logger.info(
@@ -436,7 +436,7 @@ class DeliveryWebhookScheduler:
         # propagates and aborts this send loudly: a quiet fallback to 1
         # would put an already-consumed sequence on the wire.
         sequence_number = (
-            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type="media_buy_delivery") + 1
+            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
         )
 
         # Set webhook-specific metadata directly on the response model (#1570).
@@ -534,7 +534,7 @@ class DeliveryWebhookScheduler:
         # Renaming the metadata key is not safe without migrating DB records and
         # updating all 6 protocol_webhook_service guard checks.
         metadata = {
-            "task_type": "media_buy_delivery",
+            "task_type": DELIVERY_TASK_TYPE,
             "tenant_id": media_buy.tenant_id,
             "principal_id": media_buy.principal_id,
             "media_buy_id": media_buy.media_buy_id,

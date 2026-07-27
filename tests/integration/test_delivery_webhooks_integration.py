@@ -346,10 +346,15 @@ async def test_signed_reporting_webhook_puts_a_bearer_header_on_the_wire(integra
     with mock_webhook_post(scheduler) as mock_post:
         await scheduler._send_reports()
 
-        assert mock_post.call_count == 1
-        headers = mock_post.call_args.kwargs["headers"]
-        assert headers.get("Authorization") == "Bearer test-webhook-credential", (
-            f"signed reporting_webhook must produce a Bearer Authorization header, got {headers!r}"
+        mock_post.assert_called_once_with(
+            SIGNED_DAILY_REPORTING_WEBHOOK["url"],
+            json=ANY,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "AdCP-Sales-Agent/1.0",
+                "Authorization": "Bearer test-webhook-credential",
+            },
+            timeout=10.0,
         )
 
 

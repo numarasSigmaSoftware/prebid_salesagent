@@ -22,6 +22,7 @@ from unittest.mock import ANY
 import pytest
 from sqlalchemy import inspect
 
+from src.core.database.models import DELIVERY_TASK_TYPE
 from src.core.exceptions import (
     AdCPAuthenticationError,
     AdCPValidationError,
@@ -29,6 +30,7 @@ from src.core.exceptions import (
 from src.core.schemas import GetMediaBuyDeliveryResponse
 from tests.harness.delivery_poll import mock_send_notification
 from tests.helpers.delivery_assertions import (
+    DetachedPushConfigMatcher,
     assert_next_expected_at_shape,
     assert_omits_webhook_only_fields,
     assert_partial_data_pairing,
@@ -41,7 +43,7 @@ if TYPE_CHECKING:  # annotations only — the helpers below keep their lazy runt
 
     from sqlalchemy.orm import Session
 
-    from src.core.database.models import MediaBuy
+    from src.core.database.models import MediaBuy, Principal, PushNotificationConfig, Tenant
     from src.core.database.repositories.delivery import DeliveryRepository
     from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
     from tests.harness.delivery_poll import DeliveryPollEnv
@@ -64,9 +66,9 @@ def _serving_webhook_buy(
     *,
     flight: str = "live",
     mb_id: str | None = None,
-    tenant: Any = None,
-    principal: Any = None,
-) -> Any:
+    tenant: Tenant | None = None,
+    principal: Principal | None = None,
+) -> MediaBuy:
     """Create a serving buy (tenant t1 / principal p1) with a daily reporting_webhook + adapter data.
 
     ``flight`` selects the window so the scheduler derives the right
@@ -101,6 +103,31 @@ def _serving_webhook_buy(
     return buy
 
 
+def _seed_registered_push_config(
+    env: DeliveryPollEnv,
+    *,
+    config_id: str,
+    token: str,
+    url: str = DAILY_REPORTING_WEBHOOK["url"],
+) -> tuple[Tenant, Principal, PushNotificationConfig]:
+    """Seed one registered Bearer push config for the env's tenant/principal."""
+    from tests.factories import PushNotificationConfigFactory
+
+    tenant, principal = env.setup_default_data()
+    config = cast(
+        "PushNotificationConfig",
+        PushNotificationConfigFactory(
+            tenant=tenant,
+            principal=principal,
+            id=config_id,
+            url=url,
+            authentication_type="Bearer",
+            authentication_token=token,
+        ),
+    )
+    return cast("Tenant", tenant), cast("Principal", principal), config
+
+
 def _seed_delivery_log(
     env: DeliveryPollEnv,
     buy: MediaBuy,
@@ -133,7 +160,7 @@ def _seed_delivery_log(
         principal_id="p1",
         media_buy_id=buy.media_buy_id,
         webhook_url=DAILY_REPORTING_WEBHOOK["url"],
-        task_type="media_buy_delivery",
+        task_type=DELIVERY_TASK_TYPE,
         status=status,
         **optional,
     )
@@ -3767,33 +3794,6 @@ class TestStartTimeFallbackForStatus:
 # ---------------------------------------------------------------------------
 
 
-class _PushConfigMatcher:
-    """Matcher pinning the push config passed to the sender, by identity + credential.
-
-    A count-less ``.await_args`` read can't tell a single correct send from a
-    second, duplicate send with the same last call — this pairs with an
-    ``assert_awaited_once_with`` so count and argument shape are verified
-    together, the same atomic-assertion shape this file already uses via
-    ``_MediaBuyIdMatcher``/``_SessionMatcher`` in test_delivery_webhooks_force.py.
-    """
-
-    def __init__(self, config_id: str, authentication_token: str | None) -> None:
-        self._config_id = config_id
-        self._authentication_token = authentication_token
-
-    def __eq__(self, other: object) -> bool:
-        from src.core.database.models import PushNotificationConfig
-
-        return (
-            isinstance(other, PushNotificationConfig)
-            and other.id == self._config_id
-            and other.authentication_token == self._authentication_token
-        )
-
-    def __repr__(self) -> str:
-        return f"PushNotificationConfig(id={self._config_id!r}, authentication_token={self._authentication_token!r})"
-
-
 @pytest.mark.requires_db
 class TestRegisteredPushConfigLookup:
     """The lookup arm of the scheduler's push-config decision.
@@ -3814,20 +3814,10 @@ class TestRegisteredPushConfigLookup:
     def test_lookup_is_scoped_to_the_repository_tenant(self, integration_db):
         """A row owned by another tenant is invisible, even on an exact URL match."""
         from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
-        from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
         with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            owner = TenantFactory(tenant_id="t1")
-            principal = PrincipalFactory(tenant=owner, principal_id="p1")
-            PushNotificationConfigFactory(
-                tenant=owner,
-                principal=principal,
-                id="cfg-owned",
-                url=DAILY_REPORTING_WEBHOOK["url"],
-                authentication_type="Bearer",
-                authentication_token="owner-secret",
-            )
+            _seed_registered_push_config(env, config_id="cfg-owned", token="owner-secret")
 
             session = env.get_session()
 
@@ -3864,19 +3854,13 @@ class TestRegisteredPushConfigLookup:
         lookup to return None reddens this.
         """
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
-        from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
         with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            tenant = TenantFactory(tenant_id="t1")
-            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            PushNotificationConfigFactory(
-                tenant=tenant,
-                principal=principal,
-                id="cfg-registered",
-                url=DAILY_REPORTING_WEBHOOK["url"],
-                authentication_type="Bearer",
-                authentication_token="registered-secret",
+            tenant, principal, _config = _seed_registered_push_config(
+                env,
+                config_id="cfg-registered",
+                token="registered-secret",
             )
             # The buy carries an UNSIGNED reporting_webhook for the same URL, so a
             # token on the wire can only have come from the registered row.
@@ -3892,8 +3876,13 @@ class TestRegisteredPushConfigLookup:
             # .await_args would ship a regressed duplicate send green as long as
             # the LAST call still carried the registered config.
             mock_send.assert_awaited_once_with(
-                push_notification_config=_PushConfigMatcher(
-                    config_id="cfg-registered", authentication_token="registered-secret"
+                push_notification_config=DetachedPushConfigMatcher(
+                    tenant_id="t1",
+                    principal_id="p1",
+                    url=DAILY_REPORTING_WEBHOOK["url"],
+                    config_id="cfg-registered",
+                    authentication_type="Bearer",
+                    authentication_token="registered-secret",
                 ),
                 payload=ANY,
                 metadata=ANY,
