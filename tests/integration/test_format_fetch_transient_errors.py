@@ -25,9 +25,15 @@ _ERROR_TRANSPORTS = [Transport.REST, Transport.MCP, Transport.A2A]
 _make_creative_asset = make_test_banner_creative  # Canonical version from tests.factories.creative_asset
 
 
-def _assert_transport_error(result: TransportResult, transport: Transport, code: str) -> None:
-    """Grade real wire where captured and explicit diagnostics for pre-artifact A2A errors."""
-    if transport is Transport.A2A:
+def _assert_transport_error(
+    result: TransportResult,
+    transport: Transport,
+    code: str,
+    *,
+    a2a_has_wire: bool,
+) -> None:
+    """Grade the explicitly expected envelope source for each A2A path."""
+    if transport is Transport.A2A and not a2a_has_wire:
         result.assert_synthesized_error(code, recovery="transient")
     else:
         result.assert_wire_error(code, recovery="transient")
@@ -79,13 +85,14 @@ class TestFormatFetchTransientErrors:
                 f"not return success with a terminal-looking per-item failure. Got: "
                 f"{getattr(result, 'wire_response', None) or result.payload!r}"
             )
-            _assert_transport_error(result, transport, wire_code)
+            _assert_transport_error(result, transport, wire_code, a2a_has_wire=False)
 
 
 class TestCreateMediaBuyFormatFetchTransientErrors:
     """Same contract on create_media_buy: a typed transient error from the
-    format-spec fetch must remain a transient boundary error. REST/MCP are
-    asserted on the wire; pre-artifact A2A is explicitly diagnostic.
+    format-spec fetch must remain a transient boundary error. Unlike the
+    pre-artifact sync_creatives path above, create_media_buy emits a real
+    failed-Task A2A artifact, so all three transports are asserted on the wire.
     """
 
     @pytest.mark.parametrize(
@@ -137,4 +144,4 @@ class TestCreateMediaBuyFormatFetchTransientErrors:
             assert result.is_error, (
                 f"A transient fetch failure must fail create_media_buy transiently: {result.payload!r}"
             )
-            _assert_transport_error(result, transport, wire_code)
+            _assert_transport_error(result, transport, wire_code, a2a_has_wire=True)
