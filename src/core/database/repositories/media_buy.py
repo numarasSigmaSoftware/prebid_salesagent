@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, joinedload
 from src.core.database.models import DELIVERY_TASK_TYPE, MediaBuy, MediaPackage, WebhookDeliveryLog
 
 if TYPE_CHECKING:
-    from adcp.types import ContextObject
+    from adcp.types import ContextObject, ReportingWebhook
 
 
 class MediaBuyRepository:
@@ -527,6 +527,27 @@ class MediaBuyRepository:
             if not hasattr(media_buy, key):
                 raise ValueError(f"MediaBuy has no attribute {key!r}")
             setattr(media_buy, key, value)
+        self._session.flush()
+        return media_buy
+
+    def update_reporting_webhook(
+        self,
+        media_buy_id: str,
+        reporting_webhook: ReportingWebhook,
+    ) -> MediaBuy | None:
+        """Persist a replacement reporting webhook in the media buy request snapshot.
+
+        ``raw_request`` is a JSON column, so assign a copied mapping rather than
+        mutating the existing dict in place. This makes SQLAlchemy's change
+        tracking deterministic and preserves every unrelated request field.
+        """
+        media_buy = self.get_by_id(media_buy_id)
+        if media_buy is None:
+            return None
+
+        raw_request = dict(media_buy.raw_request or {})
+        raw_request["reporting_webhook"] = reporting_webhook.model_dump(mode="json", exclude_none=True)
+        media_buy.raw_request = raw_request
         self._session.flush()
         return media_buy
 

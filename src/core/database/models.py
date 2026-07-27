@@ -2251,7 +2251,7 @@ class WebhookDeliveryLog(Base):
 
     # Retry tracking
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    status: Mapped[str] = mapped_column(String, nullable=False)  # "success", "failed", "retrying"
+    status: Mapped[str] = mapped_column(String, nullable=False)  # "pending", "success", "failed", "retrying"
     http_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

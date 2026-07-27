@@ -1702,6 +1702,11 @@ def when_scheduler_sends_report(ctx: dict, mb_id: str) -> None:
 
     env = ctx["env"]
     buy = ctx["scheduler_buy"]
+    requested_media_buy_id = _resolve_media_buy_id(ctx, mb_id)
+    assert buy.media_buy_id == requested_media_buy_id, (
+        f"Scheduler fixture selected media buy {buy.media_buy_id!r}, "
+        f"but the scenario requested {requested_media_buy_id!r}"
+    )
     try:
         ctx["scheduler_wire"] = asyncio.run(env.send_delivery_webhook(buy))
     except Exception as exc:

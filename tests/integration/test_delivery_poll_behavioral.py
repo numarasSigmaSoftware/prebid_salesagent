@@ -841,9 +841,10 @@ class TestWebhookSequenceNumber:
     async def test_retry_reuses_idempotency_key_until_sequence_succeeds(self, integration_db):
         """A later scheduler invocation retries the same sequence with the same key.
 
-        The first invocation exhausts all three HTTP attempts. The next
-        invocation repeats sequence 1 and must reuse its key; only after that
-        delivery succeeds may sequence 2 receive a new key.
+        The first invocation exhausts all three HTTP attempts on network
+        timeouts. The next invocation repeats sequence 1 and must recover its
+        durably reserved key; only after that delivery succeeds may sequence 2
+        receive a new key.
 
         Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-05
         """
@@ -853,9 +854,6 @@ class TestWebhookSequenceNumber:
         from tests.harness import DeliveryPollEnv
         from tests.harness.delivery_poll import mock_webhook_post
 
-        failed = requests.Response()
-        failed.status_code = 503
-        failed.url = DAILY_REPORTING_WEBHOOK["url"]
         succeeded = requests.Response()
         succeeded.status_code = 200
         succeeded.url = DAILY_REPORTING_WEBHOOK["url"]
@@ -871,7 +869,13 @@ class TestWebhookSequenceNumber:
 
             with mock_webhook_post(
                 scheduler,
-                responses=[failed, failed, failed, succeeded, succeeded],
+                responses=[
+                    requests.Timeout("network timeout 1"),
+                    requests.Timeout("network timeout 2"),
+                    requests.Timeout("network timeout 3"),
+                    succeeded,
+                    succeeded,
+                ],
                 skip_retry_delays=True,
             ) as mock_post:
                 with pytest.raises(RuntimeError, match="webhook send failed"):

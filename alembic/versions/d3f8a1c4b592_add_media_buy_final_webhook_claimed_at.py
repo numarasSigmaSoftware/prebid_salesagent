@@ -1,7 +1,7 @@
 """add media_buys.final_webhook_claimed_at (best-effort final-webhook claim)
 
 Serializes a buy's one FINAL delivery webhook across concurrent scheduler/manual
-workers (#1575). The delivery scheduler atomically claims the final via a
+workers. The delivery scheduler atomically claims the final via a
 conditional UPDATE on this column before the outbound POST, so only one worker
 sends; a stale claim (crashed worker, older than the lease) self-heals on a later
 batch. NULL until a final is claimed. The residual crash-after-POST duplicate

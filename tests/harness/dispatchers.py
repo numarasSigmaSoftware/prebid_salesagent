@@ -4,10 +4,11 @@ Each dispatcher calls the env's transport-specific method and wraps the
 result in a TransportResult. The env subclass provides the actual call logic;
 the dispatcher only handles result wrapping and error capture.
 
-On error, dispatchers capture the wire error envelope (the raw two-layer dict
-the buyer would see) alongside the reconstructed exception.  New tests should
-assert on ``result.wire_error_envelope`` via ``assert_envelope_shape()`` — see
-``tests/CLAUDE.md`` § Error Verification Policy.
+On error, dispatchers preserve a real wire envelope when the transport emitted
+one. IMPL has no wire, and an A2A failure raised before Task/Artifact assembly
+has no boundary artifact; those diagnostic-only paths expose a separate
+``synthesized_error_envelope``. See ``tests/CLAUDE.md`` § Error Verification
+Policy before treating an envelope assertion as transport-boundary coverage.
 
 Usage (internal — called by BaseTestEnv.call_via)::
 
@@ -30,20 +31,21 @@ if TYPE_CHECKING:
 def _envelope_from_adcp_error(exc: Exception) -> dict[str, Any] | None:
     """Build a SYNTHESIZED envelope from an AdCPError instance.
 
-    Used by ImplDispatcher to populate the separate
-    ``synthesized_error_envelope`` field — IMPL has no wire by definition
-    and ``wire_error_envelope`` is reserved for real wire bytes captured
-    by REST/MCP/A2A. Production code uses the same
+    Used by ImplDispatcher, and as an explicit A2A fallback when an exception
+    occurs before a failed Task artifact exists, to populate the separate
+    ``synthesized_error_envelope`` field. ``wire_error_envelope`` is reserved
+    for real wire bytes captured by REST/MCP/A2A. Production code uses the same
     ``build_two_layer_error_envelope`` helper at the boundary, so the
     synthesized envelope matches what production would emit for the same
     exception. It does NOT verify that a regression in
     ``build_two_layer_error_envelope`` actually reaches the wire.
 
-    A2A and REST tests asserting on ``result.wire_error_envelope`` see
+    Transport tests asserting on a non-None ``result.wire_error_envelope`` see
     REAL wire bytes:
-        - A2A: the artifact DataPart, attached to the reconstructed
-          ``AdCPError`` as ``_wire_error_envelope`` by
-          ``tests.harness._base._envelope_to_adcp_error``.
+        - A2A: the artifact DataPart, when one was assembled, attached to the
+          reconstructed ``AdCPError`` as ``_wire_error_envelope`` by
+          ``tests.harness._base._envelope_to_adcp_error``. Pre-artifact A2A
+          failures expose only the synthesized diagnostic field.
         - REST: the HTTP response body, captured directly by RestDispatcher.
         - MCP: the JSON string in ``ToolError``, parsed by McpDispatcher.
     """

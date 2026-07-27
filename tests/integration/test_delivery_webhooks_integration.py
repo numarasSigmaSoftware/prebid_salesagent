@@ -235,12 +235,14 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
 
         # Extract from payload
         task_id = payload.task_id
+        wire_task_type = payload.task_type
         status = payload.status
         result = payload.result
 
         # Webhook should have been sent exactly once
         assert mock_send_notification.await_count == 1
         assert task_type == "media_buy_delivery"
+        assert str(wire_task_type.value) == "media_buy_delivery"
         assert extracted_tenant_id == tenant_id
         assert extracted_principal_id == principal_id
         assert extracted_media_buy_id == media_buy_id

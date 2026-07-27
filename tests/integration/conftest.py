@@ -612,9 +612,7 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
             if process.poll() is not None:
                 stdout, stderr = _server_logs()
                 _close_server_logs()
-                raise RuntimeError(
-                    f"MCP server process died unexpectedly.\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-                )
+                raise RuntimeError(f"MCP server process died unexpectedly.\nSTDOUT: {stdout}\nSTDERR: {stderr}")
             time.sleep(0.3)
 
     if not server_ready:
@@ -627,8 +625,7 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
         stdout, stderr = _server_logs()
         _close_server_logs()
         raise RuntimeError(
-            f"MCP server failed to start on port {port} within {max_wait}s.\n"
-            f"STDOUT: {stdout}\nSTDERR: {stderr}"
+            f"MCP server failed to start on port {port} within {max_wait}s.\nSTDOUT: {stdout}\nSTDERR: {stderr}"
         )
 
     # Return server info

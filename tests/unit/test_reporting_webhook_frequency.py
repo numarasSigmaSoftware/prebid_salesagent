@@ -28,23 +28,25 @@ def _product(
     *,
     supports_webhooks: bool = True,
     frequencies: tuple[str, ...] = ("daily",),
+    metrics: tuple[str, ...] = ("impressions", "spend"),
 ) -> SimpleNamespace:
     return SimpleNamespace(
         product_id=product_id,
         reporting_capabilities={
             "supports_webhooks": supports_webhooks,
             "available_reporting_frequencies": list(frequencies),
+            "available_metrics": list(metrics),
         },
     )
 
 
 def test_product_validator_accepts_intersection() -> None:
-    webhook = SimpleNamespace(reporting_frequency="daily")
+    webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=["impressions"])
     validate_reporting_webhook_product_support(webhook, [_product("p1"), _product("p2")])
 
 
 def test_product_validator_rejects_when_only_one_selected_product_supports_frequency() -> None:
-    webhook = SimpleNamespace(reporting_frequency="daily")
+    webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=None)
 
     with pytest.raises(AdCPCapabilityNotSupportedError, match="p-monthly"):
         validate_reporting_webhook_product_support(
@@ -62,7 +64,22 @@ def test_product_validator_rejects_when_only_one_selected_product_supports_frequ
     ],
 )
 def test_product_validator_rejects_unsupported_product(product: SimpleNamespace, message: str) -> None:
-    webhook = SimpleNamespace(reporting_frequency="daily")
+    webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=None)
 
     with pytest.raises(AdCPCapabilityNotSupportedError, match=message):
         validate_reporting_webhook_product_support(webhook, [product])
+
+
+def test_product_validator_rejects_metric_missing_from_one_selected_product() -> None:
+    webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=["impressions", "clicks"])
+
+    with pytest.raises(AdCPCapabilityNotSupportedError, match=r"p-no-clicks: clicks") as exc_info:
+        validate_reporting_webhook_product_support(
+            webhook,
+            [
+                _product("p-all", metrics=("impressions", "clicks")),
+                _product("p-no-clicks", metrics=("impressions",)),
+            ],
+        )
+
+    assert exc_info.value.field == "reporting_webhook.requested_metrics"

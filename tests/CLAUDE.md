@@ -317,9 +317,12 @@ use `isinstance()` and `.error_code`. This reconstruction is **lossy** — e.g.,
 the wire, so reconstruction always produces `AdCPAuthenticationError`. Tests that assert
 on reconstructed exceptions verify the reconstruction layer, not the actual wire shape.
 
-**New error-path tests MUST assert on the wire error envelope** as the primary authority.
-The wire envelope is the buyer-facing contract — it is what the AdCP spec defines and
-what storyboard runners parse.
+**New error-path tests MUST assert on the real wire error envelope** as the primary
+authority whenever the exercised boundary emits one. The wire envelope is the
+buyer-facing contract — it is what the AdCP spec defines and what storyboard runners
+parse. A failure raised before A2A Task/Artifact assembly has no A2A wire artifact;
+its separate synthesized envelope is useful for diagnostics but does not grade the
+A2A boundary.
 
 ### How to assert on the wire envelope
 
@@ -369,16 +372,17 @@ Existing tests (~660 call sites, ~80 BDD steps) use `ctx["error"]` or `result.er
 (reconstructed exceptions). These are NOT broken — they continue to work. Migration is
 incremental:
 
-1. **New error tests**: MUST use `result.wire_error_envelope` + `assert_envelope_shape()`
+1. **New error tests**: MUST use `result.wire_error_envelope` + `assert_envelope_shape()` when a boundary artifact exists. Pre-artifact A2A tests must explicitly use `synthesized_error_envelope` and must not claim A2A wire coverage.
 2. **Existing tests**: Migrate when touched for other reasons (boy-scout rule)
 3. **BDD Then steps**: Add wire-envelope variants alongside existing exception-based steps
 
 ### TransportResult.wire_error_envelope
 
 `TransportResult` exposes `wire_error_envelope: dict | None` — the two-layer
-error envelope captured at the transport boundary. Populated by all
-dispatchers on error; `None` on success. This is the canonical field for
-error verification.
+error envelope captured at the transport boundary. It is populated only when
+the dispatcher observes a real boundary artifact and is `None` on success,
+IMPL, or a pre-artifact transport failure. This is the canonical field for
+wire error verification.
 
 **Authenticity per transport (matters for what regressions the field catches):**
 
@@ -386,7 +390,7 @@ error verification.
 |-----------|-----------------------------------------------------------------------|-----------------------------------------------------------------------|-----------------------------------------------------------|
 | REST      | HTTP response body (real wire)                                        | `None`                                                                | exception handler + envelope serialization + HTTP framing |
 | MCP       | JSON string in `ToolError`, else the real envelope stashed on the reconstructed error by `_envelope_to_adcp_error` — never synthesized | Built via `build_two_layer_error_envelope` against the caught error   | `_handle_tool_exception` + `build_two_layer_error_envelope` |
-| A2A       | Failed Task's artifact DataPart, stashed by `_envelope_to_adcp_error` | `None`                                                                | `on_message_send` + `_serialize_for_a2a` + envelope build |
+| A2A       | Failed Task's artifact DataPart, stashed by `_envelope_to_adcp_error`; `None` if the failure occurs before artifact assembly | Built from the caught `AdCPError` only as an explicit pre-artifact fallback | Full boundary path only when `wire_error_envelope` is non-None |
 | IMPL      | `None` (no wire by definition)                                        | Built via `build_two_layer_error_envelope` against the caught error   | `build_two_layer_error_envelope` only                     |
 
 IMPL has no wire. Use `result.synthesized_error_envelope` to see what
@@ -394,8 +398,8 @@ production WOULD emit at the boundary for the same exception, but be aware
 that field cannot catch a regression in the production boundary translator
 — both IMPL and production call the same envelope builder, so the
 synthesized value moves in lockstep with whatever the builder produces.
-Tests that need to catch real wire-shape regressions must run on REST,
-MCP, or A2A — only those transports observe actual wire bytes.
+Tests that need to catch real wire-shape regressions must run on REST or MCP,
+or on an A2A path that actually produces a non-None `wire_error_envelope`.
 
 `result.error` (reconstructed exception) remains available for backward
 compatibility. Reconstruction is lossy — assert on `wire_error_envelope`

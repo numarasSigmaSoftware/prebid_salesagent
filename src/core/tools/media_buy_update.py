@@ -53,6 +53,7 @@ from src.core.exceptions import (
     AdCPCreativeRejectedError,
     AdCPGoneError,
     AdCPInvalidRequestError,
+    AdCPMediaBuyNotFoundError,
     AdCPValidationError,
 )
 from src.core.tool_context import ToolContext
@@ -166,6 +167,28 @@ def _requested_actions(req: UpdateMediaBuyRequest) -> list[str]:
     if req.packages:
         actions.append("update_packages")
     return actions
+
+
+def _persist_reporting_webhook_update(
+    repository: MediaBuyRepository,
+    req: UpdateMediaBuyRequest,
+) -> None:
+    """Persist an acknowledged reporting-webhook replacement exactly once.
+
+    Validation happens before dry-run/approval branching. Persistence belongs
+    only on completed update paths: dry runs and submitted approval requests
+    must leave the active channel unchanged until the update is actually
+    applied.
+    """
+    if req.reporting_webhook is None:
+        return
+    updated = repository.update_reporting_webhook(req.media_buy_id, req.reporting_webhook)
+    if updated is None:
+        raise AdCPMediaBuyNotFoundError(
+            f"Media buy '{req.media_buy_id}' not found while persisting reporting_webhook",
+            suggestion="Refresh the media buy and retry the update.",
+            context=req.context,
+        )
 
 
 def _normalize_creative_agent_url(url: str | None) -> str | None:
@@ -761,6 +784,7 @@ def _update_media_buy_impl(
                         valid_actions=_post_action_actions,
                         errors=property_list_unsupported_advisories(req.packages, adapter),
                     )
+                    _persist_reporting_webhook_update(uow.media_buys, req)
                     # Log successful update_media_buy (pause/resume)
                     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
                     audit_logger.log_operation(
@@ -1388,6 +1412,8 @@ def _update_media_buy_impl(
                     )
                     logger.warning("GAM sync NOT implemented - GAM still has old dates")
 
+            _persist_reporting_webhook_update(uow.media_buys, req)
+
             # Create ObjectWorkflowMapping to link media buy update to workflow step
             # This enables webhook delivery when the update completes
             mapping = ObjectWorkflowMapping(
@@ -1431,6 +1457,7 @@ def _update_media_buy_impl(
                     "has_budget_update": req.budget is not None,
                     "has_pause_update": req.paused is not None,
                     "has_packages_update": req.packages is not None and len(req.packages) > 0,
+                    "has_reporting_webhook_update": req.reporting_webhook is not None,
                 },
             )
 

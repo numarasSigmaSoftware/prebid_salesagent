@@ -515,15 +515,9 @@ class DeliveryWebhookScheduler:
             authentication_token=auth_token,
         )
 
-        # Wire vs internal task_type distinction:
-        # - metadata["task_type"] = "media_buy_delivery" -- internal logging/dedup label
-        #   used by protocol_webhook_service guards and WebhookDeliveryLog queries.
-        # - SDK task_type = "update_media_buy" -- AdCP spec TaskType enum value
-        #   for the wire payload (delivery reports are status updates on media buys).
-        # These are intentionally different: the internal label predates the SDK enum
-        # and is used for DB filtering, while the wire value must be spec-compliant.
-        # Renaming the metadata key is not safe without migrating DB records and
-        # updating all 6 protocol_webhook_service guard checks.
+        # One task label spans the AdCP wire envelope and internal delivery-log
+        # metadata. AdCP 3.1.1 defines ``media_buy_delivery`` specifically for
+        # persistent reporting-webhook events.
         metadata = {
             "task_type": DELIVERY_TASK_TYPE,
             "tenant_id": media_buy.tenant_id,
@@ -531,16 +525,14 @@ class DeliveryWebhookScheduler:
             "media_buy_id": media_buy.media_buy_id,
         }
 
-        # SDK 6.6.0: returns McpWebhookPayload directly; 3rd arg is task_type.
-        # Delivery reports are status updates on existing media buys,
-        # so we use update_media_buy as the canonical task type.
+        # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
         # Serialize via webhook_payload(): the schema scopes aggregated_totals to
         # "API responses (get_media_buy_delivery), not webhook notifications", and
         # this is the exclusion seam (it also drops None fields, preserving the
         # final-omits-next_expected_at contract).
         media_buy_delivery_payload = create_mcp_webhook_payload(
             task_id=media_buy.media_buy_id,
-            task_type="update_media_buy",
+            task_type=DELIVERY_TASK_TYPE,
             result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
             status=AdcpTaskStatus.completed,
             token=reporting_webhook.get("token"),

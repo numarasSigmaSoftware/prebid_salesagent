@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -21,7 +22,11 @@ def _hourly_webhook() -> dict[str, Any]:
     return {**DAILY_REPORTING_WEBHOOK, "reporting_frequency": "hourly"}
 
 
-def _assert_unsupported_frequency(result: Any, frequency: str) -> None:
+def _requested_metrics_webhook(*metrics: str) -> dict[str, Any]:
+    return {**DAILY_REPORTING_WEBHOOK, "requested_metrics": list(metrics)}
+
+
+def _assert_unsupported_capability(result: Any, message: str, suggestion: str) -> None:
     from tests.helpers import assert_envelope_shape
 
     assert result.is_error, f"Expected error, got payload: {result.payload}"
@@ -29,10 +34,10 @@ def _assert_unsupported_frequency(result: Any, frequency: str) -> None:
         result.wire_error_envelope,
         "UNSUPPORTED_FEATURE",
         recovery="correctable",
-        message_substr=frequency,
+        message_substr=message,
     )
     errors = (result.wire_error_envelope or {}).get("errors", [])
-    assert errors and "daily" in (errors[0].get("suggestion") or "").lower()
+    assert errors and suggestion in (errors[0].get("suggestion") or "").lower()
 
 
 class TestCreateReportingWebhookFrequencyWire:
@@ -76,9 +81,14 @@ class TestCreateReportingWebhookFrequencyWire:
             req=self._request(product, pricing_option, _hourly_webhook()),
         )
 
-        _assert_unsupported_frequency(result, "hourly")
+        _assert_unsupported_capability(result, "hourly", "daily")
 
-    def test_product_without_webhook_support_is_rejected(self, env_with_product) -> None:
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_product_without_webhook_support_is_rejected(
+        self,
+        env_with_product,
+        transport: Transport,
+    ) -> None:
         env, product, pricing_option = env_with_product
         product.reporting_capabilities = build_daily_reporting_capabilities(
             supports_webhooks=False,
@@ -86,11 +96,26 @@ class TestCreateReportingWebhookFrequencyWire:
         )
 
         result = env.call_via(
-            Transport.REST,
+            transport,
             req=self._request(product, pricing_option, dict(DAILY_REPORTING_WEBHOOK)),
         )
 
-        _assert_unsupported_frequency(result, "daily")
+        _assert_unsupported_capability(result, "daily", "daily")
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_unavailable_requested_metric_has_typed_wire_error(
+        self,
+        env_with_product,
+        transport: Transport,
+    ) -> None:
+        env, product, pricing_option = env_with_product
+
+        result = env.call_via(
+            transport,
+            req=self._request(product, pricing_option, _requested_metrics_webhook("clicks")),
+        )
+
+        _assert_unsupported_capability(result, "clicks", "requested_metrics")
 
 
 class TestUpdateReportingWebhookFrequencyWire:
@@ -125,9 +150,14 @@ class TestUpdateReportingWebhookFrequencyWire:
             req=self._request(media_buy, _hourly_webhook()),
         )
 
-        _assert_unsupported_frequency(result, "hourly")
+        _assert_unsupported_capability(result, "hourly", "daily")
 
-    def test_product_without_webhook_support_is_rejected(self, env_with_media_buy) -> None:
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_product_without_webhook_support_is_rejected(
+        self,
+        env_with_media_buy,
+        transport: Transport,
+    ) -> None:
         env, media_buy, product = env_with_media_buy
         product.reporting_capabilities = build_daily_reporting_capabilities(
             supports_webhooks=False,
@@ -135,8 +165,102 @@ class TestUpdateReportingWebhookFrequencyWire:
         )
 
         result = env.call_via(
-            Transport.REST,
+            transport,
             req=self._request(media_buy, dict(DAILY_REPORTING_WEBHOOK)),
         )
 
-        _assert_unsupported_frequency(result, "daily")
+        _assert_unsupported_capability(result, "daily", "daily")
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_unavailable_requested_metric_has_typed_wire_error(
+        self,
+        env_with_media_buy,
+        transport: Transport,
+    ) -> None:
+        env, media_buy, _product = env_with_media_buy
+
+        result = env.call_via(
+            transport,
+            req=self._request(media_buy, _requested_metrics_webhook("clicks")),
+        )
+
+        _assert_unsupported_capability(result, "clicks", "requested_metrics")
+
+    @pytest.mark.parametrize(
+        "existing_webhook",
+        [
+            None,
+            {**DAILY_REPORTING_WEBHOOK, "url": "https://old.example.com/reporting"},
+        ],
+        ids=["none-to-webhook", "replace-webhook"],
+    )
+    @pytest.mark.asyncio
+    async def test_completed_update_persists_webhook_for_scheduler_readback(
+        self,
+        env_with_media_buy,
+        existing_webhook: dict[str, Any] | None,
+    ) -> None:
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        env, media_buy, _product = env_with_media_buy
+        original_raw_request = {
+            "brand": {"domain": "preserved.example.com"},
+            **({"reporting_webhook": existing_webhook} if existing_webhook is not None else {}),
+        }
+        media_buy.raw_request = original_raw_request
+        env._commit_factory_data()
+        replacement = {**DAILY_REPORTING_WEBHOOK, "url": "https://new.example.com/reporting"}
+
+        result = env.call_via(
+            Transport.REST,
+            req=self._request(media_buy, replacement),
+        )
+
+        assert not result.is_error, result.payload
+        session = env.get_session()
+        session.expire_all()
+        persisted = MediaBuyRepository(session, media_buy.tenant_id).get_by_id(media_buy.media_buy_id)
+        assert persisted is not None
+        assert persisted.raw_request["brand"] == {"domain": "preserved.example.com"}
+        assert persisted.raw_request["reporting_webhook"] == replacement
+
+        scheduler = DeliveryWebhookScheduler()
+        with patch.object(
+            scheduler,
+            "_send_report_for_media_buy",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_send:
+            triggered = await scheduler.trigger_report_for_media_buy_by_id(
+                media_buy.media_buy_id,
+                media_buy.tenant_id,
+            )
+
+        assert triggered is True
+        mock_send.assert_awaited_once_with(ANY, replacement, ANY, force=True)
+
+    def test_approval_gated_update_does_not_mutate_active_webhook(self, env_with_media_buy) -> None:
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+
+        env, media_buy, _product = env_with_media_buy
+        current = {**DAILY_REPORTING_WEBHOOK, "url": "https://current.example.com/reporting"}
+        media_buy.raw_request = {"reporting_webhook": current}
+        env._commit_factory_data()
+        adapter = env.mock["update_adapter"].return_value
+        adapter.manual_approval_required = True
+        adapter.manual_approval_operations = ["update_media_buy"]
+        replacement = {**DAILY_REPORTING_WEBHOOK, "url": "https://pending.example.com/reporting"}
+
+        result = env.call_via(
+            Transport.REST,
+            req=self._request(media_buy, replacement),
+        )
+
+        assert not result.is_error, result.payload
+        assert result.payload.status == "submitted"
+        session = env.get_session()
+        session.expire_all()
+        persisted = MediaBuyRepository(session, media_buy.tenant_id).get_by_id(media_buy.media_buy_id)
+        assert persisted is not None
+        assert persisted.raw_request["reporting_webhook"] == current
