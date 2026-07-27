@@ -323,7 +323,7 @@ class DeliveryWebhookScheduler:
             delivery_repo = DeliveryRepository(session, media_buy.tenant_id)
 
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
-            raw_freq = str(reporting_webhook.get("frequency") or "daily").lower()
+            raw_freq = str(reporting_webhook.get("reporting_frequency") or "daily").lower()
 
             if not force and raw_freq != "daily":
                 logger.warning(
@@ -499,7 +499,10 @@ class DeliveryWebhookScheduler:
             logger.warning("No webhook URL configured for media buy %s", media_buy.media_buy_id)
             return False
 
-        # Try to find existing push notification config or create a temporary one
+        # Reporting webhooks are a protocol channel distinct from task-status
+        # push_notification_config subscriptions. Build the sender carrier from
+        # this media buy's reporting_webhook authentication; a stored subscription
+        # for the same URL must not override these credentials.
         auth_config = reporting_webhook.get("authentication", {})
         auth_type = None
         auth_token = None
@@ -509,14 +512,8 @@ class DeliveryWebhookScheduler:
             auth_type = schemes[0] if schemes else None
             auth_token = auth_config.get("credentials")
 
-        # Reuse the principal's registered push config for this URL, if any
-        # (tenant-scoped repository lookup — no raw ORM select in the scheduler).
-        # Both arms return an already-detached carrier; the scheduler never
-        # touches the session's identity map directly.
         push_config_repo = PushNotificationConfigRepository(session, media_buy.tenant_id)
-        push_notification_config = push_config_repo.get_active_by_principal_and_url(
-            media_buy.principal_id, webhook_url
-        ) or push_config_repo.build_detached(
+        push_notification_config = push_config_repo.build_detached(
             media_buy.principal_id,
             webhook_url,
             config_id=f"temp_{media_buy.media_buy_id}",
@@ -550,8 +547,9 @@ class DeliveryWebhookScheduler:
         media_buy_delivery_payload = create_mcp_webhook_payload(
             task_id=media_buy.media_buy_id,
             task_type="update_media_buy",
-            result=delivery_response.webhook_payload(),
+            result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
             status=AdcpTaskStatus.completed,
+            token=reporting_webhook.get("token"),
         )
 
         # Atomic concurrency claim, taken NOW — immediately before the POST — so the

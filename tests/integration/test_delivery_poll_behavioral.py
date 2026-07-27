@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY
 
 import pytest
-from sqlalchemy import inspect
 
 from src.core.database.models import DELIVERY_TASK_TYPE
 from src.core.exceptions import (
@@ -3790,69 +3789,16 @@ class TestStartTimeFallbackForStatus:
 
 
 # ---------------------------------------------------------------------------
-# Push-config lookup arm — the sibling of build_detached
+# Reporting-webhook authentication is independent of push subscriptions
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.requires_db
-class TestRegisteredPushConfigLookup:
-    """The lookup arm of the scheduler's push-config decision.
-
-    ``build_detached`` (the fallback arm) is graded by the repository unit test and
-    the signed/unsigned scheduler integration tests. This arm — which reads a
-    *stored* ``authentication_token`` out of the database and hands it to the
-    outbound sender — had no test at all: both its ``tenant_id`` and
-    ``principal_id`` predicates could be deleted with the whole suite still
-    green, and no test seeded a row that made the lookup return anything, so the
-    branch (including its ``session.expunge``) never executed.
-
-    The scope predicates are a credential boundary, not a filter: a cross-tenant
-    match would emit tenant A's stored bearer token to a URL supplied by tenant B's
-    media buy.
-    """
-
-    def test_lookup_is_scoped_to_the_repository_tenant(self, integration_db):
-        """A row owned by another tenant is invisible, even on an exact URL match."""
-        from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            _seed_registered_push_config(env, config_id="cfg-owned", token="owner-secret")
-
-            session = env.get_session()
-
-            # Same principal id and same URL, but a foreign tenant scope.
-            foreign = PushNotificationConfigRepository(session, "other-tenant")
-            assert foreign.get_active_by_principal_and_url("p1", DAILY_REPORTING_WEBHOOK["url"]) is None
-
-            # Same tenant, but a principal that does not own the row.
-            other_principal = PushNotificationConfigRepository(session, "t1")
-            assert other_principal.get_active_by_principal_and_url("p2", DAILY_REPORTING_WEBHOOK["url"]) is None
-
-            # The owning (tenant, principal) pair does see it — otherwise the two
-            # assertions above would pass against a lookup that never matches.
-            found = PushNotificationConfigRepository(session, "t1").get_active_by_principal_and_url(
-                "p1", DAILY_REPORTING_WEBHOOK["url"]
-            )
-            assert found is not None
-            assert found.id == "cfg-owned"
-            assert found.authentication_token == "owner-secret"
-            # Both arms of the push-config decision hand the caller a detached
-            # carrier — the repository owns identity-map management, not the
-            # scheduler. (Detached, not transient: this row WAS in the session;
-            # build_detached's sibling carrier never was — see
-            # TestBuildDetachedIsNeverPersisted.test_instance_is_transient.)
-            assert inspect(found).detached is True
+class TestReportingWebhookAuthenticationPrecedence:
+    """A task-status push subscription cannot override reporting credentials."""
 
     @pytest.mark.asyncio
-    async def test_scheduler_reuses_a_registered_config_instead_of_building_one(self, integration_db):
-        """With a registered config for the URL, the scheduler sends ITS credentials.
-
-        Pins the arm choice, not just the query: a registered row must win over the
-        transient carrier, so the buyer's stored token reaches the wire and the
-        scheduler does not silently substitute an unsigned config. Mutating the
-        lookup to return None reddens this.
-        """
+    async def test_registered_push_config_for_same_url_does_not_override_reporting_auth(self, integration_db):
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
         from tests.harness import DeliveryPollEnv
 
@@ -3862,8 +3808,6 @@ class TestRegisteredPushConfigLookup:
                 config_id="cfg-registered",
                 token="registered-secret",
             )
-            # The buy carries an UNSIGNED reporting_webhook for the same URL, so a
-            # token on the wire can only have come from the registered row.
             buy = _serving_webhook_buy(env, tenant=tenant, principal=principal)
 
             scheduler = DeliveryWebhookScheduler()
@@ -3880,9 +3824,9 @@ class TestRegisteredPushConfigLookup:
                     tenant_id="t1",
                     principal_id="p1",
                     url=DAILY_REPORTING_WEBHOOK["url"],
-                    config_id="cfg-registered",
+                    config_id=f"temp_{buy.media_buy_id}",
                     authentication_type="Bearer",
-                    authentication_token="registered-secret",
+                    authentication_token="daily-webhook-test-credential-0001",
                 ),
                 payload=ANY,
                 metadata=ANY,

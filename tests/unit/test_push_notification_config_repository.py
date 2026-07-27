@@ -1,9 +1,9 @@
 """PushNotificationConfigRepository.build_detached — the transient auth carrier.
 
-``build_detached`` is the fallback arm of the delivery-webhook push-config
-decision: when a principal has no registered config for a ``reporting_webhook``
-URL, the scheduler still needs an object to carry the auth policy into the
-sender. That object's ``authentication_token`` becomes the outbound
+``build_detached`` creates the delivery-webhook sender carrier directly from a
+media buy's ``reporting_webhook`` configuration. Reporting webhooks are separate
+from task-status push subscriptions, so URL coincidence never changes which
+credentials are used. The carrier's ``authentication_token`` becomes the outbound
 ``Authorization`` header (``protocol_webhook_service``), so a dropped or renamed
 field silently downgrades a signed webhook to an unsigned one.
 
@@ -67,8 +67,8 @@ class TestBuildDetachedCarriesEveryField:
 
         assert cfg.tenant_id == "other-tenant"
 
-    def test_auth_fields_default_to_none_for_an_unsigned_webhook(self):
-        """An unsigned reporting_webhook yields no credentials — not a stale default."""
+    def test_auth_fields_default_to_none_when_the_caller_omits_them(self):
+        """The generic builder does not invent credentials when none are supplied."""
         cfg = _repo().build_detached("p1", _URL, config_id="c")
 
         assert cfg.authentication_type is None

@@ -78,9 +78,8 @@ def _create_basic_media_buy_with_webhook(
 ) -> str:
     """Create a minimal tenant/principal/media_buy with a daily reporting_webhook.
 
-    ``reporting_webhook`` defaults to the shared unsigned daily config; pass
-    ``SIGNED_DAILY_REPORTING_WEBHOOK`` to exercise the signed arm (the scheduler
-    then carries its credentials into the push config handed to the sender).
+    ``reporting_webhook`` defaults to the shared schema-valid daily config; pass
+    ``SIGNED_DAILY_REPORTING_WEBHOOK`` when a test needs its distinct credential.
 
     Returns:
         (tenant_id, principal_id, media_buy_id)
@@ -247,20 +246,17 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
         assert result.get("reporting_period") is not None
         assert result.get("errors") is None
 
-        # The principal registered no push config for this URL, so the scheduler
-        # took the fallback arm (PushNotificationConfigRepository.build_detached).
-        # Pin what that carrier hands the sender — it was previously extracted
-        # into a local and never asserted, so a dropped field was invisible here.
-        # Unsigned webhook -> no credentials invented along the way.
+        # Reporting authentication is carried through the repository-owned
+        # transient config without consulting task-status push subscriptions.
         assert_detached_push_config(
             push_notification_config,
             tenant_id=tenant_id,
             principal_id=principal_id,
             url=DAILY_REPORTING_WEBHOOK["url"],
             config_id=f"temp_{media_buy_id}",
-            authentication_type=None,
-            authentication_token=None,
-            context="unsigned scheduler carrier",
+            authentication_type="Bearer",
+            authentication_token="daily-webhook-test-credential-0001",
+            context="daily scheduler carrier",
         )
 
         yesterday = datetime.now(UTC).date() - timedelta(days=1)
@@ -311,7 +307,7 @@ async def test_signed_reporting_webhook_carries_credentials_into_the_push_config
                 url="https://example.com/webhook",
                 config_id=f"temp_{media_buy_id}",
                 authentication_type="Bearer",
-                authentication_token="test-webhook-credential",
+                authentication_token="signed-webhook-test-credential-0001",
             ),
             payload=ANY,
             metadata=ANY,
@@ -352,10 +348,69 @@ async def test_signed_reporting_webhook_puts_a_bearer_header_on_the_wire(integra
             headers={
                 "Content-Type": "application/json",
                 "User-Agent": "AdCP-Sales-Agent/1.0",
-                "Authorization": "Bearer test-webhook-credential",
+                "Authorization": "Bearer signed-webhook-test-credential-0001",
             },
             timeout=10.0,
         )
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db):
+    """Canonical cadence, metric projection, and validation token are wired end to end."""
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    reporting_webhook = {
+        **DAILY_REPORTING_WEBHOOK,
+        "requested_metrics": ["impressions", "clicks"],
+        "token": "buyer-validation-token-0001",
+    }
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook=reporting_webhook,
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    with patch.object(
+        scheduler.webhook_service,
+        "send_notification",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as mock_send:
+        await scheduler._send_reports()
+
+    payload = mock_send.await_args.kwargs["payload"]
+    assert payload.token == "buyer-validation-token-0001"
+    totals = payload.result["media_buy_deliveries"][0]["totals"]
+    assert set(totals) == {"impressions", "clicks"}
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reporting_frequency", ["hourly", "monthly"])
+async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_db, reporting_frequency):
+    """The scheduler reads reporting_frequency instead of silently defaulting to daily."""
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    reporting_webhook = {
+        **DAILY_REPORTING_WEBHOOK,
+        "reporting_frequency": reporting_frequency,
+    }
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook=reporting_webhook,
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    with patch.object(
+        scheduler.webhook_service,
+        "send_notification",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as mock_send:
+        await scheduler._send_reports()
+
+    mock_send.assert_not_awaited()
 
 
 @pytest.mark.requires_db

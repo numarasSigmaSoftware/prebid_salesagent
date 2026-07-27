@@ -979,6 +979,7 @@ class MediaBuy(Base):
         ),
         Index("idx_media_buys_tenant", "tenant_id"),
         Index("idx_media_buys_status", "status"),
+        Index("idx_media_buys_status_updated_at", "status", "updated_at"),
         Index("idx_media_buys_strategy", "strategy_id"),
         Index("idx_media_buys_account", "account_id"),
         # Dup-booking backstop, scoped per the spec's idempotency tuple

@@ -16,7 +16,14 @@ from datetime import UTC, date, datetime, timedelta
 # The daily reporting_webhook config used by every delivery-webhook test. Callers
 # that PERSIST it copy it (``dict(DAILY_REPORTING_WEBHOOK)``) to avoid aliasing the
 # shared module-level dict into ORM state.
-DAILY_REPORTING_WEBHOOK = {"url": "https://example.com/webhook", "frequency": "daily"}
+DAILY_REPORTING_WEBHOOK = {
+    "url": "https://example.com/webhook",
+    "authentication": {
+        "schemes": ["Bearer"],
+        "credentials": "daily-webhook-test-credential-0001",
+    },
+    "reporting_frequency": "daily",
+}
 
 # The same daily webhook, but SIGNED. The scheduler reads
 # ``reporting_webhook["authentication"]`` and carries ``schemes[0]`` /
@@ -28,7 +35,10 @@ DAILY_REPORTING_WEBHOOK = {"url": "https://example.com/webhook", "frequency": "d
 # callers cannot alias it into ORM state.
 SIGNED_DAILY_REPORTING_WEBHOOK = {
     **DAILY_REPORTING_WEBHOOK,
-    "authentication": {"schemes": ["Bearer"], "credentials": "test-webhook-credential"},
+    "authentication": {
+        "schemes": ["Bearer"],
+        "credentials": "signed-webhook-test-credential-0001",
+    },
 }
 
 # Flight phase → (start, end) day-offsets from ``today``. Single source of truth for
