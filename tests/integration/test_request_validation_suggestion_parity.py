@@ -57,8 +57,13 @@ class TestValidationSecretScrubTransportParity:
             )
 
         assert result.is_error, f"Expected {transport} to reject the extra field"
+        # REST rejects the unknown top-level body member in FastAPI before the
+        # route-level request model; AdCP classifies that structural failure as
+        # INVALID_REQUEST. A2A/MCP reach the shared strict request model and
+        # classify the value as VALIDATION_ERROR.
+        expected_code = "INVALID_REQUEST" if transport == "rest" else "VALIDATION_ERROR"
         result.assert_wire_error(
-            "VALIDATION_ERROR",
+            expected_code,
             recovery="correctable",
             require_suggestion=True,
         )
@@ -70,7 +75,7 @@ class TestValidationSecretScrubTransportParity:
             {
                 "loc": ["unrecognized_field"],
                 "msg": "Extra field is not allowed by the AdCP request schema.",
-                "type": "extra_forbidden",
+                "type": "unexpected_keyword_argument" if transport == "mcp" else "extra_forbidden",
             }
         ]
 

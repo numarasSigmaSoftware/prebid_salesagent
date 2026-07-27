@@ -33,7 +33,7 @@ class TestInvalidTokenAtTransportBoundary:
             tenant = TenantFactory(tenant_id="token_test_tenant")
             # Pass a fabricated bad token that doesn't match any principal in the DB
             headers = {
-                "x-adcp-auth": "bad-token-xyz-not-a-real-token",
+                "Authorization": "Bearer bad-token-xyz-not-a-real-token",
                 "x-adcp-tenant": tenant.tenant_id,
             }
             with pytest.raises(AdCPAuthenticationError, match="rejected"):

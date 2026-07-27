@@ -10,6 +10,30 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
+def test_a2a_parameter_serialization_recurses_into_pydantic_models() -> None:
+    """Nested creative-like models stay structured across protobuf Struct."""
+    from pydantic import BaseModel
+
+    from tests.harness._base import _serialize_a2a_parameters
+
+    class _Asset(BaseModel):
+        url: str
+        width: int
+
+    parameters = _serialize_a2a_parameters(
+        {"creatives": [{"creative_id": "creative-1", "assets": [_Asset(url="https://example.test/ad", width=300)]}]}
+    )
+
+    assert parameters == {
+        "creatives": [
+            {
+                "creative_id": "creative-1",
+                "assets": [{"url": "https://example.test/ad", "width": 300}],
+            }
+        ]
+    }
+
+
 class TestBaseClassContract:
     """BaseTestEnv must work in both integration (use_real_db=True) and unit modes."""
 

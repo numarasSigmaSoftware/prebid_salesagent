@@ -43,6 +43,13 @@ if TYPE_CHECKING:
     from tests.harness.transport import E2EConfig, Transport, TransportResult
 
 
+def _serialize_a2a_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Recursively convert A2A parameters to protobuf Struct-compatible JSON."""
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(dict[str, Any]).dump_python(parameters, mode="json")
+
+
 def _adcp_error_from_code(
     error_code: str,
     message: str,
@@ -715,6 +722,12 @@ class BaseTestEnv:
             parameters = {**req_fields, **kwargs}
         else:
             parameters = dict(kwargs)
+        # A2A parameters cross a protobuf Struct boundary.  Nested Pydantic
+        # models (for example ``list[CreativeAsset]``) must therefore be
+        # converted recursively, not left for protobuf's fallback stringifier.
+        # The shared serializer keeps this generic for every skill and mirrors
+        # ``model_dump(mode="json")`` for a top-level request model.
+        parameters = _serialize_a2a_parameters(parameters)
 
         handler = AdCPRequestHandler()
 

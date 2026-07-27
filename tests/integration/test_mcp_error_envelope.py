@@ -237,7 +237,13 @@ class TestMcpWireErrorEnvelope:
             envelope,
             "VALIDATION_ERROR",
             recovery="correctable",
-            message_substr="forced MCP top-level failure",
+        )
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            envelope,
+            "VALIDATION_ERROR",
+            rejected_fragments=("forced MCP top-level failure",),
         )
 
     def test_get_media_buy_delivery_missing_identity_emits_auth_envelope_on_wire(self, integration_db):

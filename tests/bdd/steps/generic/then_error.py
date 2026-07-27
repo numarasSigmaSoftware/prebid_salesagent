@@ -344,7 +344,26 @@ def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
 
 @then(parsers.parse('the error message should contain "{text}"'))
 def then_error_message_contains(ctx: dict, text: str) -> None:
-    """Assert error message contains the given text (case-insensitive)."""
+    """Assert trusted text is retained, or untrusted text is canonically scrubbed.
+
+    Wire boundaries intentionally replace unaudited validation messages because
+    they may interpolate rejected buyer input or adapter internals.  In that
+    case the security contract is the exact canonical message/suggestion on
+    both envelope layers plus absence of the raw fragment.  Direct implementation
+    tests still assert the unsanitized business message.
+    """
+    result = ctx.get("result")
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    if envelope:
+        from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        code = (envelope.get("adcp_error") or {}).get("code")
+        expected = _SANITIZED_BY_WIRE_CODE.get(code)
+        if expected and (envelope.get("adcp_error") or {}).get("message") == expected[0]:
+            assert_sanitized_wire_error(envelope, code, rejected_fragments=(text,))
+            return
+
     error = ctx.get("error")
     assert error is not None, "No error recorded in ctx"
     msg = _get_error_message(error).lower()

@@ -44,3 +44,40 @@ def assert_no_secret_leak(blob: object, *, context: str = "") -> None:
         assert token not in haystack, (
             f"secret fragment {token!r} leaked to the buyer-facing wire{where}: {haystack[:300]}"
         )
+
+
+def assert_sanitized_wire_error(
+    envelope: dict,
+    code: str,
+    *,
+    rejected_fragments: tuple[str, ...] = (),
+) -> None:
+    """Assert both error-envelope layers use the canonical scrubbed presentation.
+
+    The production scrub table is the single source of truth for exact message
+    and suggestion text.  Callers supply any raw business/input fragments that
+    must be absent, so replacing a brittle raw-message assertion still proves
+    the confidential text was removed.
+    """
+    from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
+
+    expected = _SANITIZED_BY_WIRE_CODE.get(code)
+    assert expected is not None, f"{code!r} has no canonical sanitized presentation"
+    expected_message, expected_suggestion = expected
+
+    adcp_error = envelope.get("adcp_error") or {}
+    errors = envelope.get("errors") or []
+    assert errors, f"Expected errors[0] in two-layer envelope: {envelope}"
+    for label, error in (("adcp_error", adcp_error), ("errors[0]", errors[0])):
+        assert error.get("message") == expected_message, (
+            f"{label}.message did not use the canonical {code} scrub: {error}"
+        )
+        assert error.get("suggestion") == expected_suggestion, (
+            f"{label}.suggestion did not use the canonical {code} guidance: {error}"
+        )
+
+    serialized = serialize_wire_error(envelope).lower()
+    for fragment in rejected_fragments:
+        assert fragment.lower() not in serialized, (
+            f"raw rejected fragment {fragment!r} leaked through the sanitized {code} envelope: {serialized[:500]}"
+        )

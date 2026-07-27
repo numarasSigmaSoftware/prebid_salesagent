@@ -48,6 +48,8 @@ def make_pending_media_buy(integration_db):
     from src.core.database.database_session import get_engine
     from tests.factories import (
         ALL_FACTORIES,
+        CreativeAssignmentFactory,
+        CreativeFactory,
         MediaBuyFactory,
         MediaPackageFactory,
         PricingOptionFactory,
@@ -98,7 +100,7 @@ def make_pending_media_buy(integration_db):
         )
         # Persisted package row — the approve path's adapter execution reads the
         # buy's MediaPackage records ("No packages found" aborts before the webhook).
-        MediaPackageFactory(
+        media_package = MediaPackageFactory(
             media_buy=media_buy,
             package_id="pkg_reject_wh_1",
             package_config={
@@ -107,6 +109,17 @@ def make_pending_media_buy(integration_db):
                 "budget": 5000.0,
                 "pricing_option_id": "cpm_usd_fixed",
             },
+        )
+        approved_creative = CreativeFactory(
+            tenant=tenant,
+            principal=principal,
+            creative_id="creative_reject_wh_1",
+            status="approved",
+        )
+        CreativeAssignmentFactory(
+            creative=approved_creative,
+            media_buy=media_buy,
+            package_id=media_package.package_id,
         )
         PushNotificationConfigFactory(
             tenant=tenant,

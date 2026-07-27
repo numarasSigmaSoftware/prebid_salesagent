@@ -58,6 +58,10 @@ services:
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       ADCP_TESTING: ${ADCP_TESTING:-true}
       ADCP_AUTH_TEST_MODE: ${ADCP_AUTH_TEST_MODE:-true}
+      # Exact callback host admitted by the development-only protocol webhook
+      # seam.  Standalone host tests override this with host.docker.internal;
+      # the in-network runner uses its stable "tests" alias.
+      ADCP_WEBHOOK_TEST_HOST: ${ADCP_WEBHOOK_TEST_HOST:-tests}
       # The SERVER must know about the pinned in-network creative agent: sync/
       # create flows resolve format specs server-side, and references carry the
       # PUBLIC canonical agent_url — without this, the registry's connection

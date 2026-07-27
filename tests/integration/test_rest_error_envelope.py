@@ -102,5 +102,11 @@ class TestRestErrorSuggestionPreservation:
             result.wire_error_envelope,
             "VALIDATION_ERROR",
             recovery="correctable",
-            message_substr="forced REST top-level failure",
+        )
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            result.wire_error_envelope,
+            "VALIDATION_ERROR",
+            rejected_fragments=("forced REST top-level failure",),
         )

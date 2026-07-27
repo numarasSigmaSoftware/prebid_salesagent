@@ -2248,12 +2248,22 @@ def then_error_with_code(ctx: dict, code: str) -> None:
 
 @then("the error indicates accounts array must not be empty")
 def then_empty_accounts_error(ctx: dict) -> None:
-    """Assert the error is a validation error about empty accounts array.
-
-    Production raises AdCPValidationError with a message containing
-    'accounts array must not be empty'.
-    """
+    """Assert empty accounts is rejected without leaking raw validator text."""
     from src.core.exceptions import AdCPValidationError
+
+    result = ctx.get("result")
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    if envelope:
+        from tests.helpers import assert_envelope_shape
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+        assert_sanitized_wire_error(
+            envelope,
+            "VALIDATION_ERROR",
+            rejected_fragments=("accounts array must not be empty",),
+        )
+        return
 
     error = _get_error(ctx)
     assert isinstance(error, (AdCPValidationError, ValueError)), (

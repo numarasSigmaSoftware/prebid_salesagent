@@ -1593,10 +1593,9 @@ def given_request_idempotency_key_omitted(ctx: dict) -> None:
     Uses the harness OMIT sentinel: the request assembler keeps it, and
     MediaBuyCreateEnv._ensure_idempotency_key pops it so the constructed
     CreateMediaBuyRequest is missing the REQUIRED field — production rejects it
-    with a VALIDATION_ERROR naming idempotency_key and a buyer-facing
-    ``suggestion`` derived by ``suggest_validation_fix`` ("Provide the required
-    'idempotency_key' field ..."), surfaced on the wire across all transports
-    (#1417/gh8p.10).
+    with a VALIDATION_ERROR naming idempotency_key in the structured diagnostic
+    and the canonical AdCP 3.1.1 buyer-facing suggestion, surfaced on the wire
+    across all transports (#1417/gh8p.10).
     """
     from tests.harness.media_buy_create import OMIT_IDEMPOTENCY_KEY
 

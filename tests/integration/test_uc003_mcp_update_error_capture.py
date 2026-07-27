@@ -153,10 +153,16 @@ class TestUC003McpUpdateErrorCapture:
             result.wire_error_envelope,
             "INVALID_REQUEST",
             recovery="correctable",
-            message_substr="at least one updatable field",
+        )
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            result.wire_error_envelope,
+            "INVALID_REQUEST",
+            rejected_fragments=("at least one updatable field",),
         )
         suggestion = self._top_level_suggestion(result.wire_error_envelope)
-        assert suggestion and "at least one updatable field" in suggestion.lower(), (
-            f"{transport}: empty-update rejection must carry a non-empty TOP-LEVEL "
-            f"'suggestion' (error.json) naming the updatable fields, got {suggestion!r}"
+        assert suggestion == "check request parameters and fix", (
+            f"{transport}: empty-update rejection must carry INVALID_REQUEST's "
+            f"canonical TOP-LEVEL suggestion, got {suggestion!r}"
         )

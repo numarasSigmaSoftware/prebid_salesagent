@@ -223,6 +223,11 @@ def docker_services_e2e(request):
         #    test_landing_pages.py) pick up the correct dynamic ports
         os.environ["ADCP_SALES_PORT"] = str(mcp_port)
         os.environ["POSTGRES_PORT"] = str(postgres_port)
+        # The receiver runs on the host while the application runs in Docker.
+        # Use Docker's explicit host gateway for both the emitted callback URL
+        # and the server's exact development-only SSRF test seam.
+        os.environ["ADCP_WEBHOOK_HOST"] = "host.docker.internal"
+        os.environ["ADCP_WEBHOOK_TEST_HOST"] = "host.docker.internal"
 
         env = os.environ.copy()
         # Set 5 seconds interval for delivery webhooks in E2E tests

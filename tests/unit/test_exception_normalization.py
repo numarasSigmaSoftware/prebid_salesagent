@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.exceptions import (
+    VALIDATION_ERROR_SUGGESTION,
     AdCPValidationError,
     build_two_layer_error_envelope,
     normalize_to_adcp_error,
@@ -61,7 +62,7 @@ def test_a2a_validation_boundary_preserves_contextual_error_format():
     assert "Invalid parameters:" in exc_info.value.message
     assert "packages.0.product_id: Required field is missing" in exc_info.value.message
     assert exc_info.value.field == "packages[0].product_id"
-    assert exc_info.value.suggestion == ("Provide the required 'packages[0].product_id' field and resend the request.")
+    assert exc_info.value.suggestion == VALIDATION_ERROR_SUGGESTION
     assert exc_info.value.details == {
         "validation_errors": [
             {

@@ -145,8 +145,14 @@ class TestA2AErrorPropagation:
         assert_envelope_shape(
             artifact_data,
             "VALIDATION_ERROR",
-            message_substr="Missing required AdCP parameters",
             recovery="correctable",
+        )
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            artifact_data,
+            "VALIDATION_ERROR",
+            rejected_fragments=("Missing required AdCP parameters",),
         )
 
         # Immediate terminal failure returned synchronously → no protocol webhook
@@ -486,8 +492,14 @@ class TestA2AErrorPropagation:
         assert_envelope_shape(
             artifact_data,
             "VALIDATION_ERROR",
-            message_substr="creatives",
             recovery="correctable",
+        )
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            artifact_data,
+            "VALIDATION_ERROR",
+            rejected_fragments=("creatives",),
         )
 
     async def test_create_media_buy_response_includes_all_adcp_fields(self, handler, test_tenant, test_principal):
@@ -730,7 +742,14 @@ class TestA2AErrorPropagation:
         assert result.artifacts is not None and len(result.artifacts) > 0
 
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
-        assert_envelope_shape(artifact_data, "VALIDATION_ERROR", message_substr="media_buy_id", recovery="correctable")
+        assert_envelope_shape(artifact_data, "VALIDATION_ERROR", recovery="correctable")
+        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+        assert_sanitized_wire_error(
+            artifact_data,
+            "VALIDATION_ERROR",
+            rejected_fragments=("media_buy_id",),
+        )
 
     @pytest.fixture
     def active_media_buy(self, _seeded):

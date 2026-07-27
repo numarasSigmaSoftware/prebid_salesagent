@@ -286,10 +286,11 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-002-ext-j": "adapter failure raises exception, no failed result envelope or suggestion — spec-production gap",
     "T-UC-002-inv-026-2": "INVALID_CREATIVES error lacks suggestion field",
     "T-UC-002-inv-026-4": "INVALID_CREATIVES error lacks suggestion field",
-    # Graduated (#1417/gh8p.10): the request-construction boundary now derives a
-    # field-aware suggestion (suggest_validation_fix) and attaches it to the
-    # AdCPValidationError, so a missing idempotency_key rejects with a non-empty
-    # wire suggestion. T-UC-002-v31-idempotency-missing passes.
+    # Graduated (#1417/gh8p.10): the request-construction boundary now attaches
+    # VALIDATION_ERROR's canonical AdCP 3.1.1 suggestion while retaining the
+    # field-specific diagnostic in field/details. A missing idempotency_key
+    # therefore rejects with a non-empty wire suggestion.
+    # T-UC-002-v31-idempotency-missing passes.
     # FIXME(salesagent-9vgz.17): optimization_goals not in adcp v3.6.0 or production schemas
     # PackageRequest(extra='forbid') rejects the field with generic validation error,
     # not spec-expected UNSUPPORTED_FEATURE / INVALID_REQUEST with structured codes.
