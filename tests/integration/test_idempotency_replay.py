@@ -39,7 +39,7 @@ def _seed_success(tenant_id, principal_id, idempotency_key, *, payload_hash, med
     )
 
 
-def _make_request(idempotency_key, *, po_number="REPLAY-1"):
+def _make_request(idempotency_key, *, po_number="REPLAY-1", reporting_webhook=None):
     from src.core.schemas import CreateMediaBuyRequest
 
     return CreateMediaBuyRequest(
@@ -49,6 +49,7 @@ def _make_request(idempotency_key, *, po_number="REPLAY-1"):
         end_time=datetime(2026, 6, 30, tzinfo=UTC),
         po_number=po_number,
         idempotency_key=idempotency_key,
+        reporting_webhook=reporting_webhook,
     )
 
 
@@ -92,6 +93,32 @@ class TestImplReplaysCachedSuccess:
         assert result.response.media_buy_id == "mb_original_123"
         assert result.status == "completed"
         assert result.replayed is True  # top-level replay marker, injected at replay time
+
+    async def test_cached_legacy_frequency_replays_before_new_capability_validation(self, integration_db):
+        """A newly unsupported capability cannot rewrite a prior exact success."""
+        from src.core.idempotency_canonical import canonical_request_hash
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK
+
+        idem_key = f"legacy-frequency-{uuid.uuid4().hex}"
+        tenant_id = f"legacy_frequency_t_{uuid.uuid4().hex[:6]}"
+        principal_id = f"p_{uuid.uuid4().hex[:8]}"
+        hourly_webhook = {**DAILY_REPORTING_WEBHOOK, "reporting_frequency": "hourly"}
+        request = _make_request(idem_key, reporting_webhook=hourly_webhook)
+
+        seed_principal(tenant_id, principal_id)
+        _seed_success(
+            tenant_id,
+            principal_id,
+            idem_key,
+            payload_hash=canonical_request_hash(request),
+            media_buy_id="mb_legacy_frequency",
+        )
+
+        result = await _create_media_buy_impl(req=request, identity=_identity(tenant_id, principal_id))
+
+        assert result.replayed is True
+        assert result.response.media_buy_id == "mb_legacy_frequency"
 
     async def test_different_payload_same_key_raises_conflict(self, integration_db):
         from src.core.exceptions import AdCPError

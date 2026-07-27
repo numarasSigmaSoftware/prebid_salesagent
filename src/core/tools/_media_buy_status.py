@@ -10,8 +10,8 @@ unmapped rows; list showed them). The background schedulers
 consume the derived sets below — the status scheduler
 (``media_buy_status_scheduler.py``) selects ``SERVING_PERSISTED_STATUSES`` and
 the delivery scheduler (``delivery_webhook_scheduler.py``) selects it plus
-recent persisted ``completed`` rows — so their persisted-column queries can
-never drift from what the read tools report as serving.
+completed/canceled/rejected rows without a successful final delivery — so their
+persisted-column queries cannot drift from what the read tools report as serving.
 
 Canonical output vocabulary — the media-buy lifecycle taxonomy plus the
 delivery-only terminal ``failed``::

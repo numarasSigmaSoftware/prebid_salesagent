@@ -56,15 +56,6 @@ SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or str(DEFAU
 # batch so a failed/crashed final is retried on the next batch.
 FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 
-# Recency horizon bounding which persisted terminal buys the batch selects
-# (see MediaBuyRepository.get_reportable_for_delivery). Terminal states are permanent,
-# so an unbounded selection would scan every ended buy that ever existed on
-# every hourly batch. INVARIANT (pinned by a unit test): the horizon must be much
-# longer than both FINAL_WEBHOOK_CLAIM_LEASE (so stale-lease recovery always
-# happens on a still-selected buy) and the batch interval (so the ~60s status
-# flip is always caught) — 2 days gives ~48x margin over the hourly batch.
-FINAL_WEBHOOK_TERMINAL_HORIZON = timedelta(days=2)
-
 
 class DeliveryWebhookScheduler:
     """Scheduler for sending delivery reports via webhooks."""
@@ -125,20 +116,15 @@ class DeliveryWebhookScheduler:
         try:
             with get_db_session() as session:
                 # Find all reportable media buys (cross-tenant scheduler query):
-                # the serving set (incl. legacy aliases "ready"/"scheduled" —
-                # #1556) PLUS terminal "completed". Completed is REQUIRED: the
-                # status scheduler flips an ended buy to persisted "completed"
-                # within ~60s, long before this hourly batch, so a serving-only
-                # selection would drop it and the buy's spec-required FINAL webhook
-                # would never be sent. The per-buy final gate below de-dups it on a
-                # best-effort basis (true exactly-once is #1606). The terminal arm
-                # is bounded by a recency horizon on updated_at so the hourly scan
-                # doesn't grow forever (see get_reportable_for_delivery).
+                # the serving set (including legacy aliases "ready"/"scheduled")
+                # plus terminal completed, canceled, and rejected buys until a
+                # successful final log exists.
+                # This durable anti-join keeps required finals selectable across
+                # arbitrarily long scheduler downtime.
                 media_buys = MediaBuyRepository.get_reportable_for_delivery(
                     session,
                     serving_statuses=sorted(SERVING_PERSISTED_STATUSES),
                     terminal_statuses=sorted(WEBHOOK_TERMINAL_PERSISTED_STATUSES),
-                    terminal_horizon=FINAL_WEBHOOK_TERMINAL_HORIZON,
                 )
 
                 reports_sent = 0
@@ -391,8 +377,8 @@ class DeliveryWebhookScheduler:
             protocol="rest",
         )
 
-        # The scheduler requests serving plus every recent terminal state in
-        # the reporting-webhook termination contract.
+        # The scheduler requests serving plus every terminal state in the
+        # reporting-webhook termination contract.
         req = GetMediaBuyDeliveryRequest(
             media_buy_ids=[media_buy.media_buy_id],
             status_filter=[MediaBuyStatus(s) for s in sorted(WEBHOOK_REPORTABLE_CANONICAL_STATUSES)],

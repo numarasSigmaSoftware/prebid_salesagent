@@ -33,6 +33,13 @@ class ProductFactory(factory.alchemy.SQLAlchemyModelFactory):
     delivery_type = "guaranteed"
     property_tags = factory.LazyFunction(lambda: ["all_inventory"])
     delivery_measurement = factory.LazyFunction(lambda: {"provider": "publisher"})
+    reporting_capabilities = factory.LazyFunction(
+        lambda: {
+            "available_reporting_frequencies": ["daily"],
+            "available_metrics": ["impressions", "spend"],
+            "supports_webhooks": True,
+        }
+    )
 
 
 class PricingOptionFactory(factory.alchemy.SQLAlchemyModelFactory):

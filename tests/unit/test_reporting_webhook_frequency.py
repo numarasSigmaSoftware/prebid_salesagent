@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.exceptions import AdCPCapabilityNotSupportedError
-from src.core.tools._reporting_webhook import validate_reporting_webhook_frequency
-from src.core.tools.media_buy_create import _create_media_buy_impl
-from src.core.tools.media_buy_update import _update_media_buy_impl
-from tests.factories.principal import PrincipalFactory
+from src.core.tools._reporting_webhook import (
+    validate_reporting_webhook_frequency,
+    validate_reporting_webhook_product_support,
+)
 
 
 @pytest.mark.parametrize("frequency", ["hourly", "monthly"])
@@ -19,28 +19,50 @@ def test_shared_validator_rejects_unsupported_frequency(frequency):
         validate_reporting_webhook_frequency(webhook)
 
 
-def test_shared_validator_accepts_daily():
+def test_shared_validator_accepts_daily() -> None:
     validate_reporting_webhook_frequency(SimpleNamespace(reporting_frequency="daily"))
 
 
-@pytest.mark.asyncio
-async def test_create_rejects_after_auth_but_before_database_work():
-    request = SimpleNamespace(
-        reporting_webhook=SimpleNamespace(reporting_frequency="hourly"),
-        context=None,
+def _product(
+    product_id: str,
+    *,
+    supports_webhooks: bool = True,
+    frequencies: tuple[str, ...] = ("daily",),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        product_id=product_id,
+        reporting_capabilities={
+            "supports_webhooks": supports_webhooks,
+            "available_reporting_frequencies": list(frequencies),
+        },
     )
-    identity = PrincipalFactory.make_identity(principal_id="p1", tenant_id="t1")
-
-    with pytest.raises(AdCPCapabilityNotSupportedError, match="hourly"):
-        await _create_media_buy_impl(request, identity=identity)
 
 
-def test_update_rejects_after_auth_but_before_database_work():
-    request = SimpleNamespace(
-        reporting_webhook=SimpleNamespace(reporting_frequency="hourly"),
-        context=None,
-    )
-    identity = PrincipalFactory.make_identity(principal_id="p1", tenant_id="t1")
+def test_product_validator_accepts_intersection() -> None:
+    webhook = SimpleNamespace(reporting_frequency="daily")
+    validate_reporting_webhook_product_support(webhook, [_product("p1"), _product("p2")])
 
-    with pytest.raises(AdCPCapabilityNotSupportedError, match="hourly"):
-        _update_media_buy_impl(request, identity=identity)
+
+def test_product_validator_rejects_when_only_one_selected_product_supports_frequency() -> None:
+    webhook = SimpleNamespace(reporting_frequency="daily")
+
+    with pytest.raises(AdCPCapabilityNotSupportedError, match="p-monthly"):
+        validate_reporting_webhook_product_support(
+            webhook,
+            [_product("p-daily"), _product("p-monthly", frequencies=("monthly",))],
+        )
+
+
+@pytest.mark.parametrize(
+    ("product", "message"),
+    [
+        (_product("p-no-webhook", supports_webhooks=False), "p-no-webhook"),
+        (_product("p-monthly", frequencies=("monthly",)), "p-monthly"),
+        (SimpleNamespace(product_id="p-missing", reporting_capabilities=None), "p-missing"),
+    ],
+)
+def test_product_validator_rejects_unsupported_product(product: SimpleNamespace, message: str) -> None:
+    webhook = SimpleNamespace(reporting_frequency="daily")
+
+    with pytest.raises(AdCPCapabilityNotSupportedError, match=message):
+        validate_reporting_webhook_product_support(webhook, [product])

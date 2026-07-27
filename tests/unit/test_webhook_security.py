@@ -47,6 +47,15 @@ class TestValidateWebhookTaskType:
 class TestWebhookURLValidator:
     """Test SSRF protection in webhook URL validation."""
 
+    @pytest.fixture(autouse=True)
+    def _stable_dns(self, monkeypatch):
+        def _resolve(hostname: str) -> str:
+            if hostname == "example.com":
+                return "93.184.216.34"
+            return hostname
+
+        monkeypatch.setattr("src.core.security.url_validator.socket.gethostbyname", _resolve)
+
     def test_valid_public_https_url(self):
         """Valid public HTTPS URLs should pass."""
         is_valid, error = WebhookURLValidator.validate_webhook_url("https://example.com/webhook")

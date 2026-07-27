@@ -353,13 +353,14 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
 
         Webhook payloads differ from polling responses:
         - ``aggregated_totals`` is excluded (polling-only field)
-        - When *requested_metrics* is provided, each media-buy ``totals``
-          dict is filtered to only include those metric keys.
+        - When *requested_metrics* is provided, metric fields are recursively
+          projected across totals and every nested breakdown while structural
+          identifiers and metadata are retained.
 
         Args:
-            requested_metrics: If provided, only these metric names are
-                kept in each ``totals`` dict.  Non-metric keys (like
-                ``media_buy_id``, ``status``) are never filtered.
+            requested_metrics: If provided, only these metric names are retained
+                in metric containers. Non-metric keys (like ``media_buy_id`` and
+                ``status``) are never filtered.
 
         Returns:
             JSON-ready dict suitable for webhook POST body.

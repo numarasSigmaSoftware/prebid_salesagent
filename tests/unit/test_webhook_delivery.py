@@ -2,6 +2,7 @@
 
 from unittest.mock import Mock, call, patch
 
+import pytest
 import requests
 
 from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retry
@@ -10,6 +11,21 @@ from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retr
 @patch("src.core.webhook_delivery.time.sleep")
 class TestWebhookDelivery:
     """Test cases for webhook delivery with exponential backoff retry."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_valid_webhook_url(self, request):
+        if request.node.name in {
+            "test_invalid_webhook_url_validation",
+            "test_localhost_webhook_url_rejected",
+        }:
+            yield
+            return
+
+        with patch(
+            "src.core.webhook_delivery.WebhookURLValidator.validate_webhook_url",
+            return_value=(True, None),
+        ):
+            yield
 
     def test_successful_delivery_first_attempt(self, mock_sleep):
         """Test successful delivery on first attempt (200 OK)."""

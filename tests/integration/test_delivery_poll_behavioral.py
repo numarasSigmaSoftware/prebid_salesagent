@@ -717,15 +717,8 @@ class TestConcurrentFinalWebhookClaim:
             )
 
     @pytest.mark.asyncio
-    async def test_ancient_completed_buys_age_out_of_selection(self, integration_db):
-        """The batch's completed arm is bounded by the updated_at recency horizon.
-
-        A completed buy last touched beyond FINAL_WEBHOOK_TERMINAL_HORIZON is not
-        selected (its would-be final would otherwise SEND — no success log exists —
-        so this reddens if the horizon is removed). A recently-touched completed buy
-        is still selected and gets its final: the bound trims the ever-growing
-        backlog without breaking the live handoff path.
-        """
+    async def test_ancient_unsent_terminal_buy_remains_selected_until_final_succeeds(self, integration_db):
+        """Scheduler downtime cannot age a required final out of selection."""
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
@@ -737,25 +730,16 @@ class TestConcurrentFinalWebhookClaim:
             ancient = _serving_webhook_buy(
                 env, flight="completed", mb_id="mb_ancient", tenant=tenant, principal=principal
             )
-            # The horizon bounds the PERSISTED-"completed" arm (the serving arm is
-            # lifecycle-bounded), so persist the status-scheduler flip, backdated
-            # beyond the horizon (explicit updated_at assignment beats onupdate).
             ancient.status = "completed"
             ancient.updated_at = datetime.now(UTC) - timedelta(days=3)
             session.commit()
 
-            assert await env.run_delivery_batch() == [], (
-                "a completed buy beyond the recency horizon must not be selected"
-            )
-
-            fresh = _serving_webhook_buy(env, flight="completed", mb_id="mb_fresh", tenant=tenant, principal=principal)
-            # Recently flipped to persisted "completed" (updated_at bumps to now).
-            fresh.status = "completed"
-            session.commit()
             wires = await env.run_delivery_batch()
-            assert len(wires) == 1, "a recently-completed buy must still be selected"
+            assert len(wires) == 1, "an old terminal buy without a successful final must remain selectable"
             assert wires[0]["result"]["notification_type"] == "final"
-            assert wires[0]["result"]["media_buy_deliveries"][0]["media_buy_id"] == fresh.media_buy_id
+            assert wires[0]["result"]["media_buy_deliveries"][0]["media_buy_id"] == ancient.media_buy_id
+
+            assert await env.run_delivery_batch() == [], "the successful final log must suppress subsequent batches"
 
     @pytest.mark.asyncio
     async def test_batch_continues_after_midloop_final_commit(self, integration_db):

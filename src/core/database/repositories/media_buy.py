@@ -16,10 +16,10 @@ import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.database.models import MediaBuy, MediaPackage
+from src.core.database.models import DELIVERY_TASK_TYPE, MediaBuy, MediaPackage, WebhookDeliveryLog
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
@@ -655,51 +655,48 @@ class MediaBuyRepository:
         *,
         serving_statuses: list[str],
         terminal_statuses: list[str],
-        terminal_horizon: datetime.timedelta,
     ) -> list[MediaBuy]:
-        """Select delivery-webhook buys: serving (unbounded) + recent terminal.
+        """Select serving buys and terminal buys whose final is still unsent.
 
         Args:
             serving_statuses: PERSISTED statuses (``PERSISTED_STATUS_TO_CANONICAL`` keys)
                 that mean "still serving" — selected unbounded.
             terminal_statuses: PERSISTED completed/canceled/rejected statuses,
-                selected only within ``terminal_horizon``. Both arms take the persisted vocabulary because
-                ``MediaBuy.status`` stores a map key, never a canonical/wire value.
-            terminal_horizon: how far back a terminal buy stays selectable,
-                measured on ``updated_at``.
+                selected until a successful final delivery log exists. Both arms
+                take the persisted vocabulary because ``MediaBuy.status`` stores
+                a map key, never a canonical/wire value.
 
         System-level cross-tenant query for the delivery webhook scheduler ONLY (the
         status scheduler keeps the unbounded ``get_all_by_statuses`` — its selection
-        is lifecycle-bounded by construction). Terminal statuses are permanent, so
-        an unbounded selection would materialize every ended buy that ever existed
-        on every hourly batch; bound them to rows touched within
-        ``terminal_horizon`` via ``updated_at``, which the status scheduler's flip,
-        the final-webhook claim, AND the claim release all bump (``onupdate``) — so:
-          - the flip starts the clock even after scheduler downtime (flip time, not
-            flight end);
-          - a buy with ongoing failed-final retries re-enters the window on every
-            claim/release write and never silently ages out mid-retry;
-          - a buy whose final SUCCEEDED stops being written and ages out, so the
-            hourly scan cost decays instead of growing forever.
-        Deliberately NOT bounded via ``final_webhook_claimed_at IS NULL``: a
-        crashed-mid-send buy leaves its claim set and stale-lease recovery depends on
-        the buy being re-selected. Completed buys whose ``updated_at`` predates the
-        horizon (ancient backlog from before the completed-selection existed) are
-        intentionally excluded — a final months after campaign end is more surprising
-        than none; the durable answer is the #1606 outbox.
+        is lifecycle-bounded by construction). The correlated success-log anti-join
+        is the durable correctness boundary: scheduler downtime cannot age an
+        unsent final out of selection, while a successful final permanently removes
+        the buy from later batches. The existing media-buy log index supports the
+        correlated lookup. ``final_webhook_claimed_at`` is deliberately not a
+        selection predicate because stale-lease recovery requires claimed rows to
+        remain selectable after a crashed send.
         """
-        cutoff = datetime.datetime.now(datetime.UTC) - terminal_horizon
+        successful_final_exists = (
+            select(WebhookDeliveryLog.id)
+            .where(
+                WebhookDeliveryLog.tenant_id == MediaBuy.tenant_id,
+                WebhookDeliveryLog.media_buy_id == MediaBuy.media_buy_id,
+                WebhookDeliveryLog.task_type == DELIVERY_TASK_TYPE,
+                WebhookDeliveryLog.status == "success",
+                WebhookDeliveryLog.notification_type == "final",
+            )
+            .exists()
+        )
         return list(
             session.scalars(
                 select(MediaBuy).where(
                     or_(
                         MediaBuy.status.in_(serving_statuses),
-                        # Both arms take PERSISTED statuses (map keys — what MediaBuy.status
-                        # holds), derived by the caller from PERSISTED_STATUS_TO_CANONICAL, so
-                        # neither can drift a partial copy (#1556). Passing the CANONICAL
-                        # "completed" here would be a vocabulary error: it is a map VALUE and
-                        # would stop matching the day a persisted key is renamed.
-                        and_(MediaBuy.status.in_(terminal_statuses), MediaBuy.updated_at >= cutoff),
+                        (
+                            MediaBuy.status.in_(terminal_statuses)
+                            & MediaBuy.raw_request["reporting_webhook"].is_not(None)
+                            & ~successful_final_exists
+                        ),
                     )
                 )
             ).all()

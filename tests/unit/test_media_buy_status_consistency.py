@@ -483,10 +483,7 @@ class TestSchedulerPassesDerivedStatusVocabulary:
         from unittest.mock import MagicMock, patch
 
         from src.services import delivery_webhook_scheduler as sched
-        from src.services.delivery_webhook_scheduler import (
-            FINAL_WEBHOOK_TERMINAL_HORIZON,
-            DeliveryWebhookScheduler,
-        )
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 
         session = MagicMock()
         cm = MagicMock()
@@ -505,7 +502,6 @@ class TestSchedulerPassesDerivedStatusVocabulary:
             session,
             serving_statuses=["SENTINEL_SERVING"],
             terminal_statuses=["SENTINEL_TERMINAL"],
-            terminal_horizon=FINAL_WEBHOOK_TERMINAL_HORIZON,
         )
 
 

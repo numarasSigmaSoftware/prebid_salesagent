@@ -2062,6 +2062,10 @@ class TestDeliveryWebhookRetry:
 
             with (
                 patch("src.core.webhook_delivery.time.sleep"),
+                patch(
+                    "src.core.webhook_delivery.WebhookURLValidator.validate_webhook_url",
+                    return_value=(True, None),
+                ),
                 patch("requests.post") as mock_post,
             ):
                 mock_response = MagicMock()
@@ -2535,32 +2539,3 @@ class TestTimeSimulationReachesFinalNotification:
         )
 
         assert response.media_buy_deliveries[0].status == "pending_creatives"
-
-
-class TestFinalWebhookSchedulingInvariants:
-    """Pin the timing relationships the final-webhook machinery depends on.
-
-    The completed-selection horizon (which bounds the hourly batch's scan of
-    persisted-"completed" buys) must dwarf both the claim lease — so a
-    stale-lease recovery always happens while the buy is still selected — and
-    the batch interval, so the status scheduler's ~60s completed-flip is always
-    caught by a later batch even across restarts. Shrinking the horizon below
-    either bound would silently strand finals.
-    """
-
-    def test_terminal_horizon_dwarfs_lease_and_batch_interval(self):
-        from datetime import timedelta
-
-        from src.services.delivery_webhook_scheduler import (
-            FINAL_WEBHOOK_CLAIM_LEASE,
-            FINAL_WEBHOOK_TERMINAL_HORIZON,
-        )
-
-        assert FINAL_WEBHOOK_TERMINAL_HORIZON >= 10 * FINAL_WEBHOOK_CLAIM_LEASE
-        # Bind to the SHIPPED default cadence, not the env-resolved SLEEP_INTERVAL_SECONDS:
-        # test runs export DELIVERY_WEBHOOK_INTERVAL=5, which would collapse this bound to
-        # seconds and make the invariant vacuous. FINAL_WEBHOOK_TERMINAL_HORIZON is not
-        # env-configurable, so it is pinned against the constant, not the resolved value.
-        from src.services.delivery_webhook_scheduler import DEFAULT_SLEEP_INTERVAL_SECONDS
-
-        assert FINAL_WEBHOOK_TERMINAL_HORIZON >= 24 * timedelta(seconds=DEFAULT_SLEEP_INTERVAL_SECONDS)
