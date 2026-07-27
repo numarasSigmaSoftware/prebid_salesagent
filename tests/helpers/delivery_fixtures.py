@@ -41,6 +41,17 @@ SIGNED_DAILY_REPORTING_WEBHOOK = {
     },
 }
 
+# A legacy HMAC-authenticated daily webhook. The credential length matches the
+# schema minimum and is intentionally distinct from the Bearer fixture so tests
+# cannot pass by accidentally selecting the wrong authentication arm.
+HMAC_DAILY_REPORTING_WEBHOOK = {
+    **DAILY_REPORTING_WEBHOOK,
+    "authentication": {
+        "schemes": ["HMAC-SHA256"],
+        "credentials": "hmac-webhook-shared-secret-0000001",
+    },
+}
+
 # Flight phase → (start, end) day-offsets from ``today``. Single source of truth for
 # the phase→window contract shared by the integration and BDD scheduler fixtures.
 _FLIGHT_OFFSETS: dict[str, tuple[int, int]] = {

@@ -57,7 +57,7 @@ class MediaBuyRepository:
     ) -> bool:
         """Atomically claim this buy's FINAL delivery webhook. True if THIS caller won.
 
-        Best-effort concurrency guard (#1575): a single conditional UPDATE that sets
+        Best-effort concurrency guard: a single conditional UPDATE that sets
         ``final_webhook_claimed_at = now`` only when it is unset OR older than
         ``stale_before`` (so a crashed worker's claim self-heals once stale rather
         than stranding the final forever). Two concurrent workers race on the same
@@ -86,7 +86,7 @@ class MediaBuyRepository:
         """Release THIS worker's final-webhook claim so a definitive failure/no-send
         doesn't block an immediate retry for the whole lease. True if the claim was cleared.
 
-        Token-guarded (#1575): clears ``final_webhook_claimed_at`` only when it still
+        Token-guarded: clears ``final_webhook_claimed_at`` only when it still
         equals ``claimed_at`` — the exact timestamp this worker wrote in
         ``try_claim_final_webhook``. If the lease already expired and another worker
         re-claimed with a newer timestamp, the ``== claimed_at`` predicate matches 0

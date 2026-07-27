@@ -24,7 +24,7 @@ from uuid import uuid4
 
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import extract_webhook_result_data, get_adcp_signed_headers_for_webhook
+from adcp import extract_webhook_result_data, sign_legacy_webhook
 from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
@@ -182,15 +182,19 @@ class ProtocolWebhookService:
         # lowercase enum values; Pydantic -> model_dump; Mapping -> dict.
         payload_dict: dict[str, Any] = _to_wire_dict(payload)
 
+        body_bytes: bytes | None = None
+
         # Apply authentication based on schemes
         if (
             push_notification_config.authentication_type == "HMAC-SHA256"
             and push_notification_config.authentication_token
         ):
-            # Sign payload with HMAC-SHA256
-            timestamp = str(int(time.time()))
-            get_adcp_signed_headers_for_webhook(
-                headers, push_notification_config.authentication_token, timestamp, payload_dict
+            # The legacy signature covers the exact bytes sent on the wire.
+            headers, body_bytes = sign_legacy_webhook(
+                push_notification_config.authentication_token,
+                payload_dict,
+                timestamp=str(int(time.time())),
+                headers=headers,
             )
 
         elif push_notification_config.authentication_type == "Bearer" and push_notification_config.authentication_token:
@@ -199,7 +203,11 @@ class ProtocolWebhookService:
 
         # Send notification with retry logic and logging
         return await self._send_with_retry_and_logging(
-            url=url, payload=payload_dict, headers=headers, metadata=metadata
+            url=url,
+            payload=payload_dict,
+            headers=headers,
+            metadata=metadata,
+            body_bytes=body_bytes,
         )
 
     @staticmethod
@@ -212,6 +220,7 @@ class ProtocolWebhookService:
         webhook_url: str,
         task_type: str,
         status: str,
+        idempotency_key: str | None = None,
         sequence_number: int = 1,
         notification_type: str | None = None,
         attempt_count: int = 1,
@@ -233,6 +242,7 @@ class ProtocolWebhookService:
                     webhook_url=webhook_url,
                     task_type=task_type,
                     status=status,
+                    idempotency_key=idempotency_key,
                     sequence_number=sequence_number,
                     notification_type=notification_type,
                     attempt_count=attempt_count,
@@ -253,11 +263,12 @@ class ProtocolWebhookService:
         payload: dict[str, Any],
         headers: dict,
         metadata: dict[str, Any],
+        body_bytes: bytes | None = None,
         max_attempts: int = 3,
     ) -> bool:
         """Send webhook with exponential backoff retry logic, logging, and audit trail."""
         # Calculate payload size for metrics
-        payload_size_bytes = len(json.dumps(payload).encode("utf-8"))
+        payload_size_bytes = len(body_bytes) if body_bytes is not None else len(json.dumps(payload).encode("utf-8"))
 
         task_type = metadata["task_type"] if "task_type" in metadata else None
         tenant_id = metadata["tenant_id"] if "tenant_id" in metadata else None
@@ -277,6 +288,8 @@ class ProtocolWebhookService:
         sequence_number_from_result = result.get("sequence_number") if result is not None else None
         notification_type = notification_type_from_result
         sequence_number = sequence_number_from_result if isinstance(sequence_number_from_result, int) else 1
+        idempotency_key_from_payload = payload.get("idempotency_key")
+        idempotency_key = idempotency_key_from_payload if isinstance(idempotency_key_from_payload, str) else None
 
         # Create webhook delivery log entry
         log_id = str(uuid4())
@@ -293,7 +306,8 @@ class ProtocolWebhookService:
                 logger.info(f"Sending webhook for task {task_id} to {url} (attempt {attempt + 1}/{max_attempts})")
 
                 def _post() -> requests.Response:
-                    return self._session.post(url, json=payload, headers=headers, timeout=10.0)
+                    request_body: dict[str, Any] = {"data": body_bytes} if body_bytes is not None else {"json": payload}
+                    return self._session.post(url, headers=headers, timeout=10.0, **request_body)
 
                 response = await asyncio.to_thread(_post)
                 response.raise_for_status()
@@ -318,6 +332,7 @@ class ProtocolWebhookService:
                         webhook_url=url,
                         task_type=task_type,
                         status="success",
+                        idempotency_key=idempotency_key,
                         sequence_number=sequence_number,
                         notification_type=notification_type,
                         attempt_count=attempt + 1,
@@ -360,6 +375,7 @@ class ProtocolWebhookService:
                             webhook_url=url,
                             task_type=task_type,
                             status="failed",
+                            idempotency_key=idempotency_key,
                             sequence_number=sequence_number,
                             notification_type=notification_type,
                             attempt_count=attempt + 1,
@@ -401,6 +417,7 @@ class ProtocolWebhookService:
                             webhook_url=url,
                             task_type=task_type,
                             status="retrying",
+                            idempotency_key=idempotency_key,
                             sequence_number=sequence_number,
                             notification_type=notification_type,
                             attempt_count=attempt + 1,
@@ -430,6 +447,7 @@ class ProtocolWebhookService:
                             webhook_url=url,
                             task_type=task_type,
                             status="failed",
+                            idempotency_key=idempotency_key,
                             sequence_number=sequence_number,
                             notification_type=notification_type,
                             attempt_count=max_attempts,
@@ -478,6 +496,7 @@ class ProtocolWebhookService:
                             webhook_url=url,
                             task_type=task_type,
                             status="failed",
+                            idempotency_key=idempotency_key,
                             sequence_number=sequence_number,
                             notification_type=notification_type,
                             attempt_count=max_attempts,
@@ -511,6 +530,7 @@ class ProtocolWebhookService:
                         webhook_url=url,
                         task_type=task_type,
                         status="failed",
+                        idempotency_key=idempotency_key,
                         sequence_number=sequence_number,
                         notification_type=notification_type,
                         attempt_count=attempt + 1,

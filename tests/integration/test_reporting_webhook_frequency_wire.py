@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from src.core.reporting_capabilities import build_daily_reporting_capabilities
 from tests.harness.transport import Transport
 from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK
 
@@ -79,11 +80,10 @@ class TestCreateReportingWebhookFrequencyWire:
 
     def test_product_without_webhook_support_is_rejected(self, env_with_product) -> None:
         env, product, pricing_option = env_with_product
-        product.reporting_capabilities = {
-            "available_reporting_frequencies": ["daily"],
-            "available_metrics": ["impressions", "spend"],
-            "supports_webhooks": False,
-        }
+        product.reporting_capabilities = build_daily_reporting_capabilities(
+            supports_webhooks=False,
+            available_metrics=("impressions", "spend"),
+        )
 
         result = env.call_via(
             Transport.REST,
@@ -129,11 +129,10 @@ class TestUpdateReportingWebhookFrequencyWire:
 
     def test_product_without_webhook_support_is_rejected(self, env_with_media_buy) -> None:
         env, media_buy, product = env_with_media_buy
-        product.reporting_capabilities = {
-            "available_reporting_frequencies": ["daily"],
-            "available_metrics": ["impressions", "spend"],
-            "supports_webhooks": False,
-        }
+        product.reporting_capabilities = build_daily_reporting_capabilities(
+            supports_webhooks=False,
+            available_metrics=("impressions", "spend"),
+        )
 
         result = env.call_via(
             Transport.REST,

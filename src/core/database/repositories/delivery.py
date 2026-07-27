@@ -193,8 +193,8 @@ class DeliveryRepository:
 
         Used by the scheduler to check if a report was already sent within a
         rolling window. When ``notification_type`` is None the check spans ANY
-        notification_type (the broadened #1570 dedup — a sent "final" must also
-        suppress a re-send); pass a value to scope the check to one type.
+        notification type, so a sent "final" also suppresses a re-send; pass a
+        value to scope the check to one type.
         """
         stmt = select(WebhookDeliveryLog).where(
             WebhookDeliveryLog.tenant_id == self._tenant_id,
@@ -233,6 +233,39 @@ class DeliveryRepository:
         )
         return result or 0
 
+    def get_idempotency_key_for_sequence(
+        self,
+        media_buy_id: str,
+        *,
+        task_type: str,
+        notification_type: str | None,
+        sequence_number: int,
+    ) -> str | None:
+        """Return the key already assigned to a notification sequence, if any.
+
+        Failed delivery attempts do not consume a sequence number, so a later
+        scheduler invocation must reuse their key when retrying that same
+        logical notification.
+        """
+        notification_filter = (
+            WebhookDeliveryLog.notification_type.is_(None)
+            if notification_type is None
+            else WebhookDeliveryLog.notification_type == notification_type
+        )
+        stmt = (
+            select(WebhookDeliveryLog.idempotency_key)
+            .where(
+                WebhookDeliveryLog.tenant_id == self._tenant_id,
+                WebhookDeliveryLog.media_buy_id == media_buy_id,
+                WebhookDeliveryLog.task_type == task_type,
+                WebhookDeliveryLog.sequence_number == sequence_number,
+                notification_filter,
+                WebhookDeliveryLog.idempotency_key.is_not(None),
+            )
+            .order_by(WebhookDeliveryLog.created_at.desc())
+        )
+        return self._session.scalars(stmt).first()
+
     def has_successful_final(self, media_buy_id: str, *, task_type: str) -> bool:
         """Whether a successful FINAL delivery webhook has already been logged for this buy.
 
@@ -269,6 +302,7 @@ class DeliveryRepository:
         webhook_url: str,
         task_type: str,
         status: str,
+        idempotency_key: str | None = None,
         attempt_count: int = 1,
         sequence_number: int = 1,
         notification_type: str | None = None,
@@ -294,6 +328,7 @@ class DeliveryRepository:
             webhook_url=webhook_url,
             task_type=task_type,
             status=status,
+            idempotency_key=idempotency_key,
             attempt_count=attempt_count,
             sequence_number=sequence_number,
             notification_type=notification_type,

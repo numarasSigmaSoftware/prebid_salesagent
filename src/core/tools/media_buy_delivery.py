@@ -582,7 +582,7 @@ def _get_media_buy_delivery_impl(
                 )
                 # Skip this media buy and continue with others
 
-        # NOTE (#1570): the WEBHOOK_ONLY_FIELDS (notification_type, sequence_number,
+        # NOTE: the WEBHOOK_ONLY_FIELDS (notification_type, sequence_number,
         # next_expected_at, partial_data, unavailable_count) are "only present in
         # webhook deliveries" (get-media-buy-delivery-response.json @ v3.1-04f59d2d5),
         # so this polling impl does NOT set them. The delivery webhook scheduler
@@ -756,7 +756,7 @@ async def get_media_buy_delivery(
     response = _get_media_buy_delivery_impl(req, identity)
 
     # Serialize via model_dump so the MCP structured content matches the
-    # A2A/REST wire shape (#1570): passing the model object would have
+    # A2A/REST wire shape: passing the model object would have
     # fastmcp serialize it via pydantic_core, bypassing AdCPBaseModel's
     # exclude_none default — every unset optional would appear as an
     # explicit null only on MCP.

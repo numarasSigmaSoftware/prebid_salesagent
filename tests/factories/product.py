@@ -8,6 +8,7 @@ import factory
 from factory import LazyAttribute, Sequence, SubFactory
 
 from src.core.database.models import PricingOption, Product
+from src.core.reporting_capabilities import build_daily_reporting_capabilities
 from tests.factories.core import TenantFactory
 
 
@@ -34,11 +35,10 @@ class ProductFactory(factory.alchemy.SQLAlchemyModelFactory):
     property_tags = factory.LazyFunction(lambda: ["all_inventory"])
     delivery_measurement = factory.LazyFunction(lambda: {"provider": "publisher"})
     reporting_capabilities = factory.LazyFunction(
-        lambda: {
-            "available_reporting_frequencies": ["daily"],
-            "available_metrics": ["impressions", "spend"],
-            "supports_webhooks": True,
-        }
+        lambda: build_daily_reporting_capabilities(
+            supports_webhooks=True,
+            available_metrics=("impressions", "spend"),
+        )
     )
 
 

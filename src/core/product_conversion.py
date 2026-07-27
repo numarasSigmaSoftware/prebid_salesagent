@@ -30,6 +30,8 @@ from adcp.types._generated import MediaChannel
 from adcp.types.generated_poc.pricing_options.time_option import Parameters as TimeParameters
 from packaging.version import InvalidVersion, Version
 
+from src.core.reporting_capabilities import build_daily_reporting_capabilities
+
 # Import our extended Product (includes implementation_config)
 # Not the library Product - we need the internal fields
 from src.core.schemas import Product
@@ -482,15 +484,9 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
     if product_model.reporting_capabilities:
         product_data["reporting_capabilities"] = product_model.reporting_capabilities
     else:
-        # adcp 4.3 makes reporting_capabilities required — provide minimal default
-        product_data["reporting_capabilities"] = {
-            "available_reporting_frequencies": ["daily"],
-            "expected_delay_minutes": 1440,
-            "timezone": "UTC",
-            "supports_webhooks": False,
-            "available_metrics": ["impressions"],
-            "date_range_support": "date_range",
-        }
+        # Capability absence remains fail-closed for webhook registration, while
+        # still producing a schema-valid get_products response.
+        product_data["reporting_capabilities"] = build_daily_reporting_capabilities(supports_webhooks=False)
 
     # Default is_custom to False if not set
     product_data["is_custom"] = product_model.is_custom if product_model.is_custom else False

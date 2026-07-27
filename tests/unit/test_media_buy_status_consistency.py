@@ -143,7 +143,7 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_serving_persisted_statuses_membership_is_pinned(self):
         """Pin the exact SERVING_PERSISTED_STATUSES set (drives the schedulers' queries).
 
-        Regression #1556: the schedulers hardcoded partial copies of this set and
+        The schedulers previously hardcoded partial copies of this set and
         stranded legacy "ready" rows — reported active by get_media_buy_delivery
         but never sent delivery webhooks and never migrated. A silent widen/narrow
         of the map would change which buys the schedulers process without a
@@ -157,7 +157,7 @@ class TestCanonicalVocabularyPinnedToSdk:
         Derived as SERVING_PERSISTED_STATUSES - {"active"} and consumed by
         media_buy_status_scheduler.py. Pin the membership so a map change that
         added/removed a serving alias can't silently change which legacy rows the
-        scheduler migrates (#1556 class — same as the SERVING pin above).
+        scheduler migrates (the same drift class as the SERVING pin above).
         """
         assert LEGACY_SERVING_ALIASES == {"approved", "ready", "scheduled"}
 
@@ -168,7 +168,7 @@ class TestCanonicalVocabularyPinnedToSdk:
         flips an ended buy to persisted "completed" (~60s) before the hourly
         delivery batch, so a serving-only selection would strand the buy's
         spec-required FINAL webhook. This pin fails loudly if "completed" is ever
-        dropped from the selection (the #1575 blocker regression).
+        dropped from the selection.
         """
         assert REPORTABLE_PERSISTED_STATUSES == {"active", "approved", "ready", "scheduled", "completed"}
         assert REPORTABLE_PERSISTED_STATUSES == SERVING_PERSISTED_STATUSES | {"completed"}
@@ -176,7 +176,7 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_pending_persisted_statuses_membership_is_pinned(self):
         """Pin the exact PENDING_PERSISTED_STATUSES set (the status scheduler's promote gate).
 
-        Same #1556 class as SERVING: the status scheduler promotes exactly these
+        Same drift class as SERVING: the status scheduler promotes exactly these
         pre-serving persisted statuses to "active" once the flight starts. A silent
         widen would auto-promote a buy the seller has not accepted.
         """
@@ -188,7 +188,7 @@ class TestCanonicalVocabularyPinnedToSdk:
         ``pending`` and ``pending_approval`` also map to pending_start, but must NEVER
         be date-promoted by the scheduler (awaiting seller acceptance). Pin the exact
         subtraction so neither a map change nor a blind re-derivation can re-introduce
-        the #1556 hand-coded-partial-copy defect.
+        a hand-coded partial-copy defect.
         """
         pending_start_keys = frozenset(k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == "pending_start")
         assert PENDING_PERSISTED_STATUSES == pending_start_keys - {"pending", "pending_approval"}

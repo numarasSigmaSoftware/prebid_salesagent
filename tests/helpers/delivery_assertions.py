@@ -1,6 +1,6 @@
 """Shared delivery-response assertions.
 
-Keeps the webhook-only-field omission check (#1570) in one place so every poll
+Keeps the webhook-only-field omission check in one place so every poll
 site asserts the SAME full set — the constant `WEBHOOK_ONLY_FIELDS` is the
 production source of truth, so a field added there is enforced everywhere at
 once (avoids the drift where some sites silently dropped `sequence_number`).
@@ -100,7 +100,7 @@ class DetachedPushConfigMatcher:
 
 
 def assert_omits_webhook_only_fields(payload: dict, *, context: str) -> None:
-    """Assert a serialized delivery body omits ALL webhook-only fields (#1570).
+    """Assert a serialized delivery body omits ALL webhook-only fields.
 
     The fields in WEBHOOK_ONLY_FIELDS (notification_type / sequence_number /
     next_expected_at / partial_data / unavailable_count) are "only present in

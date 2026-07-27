@@ -10,7 +10,7 @@ their flight dates:
 
 This ensures media buys don't get stuck in transitional states when approved
 before their start date, and migrates legacy persisted aliases to the modern
-vocabulary so they match what the read tools report (#1556).
+vocabulary so they match what the read tools report.
 """
 
 import asyncio
@@ -99,7 +99,7 @@ class MediaBuyStatusScheduler:
                 # 1. pending set -> active if start_time passed (and creatives approved)
                 # 2. serving set (incl. legacy aliases) -> active mid-flight, completed
                 #    once end_time passes. Derived from the canonical map so legacy
-                #    "ready"/"approved" rows are migrated, not stranded (#1556).
+                #    "ready"/"approved" rows are migrated, not stranded.
                 media_buys = MediaBuyRepository.get_all_by_statuses(
                     session, sorted(PENDING_PERSISTED_STATUSES | SERVING_PERSISTED_STATUSES)
                 )

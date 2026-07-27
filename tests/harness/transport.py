@@ -116,13 +116,13 @@ class TransportResult:
             for error verification — see ``tests/CLAUDE.md`` § Error
             Verification Policy.
         synthesized_error_envelope: Two-layer envelope produced by
-            ``build_two_layer_error_envelope`` against the IMPL-caught
+            ``build_two_layer_error_envelope`` against an in-process
             ``AdCPError`` — what production WOULD emit at the boundary.
-            ``None`` on success and on REST/MCP/A2A (those expose the real
-            wire envelope above instead). Tests asserting on this field
-            verify the envelope-builder contract, NOT the wire shape — a
-            regression in the production boundary translator would not be
-            caught here. Use REST/MCP/A2A for wire-shape regressions.
+            Populated for IMPL and as an A2A diagnostic fallback only when
+            the harness failed to capture a real wire envelope. Tests
+            asserting on this field verify the envelope-builder contract,
+            NOT the wire shape — a regression in the production boundary
+            translator would not be caught here.
     """
 
     payload: BaseModel | None = None
@@ -152,7 +152,7 @@ class TransportResult:
         e2e_rest) that failed to stash ``wire_response`` raises instead of
         falling through to a re-serialized ``model_dump`` — which would
         normalize away the exact wire-shape regression these oracles exist to
-        catch (e.g. the MCP explicit-null leak, #1570). Only IMPL legitimately
+        catch (e.g. an MCP explicit-null leak). Only IMPL legitimately
         has no wire.
         """
         transport = self.envelope.get("transport")

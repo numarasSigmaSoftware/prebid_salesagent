@@ -24,8 +24,8 @@ Available mocks via env.mock:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -39,8 +39,13 @@ if TYPE_CHECKING:  # annotations only — keeps the harness import graph unchang
 
 
 @contextmanager
-def mock_webhook_post(scheduler: DeliveryWebhookScheduler) -> Iterator[MagicMock]:
-    """Stub a scheduler's outbound webhook POST with a 200 success response.
+def mock_webhook_post(
+    scheduler: DeliveryWebhookScheduler,
+    *,
+    responses: Sequence[Any] | None = None,
+    skip_retry_delays: bool = False,
+) -> Iterator[MagicMock]:
+    """Stub a scheduler's outbound webhook POST.
 
     Single source of truth for the mocked-POST shape every delivery-webhook
     integration test needs (CLAUDE.md DRY invariant — ``send_delivery_webhook``
@@ -55,10 +60,23 @@ def mock_webhook_post(scheduler: DeliveryWebhookScheduler) -> Iterator[MagicMock
 
     Yields the ``mock_post`` patch object so callers can assert on
     ``call_count`` / ``call_args_list`` after driving one or more sends.
+
+    By default every call receives a 200 response. Pass ``responses`` to drive
+    a finite sequence of transport outcomes while keeping the HTTP mock seam
+    centralized in this harness. Set ``skip_retry_delays`` when those responses
+    exercise retry backoff and wall-clock sleeps are irrelevant to the test.
     """
-    mock_response = MagicMock(status_code=200, text="OK")
-    mock_response.raise_for_status.return_value = None
-    with patch.object(scheduler.webhook_service._session, "post", return_value=mock_response) as mock_post:
+    patch_kwargs: dict[str, Any]
+    if responses is None:
+        mock_response = MagicMock(status_code=200, text="OK")
+        mock_response.raise_for_status.return_value = None
+        patch_kwargs = {"return_value": mock_response}
+    else:
+        patch_kwargs = {"side_effect": list(responses)}
+    with ExitStack() as stack:
+        mock_post = stack.enter_context(patch.object(scheduler.webhook_service._session, "post", **patch_kwargs))
+        if skip_retry_delays:
+            stack.enter_context(patch("src.services.protocol_webhook_service.asyncio.sleep", new_callable=AsyncMock))
         yield mock_post
 
 
@@ -142,7 +160,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         WebhookDeliveryLog, payload serialization — mocking only the outbound
         HTTP POST. Returns the JSON body the buyer's webhook would receive
         (the webhook-only fields notification_type / sequence_number /
-        next_expected_at live under ``result``; #1570).
+        next_expected_at live under ``result``).
 
         ``buy.raw_request`` must contain a ``reporting_webhook`` config.
         """
@@ -163,7 +181,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         impl, serialization — mocking only the outbound HTTP POST. Returns one
         JSON body per webhook actually sent (empty when the batch sends nothing),
         so a test can assert both the count and each wire ``result`` (the
-        webhook-only fields live under ``result``; #1570) without hand-rolling a
+        webhook-only fields live under ``result``) without hand-rolling a
         mock in the test body.
         """
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler

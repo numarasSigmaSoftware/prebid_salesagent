@@ -2348,7 +2348,7 @@ class TestNotificationTypeTerminality:
     present ... when notification_type is not 'final'"
     (get-media-buy-delivery-response.json @ v3.1-04f59d2d5).
 
-    Since #1570 the derivation lives in the shared ``derive_notification_type``
+    The derivation lives in the shared ``derive_notification_type``
     helper, applied only on the webhook path (the delivery webhook scheduler) —
     the spec scopes notification_type to webhook deliveries, so the polling
     response no longer carries it. The #1552 invariant is pinned here against
@@ -2384,7 +2384,7 @@ class TestNotificationTypeTerminality:
 class TestPollingResponseOmitsWebhookOnlyFields:
     """The polling response never carries the webhook-only metadata fields.
 
-    Spec (#1570): notification_type, sequence_number and next_expected_at are
+    Spec: notification_type, sequence_number and next_expected_at are
     "only present in webhook deliveries" (get-media-buy-delivery-response.json
     @ v3.1-04f59d2d5) — the delivery webhook scheduler attaches them when
     decorating the response for the webhook wire; the synchronous poll must
@@ -2425,7 +2425,7 @@ class TestTimeSimulationReachesFinalNotification:
     the "final" delivery notification was unreachable. In simulation mode
     (mock_time / jump_to_event) a non-terminal buy follows the simulated clock.
 
-    Since #1570 the "final" notification itself is webhook-only (the scheduler
+    The "final" notification itself is webhook-only (the scheduler
     derives it from these statuses via derive_notification_type); the poll
     pins the simulated *status* and the absence of the webhook-only fields.
 
@@ -2456,7 +2456,7 @@ class TestTimeSimulationReachesFinalNotification:
         assert response.media_buy_deliveries[0].status == "completed"
         # The status feeds the webhook path's "final" derivation (pinned once by
         # test_no_more_data_status_is_final); the poll itself carries NONE of the
-        # webhook-only fields (#1570) — enforced via the shared full-set oracle.
+        # webhook-only fields — enforced via the shared full-set oracle.
         assert_omits_webhook_only_fields(response.model_dump(mode="json"), context="simulated-clock poll")
 
     def test_mid_flight_mock_time_via_from_headers_does_not_raise(self):

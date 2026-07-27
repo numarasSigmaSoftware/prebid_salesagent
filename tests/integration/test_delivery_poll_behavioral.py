@@ -52,7 +52,7 @@ if TYPE_CHECKING:  # annotations only — the helpers below keep their lazy runt
 #
 # The webhook-only fields (notification_type / sequence_number /
 # next_expected_at) are attached by the delivery webhook scheduler, not the
-# polling impl (#1570: "only present in webhook deliveries" —
+# polling impl ("only present in webhook deliveries" —
 # get-media-buy-delivery-response.json @ v3.1-04f59d2d5). The tests below
 # drive a real scheduler send via DeliveryPollEnv.send_delivery_webhook()
 # (only the outbound HTTP POST is mocked), asserting on the actual wire body
@@ -258,7 +258,7 @@ class TestWebhookNotificationTypeScheduled:
             assert wire["result"]["notification_type"] == "scheduled"
 
             # The synchronous poll for the same buy carries none of the
-            # webhook-only fields (#1570).
+            # webhook-only fields.
             response = env.call_impl(media_buy_ids=[buy.media_buy_id])
             assert_omits_webhook_only_fields(response.model_dump(mode="json"), context="scheduled webhook poll")
 
@@ -298,7 +298,7 @@ class TestWebhookNotificationTypeFinal:
             assert_partial_data_pairing(wire["result"], context="final webhook wire")
 
             # The poll for the same completed buy reports the status but no
-            # webhook metadata (#1570).
+            # webhook metadata.
             response = env.call_impl(media_buy_ids=[buy.media_buy_id])
             dumped = response.model_dump(mode="json")
             assert dumped["media_buy_deliveries"][0]["status"] == "completed"
@@ -342,7 +342,7 @@ class TestSimulationReachesFinalThroughRealHook:
     path that must agree with the reported status (#1545 O2). A pending_creatives
     buy under mock_time past flight end must report 'completed' — the status that
     feeds the webhook path's 'final' derivation. The webhook-only fields
-    themselves never appear on this polling response (#1570).
+    themselves never appear on this polling response.
 
     Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
     """
@@ -413,7 +413,7 @@ class TestSimulationReachesFinalThroughRealHook:
 class TestFinalWebhookSurvivesStatusHandoff:
     """The spec-required FINAL webhook survives the status-scheduler -> delivery-batch handoff.
 
-    Regression (#1575 blocker): the media-buy status scheduler flips an ended buy
+    Regression: the media-buy status scheduler flips an ended buy
     to persisted "completed" on its 60s cadence, long before the hourly delivery
     batch. When the delivery batch selected only the serving persisted set, the
     just-completed buy was dropped and its FINAL delivery webhook ("one final
@@ -508,7 +508,7 @@ class TestConcurrentFinalWebhookClaim:
     via a ``threading.Barrier`` so the contention genuinely overlaps, not just two
     sequential sessions. A stale claim (crashed worker) self-heals; a definitive
     failure/no-send RELEASES the claim so an immediate retry isn't blocked for the
-    lease. This closes the concurrency duplicate (#1575); the crash-after-POST
+    lease. This closes the concurrency duplicate; the crash-after-POST
     window remains and is deferred to #1606.
 
     Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
@@ -791,7 +791,7 @@ class TestWebhookSequenceNumber:
         The sequence is backed by WebhookDeliveryLog rows written by the real
         send path (only the outbound HTTP POST is mocked), so this pins the
         scheduler's own counter — not the poll-path counter it silently
-        inherited before #1570.
+        inherited before the scheduler owned the counter.
 
         Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-05
         """
@@ -831,11 +831,59 @@ class TestWebhookSequenceNumber:
             repo = _seed_delivery_log(env, buy, log_id="failed-attempt-1", status="failed", sequence_number=1)
 
             # The failed row is invisible to the counter...
-            assert repo.get_max_sequence_number(buy.media_buy_id, task_type="media_buy_delivery") == 0
+            assert repo.get_max_sequence_number(buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) == 0
 
             # ...so the buyer's first delivered webhook still starts at 1.
             wire = await env.send_delivery_webhook(buy)
             assert wire["result"]["sequence_number"] == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_reuses_idempotency_key_until_sequence_succeeds(self, integration_db):
+        """A later scheduler invocation retries the same sequence with the same key.
+
+        The first invocation exhausts all three HTTP attempts. The next
+        invocation repeats sequence 1 and must reuse its key; only after that
+        delivery succeeds may sequence 2 receive a new key.
+
+        Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-05
+        """
+        import requests
+
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+        from tests.harness.delivery_poll import mock_webhook_post
+
+        failed = requests.Response()
+        failed.status_code = 503
+        failed.url = DAILY_REPORTING_WEBHOOK["url"]
+        succeeded = requests.Response()
+        succeeded.status_code = 200
+        succeeded.url = DAILY_REPORTING_WEBHOOK["url"]
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            scheduler = DeliveryWebhookScheduler()
+            send_args = (
+                buy,
+                buy.raw_request["reporting_webhook"],
+                env.get_session(),
+            )
+
+            with mock_webhook_post(
+                scheduler,
+                responses=[failed, failed, failed, succeeded, succeeded],
+                skip_retry_delays=True,
+            ) as mock_post:
+                with pytest.raises(RuntimeError, match="webhook send failed"):
+                    await scheduler._send_report_for_media_buy(*send_args, force=True)
+                await scheduler._send_report_for_media_buy(*send_args, force=True)
+                await scheduler._send_report_for_media_buy(*send_args, force=True)
+
+        payloads = [call.kwargs["json"] for call in mock_post.call_args_list]
+        first_key = payloads[0]["idempotency_key"]
+        assert [payload["result"]["sequence_number"] for payload in payloads] == [1, 1, 1, 1, 2]
+        assert {payload["idempotency_key"] for payload in payloads[:4]} == {first_key}
+        assert payloads[4]["idempotency_key"] != first_key
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +923,7 @@ class TestWebhookNextExpectedAt:
 
 
 # ---------------------------------------------------------------------------
-# Failed send accounting + broadened dedup (#1570 review remediation)
+# Failed send accounting + broadened dedup
 # ---------------------------------------------------------------------------
 
 
@@ -883,7 +931,7 @@ class TestWebhookNextExpectedAt:
 class TestFailedWebhookSendRaisesNotCountedAsSent:
     """A failed webhook send (send_notification -> False) RAISES; the batch counts an error, not a "Sent".
 
-    Headline correctness fix (#1570/#1575): ``_send_report_for_media_buy`` returns
+    ``_send_report_for_media_buy`` returns
     ``bool`` and raises ``RuntimeError`` when the outbound send reports failure,
     and ``_send_reports`` increments ``reports_sent`` only on a truthy return.
     The ``if not delivered: raise`` branch is driven through the shared
@@ -911,7 +959,7 @@ class TestFailedWebhookSendRaisesNotCountedAsSent:
 class TestDedupSuppressesPriorFinalWebhook:
     """A prior successful webhook of ANY notification_type dedups the next non-forced send.
 
-    #1570 broadened the 24h dedup by dropping the ``notification_type == "scheduled"``
+    The 24h dedup intentionally drops the ``notification_type == "scheduled"``
     predicate: a sent "final" must ALSO suppress a re-send within the window (the
     durable stopper is the status scheduler flipping the buy out of the serving
     selection, not this check). Seeding a prior successful "final" log — the
@@ -1049,7 +1097,7 @@ class TestPausedBuyReceivesNoDeliveryWebhook:
 
 
 # ---------------------------------------------------------------------------
-# Cross-transport: poll omits webhook-only fields on every wire (#1570)
+# Cross-transport: poll omits webhook-only fields on every wire
 # ---------------------------------------------------------------------------
 
 
@@ -1057,7 +1105,7 @@ class TestPausedBuyReceivesNoDeliveryWebhook:
 class TestPollOmitsWebhookOnlyFieldsOnEveryTransport:
     """The poll's actual wire body omits the webhook-only fields on MCP, A2A and REST.
 
-    The WEBHOOK_ONLY_FIELDS members are "only present in webhook deliveries" (spec, #1570).
+    The WEBHOOK_ONLY_FIELDS members are "only present in webhook deliveries" per the spec.
     MCP is the transport that regressed differently: fastmcp serializes
     structured content via pydantic_core, bypassing model_dump — so before the
     fix MCP emitted explicit nulls that A2A/REST omitted. Asserting on

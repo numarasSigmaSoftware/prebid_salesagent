@@ -141,9 +141,9 @@ CANONICAL_STATUSES: frozenset[str] = frozenset(PERSISTED_STATUS_TO_CANONICAL.val
 # production rows. Derived from the map so the schedulers can never drift from
 # the read tools: the delivery webhook scheduler selects exactly this set, and
 # the status scheduler migrates the legacy aliases to "active"/"completed".
-# (Regression #1556: the schedulers hardcoded partial copies and stranded
+# The schedulers previously hardcoded partial copies and stranded
 # legacy "ready" rows — reported active by get_media_buy_delivery but never
-# sent delivery webhooks and never migrated.)
+# sent delivery webhooks and never migrated.
 SERVING_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == CANONICAL_SERVING
 )
@@ -151,7 +151,7 @@ SERVING_PERSISTED_STATUSES: frozenset[str] = frozenset(
 # The legacy serving aliases (everything serving EXCEPT the modern "active") the
 # STATUS SCHEDULER migrates to canonical "active"/"completed" once serving —
 # purely date-gated (already approved), no creative check. Lives here beside the
-# set it derives from so the scheduler can't drift a partial copy (#1556 class);
+# set it derives from so the scheduler can't drift a partial copy;
 # membership pinned in test_media_buy_status_consistency.py.
 LEGACY_SERVING_ALIASES: frozenset[str] = SERVING_PERSISTED_STATUSES - {"active"}
 
@@ -162,7 +162,7 @@ LEGACY_SERVING_ALIASES: frozenset[str] = SERVING_PERSISTED_STATUSES - {"active"}
 # would serve a buy the seller has not accepted) and bare "pending". The
 # subtraction is business taxonomy the map cannot encode on its own, so it is
 # spelled out here (and pinned in test_media_buy_status_consistency.py) rather
-# than hardcoded as a partial copy that could silently drift (#1556 class).
+# than hardcoded as a partial copy that could silently drift.
 PENDING_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == "pending_start"
 ) - {"pending", "pending_approval"}
@@ -199,7 +199,7 @@ WEBHOOK_TERMINAL_PERSISTED_STATUSES: frozenset[str] = WEBHOOK_REPORTABLE_PERSIST
 # partial_data, and unavailable_count (the latter further scoped to
 # "when partial_data is true"). The polling _get_media_buy_delivery_impl must
 # omit all of them; on the polling-response path the delivery webhook scheduler
-# is the only place they are attached to the wire (#1570). NOT a repo-wide sole
+# is the only place they are attached to the wire. NOT a repo-wide sole
 # emitter: webhook_delivery_service.send_delivery_webhook (GAM reporting,
 # delivery simulator) attaches its own notification_type / sequence_number /
 # next_expected_at from an in-memory counter rather than the WebhookDeliveryLog.
@@ -223,7 +223,7 @@ def derive_notification_type(statuses: Iterable[str]) -> str | None:
     never come (next_expected_at is "only present ... when notification_type
     is not 'final'" per get-media-buy-delivery-response.json @ v3.1-04f59d2d5).
 
-    Webhook-path only (#1570): the spec scopes notification_type to webhook
+    Webhook-path only: the spec scopes notification_type to webhook
     deliveries ("only present in webhook deliveries"), so the polling
     ``_get_media_buy_delivery_impl`` must NOT call this — the delivery webhook
     scheduler applies it when decorating the response for the wire.

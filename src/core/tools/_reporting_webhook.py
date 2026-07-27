@@ -4,8 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from src.core.exceptions import AdCPCapabilityNotSupportedError
-
-SUPPORTED_REPORTING_FREQUENCIES: frozenset[str] = frozenset({"daily"})
+from src.core.reporting_capabilities import SUPPORTED_REPORTING_FREQUENCIES
 
 
 def _reporting_frequency(reporting_webhook: Any) -> str:

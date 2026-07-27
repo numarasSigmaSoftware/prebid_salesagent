@@ -55,19 +55,18 @@ def _envelope_from_adcp_error(exc: Exception) -> dict[str, Any] | None:
 
 
 def _wire_envelope_from_exception(exc: Exception) -> dict[str, Any] | None:
-    """Prefer the REAL wire envelope stashed by the harness; fall back to synthesized.
+    """Return only the REAL wire envelope stashed by the harness.
 
     When the A2A pipeline reconstructs an AdCPError from a failed Task's
     artifact DataPart, ``tests.harness._base._envelope_to_adcp_error``
     attaches the captured envelope to the exception as
-    ``_wire_error_envelope``. This helper returns that real wire envelope
-    if present; otherwise falls back to ``_envelope_from_adcp_error``
-    (synthesized — same helper production calls).
+    ``_wire_error_envelope``. A missing capture stays missing; synthesized
+    diagnostic data must never masquerade as bytes observed on the wire.
     """
     real_wire = getattr(exc, "_wire_error_envelope", None)
     if isinstance(real_wire, dict):
         return real_wire
-    return _envelope_from_adcp_error(exc)
+    return None
 
 
 def _envelope_from_mcp_error(exc: Exception) -> dict[str, Any] | None:
@@ -124,9 +123,13 @@ class A2ADispatcher:
         try:
             payload = env.call_a2a(**kwargs)
         except Exception as exc:
+            wire_error_envelope = _wire_envelope_from_exception(exc)
             return TransportResult(
                 error=exc,
-                wire_error_envelope=_wire_envelope_from_exception(exc),
+                wire_error_envelope=wire_error_envelope,
+                synthesized_error_envelope=(
+                    None if wire_error_envelope is not None else _envelope_from_adcp_error(exc)
+                ),
             )
         # Real A2A wire: the artifact DataPart dict stashed by _run_a2a_handler
         # (declared on BaseTestEnv, reset per call_via — read directly so a

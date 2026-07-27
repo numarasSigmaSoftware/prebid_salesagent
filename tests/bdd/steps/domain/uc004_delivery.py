@@ -1648,7 +1648,7 @@ def then_first_sequence(ctx: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Real DeliveryWebhookScheduler path (#1570 review remediation, finding #3)
+# Real DeliveryWebhookScheduler path
 #
 # The @T-UC-004-webhook-* scenarios above dispatch through the harness
 # is_final/is_adjusted flags and WebhookDeliveryService's own counter — they do
@@ -1773,7 +1773,7 @@ def then_scheduler_omits_unavailable_count(ctx: dict) -> None:
 def then_poll_omits_webhook_only_fields(ctx: dict) -> None:
     """Assert the synchronous poll's WIRE body carries none of the webhook-only fields.
 
-    #1570: WEBHOOK_ONLY_FIELDS are "only present in webhook deliveries"
+    # WEBHOOK_ONLY_FIELDS are "only present in webhook deliveries"
     (get-media-buy-delivery-response.json @ v3.1-04f59d2d5). ``wire_dict`` returns
     the real serialized wire body per transport and RAISES loudly if a wire
     transport didn't stash one — never silently degrading to a ``model_dump()``

@@ -935,7 +935,7 @@ class MediaBuy(Base):
         comment="RFC 8785 JCS SHA-256 of the create request (excluded fields stripped); degraded-path IDEMPOTENCY_CONFLICT signal",
     )
     # Best-effort atomic claim serializing the buy's one FINAL delivery webhook
-    # across concurrent scheduler/manual workers (#1575). Set by a conditional
+    # across concurrent scheduler/manual workers. Set by a conditional
     # UPDATE (MediaBuyRepository.try_claim_final_webhook) before the final POST so
     # only one worker sends; a stale claim (crashed worker) self-heals once older
     # than the lease. NULL until a final is claimed. The residual crash-after-POST
@@ -979,7 +979,6 @@ class MediaBuy(Base):
         ),
         Index("idx_media_buys_tenant", "tenant_id"),
         Index("idx_media_buys_status", "status"),
-        Index("idx_media_buys_status_updated_at", "status", "updated_at"),
         Index("idx_media_buys_strategy", "strategy_id"),
         Index("idx_media_buys_account", "account_id"),
         # Dup-booking backstop, scoped per the spec's idempotency tuple
@@ -2244,6 +2243,11 @@ class WebhookDeliveryLog(Base):
     notification_type: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # "scheduled", "final", "delayed", "adjusted"
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Stable AdCP webhook idempotency key reused when retrying the same notification sequence",
+    )
 
     # Retry tracking
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")

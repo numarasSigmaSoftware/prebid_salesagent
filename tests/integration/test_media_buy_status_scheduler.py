@@ -598,7 +598,7 @@ async def test_scheduler_idempotent(integration_db):
 
 
 # =============================================================================
-# Test: legacy serving aliases (ready/approved) are migrated, not stranded (#1556)
+# Test: legacy serving aliases (ready/approved) are migrated, not stranded
 # =============================================================================
 
 
@@ -608,7 +608,7 @@ async def test_scheduler_idempotent(integration_db):
 async def test_legacy_serving_alias_transitions_to_active_when_start_time_passed(integration_db, status):
     """A mid-flight legacy serving alias ('ready'/'approved') is migrated to 'active'.
 
-    Regression #1556 ('ready'): the scheduler's query omitted 'ready' entirely,
+    The scheduler's query previously omitted 'ready' entirely,
     and its activation branch hardcoded a partial status list — so even a fetched
     'ready' row was ignored mid-flight. 'ready' is a purely date-gated legacy
     serving alias (already approved), so it must activate without a creative
@@ -648,7 +648,7 @@ async def test_legacy_serving_alias_transitions_to_active_when_start_time_passed
 async def test_legacy_ready_transitions_to_completed_when_end_time_passed(integration_db):
     """A legacy 'ready' row past its flight end is migrated to 'completed'.
 
-    Pins the deliberate #1556 behavior change: post-flight legacy serving
+    Pins the deliberate behavior change: post-flight legacy serving
     aliases auto-complete, catching the persisted column up with what the read
     tools already report (resolve_canonical_status date-refines them to
     'completed').

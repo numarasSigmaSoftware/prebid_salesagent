@@ -31,6 +31,7 @@ def init_db_ci():
             Tenant,
             TenantAuthConfig,
         )
+        from src.core.reporting_capabilities import build_daily_reporting_capabilities
 
         print("Applying database migrations for CI...")
         run_migrations()
@@ -318,6 +319,10 @@ def init_db_ci():
                     ],
                     "targeting_template": {"geo": ["US"], "device_type": "any"},
                     "delivery_type": "guaranteed",
+                    "reporting_capabilities": build_daily_reporting_capabilities(
+                        supports_webhooks=True,
+                        available_metrics=("impressions", "spend", "clicks"),
+                    ),
                     "pricing": {"model": "cpm", "rate": 15.0, "is_fixed": True},
                 },
                 {
@@ -330,6 +335,10 @@ def init_db_ci():
                     ],
                     "targeting_template": {"geo": ["US"], "device_type": "any"},
                     "delivery_type": "guaranteed",
+                    "reporting_capabilities": build_daily_reporting_capabilities(
+                        supports_webhooks=True,
+                        available_metrics=("impressions", "spend", "completed_views"),
+                    ),
                     "pricing": {"model": "cpm", "rate": 25.0, "is_fixed": True},
                 },
             ]
@@ -348,6 +357,7 @@ def init_db_ci():
                         format_ids=p["formats"],
                         targeting_template=p["targeting_template"],
                         delivery_type=p["delivery_type"],
+                        reporting_capabilities=p["reporting_capabilities"],
                         property_tags=["all_inventory"],  # Required per AdCP spec
                         # Explicitly set all JSONB fields to None (SQL NULL) to satisfy constraints
                         measurement=None,

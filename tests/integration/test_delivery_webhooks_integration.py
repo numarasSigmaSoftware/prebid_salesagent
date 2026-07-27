@@ -6,6 +6,9 @@ These tests:
 - Mock only the GAM reporting layer (get_media_buy_delivery + freshness) and outbound HTTP
 """
 
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime, time, timedelta
 from unittest.mock import ANY, AsyncMock, patch
 
@@ -33,7 +36,11 @@ from tests.helpers.delivery_assertions import (
     assert_next_expected_at_shape,
     assert_partial_data_pairing,
 )
-from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK, SIGNED_DAILY_REPORTING_WEBHOOK
+from tests.helpers.delivery_fixtures import (
+    DAILY_REPORTING_WEBHOOK,
+    HMAC_DAILY_REPORTING_WEBHOOK,
+    SIGNED_DAILY_REPORTING_WEBHOOK,
+)
 
 
 def _create_test_tenant_and_principal(ad_server: str | None = None) -> tuple[str, str]:
@@ -356,6 +363,45 @@ async def test_signed_reporting_webhook_puts_a_bearer_header_on_the_wire(integra
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+async def test_hmac_reporting_webhook_signs_the_exact_posted_body(integration_db):
+    """Legacy HMAC covers the exact compact JSON bytes sent to the buyer."""
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook=HMAC_DAILY_REPORTING_WEBHOOK,
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+
+    with mock_webhook_post(scheduler) as mock_post:
+        await scheduler._send_reports()
+
+    mock_post.assert_called_once_with(
+        HMAC_DAILY_REPORTING_WEBHOOK["url"],
+        data=ANY,
+        headers=ANY,
+        timeout=10.0,
+    )
+    call = mock_post.call_args
+    assert "json" not in call.kwargs
+    body = call.kwargs["data"]
+    headers = call.kwargs["headers"]
+    assert isinstance(body, bytes)
+    assert body == json.dumps(json.loads(body), separators=(",", ":")).encode()
+
+    timestamp = headers["X-AdCP-Timestamp"]
+    secret = HMAC_DAILY_REPORTING_WEBHOOK["authentication"]["credentials"]
+    expected_digest = hmac.new(
+        secret.encode(),
+        timestamp.encode() + b"." + body,
+        hashlib.sha256,
+    ).hexdigest()
+    assert headers["X-AdCP-Signature"] == f"sha256={expected_digest}"
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
 async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db):
     """Canonical cadence, metric projection, and validation token are wired end to end."""
     tenant_id, principal_id = _create_test_tenant_and_principal()
@@ -635,7 +681,7 @@ async def test_scheduler_uses_simulated_path_in_testing_mode(integration_db):
 async def test_serving_persisted_status_is_selected_for_delivery_webhook(integration_db, persisted_status):
     """Every serving persisted status — legacy aliases included — is selected for webhooks.
 
-    Regression #1556: the scheduler queried a hardcoded ["active", "approved"],
+    The scheduler previously queried a hardcoded ["active", "approved"],
     so a legacy mid-flight "ready" (or "scheduled") row with a configured
     reporting_webhook was reported active by get_media_buy_delivery yet never
     received scheduled delivery webhooks. The query must select exactly the

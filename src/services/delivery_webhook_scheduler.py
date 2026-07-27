@@ -49,7 +49,7 @@ DEFAULT_SLEEP_INTERVAL_SECONDS = 3600
 # Configurable via env var for testing
 SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or str(DEFAULT_SLEEP_INTERVAL_SECONDS))
 
-# Lease for the best-effort atomic "final webhook" claim (#1575). A claim older
+# Lease for the best-effort atomic "final webhook" claim. A claim older
 # than this is treated as stale (crashed/failed worker) and can be re-claimed, so
 # a stuck claim never strands the final. Comfortably longer than a real send
 # (seconds) so an in-flight send is never reclaimed, and shorter than the hourly
@@ -249,7 +249,7 @@ class DeliveryWebhookScheduler:
         """Atomically claim the buy's ONE final webhook. Returns the claim token
         (the exact ``claimed_at`` written) if THIS worker won, else None.
 
-        Best-effort concurrency guard (#1575): a conditional UPDATE that wins only
+        Best-effort concurrency guard: a conditional UPDATE that wins only
         when the claim is unset or stale (older than FINAL_WEBHOOK_CLAIM_LEASE, so a
         crashed worker's claim self-heals). Runs on the caller's ``session`` and
         COMMITS it so the claim is immediately visible to a racing worker (whose
@@ -423,7 +423,7 @@ class DeliveryWebhookScheduler:
             delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
         )
 
-        # Set webhook-specific metadata directly on the response model (#1570).
+        # Set webhook-specific metadata directly on the response model.
         # These fields are webhook-only ("only present in webhook deliveries" —
         # get-media-buy-delivery-response.json @ v3.1-04f59d2d5), so the polling
         # impl never sets them. On the polling-response path this is the only
@@ -476,6 +476,16 @@ class DeliveryWebhookScheduler:
         # partial_data reporting is implemented; setting 0 alongside partial_data
         # False put a spec-divergent field on every webhook body.
         delivery_response.unavailable_count = None
+
+        # A failed delivery does not consume its sequence number. Reuse the
+        # prior attempt's key when the scheduler retries the same logical
+        # notification in a later invocation.
+        idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
+            media_buy.media_buy_id,
+            task_type=DELIVERY_TASK_TYPE,
+            notification_type=derived,
+            sequence_number=sequence_number,
+        )
 
         # Extract webhook URL and authentication
         webhook_url = reporting_webhook.get("url")
@@ -534,13 +544,14 @@ class DeliveryWebhookScheduler:
             result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
             status=AdcpTaskStatus.completed,
             token=reporting_webhook.get("token"),
+            idempotency_key=idempotency_key,
         )
 
         # Atomic concurrency claim, taken NOW — immediately before the POST — so the
         # definitive no-send paths above never hold a claim. The loser skips; the
         # winner's claim is released below on a failed send (token-guarded) so an
-        # immediate retry isn't blocked for the lease. (#1575; crash-after-POST
-        # residual -> #1606.)
+        # immediate retry isn't blocked for the lease. The crash-after-POST
+        # residual is tracked in #1606.
         claim_token = self._claim_final_webhook(session, media_buy) if is_final else None
         if is_final and claim_token is None:
             logger.info(
