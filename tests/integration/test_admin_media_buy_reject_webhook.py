@@ -59,6 +59,7 @@ def make_pending_media_buy(integration_db):
         PushNotificationConfigFactory,
         TenantFactory,
     )
+    from tests.factories.creative_asset import build_assets, image_spec, url_spec
 
     engine = get_engine()
     session = SASession(bind=engine)
@@ -114,6 +115,17 @@ def make_pending_media_buy(integration_db):
             tenant=tenant,
             principal=principal,
             creative_id="creative_reject_wh_1",
+            # Approval performs real format resolution before firing the
+            # webhook. Use the catalog-backed image format rather than the
+            # CreativeFactory's legacy display_300x250 default, and populate
+            # the asset roles required by that catalog format.
+            format="display_300x250_image",
+            data={
+                "assets": build_assets(
+                    image_spec("banner_image"),
+                    url_spec("click_url", url="https://buyer.example.com/landing"),
+                )
+            },
             status="approved",
         )
         CreativeAssignmentFactory(
