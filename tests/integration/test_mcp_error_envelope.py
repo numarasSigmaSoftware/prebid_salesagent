@@ -195,7 +195,7 @@ class TestMcpWireErrorEnvelope:
         assert envelope is not None, "Error must include content text carrying the envelope"
         assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
         for error in (envelope["adcp_error"], envelope["errors"][0]):
-            assert error["message"] == "start_time must be a future datetime or 'asap'."
+            assert error["message"] == "Start time cannot be in the past."
             assert error["field"] == "start_time"
             assert error["suggestion"] == "Use a future datetime or 'asap' for immediate start."
 

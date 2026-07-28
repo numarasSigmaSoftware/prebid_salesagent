@@ -768,7 +768,8 @@ Source: UC-002-ext-c.md, BR-RULE-013
 **Layer** schema
 **Given** `start_time` is an ISO 8601 datetime that is in the past
 **When** the system validates timing
-**Then** it returns error: "Invalid start time: {value}. Start time cannot be in the past."
+**Then** it returns `INVALID_REQUEST` with static message "Start time cannot be in the past."
+**And** the error identifies `field: start_time`, includes a corrective suggestion, and does not echo request timestamps
 **Business Rule:** BR-RULE-013 INV-2
 **Priority:** P0
 
@@ -777,7 +778,8 @@ Source: UC-002-ext-c.md, BR-RULE-013
 **Layer** schema
 **Given** `end_time` is before or equal to `start_time`
 **When** the system validates timing
-**Then** it returns error: "Invalid time range: end time ({end}) must be after start time ({start})."
+**Then** it returns `INVALID_REQUEST` with static message "End time must be after start time."
+**And** the error identifies `field: end_time`, includes a corrective suggestion, and does not echo request timestamps
 **Business Rule:** BR-RULE-013 INV-3
 **Priority:** P0
 

@@ -262,6 +262,16 @@ class TestA2AErrorPropagation:
 
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
         assert_envelope_shape(artifact_data, "INVALID_REQUEST", recovery="correctable")
+        for error in (artifact_data["adcp_error"], artifact_data["errors"][0]):
+            assert error["message"] == "End time must be after start time."
+            assert error["field"] == "end_time"
+            assert error["suggestion"] == "Set end_time to a datetime after start_time."
+
+        from tests.helpers.secret_scrub import serialize_wire_error
+
+        serialized = serialize_wire_error(artifact_data)
+        assert start.isoformat() not in serialized
+        assert end.isoformat() not in serialized
 
     async def test_get_media_buy_delivery_malformed_account_wire_envelope(self, handler, test_tenant, test_principal):
         """A malformed account on get_media_buy_delivery surfaces VALIDATION_ERROR on the A2A wire.

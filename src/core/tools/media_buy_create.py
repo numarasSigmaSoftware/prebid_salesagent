@@ -2475,7 +2475,7 @@ async def _create_media_buy_impl(
 
             if computed_start_time < now:
                 raise AdCPInvalidRequestError(
-                    "start_time must be a future datetime or 'asap'.",
+                    "Start time cannot be in the past.",
                     suggestion="Use a future datetime or 'asap' for immediate start.",
                     field="start_time",
                     _wire_safe_message=True,
@@ -2493,7 +2493,7 @@ async def _create_media_buy_impl(
 
         if computed_end_time <= computed_start_time:
             raise AdCPInvalidRequestError(
-                "end_time must be after start_time.",
+                "End time must be after start time.",
                 suggestion="Set end_time to a datetime after start_time.",
                 field="end_time",
                 _wire_safe_message=True,
