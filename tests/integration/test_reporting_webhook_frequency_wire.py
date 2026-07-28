@@ -28,7 +28,18 @@ def _requested_metrics_webhook(*metrics: str) -> dict[str, Any]:
     return {**DAILY_REPORTING_WEBHOOK, "requested_metrics": list(metrics)}
 
 
-def _assert_unsupported_capability(result: Any, message: str, suggestion: str) -> None:
+def _assert_unsupported_capability(result: Any, message: str, suggestion: str, *, expected_field: str) -> None:
+    """Assert the typed wire rejection, including WHICH request field it blames.
+
+    ``validate_reporting_webhook_frequency`` and the frequency branch of
+    ``validate_reporting_webhook_product_support`` both raise
+    UNSUPPORTED_FEATURE with a message containing the frequency string, so
+    ``message_substr`` alone cannot tell them apart from a validator that
+    fired for the wrong reason — and neither can distinguish a correctly
+    firing metrics-branch rejection from one that emitted the frequency
+    field by mistake. ``field`` is the one wire attribute that names the
+    exact rejected input; asserting it closes both gaps.
+    """
     assert result.is_error, f"Expected error, got payload: {result.payload}"
     result.assert_wire_error(
         "UNSUPPORTED_FEATURE",
@@ -38,6 +49,12 @@ def _assert_unsupported_capability(result: Any, message: str, suggestion: str) -
     wire_suggestion = extract_wire_suggestion(result.wire_error_envelope)
     assert wire_suggestion is not None
     assert suggestion in wire_suggestion.lower()
+    errors = result.wire_error_envelope["errors"]
+    assert errors[0].get("field") == expected_field, (
+        f"expected errors[0].field == {expected_field!r}, got {errors[0].get('field')!r}: {result.wire_error_envelope}"
+    )
+    # Two-layer invariant: the envelope-level mirror carries the same field.
+    assert result.wire_error_envelope["adcp_error"].get("field") == expected_field
 
 
 class TestCreateReportingWebhookFrequencyWire:
@@ -81,7 +98,9 @@ class TestCreateReportingWebhookFrequencyWire:
             req=self._request(product, pricing_option, _hourly_webhook()),
         )
 
-        _assert_unsupported_capability(result, "hourly", "daily")
+        _assert_unsupported_capability(
+            result, "hourly", "daily", expected_field="reporting_webhook.reporting_frequency"
+        )
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_product_without_webhook_support_is_rejected(
@@ -100,7 +119,7 @@ class TestCreateReportingWebhookFrequencyWire:
             req=self._request(product, pricing_option, dict(DAILY_REPORTING_WEBHOOK)),
         )
 
-        _assert_unsupported_capability(result, "daily", "daily")
+        _assert_unsupported_capability(result, "daily", "daily", expected_field="reporting_webhook.reporting_frequency")
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_unavailable_requested_metric_has_typed_wire_error(
@@ -115,7 +134,9 @@ class TestCreateReportingWebhookFrequencyWire:
             req=self._request(product, pricing_option, _requested_metrics_webhook("clicks")),
         )
 
-        _assert_unsupported_capability(result, "clicks", "requested_metrics")
+        _assert_unsupported_capability(
+            result, "clicks", "requested_metrics", expected_field="reporting_webhook.requested_metrics"
+        )
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_implicit_base_metrics_are_accepted(
@@ -173,7 +194,9 @@ class TestUpdateReportingWebhookFrequencyWire:
             req=self._request(media_buy, _hourly_webhook()),
         )
 
-        _assert_unsupported_capability(result, "hourly", "daily")
+        _assert_unsupported_capability(
+            result, "hourly", "daily", expected_field="reporting_webhook.reporting_frequency"
+        )
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_product_without_webhook_support_is_rejected(
@@ -192,7 +215,7 @@ class TestUpdateReportingWebhookFrequencyWire:
             req=self._request(media_buy, dict(DAILY_REPORTING_WEBHOOK)),
         )
 
-        _assert_unsupported_capability(result, "daily", "daily")
+        _assert_unsupported_capability(result, "daily", "daily", expected_field="reporting_webhook.reporting_frequency")
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_unavailable_requested_metric_has_typed_wire_error(
@@ -207,7 +230,9 @@ class TestUpdateReportingWebhookFrequencyWire:
             req=self._request(media_buy, _requested_metrics_webhook("clicks")),
         )
 
-        _assert_unsupported_capability(result, "clicks", "requested_metrics")
+        _assert_unsupported_capability(
+            result, "clicks", "requested_metrics", expected_field="reporting_webhook.requested_metrics"
+        )
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
     def test_implicit_base_metrics_are_accepted(
