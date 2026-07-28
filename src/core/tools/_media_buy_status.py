@@ -27,8 +27,14 @@ the pinned commit whose shape 3.1.1 preserves, not an older spec version.)
 The two callers adapt this single result to their own surface:
 
 - ``get_media_buy_delivery`` uses the canonical string directly and overlays
-  ``reporting_delayed`` when the reporting circuit breaker is open (the schema
-  admits it on any surface; it is not restricted to webhook deliveries).
+  ``reporting_delayed`` when the reporting circuit breaker is open. UNGRADED:
+  the enum admits the value on any surface, but the schema's only descriptive
+  prose scopes it to webhook context (get-media-buy-delivery-response.json
+  ``status``: "In webhook context, reporting_delayed indicates data
+  temporarily unavailable"). Overlaying it on this polling response is our
+  reading of the same "can't currently confirm delivery data" signal, not a
+  directly graded conformance step — no storyboard exercises a polling read
+  against an open circuit breaker.
 - ``get_media_buys`` collapses ``failed`` to ``rejected`` (the lifecycle enum
   has no ``failed``) and converts to ``MediaBuyStatus``.
 

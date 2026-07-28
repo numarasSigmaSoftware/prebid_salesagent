@@ -50,6 +50,20 @@ def _parse_json_list(text: str) -> list[str]:
     return json.loads(text)
 
 
+def _delivery_webhook_body(payload: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap a captured wire envelope to its ``media_buy_delivery`` result block.
+
+    Gated on ``task_type``, not a bare ``payload["result"]``: only a
+    ``media_buy_delivery`` task envelope carries the delivery body under
+    ``result`` — an unconditional unwrap would silently grade a differently
+    shaped envelope's ``result`` key (or crash on one with none), rather than
+    falling through to the raw payload the caller can still assert against.
+    """
+    if payload.get("task_type") == DELIVERY_TASK_TYPE and isinstance(payload.get("result"), dict):
+        return payload["result"]
+    return payload
+
+
 def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     """Extract the JSON payload from the most recent webhook POST call."""
     mock_post = ctx["env"].mock["post"]
@@ -57,9 +71,7 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     call_kwargs = mock_post.call_args_list[-1][1]  # kwargs of last call
     payload = call_kwargs.get("json") or call_kwargs.get("data") or {}
     assert payload, f"Webhook POST had no JSON payload: {call_kwargs}"
-    if payload.get("task_type") == DELIVERY_TASK_TYPE and isinstance(payload.get("result"), dict):
-        return payload["result"]
-    return payload
+    return _delivery_webhook_body(payload)
 
 
 def _get_last_webhook_headers(ctx: dict) -> dict[str, str]:
@@ -1788,8 +1800,12 @@ def _scheduler_result(ctx: dict) -> dict:
 
     Raises a diagnostic (not a bare KeyError) if the scheduler send was skipped
     or errored — those set ``ctx["error"]`` without ``ctx["scheduler_wire"]``.
+    Routes through the same task_type-gated unwrap as ``_get_last_webhook_payload``
+    — ``ctx["scheduler_wire"]`` is the same envelope shape, just captured via
+    ``env.send_delivery_webhook`` instead of the mock's call args directly.
     """
-    return _require(ctx, "scheduler_wire", hint="The scheduler send may have been skipped or errored.")["result"]
+    payload = _require(ctx, "scheduler_wire", hint="The scheduler send may have been skipped or errored.")
+    return _delivery_webhook_body(payload)
 
 
 @then(parsers.parse('the scheduler webhook payload notification_type should be "{ntype}"'))
