@@ -1428,6 +1428,18 @@ _SANITIZED_INTERNAL_MESSAGE = "An internal error occurred while processing the r
 # ``terminal`` internal error (CONFIGURATION_ERROR — per 3.1.1 the buyer MUST NOT auto-retry;
 # the seller operator must resolve it): pairing ``recovery: terminal`` with "retry later" emits
 # a self-contradictory envelope. Pick the suggestion by recovery so the two never disagree.
+#
+# Deliberate deviation from the pinned enum: unlike ``_SANITIZED_BY_WIRE_CODE`` below —
+# whose suggestions ARE the codes' canonical ``enumMetadata`` text — this bucket is keyed on
+# ``recovery``, not on the wire code, so its strings are ours rather than the spec's (the enum
+# says "retry with exponential backoff" for SERVICE_UNAVAILABLE; we say "retry later ... contact
+# the seller"). The semantics agree; the wording does not. That is the point: this bucket must
+# also serve codes with no enum entry at all — an unmapped internal code is coerced to
+# SERVICE_UNAVAILABLE by the caller — and keying on the emitted ``recovery`` is what guarantees
+# the guidance can never contradict it. Per-code spec text would reintroduce exactly the
+# contradiction this table was written to remove. Kept auditable by
+# ``test_sanitized_suggestions_match_pinned_spec_enum``, which holds the client-correctable
+# codes to the enum and so makes the two-axis split visible rather than accidental.
 _SANITIZED_TRANSIENT_SUGGESTION = "Retry the request later; if the problem persists, contact the seller."
 _SANITIZED_TERMINAL_SUGGESTION = (
     "This request cannot be retried; the seller must resolve the issue before it can succeed. Contact the seller."
