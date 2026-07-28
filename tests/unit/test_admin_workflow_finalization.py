@@ -900,3 +900,57 @@ def test_tasks_get_reconciles_approved_step_before_building_terminal_artifact():
     assert task.status.state == TaskState.TASK_STATE_COMPLETED
     assert task.artifacts and task.artifacts[0].name == "media_buy_result"
     assert extract_data_from_artifact(task.artifacts[0])["media_buy_id"] == "mb_1"
+
+
+class TestWaitingForCreativesMessage:
+    """One adapter-agnostic message for the WAITING_FOR_CREATIVES outcome.
+
+    Both admin approve routes branch on the SAME
+    ``ApprovalExecutionStatus.WAITING_FOR_CREATIVES`` from
+    ``prepare_media_buy_approval_execution``, but each hand-wrote its own flash text. The
+    copies drifted on a business fact: one said "in the ad server", the other "in GAM" —
+    wrong for every tenant on a non-GAM adapter, and this branch fires for all of them.
+    """
+
+    def test_message_is_adapter_agnostic(self):
+        from src.admin.utils.approval import waiting_for_creatives_message
+
+        message = waiting_for_creatives_message(3)
+
+        assert message == (
+            "Media buy approved! Waiting for 3 creative(s) to be approved before creating in the ad server."
+        )
+        # The drift that shipped: GAM is one of several registered adapters.
+        assert "GAM" not in message
+
+    def test_no_route_reinlines_the_message(self):
+        """The wording lives in exactly one place.
+
+        A route that re-inlines the sentence can drift again without any behavioural test
+        noticing, because no admin test drives either route into this branch today (that
+        coverage needs route-level fixtures neither blueprint has). This guard is what makes
+        the single-source property hold in the meantime.
+        """
+        from pathlib import Path
+
+        from src.admin.utils.approval import waiting_for_creatives_message
+
+        # Derive the fragment FROM the helper rather than hardcoding it, so rewording the
+        # message re-points the guard automatically instead of silently disarming it. The
+        # count-independent tail is the distinctive part; a reword that drops "creative(s)"
+        # trips the assert below rather than passing vacuously.
+        tail = waiting_for_creatives_message(1).split("creative(s)", 1)[-1].strip()
+        assert tail and "creative(s)" in waiting_for_creatives_message(1), (
+            "message shape changed — re-derive this guard's fragment"
+        )
+
+        src_root = Path(__file__).resolve().parents[2] / "src"
+        offenders = [
+            f"{path.relative_to(src_root)}:{lineno}"
+            for path in src_root.rglob("*.py")
+            if path.name != "approval.py"
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+            if tail in line
+        ]
+
+        assert offenders == [], f"WAITING_FOR_CREATIVES wording re-inlined outside approval.py: {offenders}"

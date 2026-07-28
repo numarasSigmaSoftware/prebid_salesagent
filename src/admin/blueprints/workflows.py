@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.admin.utils import echo_context, require_tenant_access, session_user_email
-from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE
+from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE, waiting_for_creatives_message
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Context
@@ -230,10 +230,7 @@ def _approve_mapped_media_buy(
             blocking_count,
             log_safe(preparation.blocking_creative_ids),
         )
-        flash(
-            f"Media buy approved! Waiting for {blocking_count} creative(s) to be approved before creating in GAM.",
-            "info",
-        )
+        flash(waiting_for_creatives_message(blocking_count), "info")
         db.commit()
         return jsonify({"success": True}), 200
     if preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
