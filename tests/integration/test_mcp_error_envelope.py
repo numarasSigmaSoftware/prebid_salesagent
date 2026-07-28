@@ -205,12 +205,20 @@ class TestMcpWireErrorEnvelope:
         assert "2020-01-01" not in serialized
         assert "2020-02-01" not in serialized
 
-    def test_top_level_create_failure_emits_envelope_on_wire(self, mcp_real_tenant_setup, monkeypatch):
-        """A typed failure escaping the create implementation keeps its envelope on the MCP wire.
+    def test_typed_validation_failure_from_impl_emits_scrubbed_envelope_on_wire(
+        self, mcp_real_tenant_setup, monkeypatch
+    ):
+        """A TYPED failure escaping the create implementation keeps its envelope on the MCP wire.
 
         This is intentionally injected below request parsing and above the normal
         tool boundary: it proves the middleware/tool translator, rather than a
         particular business validator, preserves both error-envelope layers.
+
+        The injected exception is typed on purpose — this grades that an ``AdCPValidationError``
+        raise-site message is SCRUBBED off the wire, which nothing else covers. The untyped
+        crash path is a different branch with a different code, graded by its own sibling
+        below; the two cannot share one test because SERVICE_UNAVAILABLE has no canonical
+        sanitized presentation for ``assert_sanitized_wire_error`` to check.
         """
         from src.core.exceptions import AdCPValidationError
 
@@ -252,6 +260,50 @@ class TestMcpWireErrorEnvelope:
             "VALIDATION_ERROR",
             rejected_fragments=("forced MCP top-level failure",),
         )
+
+    def test_untyped_impl_crash_emits_sanitized_envelope_on_wire(self, mcp_real_tenant_setup, monkeypatch):
+        """An UNTYPED crash in the implementation still reaches the buyer as an AdCP envelope.
+
+        The typed sibling above travels a path that already carried an envelope before this
+        boundary existed. This one drives the fall-through arm — an exception the
+        normalization registry does not recognise — which is the branch that turns a real
+        crash into ``SERVICE_UNAVAILABLE``/``transient`` instead of a bare transport error.
+
+        Distinct from the unit-level oracle in ``test_error_boundary_translation.py``: this
+        one runs through a real ``Client(mcp)`` call, so it also proves FastMCP does not
+        replace the message before the buyer sees it.
+        """
+
+        from tests.helpers.secret_scrub import SECRET_BEARING_MESSAGE, assert_no_secret_leak
+
+        async def _raise_untyped_crash(*_args, **_kwargs):
+            raise RuntimeError(SECRET_BEARING_MESSAGE)
+
+        monkeypatch.setattr("src.core.tools.media_buy_create._create_media_buy_impl", _raise_untyped_crash)
+        identity = mcp_real_tenant_setup
+
+        is_error, envelope = call_mcp_tool_capturing_envelope(
+            "create_media_buy",
+            {
+                "brand": {"domain": "wiretest.example"},
+                "idempotency_key": f"int-key-{uuid.uuid4().hex}",
+                "packages": [
+                    create_test_package_request_dict(
+                        product_id=_PRODUCT_ID,
+                        pricing_option_id="cpm_usd_fixed",
+                        budget=5000.0,
+                    )
+                ],
+                "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "end_time": (datetime.now(UTC) + timedelta(days=31)).isoformat(),
+            },
+            identity,
+        )
+
+        assert is_error, "untyped implementation crash must produce an MCP tool error"
+        assert envelope is not None, "MCP tool error must carry the two-layer envelope"
+        assert_envelope_shape(envelope, "SERVICE_UNAVAILABLE", recovery="transient")
+        assert_no_secret_leak(envelope, context="MCP untyped crash wire envelope")
 
     def test_get_media_buy_delivery_missing_identity_emits_auth_envelope_on_wire(self, integration_db):
         """Missing identity in get_media_buy_delivery surfaces AUTH_MISSING on the MCP wire.

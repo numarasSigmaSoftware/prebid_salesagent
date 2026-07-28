@@ -84,8 +84,15 @@ class TestRestErrorSuggestionPreservation:
             f"result.error.suggestion '{result.error.suggestion}' != wire suggestion '{wire_suggestion}'"
         )
 
-    def test_rest_top_level_create_failure_emits_two_layer_envelope(self, env_with_data, monkeypatch):
-        """A typed failure from the REST route's raw implementation reaches the global envelope handler."""
+    def test_rest_typed_validation_failure_emits_scrubbed_envelope(self, env_with_data, monkeypatch):
+        """A TYPED failure from the REST route's raw implementation reaches the global envelope handler.
+
+        Typed on purpose: this grades that an ``AdCPValidationError`` raise-site message is
+        SCRUBBED off the wire. An ``AdCPError`` is caught by the typed handler, never the
+        untyped catch-all — that arm is graded by
+        ``test_untyped_impl_failure_returns_sanitized_two_layer_envelope`` in
+        ``tests/unit/test_error_boundary_translation.py``, which injects a real crash.
+        """
         from src.core.exceptions import AdCPValidationError
 
         async def _raise_top_level_failure(*_args, **_kwargs):

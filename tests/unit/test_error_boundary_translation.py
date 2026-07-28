@@ -478,6 +478,40 @@ class TestMCPBoundaryAdCPErrorTranslation:
         )
         assert_no_secret_leak(str(exc_info.value), context="MCP PermissionError envelope")
 
+    def test_untyped_crash_becomes_scrubbed_tool_error(self):
+        """A generic, unmapped exception → scrubbed SERVICE_UNAVAILABLE ToolError.
+
+        The fifth ``normalize_to_adcp_error`` outcome, and the only one this class did not
+        drive: the fall-through for an exception that is neither an ``AdCPError`` nor one of
+        the mapped built-ins. The sibling cases above all inject something the normalization
+        registry recognises, so removing the boundary's untyped arm left the whole suite
+        green — the branch that turns a real crash into an AdCP envelope was unlocked.
+
+        ``assert_sanitized_wire_error`` is deliberately not used: it requires the code to
+        have a canonical sanitized presentation, and SERVICE_UNAVAILABLE is in the internal
+        bucket rather than ``_SANITIZED_BY_WIRE_CODE``.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from src.core.tool_error_logging import with_error_logging
+
+        def failing_tool():
+            raise RuntimeError(SECRET_BEARING_MESSAGE)
+
+        wrapped = with_error_logging(failing_tool)
+
+        with pytest.raises(ToolError) as exc_info:
+            wrapped()
+
+        assert_envelope_shape(
+            exc_info.value,
+            "SERVICE_UNAVAILABLE",
+            check_mcp_tool_error=True,
+            recovery="transient",
+        )
+        assert exc_info.value.status_code == 500
+        assert_no_secret_leak(str(exc_info.value), context="MCP untyped crash envelope")
+
 
 def _uncovered_correctable_targets(registry, sanitized_by_code, internal_codes, standard_codes):
     """Registry semantic targets lacking a sanitized client-correctable category.
