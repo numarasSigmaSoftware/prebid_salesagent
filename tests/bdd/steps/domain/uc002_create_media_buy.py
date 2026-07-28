@@ -313,6 +313,7 @@ def when_buyer_sends_nl_a2a_request(ctx: dict, request_text: str) -> None:
     from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
     from src.core.config_loader import set_current_tenant
     from tests.harness._base import _read_failed_a2a_task
+    from tests.harness.transport import TransportResult
     from tests.utils.a2a_helpers import make_nl_send_message_request
 
     env = ctx["env"]
@@ -343,6 +344,21 @@ def when_buyer_sends_nl_a2a_request(ctx: dict, request_text: str) -> None:
         )
         ctx["wire_error_envelope"] = envelope
         ctx["error"] = error
+        # Expose the same normalized TransportResult ``dispatch_request`` builds for every
+        # other scenario. Without it the generic wire-first Then-steps find no ``result``
+        # and silently fall back to grading the RECONSTRUCTED exception, so a wire-only
+        # regression (a code correct at the top layer but wrong in ``errors[0]``) passes.
+        # ``envelope`` here came off the real wire — the failed Task's processing_error
+        # artifact DataPart via ``_read_failed_a2a_task`` — not from re-serializing a model,
+        # so this is a wire read, not a synthesized one. ``synthesized_error_envelope`` is
+        # deliberately left unset: it is the IMPL-only builder output, and populating it on
+        # a wire transport would manufacture the exact tautology this exists to remove.
+        ctx["result"] = TransportResult(
+            error=error,
+            envelope={"transport": "a2a"},
+            raw_response=result,
+            wire_error_envelope=envelope,
+        )
 
 
 @given(parsers.parse("a create_media_buy request with account configuration {partition}"))

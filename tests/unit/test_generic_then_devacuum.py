@@ -152,3 +152,35 @@ def test_wire_message_assertion_proves_untrusted_fragment_was_scrubbed() -> None
     }
 
     then_error_message_contains(ctx, text="past")
+
+
+def test_error_code_step_grades_the_wire_not_the_reconstruction() -> None:
+    """``the error code should be`` follows the wire whenever one was captured.
+
+    A step that stashes ``ctx['error']`` but never sets ``ctx['result']`` looks green while
+    grading only the reconstructed exception — and reconstruction is lossy, so a wire-only
+    regression cannot redden it. Pin the precedence directly: with the two disagreeing, the
+    wire code is the one that must decide.
+    """
+    import pytest
+
+    from src.core.exceptions import (
+        AdCPCapabilityNotSupportedError,
+        AdCPValidationError,
+        build_two_layer_error_envelope,
+        safe_adcp_error,
+    )
+    from tests.bdd.steps.generic.then_error import then_error_code
+
+    # Reconstruction says VALIDATION_ERROR; the wire says UNSUPPORTED_FEATURE.
+    wire_error = safe_adcp_error(AdCPCapabilityNotSupportedError("nl create_media_buy is not supported"))
+    envelope = build_two_layer_error_envelope(wire_error)
+    ctx = {
+        "error": AdCPValidationError("reconstructed and lossy"),
+        "result": TransportResult(error=wire_error, wire_error_envelope=envelope),
+    }
+
+    then_error_code(ctx, code=envelope["adcp_error"]["code"])
+
+    with pytest.raises(AssertionError):
+        then_error_code(ctx, code="VALIDATION_ERROR")
