@@ -18,6 +18,7 @@ Task. These tests pin the returned-failed-Task contract on the wire artifact.
 """
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -48,6 +49,7 @@ from src.core.exceptions import (
     AdCPError,
     AdCPValidationError,
 )
+from src.core.tool_context import ToolContext
 from tests.a2a_helpers import make_a2a_context
 from tests.factories import PrincipalFactory
 from tests.helpers import assert_envelope_shape
@@ -379,14 +381,26 @@ async def test_unknown_skill_records_boundary_error_exactly_once():
             "p_boundary",
             id="resolved-identity",
         ),
+        pytest.param(
+            ToolContext(
+                context_id="ctx_boundary",
+                tenant_id="t_tool",
+                principal_id="p_tool",
+                tool_name="set_push_notification_config",
+                request_timestamp=datetime.now(UTC),
+            ),
+            "t_tool",
+            "p_tool",
+            id="tool-context",
+        ),
     ],
 )
-def test_boundary_internal_error_uses_one_sentinel_regardless_of_caller(
+def test_boundary_internal_error_uses_one_scope_policy_regardless_of_caller(
     identity, expected_tenant_id, expected_principal_id
 ):
-    """``_boundary_internal_error`` — the single home shared by ``on_message_send``,
-    ``on_get_task``, and ``on_cancel_task`` — logs the SAME identity-scope sentinel no
-    matter which of the three callers it serves.
+    """``_boundary_internal_error`` — the single home shared by all seven A2A
+    request handlers — logs the SAME identity-scope policy for resolved identities,
+    tool contexts, and unresolved callers.
 
     Regression: ``on_message_send``'s boundary arm used to open-code
     ``(identity.tenant_id or "unknown") if identity else "unknown"`` while
@@ -394,8 +408,8 @@ def test_boundary_internal_error_uses_one_sentinel_regardless_of_caller(
     ``getattr(identity, "tenant_id", None)`` / ``getattr(..., "principal_id", None) or
     "anonymous"`` — the SAME unresolved-identity event logged under two different
     sentinels (``"unknown"``/``"unknown"`` vs ``None``/``"anonymous"``), un-greppable
-    across handlers. All three now delegate to this one function, so there is exactly
-    one sentinel definition to test.
+    across handlers. All seven now delegate to this one function, so there is exactly
+    one scope and sentinel definition to test.
     """
     from src.a2a_server.adcp_a2a_server import _boundary_internal_error
 
@@ -434,6 +448,56 @@ def test_anonymous_discovery_boundary_error_is_tenant_unscoped():
         tenant_id=None,
         principal_id=None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "op_key", "op_label"),
+    [
+        pytest.param(
+            "on_get_task_push_notification_config",
+            "get_push_notification_config",
+            "get push notification config",
+            id="get",
+        ),
+        pytest.param(
+            "on_create_task_push_notification_config",
+            "create_push_notification_config",
+            "set push notification config",
+            id="create",
+        ),
+        pytest.param(
+            "on_list_task_push_notification_configs",
+            "list_push_notification_configs",
+            "list push notification configs",
+            id="list",
+        ),
+        pytest.param(
+            "on_delete_task_push_notification_config",
+            "delete_push_notification_config",
+            "delete push notification config",
+            id="delete",
+        ),
+    ],
+)
+async def test_push_config_handlers_share_boundary_internal_error(handler_name, op_key, op_label):
+    """Every push-config handler delegates its untyped-crash arm to the same scope,
+    audit, and sanitization helper as message/send and task get/cancel.
+    """
+    handler = AdCPRequestHandler()
+    exc = RuntimeError("boom")
+    handler._authenticated_tool_context = MagicMock(side_effect=exc)
+    translated = InternalError(message="sanitized")
+
+    with patch(
+        "src.a2a_server.adcp_a2a_server._boundary_internal_error",
+        return_value=translated,
+    ) as mock_boundary:
+        with pytest.raises(InternalError) as exc_info:
+            await getattr(handler, handler_name)(MagicMock(), MagicMock())
+
+    assert exc_info.value is translated
+    mock_boundary.assert_called_once_with(op_key, op_label, None, exc)
 
 
 @pytest.mark.asyncio

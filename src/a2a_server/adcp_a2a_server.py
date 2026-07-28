@@ -303,8 +303,15 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     return InternalError(message=message, data=envelope)
 
 
-def _record_a2a_boundary_error(op_key: str, identity: ResolvedIdentity | None, exc: Exception) -> None:
-    """Record an A2A boundary failure with one canonical identity scope."""
+def _record_a2a_boundary_error(op_key: str, identity: ResolvedIdentity | ToolContext | None, exc: Exception) -> None:
+    """Record an A2A boundary failure with one canonical identity scope.
+
+    Accepts a ``ToolContext`` as well as a ``ResolvedIdentity``: the push-config handlers
+    hold a resolved tool context rather than a bare identity, and both expose the
+    ``tenant_id``/``principal_id`` that ``best_effort_boundary_identity`` reads. The two
+    signatures must stay in step — ``_boundary_internal_error`` forwards straight to here,
+    so a narrower type on this side rejects exactly the callers that helper exists to serve.
+    """
     tenant_id, principal_id = best_effort_boundary_identity(lambda: identity, transport="a2a")
     record_boundary_error(
         "a2a",
@@ -321,15 +328,20 @@ def _a2a_activity_scope(identity: ResolvedIdentity | None) -> tuple[str | None, 
 
 
 def _boundary_internal_error(
-    op_key: str, op_label: str, identity: ResolvedIdentity | None, exc: Exception
+    op_key: str,
+    op_label: str,
+    identity: ResolvedIdentity | ToolContext | None,
+    exc: Exception,
 ) -> InternalError:
-    """THE single untyped-crash boundary arm shared by ``on_message_send``,
-    ``on_get_task``, and ``on_cancel_task``: log server-side (``record_boundary_error``)
-    using ONE canonical identity-scope sentinel, then build the sanitized JSON-RPC
-    ``InternalError`` (``_internal_error_for``).
+    """THE single untyped-crash boundary arm shared by every A2A request handler.
 
-    Each of the three handlers previously open-coded this arm; ``on_message_send``'s
-    copy had already drifted onto a different missing-identity sentinel
+    Log server-side (``record_boundary_error``) using ONE canonical identity-scope
+    sentinel, then build the sanitized JSON-RPC ``InternalError``
+    (``_internal_error_for``).
+
+    The message/get/cancel handlers and four push-notification-config handlers
+    previously open-coded this arm. ``on_message_send``'s copy had already drifted
+    onto a different missing-identity sentinel
     (``"unknown"``/``"unknown"``) from ``on_get_task``/``on_cancel_task``'s
     (``None``/``"anonymous"``), so the SAME unresolved-identity event logged under two
     different sentinels — un-greppable, and the tenant column swung by handler. This
@@ -1757,14 +1769,12 @@ class AdCPRequestHandler(RequestHandler):
         except A2AError:
             raise
         except Exception as e:
-            record_boundary_error(
-                "a2a",
+            raise _boundary_internal_error(
                 "get_push_notification_config",
+                "get push notification config",
+                tool_context,
                 e,
-                tenant_id=tool_context.tenant_id if tool_context else None,
-                principal_id=tool_context.principal_id if tool_context else None,
-            )
-            raise _internal_error_for("get push notification config", e) from e
+            ) from e
 
     async def on_create_task_push_notification_config(
         self,
@@ -1829,14 +1839,12 @@ class AdCPRequestHandler(RequestHandler):
         except A2AError:
             raise
         except Exception as e:
-            record_boundary_error(
-                "a2a",
+            raise _boundary_internal_error(
                 "create_push_notification_config",
+                "set push notification config",
+                tool_context,
                 e,
-                tenant_id=tool_context.tenant_id if tool_context else None,
-                principal_id=tool_context.principal_id if tool_context else None,
-            )
-            raise _internal_error_for("set push notification config", e) from e
+            ) from e
 
     async def on_list_task_push_notification_configs(
         self,
@@ -1883,14 +1891,12 @@ class AdCPRequestHandler(RequestHandler):
         except A2AError:
             raise
         except Exception as e:
-            record_boundary_error(
-                "a2a",
+            raise _boundary_internal_error(
                 "list_push_notification_configs",
+                "list push notification configs",
+                tool_context,
                 e,
-                tenant_id=tool_context.tenant_id if tool_context else None,
-                principal_id=tool_context.principal_id if tool_context else None,
-            )
-            raise _internal_error_for("list push notification configs", e) from e
+            ) from e
 
     async def on_delete_task_push_notification_config(
         self,
@@ -1924,14 +1930,12 @@ class AdCPRequestHandler(RequestHandler):
         except A2AError:
             raise
         except Exception as e:
-            record_boundary_error(
-                "a2a",
+            raise _boundary_internal_error(
                 "delete_push_notification_config",
+                "delete push notification config",
+                tool_context,
                 e,
-                tenant_id=tool_context.tenant_id if tool_context else None,
-                principal_id=tool_context.principal_id if tool_context else None,
-            )
-            raise _internal_error_for("delete push notification config", e) from e
+            ) from e
 
     async def on_get_extended_agent_card(
         self,
