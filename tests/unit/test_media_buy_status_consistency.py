@@ -29,6 +29,7 @@ from src.core.tools._media_buy_status import (
     TERMINAL_STATUSES,
     WEBHOOK_ONLY_FIELDS,
     WEBHOOK_REPORTABLE_CANONICAL_STATUSES,
+    WEBHOOK_TERMINAL_CANONICAL_STATUSES,
     WEBHOOK_TERMINAL_PERSISTED_STATUSES,
     resolve_canonical_status,
 )
@@ -238,7 +239,13 @@ class TestCanonicalVocabularyPinnedToSdk:
         )
 
     def test_webhook_terminal_statuses_cover_persistent_channel_termination(self):
-        """Pin the AdCP 3.1.1 completed/canceled/rejected termination set."""
+        """Pin the completed/canceled/rejected persistent-channel termination set.
+
+        The spec/storyboard only mandate "final" for campaign completion
+        (optimization-reporting.mdx §Publisher Commitment) — extending it to
+        canceled/rejected is our reading, per WEBHOOK_TERMINAL_CANONICAL_STATUSES's
+        own UNGRADED comment. This is a literal pin, not a spec pin.
+        """
         assert WEBHOOK_REPORTABLE_CANONICAL_STATUSES == {
             "active",
             "completed",
@@ -250,6 +257,25 @@ class TestCanonicalVocabularyPinnedToSdk:
             "canceled",
             "rejected",
         }
+
+    def test_webhook_terminal_statuses_match_the_pinned_sdks_lifecycle_classification(self):
+        """WEBHOOK_TERMINAL_CANONICAL_STATUSES is a literal; ground it on the SDK.
+
+        Our "our reading, ungraded" extension happens to coincide with the pinned
+        SDK's own terminal classification (``adcp.server.helpers.is_terminal_status``)
+        over the canonical status vocabulary. Asserting the two AGREE catches the
+        literal drifting from that classification, without claiming the spec text
+        itself mandates the extension — the module comment already says it doesn't.
+
+        NOT the same set as NO_MORE_DATA_STATUSES: that one additionally includes
+        "failed" (a delivery-only canonical status the SDK's lifecycle classifier
+        does not know about) for the derive_notification_type() invariant. Conflating
+        the two would silently change notification_type for failed buys.
+        """
+        from adcp.server.helpers import is_terminal_status
+
+        sdk_terminal = {status for status in CANONICAL_STATUSES if is_terminal_status(status)}
+        assert sdk_terminal == WEBHOOK_TERMINAL_CANONICAL_STATUSES
 
     def test_webhook_only_fields_grounded_on_the_pinned_sdk(self):
         """Ground WEBHOOK_ONLY_FIELDS on the PINNED SDK's schema, not a re-typed literal.

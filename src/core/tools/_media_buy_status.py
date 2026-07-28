@@ -181,10 +181,17 @@ REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
 )
 COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
-# Reporting webhooks are persistent channels. UNGRADED: the schema/storyboard
-# describes "final" narrowly as campaign completion; treating canceled and
-# rejected as terminal is our reading of the same no-more-data invariant
-# documented by derive_notification_type(), not a directly graded requirement.
+# Reporting webhooks are persistent channels, so "no more data will ever
+# arrive" is a broader question than the spec's completion-only "final". The
+# spec/storyboard describe "final" narrowly as campaign completion
+# (optimization-reporting.mdx §Publisher Commitment) — treating canceled and
+# rejected as terminal too is our reading of the same no-more-data invariant
+# derive_notification_type() documents, not a directly graded requirement.
+# That reading happens to match the pinned SDK's own lifecycle classification
+# (adcp.server.helpers.is_terminal_status), which is spelled here as a literal
+# rather than imported so this module keeps its zero-adcp-import property;
+# test_media_buy_status_consistency.py pins the two against each other so a
+# divergence is caught rather than silently accepted.
 WEBHOOK_TERMINAL_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_COMPLETED, "canceled", "rejected"})
 WEBHOOK_REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset(
     {CANONICAL_SERVING, *WEBHOOK_TERMINAL_CANONICAL_STATUSES}
