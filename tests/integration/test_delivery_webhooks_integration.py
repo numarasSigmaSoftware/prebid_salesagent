@@ -32,6 +32,7 @@ from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 from tests.harness.delivery_poll import mock_webhook_post
 from tests.helpers.delivery_assertions import (
     DetachedPushConfigMatcher,
+    WebhookHeadersMatcher,
     assert_detached_push_config,
     assert_next_expected_at_shape,
     assert_partial_data_pairing,
@@ -379,10 +380,19 @@ async def test_hmac_reporting_webhook_signs_the_exact_posted_body(integration_db
     with mock_webhook_post(scheduler) as mock_post:
         await scheduler._send_reports()
 
+    # Header surface pinned atomically: an HMAC send must NOT also emit
+    # Authorization, or the shared secret would ship to the buyer as a bearer
+    # credential. `headers=ANY` here would match that leak silently.
     mock_post.assert_called_once_with(
         HMAC_DAILY_REPORTING_WEBHOOK["url"],
         data=ANY,
-        headers=ANY,
+        headers=WebhookHeadersMatcher(
+            static={
+                "Content-Type": "application/json",
+                "User-Agent": "AdCP-Sales-Agent/1.0",
+            },
+            dynamic_keys=frozenset({"X-AdCP-Signature", "X-AdCP-Timestamp"}),
+        ),
         timeout=10.0,
     )
     call = mock_post.call_args
@@ -431,7 +441,10 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
     payload = send_call.kwargs["payload"]
     assert payload.token == "buyer-validation-token-0001"
     totals = payload.result["media_buy_deliveries"][0]["totals"]
-    assert set(totals) == {"impressions", "clicks"}
+    # requested_metrics projects out unrequested OPTIONAL metrics; impressions and
+    # spend are implicitly included per AdCP and spend is required on the wire, so
+    # the projected set is the requested ones unioned with those.
+    assert set(totals) == {"impressions", "clicks", "spend"}
 
 
 @pytest.mark.requires_db

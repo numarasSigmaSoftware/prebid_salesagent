@@ -3164,7 +3164,7 @@ def _ensure_media_buy_in_db(
     start_date: str | None = None,
     end_date: str | None = None,
     raw_request: dict | None = None,
-) -> Any:
+) -> MediaBuy | None:
     """Create a media buy in the test database using factories; return it.
 
     Uses the env's integration DB session. If the env doesn't support

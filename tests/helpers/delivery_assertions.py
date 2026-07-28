@@ -114,6 +114,46 @@ class MediaBuyIdMatcher:
         return f"MediaBuy(media_buy_id={self._media_buy_id!r})"
 
 
+class WebhookHeadersMatcher:
+    """``==`` matcher pinning the EXACT header key set on an outbound webhook POST.
+
+    Exists so a signed-webhook test can assert count and the full header surface in
+    one atomic ``assert_called_once_with`` instead of ``headers=ANY`` followed by a
+    separate ``.call_args`` read. The split shape lets a credential land in an
+    unexpected header without any assertion noticing: an HMAC send that also emitted
+    ``Authorization`` would ship the shared secret to the buyer and still pass, since
+    ``ANY`` matches anything and the follow-up read only inspects the keys it names.
+
+    Runtime-computed values (the HMAC signature and timestamp) are matched by
+    presence, not value — the caller verifies the digest separately against the body,
+    which a header-only matcher cannot see.
+    """
+
+    def __init__(self, *, static: dict[str, str], dynamic_keys: frozenset[str] = frozenset()) -> None:
+        self._static = static
+        self._dynamic_keys = dynamic_keys
+        self._mismatch: str | None = None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, dict):
+            self._mismatch = f"expected a headers dict, got {type(other).__name__}"
+            return False
+        expected_keys = set(self._static) | set(self._dynamic_keys)
+        if set(other) != expected_keys:
+            unexpected = sorted(set(other) - expected_keys)
+            missing = sorted(expected_keys - set(other))
+            self._mismatch = f"header keys differ — unexpected: {unexpected}, missing: {missing}"
+            return False
+        for key, value in self._static.items():
+            if other[key] != value:
+                self._mismatch = f"header {key!r} is {other[key]!r}, expected {value!r}"
+                return False
+        return True
+
+    def __repr__(self) -> str:
+        return self._mismatch or f"headers(static={self._static!r}, dynamic={sorted(self._dynamic_keys)!r})"
+
+
 class SessionMatcher:
     """Match a real SQLAlchemy Session without pinning object identity."""
 

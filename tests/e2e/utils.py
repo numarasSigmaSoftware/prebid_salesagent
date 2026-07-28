@@ -120,18 +120,26 @@ def force_complete_media_buy_in_db(live_server: dict, media_buy_id: str):
     the buy is absent.
     """
     from src.core.database.models import MediaBuy
+    from src.core.database.repositories.media_buy import MediaBuyRepository
     from src.core.tools._media_buy_status import COMPLETED_PERSISTED_STATUSES
 
     # Derived, not a re-typed "completed": this must stay the same persisted status the
     # delivery scheduler's completed arm selects, or the FINAL webhook is never sent.
-    (completed_status,) = sorted(COMPLETED_PERSISTED_STATUSES)
+    completed_statuses = sorted(COMPLETED_PERSISTED_STATUSES)
+    assert len(completed_statuses) == 1, (
+        f"expected exactly one persisted status mapping to canonical completed, got {completed_statuses} — "
+        "this helper picks the scheduler's completed arm and cannot choose between several"
+    )
+    completed_status = completed_statuses[0]
 
     with live_db_env(live_server) as env:
         session = env.get_session()
+        # Read to resolve the owning tenant; the mutation itself goes through the
+        # repository so this helper does not hand-roll a raw ORM write.
         buy = session.scalars(select(MediaBuy).filter_by(media_buy_id=media_buy_id)).first()
         if buy is None:
             raise RuntimeError(f"media buy {media_buy_id!r} not found in the live e2e DB")
-        buy.status = completed_status
+        MediaBuyRepository(session, buy.tenant_id).update_status(media_buy_id, completed_status)
         session.commit()
 
 
