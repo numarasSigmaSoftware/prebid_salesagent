@@ -1208,7 +1208,7 @@ class TestRESTBoundaryAdCPErrorTranslation:
             patch("src.app._best_effort_rest_identity") as mock_identity,
             patch("src.app.record_boundary_error") as mock_record,
         ):
-            response = _envelope_response(request, error)
+            response = _envelope_response(request, error, original=error)
 
         mock_identity.assert_not_called()
         mock_record.assert_called_once_with(
@@ -1241,7 +1241,7 @@ class TestRESTBoundaryAdCPErrorTranslation:
             patch("src.app.resolve_identity", return_value=anonymous),
             patch("src.app.record_boundary_error") as mock_record,
         ):
-            response = _envelope_response(request, error)
+            response = _envelope_response(request, error, original=error)
 
         mock_record.assert_called_once_with(
             "rest",
@@ -1251,6 +1251,40 @@ class TestRESTBoundaryAdCPErrorTranslation:
             principal_id=None,
         )
         assert response.status_code == error.status_code
+
+    def test_boundary_log_receives_the_original_not_the_sanitized_twin(self):
+        """The privileged server log must see the exception as raised.
+
+        ``record_boundary_error`` picks log severity from ``isinstance(error, AdCPError)``:
+        an untyped crash gets ERROR + ``exc_info=True``, a typed error gets WARNING. Handing
+        it ``safe_adcp_error(exc)`` made that test always true, so a genuine REST crash
+        logged at WARNING with the scrubbed message and no traceback — while MCP and A2A,
+        which pass the original, kept theirs.
+
+        Identity (``is``) is the load-bearing check: an equality assertion would also pass
+        on a re-derived sanitized twin, which is exactly the bug.
+        """
+        import json as _json
+
+        from starlette.requests import Request
+
+        from src.app import _envelope_response
+        from src.core.exceptions import safe_adcp_error
+
+        request = Request({"type": "http", "method": "GET", "path": "/api/v1/capabilities", "headers": []})
+        original = RuntimeError(SECRET_BEARING_MESSAGE)
+        wire_error = safe_adcp_error(original)
+
+        with (
+            patch("src.app._best_effort_rest_identity", return_value=(None, None)),
+            patch("src.app.record_boundary_error") as mock_record,
+        ):
+            response = _envelope_response(request, wire_error, original=original)
+
+        assert mock_record.call_args.args[2] is original
+        # The wire still carries the sanitized error, never the original's text.
+        assert response.status_code == wire_error.status_code
+        assert_no_secret_leak(_json.loads(response.body), context="REST envelope body")
 
     def test_adcp_validation_from_impl_returns_400(self):
         """AdCPValidationError raised in _impl → REST returns 400 with correctable recovery."""

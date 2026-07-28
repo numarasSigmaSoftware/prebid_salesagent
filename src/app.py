@@ -137,8 +137,20 @@ app.mount("/mcp", mcp_app)
 # ---------------------------------------------------------------------------
 
 
-def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
+def _envelope_response(request: Request, exc: AdCPError, *, original: Exception) -> JSONResponse:
     """Build a JSONResponse carrying the two-layer envelope for ``exc``.
+
+    ``exc`` is the WIRE error — already sanitized, and the sole source of the response
+    body and HTTP status. ``original`` is the exception as raised, and exists only for the
+    privileged server log: ``record_boundary_error`` branches on ``isinstance(error,
+    AdCPError)`` to pick log severity, so handing it the sanitized twin made every REST
+    failure — including a genuine untyped crash — log at WARNING with no traceback and the
+    scrubbed message. MCP and A2A both pass the original, so REST was the one boundary that
+    dropped the diagnostic. Tenant-visible sinks are unaffected: ``record_boundary_error``
+    re-derives ``safe_adcp_error`` internally for the activity feed and audit log.
+
+    ``original`` is keyword-only and required so a new handler cannot silently regress to
+    the sanitized-twin behaviour by omitting it.
 
     Single source of truth for the REST envelope-response shape — used by
     every exception handler so HTTP status, body envelope, wire codes,
@@ -162,7 +174,7 @@ def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         tenant_id, principal_id = None, None
     else:
         tenant_id, principal_id = _best_effort_rest_identity(request)
-    record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
+    record_boundary_error("rest", request.url.path, original, tenant_id=tenant_id, principal_id=principal_id)
     return JSONResponse(
         status_code=exc.status_code,
         content=build_two_layer_error_envelope(exc),
@@ -204,7 +216,7 @@ async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
     in ``_envelope_response`` so all three handlers leave a uniform
     breadcrumb.
     """
-    return _envelope_response(request, safe_adcp_error(exc))
+    return _envelope_response(request, safe_adcp_error(exc), original=exc)
 
 
 @app.exception_handler(ValueError)
@@ -220,7 +232,7 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
     Does NOT catch FastAPI's ``RequestValidationError`` (separate class, not a
     ValueError subclass) — that has its own handler below.
     """
-    return _envelope_response(request, safe_adcp_error(exc))
+    return _envelope_response(request, safe_adcp_error(exc), original=exc)
 
 
 @app.exception_handler(RequestValidationError)
@@ -272,7 +284,7 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
         details=build_validation_error_details(projected_errors),
         _wire_safe_message=True,
     )
-    return _envelope_response(request, adcp_exc)
+    return _envelope_response(request, adcp_exc, original=exc)
 
 
 @app.exception_handler(PermissionError)
@@ -285,7 +297,7 @@ async def permission_error_handler(request: Request, exc: PermissionError) -> JS
     error instead of the 403 authorization envelope every transport should
     emit for the same condition.
     """
-    return _envelope_response(request, safe_adcp_error(exc))
+    return _envelope_response(request, safe_adcp_error(exc), original=exc)
 
 
 @app.exception_handler(ToolError)
@@ -307,9 +319,13 @@ async def tool_error_handler(request: Request, exc: ToolError) -> JSONResponse:
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Keep unexpected REST failures on the same sanitized AdCP wire contract."""
-    logger.exception("Unhandled REST request failure")
-    return _envelope_response(request, safe_adcp_error(exc))
+    """Keep unexpected REST failures on the same sanitized AdCP wire contract.
+
+    No ``logger.exception`` here: passing ``original`` makes ``record_boundary_error``
+    take its untyped branch (ERROR + ``exc_info=True``), so the boundary emits exactly one
+    traceback instead of two.
+    """
+    return _envelope_response(request, safe_adcp_error(exc), original=exc)
 
 
 # ---------------------------------------------------------------------------
