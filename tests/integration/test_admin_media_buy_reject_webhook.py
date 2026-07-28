@@ -200,9 +200,15 @@ def webhook_capture():
     mock_service = MagicMock()
     mock_service.send_notification = AsyncMock(side_effect=_capture)
     captured["service"] = mock_service
-    with patch(
-        "src.admin.blueprints.operations.get_protocol_webhook_service",
-        return_value=mock_service,
+    with (
+        patch(
+            "src.admin.blueprints.operations.get_protocol_webhook_service",
+            return_value=mock_service,
+        ),
+        patch(
+            "src.core.utils.naming.generate_auto_name",
+            return_value="reject-wh.example.com",
+        ),
     ):
         yield captured
 

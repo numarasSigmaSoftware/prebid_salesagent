@@ -443,7 +443,10 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         )
                     db_session.commit()
 
-                    logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
+                    logger.info(
+                        "[APPROVAL] Executing adapter creation for approved media buy %s",
+                        log_safe(media_buy_id),
+                    )
                     outcome = execute_and_finalize_media_buy_approval(
                         tenant_id=tenant_id,
                         media_buy_id=media_buy_id,
@@ -453,7 +456,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     if outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
                         logger.error(
                             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
-                            media_buy_id,
+                            log_safe(media_buy_id),
                         )
                         flash(
                             "Media buy was created externally, but activation could not be finalized. "
@@ -477,14 +480,14 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     if outcome.status is ApprovalExecutionStatus.FINALIZATION_FAILED:
                         logger.error(
                             "[APPROVAL] Adapter succeeded but workflow step %s could not be finalized",
-                            step_data["step_id"],
+                            log_safe(step_data["step_id"]),
                         )
                         flash("Media buy was created but its workflow result could not be finalized", "error")
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )
 
-                    logger.info(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}")
+                    logger.info("[APPROVAL] Adapter creation succeeded for %s", log_safe(media_buy_id))
 
                     # Send webhook notification to buyer
                     webhook_config = None

@@ -194,9 +194,16 @@ class TestMcpWireErrorEnvelope:
         assert is_error, "INVALID_REQUEST must produce a tool error"
         assert envelope is not None, "Error must include content text carrying the envelope"
         assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
-        msg_lower = envelope["adcp_error"]["message"].lower()
-        past_or_start_msg = f"Envelope message must explain the failure, got: {envelope['adcp_error']['message']}"
-        assert "past" in msg_lower or "start" in msg_lower, past_or_start_msg
+        for error in (envelope["adcp_error"], envelope["errors"][0]):
+            assert error["message"] == "start_time must be a future datetime or 'asap'."
+            assert error["field"] == "start_time"
+            assert error["suggestion"] == "Use a future datetime or 'asap' for immediate start."
+
+        from tests.helpers.secret_scrub import serialize_wire_error
+
+        serialized = serialize_wire_error(envelope)
+        assert "2020-01-01" not in serialized
+        assert "2020-02-01" not in serialized
 
     def test_top_level_create_failure_emits_envelope_on_wire(self, mcp_real_tenant_setup, monkeypatch):
         """A typed failure escaping the create implementation keeps its envelope on the MCP wire.

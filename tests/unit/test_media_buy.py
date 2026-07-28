@@ -30,6 +30,7 @@ from src.core.exceptions import (
     AdCPBudgetExceededError,
     AdCPContextNotFoundError,
     AdCPCreativeRejectedError,
+    AdCPInvalidRequestError,
     AdCPProductNotFoundError,
     AdCPValidationError,
 )
@@ -58,6 +59,7 @@ from src.core.schemas import (
 )
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
+from src.core.webhook_validator import WebhookURLValidator
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -1153,6 +1155,28 @@ class TestCreateMediaBuyStatusDetermination:
 class TestCreateMediaBuyImplAuth:
     """UC-002 auth extension: identity and principal validation."""
 
+    def test_format_agent_mcp_alias_is_shared_by_registration_and_product_matching(self):
+        """The supported base/``/mcp`` alias cannot diverge across create validators."""
+        from src.core.tools.media_buy_create import (
+            _format_reference_compatibility_key,
+            _validate_registered_format_agent,
+        )
+
+        base_url = "https://creative.adcontextprotocol.org"
+        endpoint_url = f"{base_url}/mcp/"
+        assert _format_reference_compatibility_key(base_url, "display_300x250") == (
+            _format_reference_compatibility_key(endpoint_url, "display_300x250")
+        )
+        for distinct_path in (f"{base_url}/a2a", f"{base_url}/.well-known/adcp/sales"):
+            assert _format_reference_compatibility_key(base_url, "display_300x250") != (
+                _format_reference_compatibility_key(distinct_path, "display_300x250")
+            )
+        _validate_registered_format_agent(
+            endpoint_url,
+            frozenset({base_url}),
+            field="packages[0].format_ids[0].agent_url",
+        )
+
     @pytest.mark.asyncio
     async def test_missing_identity_raises_validation_error(self):
         """UC-002-A01: None identity raises error.
@@ -1207,6 +1231,79 @@ class TestCreateMediaBuyImplAuth:
         )
         with pytest.raises(AdCPAuthenticationError, match="(?i)tenant"):
             await _create_media_buy_impl(req, identity=identity)
+
+    @pytest.mark.asyncio
+    async def test_unsafe_push_url_is_rejected_before_workflow_writes(self):
+        """An invalid callback cannot leave a context or workflow-step artifact."""
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request()
+        identity = _make_identity()
+
+        with (
+            patch("src.core.tools.media_buy_create.validate_setup_complete"),
+            patch("src.core.tools.media_buy_create.resolve_principal_or_raise", return_value=MagicMock()),
+            patch("src.core.tools.media_buy_create._lookup_cached_replay", return_value=None),
+            patch.object(
+                WebhookURLValidator,
+                "validate_protocol_webhook_url",
+                return_value=(False, "blocked"),
+            ),
+            patch("src.core.tools.media_buy_create.get_context_manager") as get_context_manager,
+            pytest.raises(AdCPValidationError) as exc_info,
+        ):
+            await _create_media_buy_impl(
+                req,
+                push_notification_config={"url": "http://127.0.0.1/internal"},
+                identity=identity,
+            )
+
+        assert exc_info.value.field == "push_notification_config.url"
+        assert exc_info.value.message == "Push notification URL must resolve to a public HTTPS endpoint"
+        assert exc_info.value.error_code == "VALIDATION_ERROR"
+        get_context_manager.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unregistered_format_agent_is_rejected_before_workflow_writes(self):
+        """A foreign FormatId federation identity is rejected on the real impl path."""
+        from src.core.creative_agent_registry import CreativeAgentRegistry
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "format_ids": [
+                        {
+                            "agent_url": "https://unregistered-agent.example.com",
+                            "id": "banner_300x250",
+                        }
+                    ],
+                }
+            ]
+        )
+        identity = _make_identity()
+
+        with (
+            patch("src.core.tools.media_buy_create.validate_setup_complete"),
+            patch("src.core.tools.media_buy_create.resolve_principal_or_raise", return_value=MagicMock()),
+            patch("src.core.tools.media_buy_create._lookup_cached_replay", return_value=None),
+            patch.object(
+                CreativeAgentRegistry,
+                "get_registered_agent_urls",
+                return_value=frozenset({"https://creative.adcontextprotocol.org"}),
+            ),
+            patch("src.core.tools.media_buy_create.get_context_manager") as get_context_manager,
+            pytest.raises(AdCPInvalidRequestError) as exc_info,
+        ):
+            await _create_media_buy_impl(req, identity=identity)
+
+        assert exc_info.value.error_code == "INVALID_REQUEST"
+        assert exc_info.value.message == "Creative agent is not registered."
+        assert exc_info.value.field == "packages[0].format_ids[0].agent_url"
+        get_context_manager.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_setup_incomplete_raises_error(self):

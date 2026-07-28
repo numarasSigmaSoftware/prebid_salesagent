@@ -609,12 +609,20 @@ class TestA2AErrorPropagation:
 
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
 
-        # Full two-layer envelope on the wire.
+        # Full safe, actionable two-layer envelope on the wire. Declared
+        # schema paths remain visible; rejected input values and raw Pydantic
+        # diagnostics do not.
         assert_envelope_shape(artifact_data, "VALIDATION_ERROR", recovery="correctable")
-        # Per-error message enumerates the missing required fields.
-        msg = artifact_data["errors"][0]["message"]
-        detail = f"Per-error message must name all missing required fields, got: {msg}"
-        assert "format_id" in msg and "content_uri" in msg and "name" in msg, detail
+        expected_errors = [
+            {"loc": ["format_id"], "msg": "Required field is missing.", "type": "missing"},
+            {"loc": ["content_uri"], "msg": "Required field is missing.", "type": "missing"},
+            {"loc": ["name"], "msg": "Required field is missing.", "type": "missing"},
+        ]
+        for error in (artifact_data["adcp_error"], artifact_data["errors"][0]):
+            assert error["field"] == "format_id"
+            assert error["suggestion"] == "review error details and fix field values"
+            assert error["details"] == {"validation_errors": expected_errors}
+            assert_no_raw_validation_leak(error["message"])
 
     async def test_assign_creative_missing_required_params_wire_envelope(self, handler, test_tenant, test_principal):
         """assign_creative missing required params → two-layer envelope on the A2A wire.
@@ -653,9 +661,19 @@ class TestA2AErrorPropagation:
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
 
         assert_envelope_shape(artifact_data, "VALIDATION_ERROR", recovery="correctable")
-        # Per-error message enumerates ONLY the missing fields (not the provided media_buy_id).
-        msg = artifact_data["errors"][0]["message"]
-        assert "package_id" in msg and "creative_id" in msg, f"Per-error message must name missing fields, got: {msg}"
+        expected_errors = [
+            {"loc": ["package_id"], "msg": "Required field is missing.", "type": "missing"},
+            {"loc": ["creative_id"], "msg": "Required field is missing.", "type": "missing"},
+        ]
+        for error in (artifact_data["adcp_error"], artifact_data["errors"][0]):
+            assert error["field"] == "package_id"
+            assert error["suggestion"] == "review error details and fix field values"
+            assert error["details"] == {"validation_errors": expected_errors}
+            assert_no_raw_validation_leak(error["message"])
+
+        from tests.helpers.secret_scrub import serialize_wire_error
+
+        assert "mb_123" not in serialize_wire_error(artifact_data)
 
     async def test_update_media_buy_not_found_wire_envelope(self, handler, test_tenant, test_principal):
         """update_media_buy with unknown media_buy_id surfaces MEDIA_BUY_NOT_FOUND on the A2A wire.

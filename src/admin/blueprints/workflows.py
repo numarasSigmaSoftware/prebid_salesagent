@@ -181,7 +181,10 @@ def _complete_plain_workflow_approval(db: Session, tenant_id: str, step_id: str)
     completed = WorkflowRepository(db, tenant_id).complete_claimed_approval(step_id)
     if completed is None:
         db.rollback()
-        logger.error("[APPROVAL] Claimed workflow step %s could not be completed atomically", step_id)
+        logger.error(
+            "[APPROVAL] Claimed workflow step %s could not be completed atomically",
+            log_safe(step_id),
+        )
         return jsonify({"success": False, "error": "Workflow result could not be finalized"}), 503
     db.commit()
     flash("Workflow step approved successfully", "success")
@@ -225,7 +228,7 @@ def _approve_mapped_media_buy(
         logger.warning(
             "[APPROVAL] Cannot execute adapter creation yet - %s creatives not approved: %s",
             blocking_count,
-            preparation.blocking_creative_ids,
+            log_safe(preparation.blocking_creative_ids),
         )
         flash(
             f"Media buy approved! Waiting for {blocking_count} creative(s) to be approved before creating in GAM.",
@@ -247,7 +250,7 @@ def _approve_mapped_media_buy(
     if outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
         logger.error(
             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
-            media_buy_id,
+            log_safe(media_buy_id),
         )
         message = (
             "Media buy was created externally, but activation could not be finalized. "
@@ -264,10 +267,13 @@ def _approve_mapped_media_buy(
         flash(APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE, "error")
         return jsonify({"success": False, "error": APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE}), 500
     if outcome.status is ApprovalExecutionStatus.FINALIZATION_FAILED:
-        logger.error("[APPROVAL] Adapter outcome for workflow step %s could not be finalized", step_id)
+        logger.error(
+            "[APPROVAL] Adapter outcome for workflow step %s could not be finalized",
+            log_safe(step_id),
+        )
         return jsonify({"success": False, "error": "Workflow result could not be finalized"}), 500
 
-    logger.info("[APPROVAL] Media buy %s successfully created in adapter", media_buy_id)
+    logger.info("[APPROVAL] Media buy %s successfully created in adapter", log_safe(media_buy_id))
     flash("Workflow step approved and media buy created successfully", "success")
     return jsonify({"success": True}), 200
 

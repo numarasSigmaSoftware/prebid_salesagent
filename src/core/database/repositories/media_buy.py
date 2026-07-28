@@ -235,11 +235,17 @@ class MediaBuyRepository:
             result.setdefault(pkg.media_buy_id, []).append(pkg)
         return result
 
-    def find_package_with_media_buy(self, package_id: str) -> tuple[MediaPackage, MediaBuy] | None:
-        """Find a package and its parent media buy by package_id within the tenant.
+    def find_package_with_media_buy(
+        self,
+        package_id: str,
+        principal_id: str,
+    ) -> tuple[MediaPackage, MediaBuy] | None:
+        """Find a package and parent buy owned by the principal in this tenant.
 
         Useful when you only have a package_id and need to resolve the parent
-        media buy (e.g. during creative-to-package assignment).
+        media buy (e.g. during creative-to-package assignment). Principal
+        scoping prevents a same-tenant buyer from assigning its creative to
+        another buyer's package.
 
         Returns (MediaPackage, MediaBuy) tuple or None if not found.
         """
@@ -249,6 +255,7 @@ class MediaBuyRepository:
             .where(
                 MediaPackage.package_id == package_id,
                 MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.principal_id == principal_id,
             )
         ).first()
         if result is None:

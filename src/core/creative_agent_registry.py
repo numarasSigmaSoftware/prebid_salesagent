@@ -362,6 +362,19 @@ class CreativeAgentRegistry:
         agents.sort(key=lambda a: a.priority)
         return [a for a in agents if a.enabled]
 
+    def get_registered_agent_urls(self, tenant_id: str | None) -> frozenset[str]:
+        """Return canonical federation URLs accepted for format references.
+
+        ``CREATIVE_AGENT_URL`` may redirect the standard agent to an in-network
+        test service, but buyers must continue to reference its public
+        federation identity. Tenant-specific agents retain their configured
+        public identities.
+        """
+        agents = self._get_tenant_agents(tenant_id)
+        urls = {canonical_agent_url(PUBLIC_DEFAULT_AGENT_URL)}
+        urls.update(canonical_agent_url(agent.agent_url) for agent in agents if agent is not self.DEFAULT_AGENT)
+        return frozenset(urls)
+
     async def _fetch_formats_from_agent(
         self,
         client: ADCPMultiAgentClient,

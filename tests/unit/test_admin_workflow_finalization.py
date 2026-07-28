@@ -491,6 +491,28 @@ def test_live_execution_lease_loop_renews_and_stops_after_lease_loss():
     assert renewals == ["renewed"]
 
 
+def test_live_execution_lease_error_log_sanitizes_media_buy_id(caplog):
+    """A crafted identifier cannot inject a second approval log record."""
+    from src.core.tools.media_buy_create import _ApprovalExecutionLease
+
+    lease = _ApprovalExecutionLease("mb_1\r\nFORGED", "tenant_1")
+    lease._stop = _StopSignal([False, True])
+
+    def failed_renewal():
+        raise RuntimeError("renewal failed")
+
+    lease._renew_once = failed_renewal
+    with caplog.at_level("ERROR", logger="src.core.tools.media_buy_create"):
+        lease._run()
+
+    message = next(
+        record.getMessage() for record in caplog.records if "Could not renew execution lease" in record.getMessage()
+    )
+    assert "\r" not in message
+    assert "\n" not in message
+    assert "mb_1FORGED" in message
+
+
 def test_live_execution_lease_stop_prevents_renewal_and_joins_thread():
     """Closing the heartbeat wakes its wait and joins without another renewal."""
     from src.core.tools.media_buy_create import _ApprovalExecutionLease
@@ -510,6 +532,50 @@ def test_live_execution_lease_stop_prevents_renewal_and_joins_thread():
 
     assert stop.set_called is True
     assert thread.join_timeout == 1.0
+
+
+def test_blocking_creative_log_sanitizes_identifiers(caplog):
+    """The workflow creative gate neutralizes CR/LF before logging IDs."""
+    from flask import Flask
+
+    from src.admin.blueprints import workflows as workflows_module
+
+    app = Flask(__name__)
+    app.secret_key = "test-only"
+    db = Mock()
+    media_buy_repo = Mock()
+    media_buy_repo.get_by_id.return_value = SimpleNamespace(
+        status="pending_approval",
+        principal_id="principal_1",
+    )
+    preparation = SimpleNamespace(
+        status=ApprovalExecutionStatus.WAITING_FOR_CREATIVES,
+        blocking_creative_ids=("creative_1\r\nFORGED",),
+    )
+
+    with (
+        app.test_request_context("/"),
+        patch.object(workflows_module, "MediaBuyRepository", return_value=media_buy_repo),
+        patch.object(
+            workflows_module,
+            "prepare_media_buy_approval_execution",
+            return_value=preparation,
+        ),
+        caplog.at_level("WARNING", logger="src.admin.blueprints.workflows"),
+    ):
+        _response, status = workflows_module._approve_mapped_media_buy(
+            db=db,
+            tenant_id="tenant_1",
+            step_id="step_1",
+            media_buy_id="mb_1",
+            request_data={},
+            user_email="reviewer@example.com",
+        )
+
+    assert status == 200
+    message = next(record.getMessage() for record in caplog.records if "creatives not approved" in record.getMessage())
+    assert "\r" not in message
+    assert "\n" not in message
 
 
 def test_shared_preparation_applies_creative_gate_before_execution_claim():

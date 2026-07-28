@@ -465,8 +465,12 @@ class CreativeAssignmentRepository:
     # Cross-model lookups (for assignment workflow)
     # ------------------------------------------------------------------
 
-    def find_package_with_media_buy(self, package_id: str) -> tuple[MediaPackage, MediaBuy] | None:
-        """Find a package and its parent media buy within the tenant.
+    def find_package_with_media_buy(
+        self,
+        package_id: str,
+        principal_id: str,
+    ) -> tuple[MediaPackage, MediaBuy] | None:
+        """Find a principal-owned package and its parent buy within the tenant.
 
         Delegates to MediaBuyRepository — all MediaPackage queries are owned by
         that repository per the no-raw-MediaPackage-select guard.
@@ -476,7 +480,7 @@ class CreativeAssignmentRepository:
         from src.core.database.repositories.media_buy import MediaBuyRepository
 
         mb_repo = MediaBuyRepository(self._session, self._tenant_id)
-        return mb_repo.find_package_with_media_buy(package_id)
+        return mb_repo.find_package_with_media_buy(package_id, principal_id)
 
     def get_creative_by_id(self, creative_id: str, principal_id: str) -> Creative | None:
         """Get a creative by its full composite key (tenant + principal + creative_id).

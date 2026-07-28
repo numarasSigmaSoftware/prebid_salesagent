@@ -28,9 +28,9 @@ class WebhookReceiver(WebhookCaptureHandler):
 
 @pytest.fixture
 def webhook_server():
-    # Loopback-pinned: this lifecycle reaches the server over the host loopback, so the
-    # callback host stays 127.0.0.1 rather than honoring ADCP_WEBHOOK_HOST.
-    with run_webhook_capture_server(WebhookReceiver, WebhookReceiver.received_webhooks, host="127.0.0.1") as info:
+    # Honor ADCP_WEBHOOK_HOST so Docker and in-network runners publish a callback
+    # hostname that the application container can both validate and reach.
+    with run_webhook_capture_server(WebhookReceiver, WebhookReceiver.received_webhooks) as info:
         yield info
 
 

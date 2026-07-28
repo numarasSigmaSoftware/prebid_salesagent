@@ -45,7 +45,6 @@ from src.core.database.repositories.creative import CreativeRepository
 from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
 from src.core.exceptions import (
     AdCPAdapterError,
-    AdCPAuthorizationError,
     AdCPBudgetExceededError,
     AdCPBudgetTooLowError,
     AdCPCapabilityNotSupportedError,
@@ -146,6 +145,7 @@ from src.core.schemas import (
     Principal,
     Product,
     Targeting,
+    canonical_agent_url,
 )
 from src.core.schemas import (
     url as make_url,
@@ -161,6 +161,7 @@ from src.core.tools.financial_validation import (
 
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
+from src.core.webhook_validator import WebhookURLValidator
 from src.services.activity_feed import activity_feed
 from src.services.gam_product_config_service import GAMProductConfigService
 from src.services.targeting_capabilities import (
@@ -178,6 +179,95 @@ from src.services.targeting_capabilities import (
 # NOTE: _sanitize_package_status() removed in adcp 2.12.0 migration
 # Package.status enum was replaced with Package.paused boolean field
 # See: adcp 2.12.0 changelog
+
+
+def _validate_push_notification_config_url(push_notification_config: dict[str, Any] | None) -> str | None:
+    """Validate a protocol callback before any durable create-media-buy writes."""
+    if not push_notification_config:
+        return None
+    url = push_notification_config.get("url")
+    if not url:
+        return None
+    if not isinstance(url, str):
+        raise AdCPValidationError(
+            "Push notification URL must resolve to a public HTTPS endpoint",
+            field="push_notification_config.url",
+            _wire_safe_message=True,
+        )
+    is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
+    if not is_safe:
+        raise AdCPValidationError(
+            "Push notification URL must resolve to a public HTTPS endpoint",
+            field="push_notification_config.url",
+            _wire_safe_message=True,
+        )
+    return url
+
+
+def _format_agent_compatibility_url(agent_url: object | None) -> str | None:
+    """Canonicalize an agent identity while accepting supported endpoint aliases.
+
+    FormatId identity remains path-sensitive everywhere else. Create-media-buy
+    historically accepts an agent's base URL and its ``/mcp`` endpoint as the
+    same configured agent, so both registration and product compatibility must
+    apply that policy through this single helper.
+    """
+    if agent_url is None:
+        return None
+    return canonical_agent_url(agent_url).removesuffix("/mcp")
+
+
+def _format_reference_compatibility_key(agent_url: object | None, format_id: str) -> tuple[str | None, str]:
+    """Return the create-media-buy compatibility key for a format reference."""
+    return (_format_agent_compatibility_url(agent_url), format_id)
+
+
+def _validate_registered_format_agent(
+    agent_url: object,
+    registered_urls: frozenset[str],
+    *,
+    field: str,
+) -> None:
+    """Apply the seller's creative-agent allowlist without disclosing its contents."""
+    registered_compatibility_urls = {
+        compatibility_url
+        for registered_url in registered_urls
+        if (compatibility_url := _format_agent_compatibility_url(registered_url)) is not None
+    }
+    if _format_agent_compatibility_url(agent_url) not in registered_compatibility_urls:
+        raise AdCPInvalidRequestError(
+            "Creative agent is not registered.",
+            field=field,
+            suggestion="Use list_creative_formats to select a format from a registered creative agent.",
+            _wire_safe_message=True,
+        )
+
+
+def _validate_registered_format_agents(req: CreateMediaBuyRequest, tenant_id: str) -> None:
+    """Reject format references whose federation agent is not registered.
+
+    AdCP 3.1.1 defines ``FormatId`` identity as ``(agent_url, id)``. Whether a
+    seller accepts a non-default agent is implementation policy (ungraded), so
+    this boundary emits a static INVALID_REQUEST rather than exposing registry
+    contents or the rejected URL.
+    """
+    from src.core.creative_agent_registry import CreativeAgentRegistry
+
+    format_references = [
+        (package_index, format_index, format_id)
+        for package_index, package in enumerate(req.packages or [])
+        for format_index, format_id in enumerate(package.format_ids or [])
+    ]
+    if not format_references:
+        return
+
+    registered_urls = CreativeAgentRegistry().get_registered_agent_urls(tenant_id)
+    for package_index, format_index, format_id in format_references:
+        _validate_registered_format_agent(
+            format_id.agent_url,
+            registered_urls,
+            field=f"packages[{package_index}].format_ids[{format_index}].agent_url",
+        )
 
 
 def _get_creative_ids(package: AdcpPackageRequest | PackageRequest | Package | MediaPackage) -> list[str] | None:
@@ -769,7 +859,10 @@ def _mark_approved_execution_unknown(
         # The durable pre-dispatch ``activating`` claim still prevents a
         # duplicate order. Its lease-based reconciler handles a failed marker
         # write once the in-flight window expires.
-        logger.exception("[APPROVAL] Could not persist ambiguous execution marker for %s", media_buy_id)
+        logger.exception(
+            "[APPROVAL] Could not persist ambiguous execution marker for %s",
+            log_safe(media_buy_id),
+        )
     return None, error_message
 
 
@@ -808,7 +901,10 @@ class _ApprovalExecutionLease:
                 if not self._renew_once():
                     return
             except Exception:
-                logger.exception("[APPROVAL] Could not renew execution lease for %s", self._media_buy_id)
+                logger.exception(
+                    "[APPROVAL] Could not renew execution lease for %s",
+                    log_safe(self._media_buy_id),
+                )
 
 
 @_persist_approved_execution_outcome
@@ -1367,7 +1463,10 @@ def execute_approved_media_buy(
                 tenant_id,
                 "Approved media buy execution lost its durable claim before completion",
             )
-        logger.info(f"[APPROVAL] Updated media buy {media_buy_id} status to 'active'")
+        logger.info(
+            "[APPROVAL] Updated media buy %s status to 'active'",
+            log_safe(media_buy_id),
+        )
 
         return True, None
 
@@ -1692,13 +1791,7 @@ async def _validate_and_convert_format_ids(
     registry = CreativeAgentRegistry()
     validated_format_ids = []
 
-    # Get registered agents for this tenant
-    registered_agents = registry._get_tenant_agents(tenant_id)
-    # Normalize agent URLs for consistent comparison (strips /mcp, /a2a, /.well-known/*, trailing slashes)
-    # This ensures all URL variations match: "https://example.com/mcp/" -> "https://example.com"
-    from src.core.validation import normalize_agent_url
-
-    registered_agent_urls = {normalize_agent_url(agent.agent_url) for agent in registered_agents}
+    registered_agent_urls = registry.get_registered_agent_urls(tenant_id)
 
     for idx, fmt_id in enumerate(format_ids):
         # STRICT ENFORCEMENT: Reject plain strings
@@ -1730,15 +1823,12 @@ async def _validate_and_convert_format_ids(
                 f"Both agent_url and id are required. Got: agent_url={agent_url!r}, id={format_id!r}",
             )
 
-        # VALIDATION: Check agent is registered
-        # Normalize incoming agent_url for comparison (strips /mcp, /a2a, /.well-known/*, trailing slashes)
-        normalized_agent_url = normalize_agent_url(agent_url)
-        if normalized_agent_url not in registered_agent_urls:
-            raise AdCPAuthorizationError(
-                f"Package {package_idx + 1}, format_ids[{idx}]: Creative agent not registered: {agent_url}. "
-                f"Registered agents: {', '.join(sorted(registered_agent_urls))}. "
-                f"Contact your administrator to register this creative agent.",
-            )
+        # VALIDATION: Check the public federation identity is registered.
+        _validate_registered_format_agent(
+            agent_url,
+            registered_agent_urls,
+            field=f"packages[{package_idx}].format_ids[{idx}].agent_url",
+        )
 
         # VALIDATION: Verify format exists on agent
         try:
@@ -2238,6 +2328,12 @@ async def _create_media_buy_impl(
         # Miss or unusable cached envelope — proceed as a fresh execution; the
         # MediaBuy backstop resolves any resulting duplicate to the degraded path.
 
+    # Reject an unsafe callback before ContextManager persists a context or
+    # workflow step. The delivery service validates again at connection time to
+    # cover DNS rebinding between registration and delivery.
+    push_notification_url = _validate_push_notification_config_url(push_notification_config)
+    _validate_registered_format_agents(req, tenant["tenant_id"])
+
     # Context management and workflow step creation - create workflow step FIRST
     # Skip for dry_run mode (no side effects, no database writes)
     ctx_manager = get_context_manager()
@@ -2283,22 +2379,14 @@ async def _create_media_buy_impl(
         if push_notification_config:
             # Lazy: tests patch src.core.database.repositories.MediaBuyUoW; the call-time import binds the patched object (hoisting would bind the unpatched one at module load).
             from src.core.database.repositories import MediaBuyUoW
-            from src.core.webhook_validator import WebhookURLValidator
 
             logger.info("[MCP/A2A] Registering push notification config from request")
 
             # Extract config details
-            url = push_notification_config.get("url")
+            url = push_notification_url
             authentication = push_notification_config.get("authentication", {})
 
             if url:
-                is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
-                if not is_safe:
-                    raise AdCPValidationError(
-                        "Push notification URL must resolve to a public HTTPS endpoint",
-                        field="push_notification_config.url",
-                        _wire_safe_message=True,
-                    )
                 # Extract authentication details (A2A format: schemes + credentials)
                 schemes = authentication.get("schemes", []) if authentication else []
                 auth_type = schemes[0] if schemes else None
@@ -2386,11 +2474,11 @@ async def _create_media_buy_impl(
                 computed_start_time = computed_start_time.replace(tzinfo=UTC)
 
             if computed_start_time < now:
-                error_msg = f"Invalid start time: {req.start_time}. Start time cannot be in the past."
                 raise AdCPInvalidRequestError(
-                    error_msg,
+                    "start_time must be a future datetime or 'asap'.",
                     suggestion="Use a future datetime or 'asap' for immediate start.",
                     field="start_time",
+                    _wire_safe_message=True,
                 )
 
         # Validate end_time
@@ -2404,11 +2492,11 @@ async def _create_media_buy_impl(
             computed_end_time = computed_end_time.replace(tzinfo=UTC)
 
         if computed_end_time <= computed_start_time:
-            error_msg = f"Invalid time range: end time ({req.end_time}) must be after start time ({req.start_time})."
             raise AdCPInvalidRequestError(
-                error_msg,
+                "end_time must be after start_time.",
                 suggestion="Set end_time to a datetime after start_time.",
                 field="end_time",
+                _wire_safe_message=True,
             )
 
         # Assign computed times to local variables for use throughout the function
@@ -3433,15 +3521,12 @@ async def _create_media_buy_impl(
                 product_format_keys: set[tuple[str | None, str]] = set()
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
-                        agent_url = fmt.agent_url
-                        normalized_url = str(agent_url).rstrip("/") if agent_url else None
-                        product_format_keys.add((normalized_url, fmt.id))
+                        product_format_keys.add(_format_reference_compatibility_key(fmt.agent_url, fmt.id))
 
                 # Build set of requested format keys for comparison
                 requested_format_keys: set[tuple[str | None, str]] = set()
                 for fmt in matching_package.format_ids:
-                    normalized_url = str(fmt.agent_url).rstrip("/") if fmt.agent_url else None
-                    requested_format_keys.add((normalized_url, fmt.id))
+                    requested_format_keys.add(_format_reference_compatibility_key(fmt.agent_url, fmt.id))
 
                 def format_display(url: str | None, fid: str) -> str:
                     """Format a (url, id) pair for display, handling trailing slashes."""
@@ -3452,34 +3537,10 @@ async def _create_media_buy_impl(
                     clean_url = str(url).rstrip("/")
                     return f"{clean_url}/{fid}"
 
-                def _has_supported_key(url: str | None, fid: str, keys: set = product_format_keys) -> bool:
-                    """Check if (url, fid) is supported, allowing an '/mcp' URL variant.
-
-                    This does not mutate any of the underlying key sets; it only checks
-                    for the presence of either the exact key or an alternative where
-                    '/mcp' is appended to the end of the URL path.
-
-                    Args:
-                        url: The format URL to check
-                        fid: The format ID to check
-                        keys: The set of supported (url, fid) tuples (bound at function definition)
-                    """
-                    # Exact match first
-                    if (url, fid) in keys:
-                        return True
-
-                    # If URL provided, also try with '/mcp' appended (idempotent if already present)
-                    if url:
-                        # Convert to string in case it's an AnyUrl object
-                        base = str(url).rstrip("/")
-                        mcp_url = base if base.endswith("/mcp") else f"{base}/mcp"
-                        if (mcp_url, fid) in keys:
-                            return True
-
-                    return False
-
                 unsupported_formats = [
-                    format_display(url, fid) for url, fid in requested_format_keys if not _has_supported_key(url, fid)
+                    format_display(url, fid)
+                    for url, fid in requested_format_keys
+                    if (url, fid) not in product_format_keys
                 ]
 
                 if unsupported_formats:
@@ -3507,11 +3568,9 @@ async def _create_media_buy_impl(
                 product_format_dimensions = {}
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
-                        agent_url = fmt.agent_url
                         fmt_id = fmt.id
-                        normalized_url = str(agent_url).rstrip("/") if agent_url else None
                         if fmt_id:
-                            product_format_dimensions[(normalized_url, fmt_id)] = (
+                            product_format_dimensions[_format_reference_compatibility_key(fmt.agent_url, fmt_id)] = (
                                 fmt.width,
                                 fmt.height,
                                 fmt.duration_ms,
@@ -3519,7 +3578,7 @@ async def _create_media_buy_impl(
 
                 # Process request format_ids, merging dimensions from product if missing
                 for req_fmt in matching_package.format_ids:
-                    normalized_url = str(req_fmt.agent_url).rstrip("/") if req_fmt.agent_url else None
+                    compatibility_key = _format_reference_compatibility_key(req_fmt.agent_url, req_fmt.id)
                     # Check if request format has dimensions
                     if req_fmt.width is not None and req_fmt.height is not None:
                         # Request has dimensions, convert to our FormatId type
@@ -3534,7 +3593,7 @@ async def _create_media_buy_impl(
                         )
                     else:
                         # Try to get dimensions from product's format_ids
-                        product_dims = product_format_dimensions.get((normalized_url, req_fmt.id))
+                        product_dims = product_format_dimensions.get(compatibility_key)
                         if product_dims and (product_dims[0] is not None or product_dims[1] is not None):
                             # Merge dimensions from product
                             format_ids_to_use.append(

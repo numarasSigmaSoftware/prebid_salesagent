@@ -813,6 +813,58 @@ class TestAssignmentProcessing:
             ).all()
             assert len(assignments) == 1
 
+    def test_cross_principal_package_reference_is_not_assignable(self, integration_db):
+        """A same-tenant buyer cannot attach its creative to another buyer's package."""
+        from src.core.database.models import CreativeAssignment as DBAssignment
+        from tests.factories import CreativeFactory
+
+        with CreativeSyncEnv() as env:
+            tenant = TenantFactory(tenant_id="test_tenant")
+            requester = PrincipalFactory(tenant=tenant, principal_id="test_principal")
+            other = PrincipalFactory(tenant=tenant, principal_id="other_principal")
+            CreativeFactory(
+                tenant=tenant,
+                principal=requester,
+                creative_id="c_requester",
+                format="display_300x250",
+                agent_url=DEFAULT_AGENT_URL,
+            )
+            requester_buy = MediaBuyFactory(tenant=tenant, principal=requester)
+            requester_package = MediaPackageFactory(media_buy=requester_buy)
+            other_buy = MediaBuyFactory(tenant=tenant, principal=other)
+            other_package = MediaPackageFactory(media_buy=other_buy)
+
+            response = env.call_impl(
+                creatives=[],
+                assignments={
+                    "c_requester": [
+                        requester_package.package_id,
+                        other_package.package_id,
+                    ]
+                },
+                validation_mode="lenient",
+            )
+
+            entry = next(result for result in response.creatives if result.creative_id == "c_requester")
+            assert entry.assigned_to == [requester_package.package_id]
+            assert entry.assignment_errors == {
+                other_package.package_id: f"Package not found: {other_package.package_id}"
+            }
+            requester_rows = env.query(
+                DBAssignment,
+                tenant_id=tenant.tenant_id,
+                creative_id="c_requester",
+                package_id=requester_package.package_id,
+            )
+            cross_principal_rows = env.query(
+                DBAssignment,
+                tenant_id=tenant.tenant_id,
+                creative_id="c_requester",
+                package_id=other_package.package_id,
+            )
+            assert len(requester_rows) == 1
+            assert cross_principal_rows == []
+
     def test_cross_principal_creative_reference_does_not_500_or_leak(self, integration_db):
         """A principal referencing ANOTHER principal's creative_id in assignments
         must get a clean response — not a raw FK IntegrityError 500 — no

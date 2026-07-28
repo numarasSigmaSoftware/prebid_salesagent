@@ -76,6 +76,7 @@ from src.core.exceptions import (
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import coerce_creative_filters, to_account_reference, to_brand_reference
 from src.core.schemas import CreativeStatusEnum
+from src.core.schemas.creative import AssignCreativeRequest, CreateCreativeRequest
 from src.core.tool_context import ToolContext
 from src.core.tool_error_logging import best_effort_boundary_identity, record_boundary_error
 from src.core.tools import (
@@ -2293,18 +2294,11 @@ class AdCPRequestHandler(RequestHandler):
 
     async def _handle_create_creative_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
         """Handle explicit create_creative skill invocation."""
-        tool_context = self._make_tool_context(identity, "create_creative")
-
-        # Map A2A parameters - format_id, content_uri, and name are required.
-        # Raise typed AdCPValidationError so the outer dispatcher emits a two-layer envelope.
-        required_params = ["format_id", "content_uri", "name"]
-        missing_params = [param for param in required_params if param not in parameters]
-
-        if missing_params:
-            raise AdCPValidationError(
-                f"Missing required parameters: {missing_params}",
-                suggestion=f"Required: {required_params}",
-            )
+        # Project Pydantic failures through the shared safe boundary. This keeps
+        # declared request paths actionable without echoing rejected values or
+        # raw validator text onto the A2A wire.
+        with adcp_validation_boundary(context="create_creative request"):
+            CreateCreativeRequest.model_validate(parameters)
 
         # TODO: Implement create_creative tool
         # Call core function with individual parameters
@@ -2329,18 +2323,8 @@ class AdCPRequestHandler(RequestHandler):
 
     async def _handle_assign_creative_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
         """Handle explicit assign_creative skill invocation."""
-        tool_context = self._make_tool_context(identity, "assign_creative")
-
-        # Map A2A parameters - media_buy_id, package_id, and creative_id are required.
-        # Raise typed AdCPValidationError so the outer dispatcher emits a two-layer envelope.
-        required_params = ["media_buy_id", "package_id", "creative_id"]
-        missing_params = [param for param in required_params if param not in parameters]
-
-        if missing_params:
-            raise AdCPValidationError(
-                f"Missing required parameters: {missing_params}",
-                suggestion=f"Required: {required_params}",
-            )
+        with adcp_validation_boundary(context="assign_creative request"):
+            AssignCreativeRequest.model_validate(parameters)
 
         # TODO: Implement assign_creative tool
         # identity already resolved at transport boundary

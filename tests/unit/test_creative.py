@@ -1815,7 +1815,6 @@ class TestGenerativeCreativeBuild:
 
         Note: mock_format_obj.format_id uses _adcp_format_id() (the library type)
         to match the CreativeAsset.format_id type from _make_creative_asset().
-        FormatId equality requires same type instances.
         """
         mock_format_obj = MagicMock()
         mock_format_obj.format_id = _adcp_format_id()
@@ -1826,6 +1825,22 @@ class TestGenerativeCreativeBuild:
         mock_config.gemini_api_key = gemini_key
 
         return mock_format_obj, mock_config
+
+    def test_format_matching_uses_canonical_federation_identity(self):
+        """Equivalent agent URLs match across transport serialization differences."""
+        from src.core.tools.creatives._processing import _find_matching_format
+
+        listed_format = MagicMock()
+        listed_format.format_id = AdcpFormatId(
+            agent_url=f"{DEFAULT_AGENT_URL}/formats/",
+            id="display_300x250_image",
+        )
+        requested_format = AdcpFormatId(
+            agent_url=f"{DEFAULT_AGENT_URL}/formats",
+            id="display_300x250_image",
+        )
+
+        assert _find_matching_format([listed_format], requested_format) is listed_format
 
     def test_format_with_output_format_ids_classified_as_generative(self):
         """Format with output_format_ids is classified as a generative creative.
@@ -3183,7 +3198,8 @@ class TestValidationModeSemantics:
             mock_media_buy.status = "draft"
             mock_media_buy.approved_at = None
 
-            def find_pkg(package_id):
+            def find_pkg(package_id, principal_id):
+                assert principal_id == "principal_1"
                 if package_id == "pkg_ok":
                     return (mock_package, mock_media_buy)
                 return None

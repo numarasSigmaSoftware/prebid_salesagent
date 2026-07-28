@@ -1382,7 +1382,7 @@ class TestA2ASkillInvocation:
             ctx = make_a2a_context(headers={"host": f"{sample_tenant['subdomain']}.example.com"})
 
             # Create skill invocation
-            skill_params = {"brief": "display formats"}
+            skill_params = {}
             message = create_a2a_message_with_skill("list_creative_formats", skill_params)
             params = SendMessageRequest(message=message)
 

@@ -51,6 +51,26 @@ class TestCacheKeyAcceptsAnyUrl:
 class TestCreativeAgentRegistry:
     """Test suite for Creative Agent Registry adcp integration."""
 
+    def test_registered_agent_urls_keep_default_public_identity(self, monkeypatch):
+        """An internal default transport alias is never exposed as federation identity."""
+        registry = CreativeAgentRegistry()
+        custom_agent = CreativeAgent(
+            agent_url="https://Tenant-Agent.Example.com/mcp/",
+            name="Tenant Agent",
+        )
+        monkeypatch.setattr(
+            registry,
+            "_get_tenant_agents",
+            lambda _tenant_id: [registry.DEFAULT_AGENT, custom_agent],
+        )
+
+        assert registry.get_registered_agent_urls("tenant_1") == frozenset(
+            {
+                "https://creative.adcontextprotocol.org",
+                "https://tenant-agent.example.com/mcp",
+            }
+        )
+
     def test_build_adcp_client_with_custom_auth_header(self):
         """Test _build_adcp_client correctly maps custom auth headers."""
         registry = CreativeAgentRegistry()
