@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.core.reporting_capabilities import build_daily_reporting_capabilities
-from tests.harness.transport import Transport
+from tests.harness.transport import Transport, extract_wire_suggestion
 from tests.helpers.delivery_assertions import MediaBuyIdMatcher, SessionMatcher
 from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK
 
@@ -28,17 +29,15 @@ def _requested_metrics_webhook(*metrics: str) -> dict[str, Any]:
 
 
 def _assert_unsupported_capability(result: Any, message: str, suggestion: str) -> None:
-    from tests.helpers import assert_envelope_shape
-
     assert result.is_error, f"Expected error, got payload: {result.payload}"
-    assert_envelope_shape(
-        result.wire_error_envelope,
+    result.assert_wire_error(
         "UNSUPPORTED_FEATURE",
-        recovery="correctable",
         message_substr=message,
+        require_suggestion=True,
     )
-    errors = (result.wire_error_envelope or {}).get("errors", [])
-    assert errors and suggestion in (errors[0].get("suggestion") or "").lower()
+    wire_suggestion = extract_wire_suggestion(result.wire_error_envelope)
+    assert wire_suggestion is not None
+    assert suggestion in wire_suggestion.lower()
 
 
 class TestCreateReportingWebhookFrequencyWire:
@@ -240,16 +239,19 @@ class TestUpdateReportingWebhookFrequencyWire:
         ],
         ids=["none-to-webhook", "replace-webhook"],
     )
-    @pytest.mark.asyncio
-    async def test_completed_update_persists_webhook_for_scheduler_readback(
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_completed_update_persists_webhook_for_scheduler_readback(
         self,
         env_with_media_buy,
         existing_webhook: dict[str, Any] | None,
+        transport: Transport,
     ) -> None:
         from src.core.database.repositories.media_buy import MediaBuyRepository
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 
         env, media_buy, _product = env_with_media_buy
+        media_buy_id = media_buy.media_buy_id
+        tenant_id = media_buy.tenant_id
         original_raw_request = {
             "brand": {"domain": "preserved.example.com"},
             **({"reporting_webhook": existing_webhook} if existing_webhook is not None else {}),
@@ -259,14 +261,14 @@ class TestUpdateReportingWebhookFrequencyWire:
         replacement = {**DAILY_REPORTING_WEBHOOK, "url": "https://new.example.com/reporting"}
 
         result = env.call_via(
-            Transport.REST,
+            transport,
             req=self._request(media_buy, replacement),
         )
 
         assert not result.is_error, result.payload
         session = env.get_session()
         session.expire_all()
-        persisted = MediaBuyRepository(session, media_buy.tenant_id).get_by_id(media_buy.media_buy_id)
+        persisted = MediaBuyRepository(session, tenant_id).get_by_id(media_buy_id)
         assert persisted is not None
         assert persisted.raw_request["brand"] == {"domain": "preserved.example.com"}
         assert persisted.raw_request["reporting_webhook"] == replacement
@@ -278,23 +280,32 @@ class TestUpdateReportingWebhookFrequencyWire:
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_send:
-            triggered = await scheduler.trigger_report_for_media_buy_by_id(
-                media_buy.media_buy_id,
-                media_buy.tenant_id,
+            triggered = asyncio.run(
+                scheduler.trigger_report_for_media_buy_by_id(
+                    media_buy_id,
+                    tenant_id,
+                )
             )
 
         assert triggered is True
         mock_send.assert_awaited_once_with(
-            MediaBuyIdMatcher(media_buy.media_buy_id),
+            MediaBuyIdMatcher(media_buy_id),
             replacement,
             SessionMatcher(),
             force=True,
         )
 
-    def test_approval_gated_update_does_not_mutate_active_webhook(self, env_with_media_buy) -> None:
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_approval_gated_update_does_not_mutate_active_webhook(
+        self,
+        env_with_media_buy,
+        transport: Transport,
+    ) -> None:
         from src.core.database.repositories.media_buy import MediaBuyRepository
 
         env, media_buy, _product = env_with_media_buy
+        media_buy_id = media_buy.media_buy_id
+        tenant_id = media_buy.tenant_id
         current = {**DAILY_REPORTING_WEBHOOK, "url": "https://current.example.com/reporting"}
         media_buy.raw_request = {"reporting_webhook": current}
         env._commit_factory_data()
@@ -304,7 +315,7 @@ class TestUpdateReportingWebhookFrequencyWire:
         replacement = {**DAILY_REPORTING_WEBHOOK, "url": "https://pending.example.com/reporting"}
 
         result = env.call_via(
-            Transport.REST,
+            transport,
             req=self._request(media_buy, replacement),
         )
 
@@ -312,6 +323,6 @@ class TestUpdateReportingWebhookFrequencyWire:
         assert result.payload.status == "submitted"
         session = env.get_session()
         session.expire_all()
-        persisted = MediaBuyRepository(session, media_buy.tenant_id).get_by_id(media_buy.media_buy_id)
+        persisted = MediaBuyRepository(session, tenant_id).get_by_id(media_buy_id)
         assert persisted is not None
         assert persisted.raw_request["reporting_webhook"] == current

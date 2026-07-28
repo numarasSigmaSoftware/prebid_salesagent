@@ -2794,7 +2794,10 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # Scheduler-originated events do not enter through an AdCP request transport.
 # Keep these scenarios single-run instead of producing misleading A2A/MCP/REST
 # variants that all exercise the same outbound scheduler path.
-_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {"T-UC-004-webhook-scheduled"}
+_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
+    "T-UC-004-webhook-scheduled",
+    "T-UC-004-webhook-scheduler-derivation",
+}
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
 # (UC-002 @account used to live here when it ran resolve_account() via IMPL on

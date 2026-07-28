@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pytest_bdd import given, parsers, then, when
 
+from src.core.database.models import DELIVERY_TASK_TYPE
 from tests.bdd.steps._outcome_helpers import _require, wire_dict
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
@@ -28,6 +29,9 @@ from tests.helpers.delivery_assertions import (
     assert_partial_data_pairing,
 )
 from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK, flight_window
+
+if TYPE_CHECKING:
+    from src.core.database.models import MediaBuy
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -53,7 +57,7 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     call_kwargs = mock_post.call_args_list[-1][1]  # kwargs of last call
     payload = call_kwargs.get("json") or call_kwargs.get("data") or {}
     assert payload, f"Webhook POST had no JSON payload: {call_kwargs}"
-    if payload.get("task_type") == "media_buy_delivery" and isinstance(payload.get("result"), dict):
+    if payload.get("task_type") == DELIVERY_TASK_TYPE and isinstance(payload.get("result"), dict):
         return payload["result"]
     return payload
 
@@ -338,6 +342,52 @@ def given_adapter_no_data_period(ctx: dict, mb_id: str) -> None:
 _WEBHOOK_URL = "https://buyer.example.com/webhook"
 
 
+def _setup_scheduler_buy(
+    ctx: dict,
+    mb_id: str,
+    *,
+    reporting_webhook: dict[str, Any] | None = None,
+    flight: str | None = None,
+) -> MediaBuy:
+    """Create and register the media buy used by scheduler-originated scenarios."""
+    owner = ctx.get("principal_id", "buyer-001")
+    start_date: str | None = None
+    end_date: str | None = None
+    if flight is not None:
+        flight_start, flight_end = flight_window(flight)
+        start_date = flight_start.isoformat()
+        end_date = flight_end.isoformat()
+
+    buy = _ensure_media_buy_in_db(
+        ctx,
+        mb_id,
+        owner,
+        status="active",
+        start_date=start_date,
+        end_date=end_date,
+        raw_request={"reporting_webhook": dict(reporting_webhook or DAILY_REPORTING_WEBHOOK)},
+    )
+    assert buy is not None, "Scheduler scenarios require a database-backed delivery polling environment"
+    ctx.setdefault("media_buys", {})[mb_id] = {
+        "media_buy_id": mb_id,
+        "owner": owner,
+        "status": "active",
+    }
+    ctx["scheduler_buy"] = buy
+    return buy
+
+
+def _scheduler_buy_for(ctx: dict, mb_id: str) -> MediaBuy:
+    """Return the scheduler fixture after proving it matches the scenario buy."""
+    buy = ctx["scheduler_buy"]
+    requested_media_buy_id = _resolve_media_buy_id(ctx, mb_id)
+    assert buy.media_buy_id == requested_media_buy_id, (
+        f"Scheduler fixture selected media buy {buy.media_buy_id!r}, "
+        f"but the scenario requested {requested_media_buy_id!r}"
+    )
+    return buy
+
+
 def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     """Shared: configure an active webhook for a media buy.
 
@@ -352,24 +402,12 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     from tests.harness.delivery_poll import DeliveryPollEnv
 
     if isinstance(env, DeliveryPollEnv):
-        owner = ctx.get("principal_id", "buyer-001")
         reporting_webhook = {
             **DAILY_REPORTING_WEBHOOK,
             "url": _WEBHOOK_URL,
             "reporting_frequency": ctx.get("reporting_frequency", "daily"),
         }
-        buy = _ensure_media_buy_in_db(
-            ctx,
-            mb_id,
-            owner,
-            raw_request={"reporting_webhook": reporting_webhook},
-        )
-        ctx.setdefault("media_buys", {})[mb_id] = {
-            "media_buy_id": mb_id,
-            "owner": owner,
-            "status": "active",
-        }
-        ctx["scheduler_buy"] = buy
+        _setup_scheduler_buy(ctx, mb_id, reporting_webhook=reporting_webhook)
         ctx["webhook_url"] = _WEBHOOK_URL
         return
     if getattr(env, "_session", None) is not None:
@@ -880,9 +918,7 @@ def when_webhook_fires(ctx: dict, mb_id: str) -> None:
 
     env = ctx["env"]
     try:
-        buy = ctx["scheduler_buy"]
-        requested_media_buy_id = _resolve_media_buy_id(ctx, mb_id)
-        assert buy.media_buy_id == requested_media_buy_id
+        _scheduler_buy_for(ctx, mb_id)
         payloads = asyncio.run(env.run_delivery_batch())
         assert len(payloads) == 1, f"Expected one scheduled webhook, got {len(payloads)}"
         ctx["scheduler_wire"] = payloads[0]
@@ -1729,21 +1765,8 @@ def given_media_buy_with_reporting_webhook(ctx: dict, mb_id: str, flight: str) -
     integration fixture via ``tests/helpers/delivery_fixtures`` so the two layers
     grade the same flight phase under the same phase name.
     """
-    start_date, end_date = flight_window(flight)  # raises ValueError on unknown phase
-
     env = ctx["env"]
-    owner = ctx.get("principal_id", "buyer-001")
-    buy = _ensure_media_buy_in_db(
-        ctx,
-        mb_id,
-        owner,
-        status="active",
-        start_date=start_date.isoformat(),
-        end_date=end_date.isoformat(),
-        raw_request={"reporting_webhook": dict(DAILY_REPORTING_WEBHOOK)},
-    )
-    ctx.setdefault("media_buys", {})[mb_id] = {"media_buy_id": mb_id, "owner": owner, "status": "active"}
-    ctx["scheduler_buy"] = buy
+    buy = _setup_scheduler_buy(ctx, mb_id, flight=flight)
     env.set_adapter_response(buy.media_buy_id, impressions=5000)
 
 
@@ -1753,13 +1776,8 @@ def when_scheduler_sends_report(ctx: dict, mb_id: str) -> None:
     import asyncio
 
     env = ctx["env"]
-    buy = ctx["scheduler_buy"]
-    requested_media_buy_id = _resolve_media_buy_id(ctx, mb_id)
-    assert buy.media_buy_id == requested_media_buy_id, (
-        f"Scheduler fixture selected media buy {buy.media_buy_id!r}, "
-        f"but the scenario requested {requested_media_buy_id!r}"
-    )
     try:
+        buy = _scheduler_buy_for(ctx, mb_id)
         ctx["scheduler_wire"] = asyncio.run(env.send_delivery_webhook(buy))
     except Exception as exc:
         ctx["error"] = exc

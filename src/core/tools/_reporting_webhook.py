@@ -3,14 +3,16 @@
 from collections.abc import Iterable
 from typing import Any
 
+from adcp.types import ReportingWebhook
+
 from src.core.exceptions import AdCPCapabilityNotSupportedError
 from src.core.reporting_capabilities import SUPPORTED_REPORTING_FREQUENCIES
 
 _IMPLICIT_REPORTING_METRICS = frozenset({"impressions", "spend"})
 
 
-def _reporting_frequency(reporting_webhook: Any) -> str:
-    return str(getattr(reporting_webhook, "reporting_frequency", "") or "").lower()
+def _reporting_frequency(reporting_webhook: ReportingWebhook) -> str:
+    return str(reporting_webhook.reporting_frequency or "").lower()
 
 
 def _normalized_values(values: Iterable[Any]) -> set[str]:
@@ -23,7 +25,7 @@ def _effective_available_metrics(values: Iterable[Any]) -> set[str]:
     return _normalized_values(values) | _IMPLICIT_REPORTING_METRICS
 
 
-def validate_reporting_webhook_frequency(reporting_webhook: Any) -> None:
+def validate_reporting_webhook_frequency(reporting_webhook: ReportingWebhook | None) -> None:
     """Reject reporting cadences the seller cannot fulfill.
 
     AdCP 3.1.1 requires one notification per configured frequency period.
@@ -44,7 +46,7 @@ def validate_reporting_webhook_frequency(reporting_webhook: Any) -> None:
 
 
 def validate_reporting_webhook_product_support(
-    reporting_webhook: Any,
+    reporting_webhook: ReportingWebhook | None,
     products: Iterable[Any],
     *,
     required_product_ids: Iterable[str] = (),
@@ -61,7 +63,7 @@ def validate_reporting_webhook_product_support(
 
     frequency = _reporting_frequency(reporting_webhook)
     required_ids = {str(product_id) for product_id in required_product_ids}
-    requested_metrics = _normalized_values(getattr(reporting_webhook, "requested_metrics", None) or ())
+    requested_metrics = _normalized_values(reporting_webhook.requested_metrics or ())
     unsupported = set(required_ids)
     unavailable_metrics_by_product: dict[str, set[str]] = {}
     for product in products:

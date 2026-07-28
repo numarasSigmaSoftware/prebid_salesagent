@@ -181,9 +181,10 @@ REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
 )
 COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
-# Reporting webhooks are persistent channels. AdCP 3.1.1 requires their final
-# delivery after completed, canceled, or rejected, so the scheduler has a wider
-# terminal vocabulary than the polling delivery tool.
+# Reporting webhooks are persistent channels. UNGRADED: the schema/storyboard
+# describes "final" narrowly as campaign completion; treating canceled and
+# rejected as terminal is our reading of the same no-more-data invariant
+# documented by derive_notification_type(), not a directly graded requirement.
 WEBHOOK_TERMINAL_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_COMPLETED, "canceled", "rejected"})
 WEBHOOK_REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset(
     {CANONICAL_SERVING, *WEBHOOK_TERMINAL_CANONICAL_STATUSES}
