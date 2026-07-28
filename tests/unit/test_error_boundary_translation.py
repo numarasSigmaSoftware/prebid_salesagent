@@ -651,6 +651,33 @@ class TestSafeAdcpErrorSuggestionMatchesRecovery:
             assert_no_secret_leak(e.message, context=f"{e.wire_error_code} message")
             assert_no_secret_leak(e.suggestion, context=f"{e.wire_error_code} suggestion")
 
+    def test_typed_and_raw_validation_scrubs_share_one_category_text(self):
+        """Both scrub paths select sanitized text from ONE table.
+
+        ``safe_adcp_error`` reaches the scrub two ways: the ``synthesize``-based
+        ``_scrubbed_error`` (raw built-in) and the subclass-preserving ``type(exc)(...)``
+        branch (untrusted ``AdCPValidationError``). The second cannot delegate to the first,
+        so the selection lived at both sites — and the same wire code could yield different
+        buyer text depending on the exception's provenance. Pin that they agree.
+        """
+        from src.core.exceptions import _SANITIZED_BY_WIRE_CODE, AdCPValidationError, safe_adcp_error
+
+        expected_message, expected_suggestion = _SANITIZED_BY_WIRE_CODE["VALIDATION_ERROR"]
+
+        typed = safe_adcp_error(AdCPValidationError(SECRET_BEARING_MESSAGE))
+        raw = safe_adcp_error(ValueError(SECRET_BEARING_MESSAGE))
+
+        assert typed.wire_error_code == raw.wire_error_code == "VALIDATION_ERROR"
+        assert typed.message == expected_message == raw.message
+        assert typed.suggestion == expected_suggestion == raw.suggestion
+        # The typed branch exists to preserve the subclass; losing that would silently
+        # change the raised type even though the text now matches.
+        assert type(typed) is AdCPValidationError
+
+        for e in (typed, raw):
+            assert_no_secret_leak(e.message, context=f"{type(e).__name__} scrubbed message")
+            assert_no_secret_leak(e.suggestion, context=f"{type(e).__name__} scrubbed suggestion")
+
     def test_sanitized_category_registry_covers_all_correctable_builtin_targets(self):
         """Completeness guard reconciling ``_BUILTIN_NORMALIZATION`` with ``_SANITIZED_BY_WIRE_CODE``.
 

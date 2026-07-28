@@ -1491,6 +1491,20 @@ _SANITIZED_BY_WIRE_CODE: dict[str, tuple[str, str]] = {
 }
 
 
+def _sanitized_text_for(wire_code: str, recovery: RecoveryHint) -> tuple[str, str]:
+    """The sanitized ``(message, suggestion)`` a scrub emits for ``wire_code``.
+
+    ONE selection rule for BOTH scrub paths: the ``synthesize``-based ``_scrubbed_error``
+    below, and the ``AdCPValidationError`` branch of ``safe_adcp_error``, which must return
+    ``type(exc)(...)`` to preserve the subclass and therefore cannot delegate to
+    ``_scrubbed_error``. Inlining the lookup at both sites let the same wire code yield
+    different buyer text depending on whether the exception was a raw built-in or a typed
+    validation error. Codes without a category entry fall back to the generic internal
+    message plus a ``recovery``-matched suggestion.
+    """
+    return _SANITIZED_BY_WIRE_CODE.get(wire_code, (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(recovery)))
+
+
 def _scrubbed_error(
     *,
     error_code: str,
@@ -1507,9 +1521,7 @@ def _scrubbed_error(
     constructor for ``safe_adcp_error`` so message replacement can't drift between call sites.
     Codes without a category entry fall back to the generic internal message + a
     recovery-matched suggestion."""
-    message, suggestion = _SANITIZED_BY_WIRE_CODE.get(
-        wire_code, (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(recovery))
-    )
+    message, suggestion = _sanitized_text_for(wire_code, recovery)
     return AdCPError.synthesize(
         message,
         error_code=error_code,
@@ -1616,10 +1628,7 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         # Typed validation text is untrusted by default because business
         # validators frequently interpolate rejected request values. Only
         # audited static messages opt in with ``_wire_safe_message=True``.
-        safe_message, safe_suggestion = _SANITIZED_BY_WIRE_CODE.get(
-            wire_code,
-            (_SANITIZED_INTERNAL_MESSAGE, _sanitized_suggestion_for(normalized.recovery)),
-        )
+        safe_message, safe_suggestion = _sanitized_text_for(wire_code, normalized.recovery)
         return type(exc)(
             safe_message,
             suggestion=safe_suggestion,
