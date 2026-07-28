@@ -90,9 +90,28 @@ credential-presence information exists.
 
 This behavior is **ungraded** by the official conformance storyboards:
 `dist/compliance/3.1.1/universal/error-compliance.yaml` contains no
-`AUTH_*` scenario. The normative enum mandate is covered by the repository's
-cross-transport wire tests and the pinned fixture at
+`AUTH_*` scenario. The two codes are covered by the repository's cross-transport
+wire tests, and by the pinned fixture at
 `tests/fixtures/adcp_schemas_pinned/enums/error-code.json`.
+
+### What the pinned fixture does and does not vendor
+
+The fixture tree is vendored at commit `04f59d2d5` (the v3.1 cut, 2026-05-13), **not**
+at `v3.1.1`. The two AUTH entries above are transplanted from `467fd93d` and declared as
+a supplement in `tests/fixtures/adcp_schemas_pinned/_refresh.py`, because production
+emits both codes and the recovery-conformance guard resolves them against this file.
+
+So the fixture is **not** a complete v3.1.1 vocabulary: it carries the base commit's
+codes plus exactly that declared supplement, and it lags published 3.1.1 by a number of
+codes and several `enumMetadata` suggestion texts. That gap is real and tracked
+separately — the point of declaring it is that the tree no longer claims a fidelity it
+does not have.
+
+`tests/unit/test_pinned_schema_provenance.py` enforces the claim against the bytes:
+`PINNED_SHA` must match the generated `_manifest.py`, every vendored file must match its
+recorded digest, and the error-code enum must equal the base vocabulary plus exactly the
+declared supplement. Advancing the pin therefore requires actually re-running
+`_refresh.py` — editing the constant alone fails.
 
 ## Protocol callback URL transport policy
 

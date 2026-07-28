@@ -51,7 +51,11 @@ from src.core.schemas.delivery import GetCreativeDeliveryResponse, GetMediaBuyDe
 # reference point for AdCP 3.1. Upstream ships constantly and `/schemas/latest` drifts,
 # so we deliberately do NOT track it: the schemas are vendored (committed) and read
 # offline. To advance the pin, run tests/fixtures/adcp_schemas_pinned/_refresh.py.
-_PINNED_SHA = "04f59d2d56d3d77033162c310e99a1188e4eb419"
+# Read from the generated manifest rather than re-declaring: three modules cite this
+# commit, and a hand-copied constant is how the tree came to claim a provenance it did
+# not have. The manifest is only rewritten by an actual refresh run.
+from tests.fixtures.adcp_schemas_pinned._manifest import PINNED_SHA as _PINNED_SHA
+
 _PINNED_SCHEMA_DIR = Path(__file__).parent.parent / "fixtures" / "adcp_schemas_pinned"
 
 # Map AdCP schema refs to Pydantic model classes. Keys are the pinned schema `$id`

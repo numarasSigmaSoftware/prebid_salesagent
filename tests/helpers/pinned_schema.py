@@ -3,7 +3,8 @@
 Single source of truth for schema-shape assertions in tests (e.g. the BDD step
 "the response should be schema-valid against <file>"). Reads the committed
 fixtures under ``tests/fixtures/adcp_schemas_pinned/``, pinned at
-adcontextprotocol/adcp@467fd93d (tag ``v3.1.1``). It never fetches the
+adcontextprotocol/adcp@04f59d2d5 plus the supplement declared in that directory's
+``_refresh.py`` (the 3.1.1 auth-code split). It never fetches the
 network — ``/schemas/latest`` drifts and would make tests non-deterministic.
 
 ``$ref`` resolution (e.g. ``/schemas/core/format-id.json``) is wired through a
