@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from adcp import PushNotificationConfig
-from adcp.types import CreativeAction
+from adcp.types import CreativeAction, FormatId
 from pydantic import BaseModel
 
 from tests.factories import PrincipalFactory
@@ -49,8 +49,12 @@ def identity():
 @pytest.fixture
 def mock_format_spec():
     spec = Mock()
-    spec.format_id = "display_300x250_image"
+    spec.format_id = FormatId(
+        agent_url="https://creative.adcontextprotocol.org",
+        id="display_300x250_image",
+    )
     spec.agent_url = "https://creative.adcontextprotocol.org"
+    spec.output_format_ids = []
     spec.name = "Medium Rectangle"
     return spec
 

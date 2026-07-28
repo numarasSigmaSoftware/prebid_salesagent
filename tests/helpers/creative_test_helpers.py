@@ -9,8 +9,10 @@ DRY extraction for creative sync and serialization test utilities shared across:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 from tests.factories.creative_asset import AssetSpec, assert_assets, build_assets, image_spec
@@ -97,6 +99,24 @@ def make_creative_uow(*, include_assignments: bool = False):
     return mock_uow, mock_creative_repo
 
 
+def make_creative_registry_mock(
+    *,
+    list_all_formats: Callable[..., Any],
+    get_format: Callable[..., Any] | None = None,
+) -> Mock:
+    """Build a registry mock with the real async static-preview boundary."""
+
+    async def preview_creative(**_kwargs: Any) -> dict:
+        return {}
+
+    registry = Mock()
+    registry.list_all_formats = list_all_formats
+    if get_format is not None:
+        registry.get_format = get_format
+    registry.preview_creative = preview_creative
+    return registry
+
+
 def sync_patches():
     """Context manager returning (mock_creative_repo, mock_registry) with standard patches."""
 
@@ -108,9 +128,10 @@ def sync_patches():
         async def mock_get_format(agent_url, format_id):
             return mock_format_spec_arg
 
-        mock_registry = Mock()
-        mock_registry.list_all_formats = mock_list_all_formats
-        mock_registry.get_format = mock_get_format
+        mock_registry = make_creative_registry_mock(
+            list_all_formats=mock_list_all_formats,
+            get_format=mock_get_format,
+        )
 
         mock_uow, mock_creative_repo = make_creative_uow()
 
