@@ -224,7 +224,7 @@ class DeliveryWebhookScheduler:
             re-send a fresh periodic report on demand.
         """
         if is_final:
-            if delivery_repo.has_successful_final(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE):
+            if delivery_repo.has_successful_final(media_buy.media_buy_id):
                 logger.info("Final delivery webhook already sent for media buy %s – skipping", media_buy.media_buy_id)
                 return True
             return False

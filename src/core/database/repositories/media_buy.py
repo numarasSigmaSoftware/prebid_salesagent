@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.database.models import DELIVERY_TASK_TYPE, MediaBuy, MediaPackage, WebhookDeliveryLog
+from src.core.database.models import MediaBuy, MediaPackage, WebhookDeliveryLog
+from src.core.database.repositories.delivery import successful_final_log_clauses
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject, ReportingWebhook
@@ -697,14 +698,16 @@ class MediaBuyRepository:
         selection predicate because stale-lease recovery requires claimed rows to
         remain selectable after a crashed send.
         """
+        # Same predicate DeliveryRepository.has_successful_final applies as a
+        # pre-send skip — correlated here against the outer select(MediaBuy)
+        # instead of a caller-known scalar id, so the two gates cannot diverge.
         successful_final_exists = (
             select(WebhookDeliveryLog.id)
             .where(
-                WebhookDeliveryLog.tenant_id == MediaBuy.tenant_id,
-                WebhookDeliveryLog.media_buy_id == MediaBuy.media_buy_id,
-                WebhookDeliveryLog.task_type == DELIVERY_TASK_TYPE,
-                WebhookDeliveryLog.status == "success",
-                WebhookDeliveryLog.notification_type == "final",
+                *successful_final_log_clauses(
+                    tenant_id=MediaBuy.tenant_id,
+                    media_buy_id=MediaBuy.media_buy_id,
+                )
             )
             .exists()
         )

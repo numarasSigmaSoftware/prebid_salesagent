@@ -18,10 +18,40 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
-from src.core.database.models import WebhookDeliveryLog, WebhookDeliveryRecord
+from src.core.database.models import DELIVERY_TASK_TYPE, WebhookDeliveryLog, WebhookDeliveryRecord
+
+
+def successful_final_log_clauses(
+    *,
+    tenant_id: Any,
+    media_buy_id: Any,
+    task_type: str = DELIVERY_TASK_TYPE,
+) -> tuple[ColumnElement[bool], ...]:
+    """The WHERE terms matching "a successful FINAL webhook was already logged".
+
+    One home for this predicate so a change to what counts as a logged final
+    (the success status, the notification_type value, an added scope term)
+    lands in both the delivery scheduler's pre-send skip
+    (``DeliveryRepository.has_successful_final``) and its selection-time
+    anti-join (``MediaBuyRepository.get_reportable_for_delivery``) — missing a
+    copy would let one gate diverge from the other and either send a duplicate
+    final or never select an unsent one.
+
+    ``tenant_id``/``media_buy_id`` accept a scalar (a standalone lookup scoped
+    to one caller-known buy) OR a column expression (a subquery correlated
+    against an outer ``select(MediaBuy)``) — both produce a SQLAlchemy boolean
+    clause, so one definition serves both query shapes.
+    """
+    return (
+        WebhookDeliveryLog.tenant_id == tenant_id,
+        WebhookDeliveryLog.media_buy_id == media_buy_id,
+        WebhookDeliveryLog.task_type == task_type,
+        WebhookDeliveryLog.status == "success",
+        WebhookDeliveryLog.notification_type == "final",
+    )
 
 
 class DeliveryRepository:
@@ -266,7 +296,7 @@ class DeliveryRepository:
         )
         return self._session.scalars(stmt).first()
 
-    def has_successful_final(self, media_buy_id: str, *, task_type: str) -> bool:
+    def has_successful_final(self, media_buy_id: str) -> bool:
         """Whether a successful FINAL delivery webhook has already been logged for this buy.
 
         Backs the delivery scheduler's BEST-EFFORT final de-duplication: the spec
@@ -279,13 +309,16 @@ class DeliveryRepository:
         guarantee exactly-once under concurrent workers or a crash between a
         successful POST and the log write — that needs an atomic reserve / outbox
         (#1606).
+
+        Uses ``successful_final_log_clauses`` — the same predicate
+        ``MediaBuyRepository.get_reportable_for_delivery`` correlates against —
+        so this pre-send gate and that selection-time anti-join cannot diverge.
+        No ``task_type`` parameter: this repository's only caller always checks
+        the delivery-report task, so a parameter here bought nothing but a
+        second place the two callers could disagree.
         """
         stmt = select(WebhookDeliveryLog.id).where(
-            WebhookDeliveryLog.tenant_id == self._tenant_id,
-            WebhookDeliveryLog.media_buy_id == media_buy_id,
-            WebhookDeliveryLog.task_type == task_type,
-            WebhookDeliveryLog.status == "success",
-            WebhookDeliveryLog.notification_type == "final",
+            *successful_final_log_clauses(tenant_id=self._tenant_id, media_buy_id=media_buy_id)
         )
         return self._session.scalars(stmt).first() is not None
 
