@@ -3859,3 +3859,133 @@ class TestReportingWebhookAuthenticationPrecedence:
                 payload=ANY,
                 metadata=ANY,
             )
+
+
+# ---------------------------------------------------------------------------
+# successful_final_log_clauses — shared by DeliveryRepository.has_successful_final
+# and MediaBuyRepository.get_reportable_for_delivery's anti-join. Each class below
+# isolates ONE of the two consumers, calling the repository method directly with
+# no send attempted and no claim ever taken — the scheduler's independent
+# claim-lease mechanism (final_webhook_claimed_at) would otherwise redundantly
+# block a re-send regardless of whether the predicate itself is correct, masking
+# a broken predicate behind every full-batch test.
+# ---------------------------------------------------------------------------
+
+
+class TestHasSuccessfulFinal:
+    """has_successful_final keys on BOTH status=='success' AND notification_type=='final'."""
+
+    @pytest.mark.asyncio
+    async def test_true_when_a_successful_final_is_logged(self, integration_db):
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            _seed_delivery_log(env, buy, log_id="final-success", status="success", notification_type="final")
+
+            repo = DeliveryRepository(env.get_session(), "t1")
+            assert repo.has_successful_final(buy.media_buy_id) is True
+
+    @pytest.mark.asyncio
+    async def test_false_when_the_only_success_is_not_final(self, integration_db):
+        """A successful periodic send must NOT count as the final.
+
+        The discriminating case: a terminal buy commonly has prior successful
+        "scheduled" sends from its serving days before its final is due.
+        Collapsing the predicate to "any successful send exists" would report a
+        final as already delivered when none was ever sent.
+        """
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            _seed_delivery_log(env, buy, log_id="scheduled-success", status="success", notification_type="scheduled")
+
+            repo = DeliveryRepository(env.get_session(), "t1")
+            assert repo.has_successful_final(buy.media_buy_id) is False
+
+    @pytest.mark.asyncio
+    async def test_false_when_the_only_final_failed(self, integration_db):
+        """A retry after a FAILED final must still go through."""
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            _seed_delivery_log(env, buy, log_id="final-failed", status="failed", notification_type="final")
+
+            repo = DeliveryRepository(env.get_session(), "t1")
+            assert repo.has_successful_final(buy.media_buy_id) is False
+
+    @pytest.mark.asyncio
+    async def test_false_when_no_logs_exist(self, integration_db):
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+
+            repo = DeliveryRepository(env.get_session(), "t1")
+            assert repo.has_successful_final(buy.media_buy_id) is False
+
+
+class TestGetReportableForDeliveryFinalAntiJoin:
+    """get_reportable_for_delivery excludes a terminal buy ONLY once its FINAL succeeds."""
+
+    @pytest.mark.asyncio
+    async def test_selected_when_no_final_has_been_logged(self, integration_db):
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            buy.status = "completed"
+            env.get_session().commit()
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=[], terminal_statuses=["completed"]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_excluded_once_a_successful_final_is_logged(self, integration_db):
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            buy.status = "completed"
+            env.get_session().commit()
+            _seed_delivery_log(env, buy, log_id="final-success", status="success", notification_type="final")
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=[], terminal_statuses=["completed"]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id not in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_still_selected_when_only_a_prior_scheduled_send_succeeded(self, integration_db):
+        """A successful periodic send from the buy's serving days must NOT
+        suppress selection — only a successful FINAL does. Without the
+        notification_type filter, this buy's real final would never be sent."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            buy.status = "completed"
+            env.get_session().commit()
+            _seed_delivery_log(env, buy, log_id="scheduled-success", status="success", notification_type="scheduled")
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=[], terminal_statuses=["completed"]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id in reportable_ids
