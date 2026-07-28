@@ -279,9 +279,12 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
       ``str(e)`` into its message, so the ORIGINAL ``exc.message`` must never be
       used here (it would leak through ``error.message`` even while ``error.data``
       is scrubbed).
-    - Any UNTYPED exception is replaced with a generic message and a base
-      ``SERVICE_UNAVAILABLE`` envelope; the raw ``str(exc)`` is NEVER placed on the
-      wire (callers log it server-side via ``record_boundary_error``).
+    - An UNTYPED exception is replaced with a generic message; the raw ``str(exc)`` is
+      NEVER placed on the wire (callers log it server-side via ``record_boundary_error``).
+      The envelope CODE comes from ``safe_adcp_error``, which normalizes semantics before
+      scrubbing presentation — so a mapped built-in keeps its client-correctable code
+      (``ValueError`` → VALIDATION_ERROR, ``PermissionError`` → AUTH_REQUIRED) and only a
+      genuinely unmapped exception falls through to ``SERVICE_UNAVAILABLE``.
 
     ``InternalError`` stays an ``A2AError`` so the SDK's ``JsonRpcDispatcher``
     serializes it as a structured JSON-RPC error (the four
@@ -447,6 +450,41 @@ class AdCPRequestHandler(RequestHandler):
             "error_envelope": AdCPRequestHandler._build_error_envelope(exc),
             "success": False,
         }
+
+    @staticmethod
+    async def _dispatch_under_sanitize_seam(operation: str, identity: Any, handler_coro: Awaitable[Any]) -> Any:
+        """Await ``handler_coro`` with the boundary's provenance policy applied to failures.
+
+        The seam every buyer-reachable handler call goes through — explicit-skill dispatch
+        and natural-language routing alike — so a client-correctable failure reaches the
+        outer boundary already typed, and is framed as an application-layer failed Task
+        rather than a transport-layer JSON-RPC error.
+
+        Catches exactly ``(AdCPError, ValueError, PermissionError)``. NOT ``Exception``:
+        AdCP 3.1.1 ``transport-errors.mdx`` §"Layer Separation" classifies an internal crash
+        as a TRANSPORT-layer event, so a genuine crash must keep falling through to the
+        JSON-RPC ``InternalError`` arm. Widening this would also re-expose the raw-text leak
+        that arm exists to prevent.
+
+        ``safe_adcp_error`` decides SEMANTICS and MESSAGE TRUST separately: ``ValueError`` →
+        VALIDATION_ERROR, ``PermissionError`` → AUTH_REQUIRED, native ``AdCPError``
+        unchanged, while a raw built-in's untrusted ``str(e)`` is scrubbed. Re-raising the
+        *normalized* error instead would hand the outer sanitizer a trusted
+        ``AdCPValidationError`` and let a secret survive. ``record_boundary_error`` receives
+        the ORIGINAL exception, so raw diagnostics stay in the privileged server log while
+        tenant-visible sinks get the scrubbed copy.
+        """
+        try:
+            return await handler_coro
+        except A2AError:
+            # Already a properly-formatted transport error.
+            raise
+        except (AdCPError, ValueError, PermissionError) as e:
+            _record_a2a_boundary_error(operation, identity, e)
+            sanitized = safe_adcp_error(e)
+            if sanitized is not e:
+                raise sanitized from e
+            raise
 
     def _mark_task_failed(self, task: Task) -> None:
         """Mark a task FAILED. No webhook — the caller returns this terminal Task
@@ -965,9 +1003,15 @@ class AdCPRequestHandler(RequestHandler):
                 # message is the contract. Raised as a typed application error →
                 # failed Task (UNSUPPORTED_FEATURE); no skill runs, so no side effects.
                 if len(skill_invocations) > 1:
-                    raise AdCPCapabilityNotSupportedError(
+                    multi_skill_error = AdCPCapabilityNotSupportedError(
                         message="Batching multiple skills in one message is not supported; send one skill per message."
                     )
+                    # Recorded HERE, at the raise site. This is the one raise reaching the
+                    # outer ``except AdCPError`` that does not pass through
+                    # ``_dispatch_under_sanitize_seam``, and that arm no longer records —
+                    # so an unrecorded raise would vanish from the observability sinks.
+                    _record_a2a_boundary_error("message_processing", identity, multi_skill_error)
+                    raise multi_skill_error
 
                 # Process the single explicit skill invocation.
                 results = []
@@ -1134,7 +1178,9 @@ class AdCPRequestHandler(RequestHandler):
 
             # Natural language fallback (existing keyword-based routing)
             elif any(word in combined_text for word in ["product", "inventory", "available", "catalog"]):
-                result = await self._get_products(combined_text, identity)
+                result = await self._dispatch_under_sanitize_seam(
+                    "get_products", identity, self._get_products(combined_text, identity)
+                )
                 tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
@@ -1157,9 +1203,8 @@ class AdCPRequestHandler(RequestHandler):
                 )
             elif any(word in combined_text for word in ["price", "pricing", "cost", "cpm", "budget"]):
                 # Redirect pricing queries to get_products which has real price_guidance
-                result = await self._handle_get_products_skill(
-                    {"brief": combined_text},
-                    identity,
+                result = await self._dispatch_under_sanitize_seam(
+                    "get_products", identity, self._handle_get_products_skill({"brief": combined_text}, identity)
                 )
                 tenant_id, principal_id = _a2a_activity_scope(identity)
 
@@ -1184,7 +1229,9 @@ class AdCPRequestHandler(RequestHandler):
                 )
             elif any(word in combined_text for word in ["target", "audience"]):
                 # Redirect targeting queries to get_adcp_capabilities which has real targeting info
-                result = await self._handle_get_adcp_capabilities_skill({}, identity)
+                result = await self._dispatch_under_sanitize_seam(
+                    "get_adcp_capabilities", identity, self._handle_get_adcp_capabilities_skill({}, identity)
+                )
                 tenant_id, principal_id = _a2a_activity_scope(identity)
 
                 self._log_a2a_operation(
@@ -1213,7 +1260,9 @@ class AdCPRequestHandler(RequestHandler):
                 # attaches a spec-compliant two-layer envelope to the failed
                 # Task artifact, and returns that failed Task (never a
                 # JSON-RPC error).
-                await self._create_media_buy(combined_text, identity)
+                await self._dispatch_under_sanitize_seam(
+                    "create_media_buy", identity, self._create_media_buy(combined_text, identity)
+                )
             else:
                 # General help response
                 capabilities = {
@@ -1299,10 +1348,14 @@ class AdCPRequestHandler(RequestHandler):
             # message is CONTROLLED (e.g. "Unknown skill 'x'", "brief must not be
             # empty"), so it is client-safe to surface. Immediate terminal response
             # returned synchronously below → no webhook (a2a-guide.mdx). Falls through
-            # to the shared store-and-return. Explicit-skill failures are already
-            # recorded by ``_handle_explicit_skill``; errors reaching this outer
-            # boundary (multi-skill rejection and NL routing) are recorded here.
-            _record_a2a_boundary_error("message_processing", identity, e)
+            # to the shared store-and-return.
+            #
+            # This arm is pure FRAMING — it no longer records. Every raise that can reach
+            # it now records itself exactly once, with the ORIGINAL exception, at its own
+            # raise site: explicit-skill dispatch and NL routing via
+            # ``_dispatch_under_sanitize_seam``, the multi-skill rejection inline above.
+            # Recording again here would double-count, and would relabel the specific
+            # operation the seam already logged as the generic ``message_processing``.
             del task.artifacts[:]
             task.artifacts.append(self._failed_task_artifact(e))
             self._mark_task_failed(task)
@@ -2016,13 +2069,17 @@ class AdCPRequestHandler(RequestHandler):
 
         skill_handlers = self._skill_handler_map()
 
-        try:
+        # Defensive about identity shape — test fixtures sometimes pass a string or
+        # partially-built identity; the canonical recorder handles None internally.
+        operation = skill_name if skill_name in skill_handlers else "unsupported_skill"
+
+        async def _invoke() -> Any:
             # An unknown SKILL is an application-layer failure — the JSON-RPC method
             # (message/send) is valid; routing failed inside skill dispatch. Per AdCP
             # transport-errors.mdx "Layer Separation" (present since 3.0.0), it belongs in the
             # task body as a failed Task with a two-layer envelope, NOT a JSON-RPC
             # MethodNotFoundError (reserved for unknown JSON-RPC methods). Raised
-            # INSIDE this try so the boundary observability below records it exactly
+            # INSIDE the seam so the boundary observability records it exactly
             # once (an unknown skill must not bypass record_boundary_error); the outer
             # dispatcher's `except AdCPError` re-wraps it into a failed-skill result,
             # preserving accumulated results from earlier skills.
@@ -2040,33 +2097,11 @@ class AdCPRequestHandler(RequestHandler):
                 result = await handler(parameters, identity)
             # Serialize at the boundary — models become dicts with protocol fields
             return self._serialize_for_a2a(result)
-        except A2AError:
-            # Re-raise A2AError as-is (already properly formatted)
-            raise
-        except (AdCPError, ValueError, PermissionError) as e:
-            # SANITIZE HERE so exception PROVENANCE (raw built-in vs explicitly-typed) is decided
-            # before the outer envelope build. ``safe_adcp_error`` keeps the SEMANTIC code the
-            # buyer's contract expects — ``ValueError`` → VALIDATION_ERROR, ``PermissionError`` →
-            # AUTH_REQUIRED, native ``AdCPError`` unchanged — but SCRUBS a raw built-in's untrusted
-            # ``str(e)`` (a connection string / token), because re-raising the *normalized* typed
-            # error here would hand the outer sanitizer a trusted ``AdCPValidationError`` and let
-            # the secret survive. ``record_boundary_error`` receives the ORIGINAL exception so
-            # the same provenance rule applies there: raw diagnostics stay in the privileged
-            # server log while tenant activity, persistent audit, and notification sinks receive
-            # a scrubbed semantic copy.
-            #
-            # Defensive about identity shape — test fixtures sometimes pass a string or
-            # partially-built identity; the canonical recorder handles None internally.
-            operation = skill_name if skill_name in skill_handlers else "unsupported_skill"
-            _record_a2a_boundary_error(operation, identity, e)
 
-            sanitized = safe_adcp_error(e)
-            if sanitized is not e:
-                raise sanitized from e
-            raise
-        # Untyped exceptions fall through to the dispatcher's `except Exception`
-        # at the call site, which routes them through `_build_failed_skill_result`
-        # for uniform envelope shape. No catch-all here.
+        # Untyped exceptions are NOT caught by the seam: they fall through to the
+        # dispatcher's `except Exception` at the call site, which routes them through
+        # `_build_failed_skill_result` for uniform envelope shape.
+        return await self._dispatch_under_sanitize_seam(operation, identity, _invoke())
 
     async def _handle_get_products_skill(self, parameters: dict, identity: ResolvedIdentity | None) -> Any:
         """Handle explicit get_products skill invocation.

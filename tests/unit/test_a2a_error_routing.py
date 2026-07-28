@@ -467,9 +467,71 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
     )
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected_code"),
+    [
+        (ValueError(SECRET_BEARING_MESSAGE), "VALIDATION_ERROR"),
+        (PermissionError(SECRET_BEARING_MESSAGE), "AUTH_REQUIRED"),
+    ],
+    ids=["value_error", "permission_error"],
+)
 @pytest.mark.asyncio
-async def test_nl_typed_failure_records_outer_boundary_once():
-    """A typed NL-routing failure is recorded once by the outer task boundary."""
+async def test_nl_client_correctable_builtin_becomes_failed_task_not_internal_error(raised, expected_code):
+    """A client-correctable built-in from an NL handler is an APPLICATION-layer failure.
+
+    AdCP 3.1.1 ``transport-errors.mdx`` §"Layer Separation" puts AdCP errors in the task
+    response, not the transport error channel, and classifies a malformed request as a
+    Validation Error rather than a Protocol Error. Explicit-skill dispatch already honoured
+    that; NL routing did not, because its handlers were invoked outside the sanitize seam —
+    so a raw ``ValueError`` surfaced as a JSON-RPC ``InternalError``. The envelope inside it
+    already said ``correctable``, which told the buyer not to auto-retry while the transport
+    frame told them it was a server fault.
+
+    Ungraded by the 3.1.1 conformance storyboards (``check: error_code`` is shape-agnostic
+    and accepts ``error.data``), so this test is the contract.
+
+    The recorder assertion is on the exception TYPE, not its wire code: the seam must hand
+    ``record_boundary_error`` the ORIGINAL built-in so the privileged log keeps the raw text
+    and traceback, while the wire gets the scrubbed copy.
+    """
+    handler, ctx = _make_handler()
+    params = make_nl_send_message_request("Show me available products in the catalog")
+
+    recorded: list[tuple[str, str]] = []
+
+    def record(transport, operation, error, *, tenant_id, principal_id):
+        recorded.append((operation, type(error).__name__))
+
+    with patch("src.core.resolved_identity.resolve_identity", return_value=_TEST_IDENTITY):
+        with patch("src.a2a_server.adcp_a2a_server.core_get_products_tool", side_effect=raised):
+            with patch("src.a2a_server.adcp_a2a_server.record_boundary_error", side_effect=record):
+                result = await handler.on_message_send(params, context=ctx)
+
+    assert isinstance(result, Task), f"expected a failed Task, got {type(result).__name__}"
+    assert result.status.state == TaskState.TASK_STATE_FAILED
+
+    envelope = extract_processing_error_envelope(result)
+    assert_envelope_shape(envelope, expected_code, recovery="correctable")
+    assert_no_secret_leak(envelope, context=f"NL {type(raised).__name__} failed-Task envelope")
+
+    # Recorded exactly once, with the ORIGINAL exception, under its own operation label.
+    assert recorded == [("get_products", type(raised).__name__)]
+
+    # The failed Task is retained: it is a task-layer outcome, so tasks/get can serve it.
+    assert handler.tasks, "a failed Task must not be dropped like a transport-layer crash"
+
+
+@pytest.mark.asyncio
+async def test_nl_typed_failure_records_once_under_its_own_operation():
+    """A typed NL-routing failure is recorded exactly once, labelled by the operation.
+
+    The record moved from the outer task boundary into the shared dispatch seam, so it now
+    carries the specific operation (``get_products``) instead of the generic
+    ``message_processing`` — matching what explicit-skill dispatch has always logged, and
+    making the two paths greppable together. "Once" remains the load-bearing half: the
+    outer arm is pure framing now, so a re-added record there would show up as a second
+    entry.
+    """
     handler, ctx = _make_handler()
     params = make_nl_send_message_request("Show me available products in the catalog")
     records, record = _boundary_recording_spy()
@@ -489,7 +551,7 @@ async def test_nl_typed_failure_records_outer_boundary_once():
         artifact_name="processing_error",
     )
     assert records == [
-        ("a2a", "message_processing", "VALIDATION_ERROR", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
+        ("a2a", "get_products", "VALIDATION_ERROR", _TEST_IDENTITY.tenant_id, _TEST_IDENTITY.principal_id)
     ]
 
 
