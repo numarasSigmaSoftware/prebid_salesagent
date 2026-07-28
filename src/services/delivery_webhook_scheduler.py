@@ -25,6 +25,7 @@ from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.helpers import enum_value
+from src.core.reporting_capabilities import SUPPORTED_REPORTING_FREQUENCIES
 from src.core.schemas import GetMediaBuyDeliveryRequest, GetMediaBuyDeliveryResponse
 from src.core.tools._media_buy_status import (
     SERVING_PERSISTED_STATUSES,
@@ -308,12 +309,17 @@ class DeliveryWebhookScheduler:
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
             raw_freq = str(reporting_webhook.get("reporting_frequency") or "daily").lower()
 
-            if not force and raw_freq != "daily":
+            # Same set the create/update capability validator rejects against. If
+            # these drift, an unsupported cadence is accepted at booking and then
+            # silently never sent — the acknowledged-but-never-fires state
+            # validate_reporting_webhook_frequency exists to prevent.
+            if not force and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
                 logger.warning(
                     "Skipping reporting webhook with frequency '%s' for media buy %s – "
-                    "only 'daily' frequency is supported for delivery webhooks at this time",
+                    "supported delivery-webhook frequencies are: %s",
                     raw_freq,
                     media_buy.media_buy_id,
+                    ", ".join(sorted(SUPPORTED_REPORTING_FREQUENCIES)),
                 )
                 return False
 
@@ -443,16 +449,21 @@ class DeliveryWebhookScheduler:
         # the campaign completes", optimization-reporting.mdx §Publisher
         # Commitment), "scheduled" otherwise.
         derived = derive_notification_type(enum_value(d.status) for d in delivery_response.media_buy_deliveries or [])
-        delivery_response.notification_type = NotificationType(derived) if derived else None
+        notification_type = NotificationType(derived) if derived else None
+        delivery_response.notification_type = notification_type
 
         # next_expected_at: only present when notification_type is not "final"
         # (spec, same schema — a non-nullable date-time, so a final webhook
         # must OMIT the field; leaving it None lets the response's
         # exclude-None serialization drop it from the wire). Daily
         # frequency -> start of next day (UTC).
-        if derived == "final":
+        #
+        # Branch on the enum rather than re-comparing the raw string: the value
+        # was already narrowed to NotificationType one line up, and a bare
+        # literal here would silently stop matching if the vocabulary changed.
+        if notification_type is NotificationType.final:
             delivery_response.next_expected_at = None
-        elif derived == "scheduled":
+        elif notification_type is NotificationType.scheduled:
             next_day = datetime.now(UTC).date() + timedelta(days=1)
             delivery_response.next_expected_at = utc_flight_start(next_day)
         # derived is None (zero deliveries) -> leave next_expected_at unset;
