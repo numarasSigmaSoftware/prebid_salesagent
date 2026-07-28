@@ -1140,8 +1140,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # Date range validation: production doesn't validate start>end
             "T-UC-004-daterange-invalid": ("date range validation (start>end) not implemented", True),
             "T-UC-004-daterange-equal": ("date range validation (start==end) not implemented", True),
-            # Webhook delivery: not yet in production
-            "T-UC-004-webhook-scheduled": ("webhook delivery not implemented", True),
             # Graduated: T-UC-004-webhook-sequence (production fixed: sequence numbers now strictly ascending)
             # Graduated: T-UC-004-webhook-circuit-halfopen (merge from main fixed circuit breaker probe timing)
             # Graduated: T-UC-004-webhook-retry-5xx (production fixed: retry count now correct)
@@ -2793,6 +2791,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 # These scenarios must NOT be multiplied — they have explicit When steps.
 _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 
+# Scheduler-originated events do not enter through an AdCP request transport.
+# Keep these scenarios single-run instead of producing misleading A2A/MCP/REST
+# variants that all exercise the same outbound scheduler path.
+_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {"T-UC-004-webhook-scheduled"}
+
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
 # (UC-002 @account used to live here when it ran resolve_account() via IMPL on
 # MediaBuyAccountEnv; #1417 routed those scenarios through a full
@@ -2855,6 +2858,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     marker_names = {m.name for m in metafunc.definition.iter_markers()}
     if marker_names & _TRANSPORT_SPECIFIC_TAGS:
         # Transport-specific scenario — don't multiply
+        return
+    if marker_names & _TRANSPORT_INDEPENDENT_SCENARIO_TAGS:
         return
 
     # Admin scenarios use Flask test_client, not API transports
@@ -3123,6 +3128,8 @@ def _detect_delivery_harness(request: pytest.FixtureRequest) -> str:
     # them to MediaBuyCreateEnv so production Pydantic does the rejecting.
     if {"T-UC-004-webhook-creds-short", "T-UC-004-webhook-creds-valid"} & marker_names:
         return "create"
+    if "T-UC-004-webhook-scheduled" in marker_names:
+        return "poll"
     if "webhook-reliability" in marker_names:
         return "circuit-breaker"
     if "webhook" in marker_names:

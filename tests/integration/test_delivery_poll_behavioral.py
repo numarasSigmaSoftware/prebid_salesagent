@@ -621,42 +621,6 @@ class TestConcurrentFinalWebhookClaim:
             )
             assert sorted(results) == [False, True], f"exactly one entrypoint call must report success, got {results}"
 
-    def test_claim_and_release_bump_updated_at(self, integration_db):
-        """The horizon's liveness rests on claim/release bumping ``updated_at`` — pin it.
-
-        get_reportable_for_delivery bounds the completed arm by ``updated_at``; the
-        no-strand-mid-retry property holds ONLY because the claim UPDATE and the
-        release UPDATE fire the column's ``onupdate`` (Core updates included). If a
-        change ever sets ``updated_at`` explicitly in those .values() or reroutes
-        them around SQLAlchemy, a retrying buy silently ages out at the horizon and
-        its final is stranded — with every other test green. This reddens instead.
-        """
-        from src.core.database.repositories.media_buy import MediaBuyRepository
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
-            buy = _serving_webhook_buy(env, flight="completed")
-            mb_id = buy.media_buy_id
-            session = env.get_session()
-            session.commit()
-            repo = MediaBuyRepository(session, "t1")
-
-            def _updated_at():
-                session.expire_all()
-                return repo.get_by_id(mb_id).updated_at
-
-            before = _updated_at()
-            now = datetime.now(UTC)
-            assert repo.try_claim_final_webhook(mb_id, now=now, stale_before=now - timedelta(minutes=15)) is True
-            session.commit()
-            after_claim = _updated_at()
-            assert after_claim > before, "the claim UPDATE must bump updated_at (horizon liveness)"
-
-            assert repo.release_final_webhook_claim(mb_id, claimed_at=now) is True
-            session.commit()
-            after_release = _updated_at()
-            assert after_release > after_claim, "the release UPDATE must bump updated_at (horizon liveness)"
-
     @pytest.mark.asyncio
     async def test_failed_send_releases_the_claim_for_immediate_retry(self, integration_db):
         """A definitive send failure releases the final claim so a retry isn't blocked for the lease.
@@ -964,12 +928,13 @@ class TestDedupSuppressesPriorFinalWebhook:
     """A prior successful webhook of ANY notification_type dedups the next non-forced send.
 
     The 24h dedup intentionally drops the ``notification_type == "scheduled"``
-    predicate: a sent "final" must ALSO suppress a re-send within the window (the
-    durable stopper is the status scheduler flipping the buy out of the serving
-    selection, not this check). Seeding a prior successful "final" log — the
-    discriminating case the old "scheduled"-only query would have missed — and
-    asserting the next non-forced send is skipped pins the broadening: re-adding
-    the "scheduled"-only predicate lets the send through and turns this red.
+    predicate: a sent "final" must ALSO suppress a re-send within the window.
+    Independently, the terminal-row selection's successful-final anti-join is the
+    durable stopper for future batches. Seeding a prior successful "final" log —
+    the discriminating case the old "scheduled"-only query would have missed —
+    and asserting the next non-forced send is skipped pins the broadening:
+    re-adding the "scheduled"-only predicate lets the send through and turns this
+    red.
 
     Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
     """

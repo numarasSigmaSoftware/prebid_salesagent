@@ -6,6 +6,8 @@ from typing import Any
 from src.core.exceptions import AdCPCapabilityNotSupportedError
 from src.core.reporting_capabilities import SUPPORTED_REPORTING_FREQUENCIES
 
+_IMPLICIT_REPORTING_METRICS = frozenset({"impressions", "spend"})
+
 
 def _reporting_frequency(reporting_webhook: Any) -> str:
     return str(getattr(reporting_webhook, "reporting_frequency", "") or "").lower()
@@ -14,6 +16,11 @@ def _reporting_frequency(reporting_webhook: Any) -> str:
 def _normalized_values(values: Iterable[Any]) -> set[str]:
     """Normalize enum or string capability values for set comparisons."""
     return {str(getattr(value, "value", value)).lower() for value in values}
+
+
+def _effective_available_metrics(values: Iterable[Any]) -> set[str]:
+    """Return declared metrics plus the base metrics AdCP makes implicit."""
+    return _normalized_values(values) | _IMPLICIT_REPORTING_METRICS
 
 
 def validate_reporting_webhook_frequency(reporting_webhook: Any) -> None:
@@ -67,7 +74,9 @@ def validate_reporting_webhook_product_support(
             unsupported.add(product_id)
             continue
 
-        unavailable_metrics = requested_metrics - _normalized_values(capabilities.get("available_metrics", ()))
+        unavailable_metrics = requested_metrics - _effective_available_metrics(
+            capabilities.get("available_metrics", ())
+        )
         if unavailable_metrics:
             unavailable_metrics_by_product[product_id] = unavailable_metrics
 

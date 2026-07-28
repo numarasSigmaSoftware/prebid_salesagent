@@ -99,6 +99,33 @@ class DetachedPushConfigMatcher:
         return self._mismatch or f"PushNotificationConfig(matching {self._kwargs!r})"
 
 
+class MediaBuyIdMatcher:
+    """Match a media-buy ORM row by durable identity across session boundaries."""
+
+    def __init__(self, media_buy_id: str) -> None:
+        self._media_buy_id = media_buy_id
+
+    def __eq__(self, other: object) -> bool:
+        from src.core.database.models import MediaBuy
+
+        return isinstance(other, MediaBuy) and other.media_buy_id == self._media_buy_id
+
+    def __repr__(self) -> str:
+        return f"MediaBuy(media_buy_id={self._media_buy_id!r})"
+
+
+class SessionMatcher:
+    """Match a real SQLAlchemy Session without pinning object identity."""
+
+    def __eq__(self, other: object) -> bool:
+        from sqlalchemy.orm import Session
+
+        return isinstance(other, Session)
+
+    def __repr__(self) -> str:
+        return "Session(...)"
+
+
 def assert_omits_webhook_only_fields(payload: dict, *, context: str) -> None:
     """Assert a serialized delivery body omits ALL webhook-only fields.
 

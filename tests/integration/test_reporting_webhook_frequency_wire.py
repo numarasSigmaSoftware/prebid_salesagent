@@ -5,12 +5,13 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.core.reporting_capabilities import build_daily_reporting_capabilities
 from tests.harness.transport import Transport
+from tests.helpers.delivery_assertions import MediaBuyIdMatcher, SessionMatcher
 from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -117,6 +118,29 @@ class TestCreateReportingWebhookFrequencyWire:
 
         _assert_unsupported_capability(result, "clicks", "requested_metrics")
 
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_implicit_base_metrics_are_accepted(
+        self,
+        env_with_product,
+        transport: Transport,
+    ) -> None:
+        env, product, pricing_option = env_with_product
+        product.reporting_capabilities = build_daily_reporting_capabilities(
+            supports_webhooks=True,
+            available_metrics=("clicks",),
+        )
+
+        result = env.call_via(
+            transport,
+            req=self._request(
+                product,
+                pricing_option,
+                _requested_metrics_webhook("impressions", "spend"),
+            ),
+        )
+
+        assert not result.is_error, result.wire_error_envelope
+
 
 class TestUpdateReportingWebhookFrequencyWire:
     @pytest.fixture
@@ -186,6 +210,28 @@ class TestUpdateReportingWebhookFrequencyWire:
 
         _assert_unsupported_capability(result, "clicks", "requested_metrics")
 
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_implicit_base_metrics_are_accepted(
+        self,
+        env_with_media_buy,
+        transport: Transport,
+    ) -> None:
+        env, media_buy, product = env_with_media_buy
+        product.reporting_capabilities = build_daily_reporting_capabilities(
+            supports_webhooks=True,
+            available_metrics=("clicks",),
+        )
+
+        result = env.call_via(
+            transport,
+            req=self._request(
+                media_buy,
+                _requested_metrics_webhook("impressions", "spend"),
+            ),
+        )
+
+        assert not result.is_error, result.wire_error_envelope
+
     @pytest.mark.parametrize(
         "existing_webhook",
         [
@@ -238,7 +284,12 @@ class TestUpdateReportingWebhookFrequencyWire:
             )
 
         assert triggered is True
-        mock_send.assert_awaited_once_with(ANY, replacement, ANY, force=True)
+        mock_send.assert_awaited_once_with(
+            MediaBuyIdMatcher(media_buy.media_buy_id),
+            replacement,
+            SessionMatcher(),
+            force=True,
+        )
 
     def test_approval_gated_update_does_not_mutate_active_webhook(self, env_with_media_buy) -> None:
         from src.core.database.repositories.media_buy import MediaBuyRepository

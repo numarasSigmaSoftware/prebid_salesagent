@@ -171,6 +171,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
             await scheduler._send_report_for_media_buy(
                 buy, buy.raw_request["reporting_webhook"], self.get_session(), force=True
             )
+        self.mock["post"] = mock_post
         assert mock_post.call_count == 1, "scheduler must send exactly one webhook"
         return mock_post.call_args.kwargs["json"]
 
@@ -189,4 +190,5 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         scheduler = DeliveryWebhookScheduler()
         with mock_webhook_post(scheduler) as mock_post:
             await scheduler._send_reports()
+        self.mock["post"] = mock_post
         return [call.kwargs["json"] for call in mock_post.call_args_list]

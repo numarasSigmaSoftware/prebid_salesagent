@@ -53,6 +53,8 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     call_kwargs = mock_post.call_args_list[-1][1]  # kwargs of last call
     payload = call_kwargs.get("json") or call_kwargs.get("data") or {}
     assert payload, f"Webhook POST had no JSON payload: {call_kwargs}"
+    if payload.get("task_type") == "media_buy_delivery" and isinstance(payload.get("result"), dict):
+        return payload["result"]
     return payload
 
 
@@ -347,6 +349,29 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
         "active": True,
     }
     env = ctx["env"]
+    from tests.harness.delivery_poll import DeliveryPollEnv
+
+    if isinstance(env, DeliveryPollEnv):
+        owner = ctx.get("principal_id", "buyer-001")
+        reporting_webhook = {
+            **DAILY_REPORTING_WEBHOOK,
+            "url": _WEBHOOK_URL,
+            "reporting_frequency": ctx.get("reporting_frequency", "daily"),
+        }
+        buy = _ensure_media_buy_in_db(
+            ctx,
+            mb_id,
+            owner,
+            raw_request={"reporting_webhook": reporting_webhook},
+        )
+        ctx.setdefault("media_buys", {})[mb_id] = {
+            "media_buy_id": mb_id,
+            "owner": owner,
+            "status": "active",
+        }
+        ctx["scheduler_buy"] = buy
+        ctx["webhook_url"] = _WEBHOOK_URL
+        return
     if getattr(env, "_session", None) is not None:
         _persist_webhook_config_if_needed(ctx, env)
 
@@ -470,6 +495,14 @@ def given_no_webhook(ctx: dict, mb_id: str) -> None:
 def given_reporting_frequency(ctx: dict, frequency: str) -> None:
     """Set the reporting frequency for webhook delivery."""
     ctx["reporting_frequency"] = frequency
+    buy = ctx.get("scheduler_buy")
+    if buy is not None:
+        raw_request = dict(buy.raw_request or {})
+        reporting_webhook = dict(raw_request.get("reporting_webhook") or {})
+        reporting_webhook["reporting_frequency"] = frequency
+        raw_request["reporting_webhook"] = reporting_webhook
+        buy.raw_request = raw_request
+        ctx["env"].get_session().commit()
 
 
 @given(parsers.parse('a media buy "{mb_id}" with webhook authentication scheme "{scheme}"'))
@@ -843,9 +876,17 @@ def when_request_no_auth(ctx: dict) -> None:
 @when(parsers.parse('the webhook scheduler fires for "{mb_id}"'))
 def when_webhook_fires(ctx: dict, mb_id: str) -> None:
     """Webhook scheduler fires for a media buy."""
+    import asyncio
+
     env = ctx["env"]
     try:
-        ctx["webhook_result"] = env.call_deliver(media_buy_id=mb_id)
+        buy = ctx["scheduler_buy"]
+        requested_media_buy_id = _resolve_media_buy_id(ctx, mb_id)
+        assert buy.media_buy_id == requested_media_buy_id
+        payloads = asyncio.run(env.run_delivery_batch())
+        assert len(payloads) == 1, f"Expected one scheduled webhook, got {len(payloads)}"
+        ctx["scheduler_wire"] = payloads[0]
+        ctx["webhook_result"] = True
     except Exception as exc:
         ctx["error"] = exc
 
@@ -1545,26 +1586,37 @@ def then_webhook_payload_has_metrics(ctx: dict, mb_id: str) -> None:
     """
     payload = _get_last_webhook_payload(ctx)
     real_id = _resolve_media_buy_id(ctx, mb_id)
-    # ID mapping: payload media_buy_id must match the requested buy
-    assert payload.get("media_buy_id") == real_id, (
-        f"Expected payload media_buy_id == {real_id!r}, got {payload.get('media_buy_id')!r}"
+    deliveries = payload.get("media_buy_deliveries") or []
+    delivery = next(
+        (item for item in deliveries if isinstance(item, dict) and item.get("media_buy_id") == real_id),
+        None,
     )
+    if deliveries:
+        assert delivery is not None, (
+            f"Expected a delivery row for media_buy_id {real_id!r}, got "
+            f"{[item.get('media_buy_id') for item in deliveries if isinstance(item, dict)]}"
+        )
+    else:
+        assert payload.get("media_buy_id") == real_id, (
+            f"Expected payload media_buy_id == {real_id!r}, got {payload.get('media_buy_id')!r}"
+        )
 
     # Metrics: the payload must carry concrete numeric delivery data.
     # Look in totals, then by_package, then top-level — whatever the payload shape.
-    totals = payload.get("totals") or payload.get("aggregated_totals") or {}
+    metric_source = delivery or payload
+    totals = metric_source.get("totals") or payload.get("aggregated_totals") or {}
     impressions = totals.get("impressions") if isinstance(totals, dict) else None
     spend = totals.get("spend") if isinstance(totals, dict) else None
 
     # Fallback: check by_package or top-level keys
     if impressions is None:
-        pkgs = payload.get("by_package") or []
+        pkgs = metric_source.get("by_package") or []
         if pkgs:
             impressions = sum(p.get("impressions", 0) for p in pkgs if isinstance(p, dict))
             spend = sum(p.get("spend", 0) for p in pkgs if isinstance(p, dict))
         else:
-            impressions = payload.get("impressions")
-            spend = payload.get("spend")
+            impressions = metric_source.get("impressions")
+            spend = metric_source.get("spend")
 
     assert impressions is not None, (
         f"Webhook payload for {real_id!r} missing delivery metric 'impressions': payload keys={list(payload.keys())}"

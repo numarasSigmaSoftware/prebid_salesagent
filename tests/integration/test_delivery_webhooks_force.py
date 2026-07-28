@@ -10,6 +10,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import WebhookDeliveryLog
 from src.core.schemas import GetMediaBuyDeliveryResponse
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+from tests.helpers.delivery_assertions import MediaBuyIdMatcher, SessionMatcher
 from tests.integration.test_delivery_webhooks_integration import (
     _create_basic_media_buy_with_webhook,
     _create_test_tenant_and_principal,
@@ -130,46 +131,6 @@ async def test_force_trigger_delivery_webhook_bypasses_duplicate_check(integrati
             assert payload.result["media_buy_deliveries"][0]["media_buy_id"] == media_buy_id
 
 
-class _MediaBuyIdMatcher:
-    """Matcher pinning the media buy the wrapper passed on, by row identity not object identity.
-
-    ``trigger_report_for_media_buy_by_id`` documents that it "manages its own
-    database session to avoid detached instance errors" — so the ``MediaBuy``
-    it hands to ``_send_report_for_media_buy`` is never the same Python object
-    this test loaded in its own session, even though it's the same row.
-    Comparing by ``media_buy_id`` is what actually catches a wrong-media-buy
-    wiring bug; a bare identity/``ANY`` comparison can't.
-    """
-
-    def __init__(self, media_buy_id: str) -> None:
-        self._media_buy_id = media_buy_id
-
-    def __eq__(self, other: object) -> bool:
-        from src.core.database.models import MediaBuy
-
-        return isinstance(other, MediaBuy) and other.media_buy_id == self._media_buy_id
-
-    def __repr__(self) -> str:
-        return f"MediaBuy(media_buy_id={self._media_buy_id!r})"
-
-
-class _SessionMatcher:
-    """Matcher confirming a real Session was passed, without pinning which one.
-
-    The wrapper opens a fresh session per call by design (see the docstring
-    above) — asserting a specific session's identity would be asserting an
-    implementation detail that is supposed to vary, not a wiring bug.
-    """
-
-    def __eq__(self, other: object) -> bool:
-        from sqlalchemy.orm import Session
-
-        return isinstance(other, Session)
-
-    def __repr__(self) -> str:
-        return "Session(...)"
-
-
 @pytest.mark.requires_db
 @pytest.mark.asyncio
 async def test_trigger_report_for_media_buy_public_method(integration_db):
@@ -198,9 +159,9 @@ async def test_trigger_report_for_media_buy_public_method(integration_db):
             # 3. Verify result and call
             assert result is True
             mock_send_internal.assert_awaited_once_with(
-                _MediaBuyIdMatcher(media_buy_id),
+                MediaBuyIdMatcher(media_buy_id),
                 media_buy.raw_request["reporting_webhook"],
-                _SessionMatcher(),
+                SessionMatcher(),
                 force=True,
             )
 

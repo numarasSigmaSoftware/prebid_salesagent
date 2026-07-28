@@ -45,6 +45,14 @@ def test_product_validator_accepts_intersection() -> None:
     validate_reporting_webhook_product_support(webhook, [_product("p1"), _product("p2")])
 
 
+def test_product_validator_accepts_implicit_base_metrics() -> None:
+    webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=["impressions", "spend"])
+    validate_reporting_webhook_product_support(
+        webhook,
+        [_product("p1", metrics=("clicks",)), _product("p2", metrics=())],
+    )
+
+
 def test_product_validator_rejects_when_only_one_selected_product_supports_frequency() -> None:
     webhook = SimpleNamespace(reporting_frequency="daily", requested_metrics=None)
 

@@ -115,8 +115,9 @@ def force_complete_media_buy_in_db(live_server: dict, media_buy_id: str):
     batch resolves it to canonical ``completed`` and sends the spec-required FINAL
     notification (``notification_type == "final"``, ``next_expected_at`` omitted).
     ``completed`` is terminal, so ``resolve_canonical_status`` returns it verbatim
-    (no date refinement needed); the write bumps ``updated_at`` so the buy falls
-    inside the completed-selection recency horizon. Fails loud if the buy is absent.
+    (no date refinement needed); the successful-final delivery-log anti-join keeps
+    the row eligible until that notification is durably recorded. Fails loud if
+    the buy is absent.
     """
     from src.core.database.models import MediaBuy
     from src.core.tools._media_buy_status import COMPLETED_PERSISTED_STATUSES
