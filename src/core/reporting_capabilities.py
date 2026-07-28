@@ -16,9 +16,7 @@ SUPPORTED_REPORTING_FREQUENCIES: frozenset[str] = frozenset({"daily"})
 # body) read this one set, so it lives here rather than beside either consumer.
 # Members are spelled through AvailableMetric so a vocabulary change fails at
 # import rather than silently degrading to an unsatisfiable literal.
-IMPLICIT_REPORTING_METRICS: frozenset[str] = frozenset(
-    {AvailableMetric.impressions.value, AvailableMetric.spend.value}
-)
+IMPLICIT_REPORTING_METRICS: frozenset[str] = frozenset({AvailableMetric.impressions.value, AvailableMetric.spend.value})
 
 
 def build_daily_reporting_capabilities(
