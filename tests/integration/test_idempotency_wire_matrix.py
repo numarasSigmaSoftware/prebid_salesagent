@@ -249,6 +249,7 @@ class TestMissingKeyWireMatrix:
         assert envelope["errors"][0].get("field") == "idempotency_key"
 
 
+@pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP, Transport.REST], ids=lambda t: t.value)
 class TestWireLevelHashInput:
     """The payload hash is computed over the WIRE payload, not the model dump.
 
@@ -258,26 +259,42 @@ class TestWireLevelHashInput:
     they are different wire payloads, so the retry must conflict. Pins that the
     transport wrappers thread the raw wire dict into the hash (a wrapper that
     silently dropped it would fall back to model hashing and replay here).
+
+    Parametrized over every transport that threads ``raw_wire_payload``
+    (mcp_auth_middleware.py, adcp_a2a_server.py, the REST compat path) — this
+    is the discriminating oracle for that threading, and REST alone does not
+    prove it holds for the other two. This is also the coverage that makes an
+    IMPL-only test of the SELECTION between ``canonical_payload_hash`` and
+    ``canonical_request_hash`` (e.g. an ordering test against a cached
+    success) legitimate: once every real-wire transport is proven to land on
+    the WIRE branch, the branch-independent behavior downstream of the hash
+    needs no further per-transport duplication.
     """
 
-    def test_equivalent_but_differently_encoded_retry_conflicts(self, integration_db):
-        key = f"wire-enc-{uuid.uuid4().hex}"
+    def test_equivalent_but_differently_encoded_retry_conflicts(self, integration_db, transport):
+        key = f"wire-enc-{transport.value}-{uuid.uuid4().hex}"
 
         with MediaBuyCreateEnv() as env:
             _tenant, _principal, product, _pricing = env.setup_media_buy_data()
             kwargs = _create_kwargs(product, idempotency_key=key)
 
-            first = env.call_via(Transport.REST, **dict(kwargs))
-            assert first.is_success, f"fresh create failed: {first.error}"
+            first = env.call_via(transport, **dict(kwargs))
+            assert first.is_success, f"fresh create failed on {transport.value}: {first.error}"
 
             # Same instant, different wire encoding: +00:00 instead of Z.
             reencoded = dict(kwargs)
             reencoded["start_time"] = reencoded["start_time"].replace("Z", "+00:00")
 
-            second = env.call_via(Transport.REST, **reencoded)
+            second = env.call_via(transport, **reencoded)
 
-        assert second.is_error, "a differently-encoded wire payload must not replay"
-        assert_envelope_shape(second.wire_error_envelope, "IDEMPOTENCY_CONFLICT", recovery="correctable")
+        assert second.is_error, f"a differently-encoded wire payload must not replay on {transport.value}"
+        # IDEMPOTENCY_CONFLICT raises mid-execution (past request validation), so
+        # every real-wire transport, including A2A, carries a real failed-Task
+        # wire envelope here — unlike the pre-artifact VALIDATION_ERROR case in
+        # TestMissingKeyWireMatrix, which has no Task yet to attach one to.
+        envelope = second.wire_error_envelope
+        assert envelope is not None, f"IDEMPOTENCY_CONFLICT must carry the wire envelope on {transport.value}"
+        assert_envelope_shape(envelope, "IDEMPOTENCY_CONFLICT", recovery="correctable")
 
 
 class TestCaptureUniformity:
