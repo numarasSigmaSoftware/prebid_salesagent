@@ -1,15 +1,21 @@
-"""persist delivery webhook idempotency keys and remove unused scan index
+"""persist delivery webhook idempotency keys
 
 Failed webhook attempts retain their sequence number. Persist the AdCP
 idempotency key with each attempt so a later scheduler invocation can retry the
 same logical notification with the same key.
 
-The delivery scheduler's repository query filters only by status; it has no
-updated_at predicate. Remove the composite index added in the preceding
-migration because it cannot support that query.
+No index accompanies this change. An earlier draft of this branch added a
+composite ``(status, updated_at)`` index on ``media_buys`` and dropped it again
+one revision later, because the delivery scheduler's repository query filters
+only by status and has no ``updated_at`` predicate. Both revisions were squashed
+away before merge rather than making every deployment pay two concurrent index
+builds for no net schema change. Note that ``media_buys`` carries no status
+index at all: ``models.py`` declares ``idx_media_buys_status`` in
+``__table_args__``, but no migration creates it, so the scheduler's status scan
+is unindexed in both CI and production.
 
 Revision ID: b7c9d2e4f6a8
-Revises: 9f3a1b7c2d4e
+Revises: d3f8a1c4b592
 Create Date: 2026-07-27 00:00:00.000000
 
 """
@@ -22,26 +28,19 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "b7c9d2e4f6a8"
-down_revision: str | Sequence[str] | None = "9f3a1b7c2d4e"
+down_revision: str | Sequence[str] | None = "d3f8a1c4b592"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Persist retry keys and remove the index unused by the scheduler query."""
+    """Persist retry keys so a later invocation reuses the same idempotency key."""
     op.add_column(
         "webhook_delivery_log",
         sa.Column("idempotency_key", sa.String(length=255), nullable=True),
     )
-    with op.get_context().autocommit_block():
-        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_media_buys_status_updated_at")
 
 
 def downgrade() -> None:
-    """Restore the scan index and remove persisted retry keys."""
-    with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_media_buys_status_updated_at "
-            "ON media_buys (status, updated_at)"
-        )
+    """Remove persisted retry keys."""
     op.drop_column("webhook_delivery_log", "idempotency_key")
