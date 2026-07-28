@@ -15,6 +15,7 @@ Validates the two contracts the helper exists to enforce:
    failure.
 """
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,7 +43,7 @@ def _new_ctx_manager_with_mocked_update() -> tuple[ContextManager, MagicMock]:
     return cm, cm.update_workflow_step
 
 
-def _scrubbed_response_data(exc: Exception) -> dict:
+def _scrubbed_response_data(exc: Exception) -> dict[str, Any]:
     """The scrubbed two-layer ``response_data`` the audit helper must emit for an INTERNAL
     error — built through the exact production policy (``safe_adcp_error`` →
     ``build_two_layer_error_envelope``, on the ORIGINAL exception, NOT pre-normalized). If the

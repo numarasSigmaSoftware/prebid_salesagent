@@ -8,6 +8,7 @@ from adcp import Error, create_a2a_webhook_payload, create_mcp_webhook_payload
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from flask import Blueprint, request
 from sqlalchemy import select
+from werkzeug.wrappers import Response
 
 from src.admin.utils import echo_context, require_auth, require_tenant_access, session_user_email
 from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE, waiting_for_creatives_message
@@ -311,7 +312,7 @@ def _media_buy_webhook_metadata(step_data: dict, tenant_id: str, media_buy_id: s
     }
 
 
-def _refused_media_buy_redirect(tenant_id: str, media_buy_id: str, message: str):
+def _refused_media_buy_redirect(tenant_id: str, media_buy_id: str, message: str) -> Response:
     """Flash ``message`` and redirect back to the media-buy detail page.
 
     The approve and reject routes both refuse an atomic claim/reject the same way — flash an
