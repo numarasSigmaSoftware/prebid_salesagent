@@ -346,11 +346,42 @@ class TestGetMediaBuyDeliveryResponseMethods:
 
         for metrics in (delivery["totals"], package, placement, daily):
             assert "impressions" in metrics
-            assert "spend" not in metrics
+            # spend survives an omitting requested_metrics: AdCP declares it
+            # implicitly included, so the capability validator accepted this
+            # request on the premise it rides along.
+            assert "spend" in metrics
             assert "clicks" not in metrics
         assert package["package_id"] == "pkg_1"
         assert placement["placement_id"] == "placement_1"
         assert daily["date"] == "2025-01-01"
+
+    def test_webhook_payload_projection_stays_schema_valid(self):
+        """A projected body must still satisfy the pinned webhook-result schema.
+
+        ``totals.spend`` and every ``by_package[].spend`` are required by
+        media-buy-delivery-webhook-result.json, so projecting a requested_metrics
+        set that omits spend previously emitted a body the buyer's SDK rejects.
+        This grades the emitted dict against the pinned model itself rather than
+        re-asserting our own projection rule.
+        """
+        from adcp.types import MediaBuyDeliveryWebhookResult
+
+        resp = _make_delivery_response(
+            media_buy_deliveries=[
+                {
+                    "media_buy_id": "buy_1",
+                    "status": "active",
+                    "totals": {"impressions": 1000, "spend": 5.0, "clicks": 12},
+                    "by_package": [
+                        {"package_id": "pkg_1", "impressions": 1000, "spend": 5.0, "clicks": 12},
+                    ],
+                }
+            ]
+        )
+        payload = resp.webhook_payload(requested_metrics=["clicks"])
+        payload["notification_type"] = "scheduled"
+
+        MediaBuyDeliveryWebhookResult.model_validate(payload)
 
     def test_round_trip_serialization(self):
         resp = _make_delivery_response()

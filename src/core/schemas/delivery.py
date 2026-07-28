@@ -30,6 +30,7 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
 from pydantic import ConfigDict, Field
 
 from src.core.config import get_pydantic_extra_mode
+from src.core.reporting_capabilities import IMPLICIT_REPORTING_METRICS
 from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
 
 # ---------------------------------------------------------------------------
@@ -357,10 +358,18 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
           projected across totals and every nested breakdown while structural
           identifiers and metadata are retained.
 
+        The projection always retains ``IMPLICIT_REPORTING_METRICS``. Those are
+        the metrics AdCP declares implicitly included, so the capability
+        validator accepts a ``requested_metrics`` set that omits them; projecting
+        them out here would emit a body the buyer never opted out of and that
+        media-buy-delivery-webhook-result.json rejects (``spend`` is required on
+        ``totals`` and on every ``by_package`` row).
+
         Args:
-            requested_metrics: If provided, only these metric names are retained
-                in metric containers. Non-metric keys (like ``media_buy_id`` and
-                ``status``) are never filtered.
+            requested_metrics: If provided, only these metric names — plus the
+                implicitly-included ones — are retained in metric containers.
+                Non-metric keys (like ``media_buy_id`` and ``status``) are never
+                filtered.
 
         Returns:
             JSON-ready dict suitable for webhook POST body.
@@ -368,7 +377,7 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
         data = self.model_dump(mode="json", exclude={"aggregated_totals"})
 
         if requested_metrics is not None:
-            requested = set(requested_metrics)
+            requested = set(requested_metrics) | IMPLICIT_REPORTING_METRICS
             all_metrics = {metric.value for metric in AvailableMetric}
 
             def project(value: Any) -> Any:

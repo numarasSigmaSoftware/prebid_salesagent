@@ -301,7 +301,12 @@ class TestWebhookRequestedMetricsFiltering:
     """
 
     def test_only_requested_metrics_in_payload(self):
-        """Webhook payload should only include metrics specified in requested_metrics.
+        """Webhook payload carries the requested metrics plus the implicit ones.
+
+        AdCP 3.1.1 core/reporting-capabilities.json (available_metrics):
+        "Impressions and spend are always implicitly included." An unrequested
+        metric like ``conversions`` is projected out; ``spend`` is not, because
+        media-buy-delivery-webhook-result.json marks it required on ``totals``.
 
         Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-10
         """
@@ -313,12 +318,15 @@ class TestWebhookRequestedMetricsFiltering:
 
             response = env.call_impl(media_buy_ids=["mb_001"])
 
-            # Act — dump payload filtering to [impressions, clicks]
-            payload = response.webhook_payload(requested_metrics=["impressions", "clicks"])
+            # Act — dump payload filtering to [impressions] only
+            payload = response.webhook_payload(requested_metrics=["impressions"])
             totals = payload["media_buy_deliveries"][0]["totals"]
 
-            # Assert — only requested metrics should be present (spend excluded)
-            assert "spend" not in totals, "spend should be excluded when not in requested_metrics"
+            # Assert — unrequested optional metrics drop out...
+            assert "clicks" not in totals, "clicks should be excluded when not in requested_metrics"
+            # ...but the implicitly-included ones survive.
+            assert "impressions" in totals
+            assert "spend" in totals, "spend is implicitly included and is required on the wire"
 
 
 # ---------------------------------------------------------------------------

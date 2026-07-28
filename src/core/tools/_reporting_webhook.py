@@ -6,9 +6,7 @@ from typing import Any
 from adcp.types import ReportingWebhook
 
 from src.core.exceptions import AdCPCapabilityNotSupportedError
-from src.core.reporting_capabilities import SUPPORTED_REPORTING_FREQUENCIES
-
-_IMPLICIT_REPORTING_METRICS = frozenset({"impressions", "spend"})
+from src.core.reporting_capabilities import IMPLICIT_REPORTING_METRICS, SUPPORTED_REPORTING_FREQUENCIES
 
 
 def _reporting_frequency(reporting_webhook: ReportingWebhook) -> str:
@@ -22,7 +20,7 @@ def _normalized_values(values: Iterable[Any]) -> set[str]:
 
 def _effective_available_metrics(values: Iterable[Any]) -> set[str]:
     """Return declared metrics plus the base metrics AdCP makes implicit."""
-    return _normalized_values(values) | _IMPLICIT_REPORTING_METRICS
+    return _normalized_values(values) | IMPLICIT_REPORTING_METRICS
 
 
 def validate_reporting_webhook_frequency(reporting_webhook: ReportingWebhook | None) -> None:

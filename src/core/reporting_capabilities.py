@@ -5,9 +5,20 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from adcp.types import ReportingCapabilities
+from adcp.types import AvailableMetric, ReportingCapabilities
 
 SUPPORTED_REPORTING_FREQUENCIES: frozenset[str] = frozenset({"daily"})
+
+# AdCP 3.1.1 core/reporting-capabilities.json, available_metrics.description:
+# "Impressions and spend are always implicitly included." Both the capability
+# validator (which accepts a requested_metrics set on the premise these ride
+# along) and the webhook serializer (which must not project them out of the
+# body) read this one set, so it lives here rather than beside either consumer.
+# Members are spelled through AvailableMetric so a vocabulary change fails at
+# import rather than silently degrading to an unsatisfiable literal.
+IMPLICIT_REPORTING_METRICS: frozenset[str] = frozenset(
+    {AvailableMetric.impressions.value, AvailableMetric.spend.value}
+)
 
 
 def build_daily_reporting_capabilities(
