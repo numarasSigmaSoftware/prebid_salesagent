@@ -151,7 +151,14 @@ def _dict_to_struct(d: dict) -> struct_pb2.Struct:
 
 
 # AdCP discovery skills that don't require authentication.
-# Per AdCP spec section 3.2, these endpoints allow optional authentication for public discovery.
+# dist/docs/3.1.1/protocol/required-tasks.mdx documents get_products,
+# get_adcp_capabilities, and list_creative_formats as plain "Required" discovery
+# tasks with no auth caveat. list_accounts is deliberately NOT in this set:
+# dist/docs/3.1.1/accounts/tasks/list_accounts.mdx:8 scopes it to "the
+# authenticated agent", and required-tasks.mdx:118 ties it to discovering
+# "seller-assigned accounts" for a resolved credential — a question that has
+# no meaning without an authenticated identity to scope against, unlike the
+# genuinely public data the four skills below return.
 # The transport-neutral set in auth_policy is the single source of truth.
 # Add new skills there ONLY if they meet AdCP discovery endpoint requirements:
 #   1. Return only public/non-sensitive data

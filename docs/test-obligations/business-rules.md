@@ -932,6 +932,7 @@ Then an empty accounts array is returned (not an error)
 **Obligation ID** BR-RULE-055-01
 **Layer** behavioral
 **Invariant:** sync_accounts and list_accounts require valid auth. list_accounts scopes results to accounts visible to the authenticated agent.
+**Grounded in:** dist/docs/3.1.1/accounts/tasks/list_accounts.mdx:8 ("Returns all accounts the authenticated agent can operate..."); dist/docs/3.1.1/protocol/required-tasks.mdx:118 (list_accounts discovers "seller-assigned accounts" for a resolved credential, unlike the plain "Required" no-auth-caveat discovery tasks in the same table). Not a single explicit "MUST require authentication" sentence — inferred consistently across both passages from a task that is meaningless without a resolved identity to scope against.
 **Scenario:**
 ```gherkin
 Given no authentication
