@@ -32,16 +32,10 @@ LEGACY_ERROR_MESSAGE = f"HTTP 404: 404 Client Error: Not Found for url: {LEGACY_
 CREDENTIAL_SUBSTRINGS = ("buyer", "s3cr3t-password", "secret.example", "leaked-legacy-value")
 
 
-def _seed_legacy_rows(engine, id_prefix: str) -> None:
+def _ensure_fk_parents(engine) -> None:
     """Ensure the shared tenant/principal/media_buy exist (ON CONFLICT DO
-    NOTHING -- safely reused across tests) and seed three webhook_delivery_log
-    rows under id_prefix: one with a credential-bearing URL and error_message
-    (the common case), one with a credential-bearing URL but NULL
-    error_message (a logged attempt with no captured error -- NULL must stay
-    NULL, not become a fake redacted string), and one whose error_message has
-    no credential at all (must still be swept -- the migration can't
-    distinguish "safe" legacy text from "unsafe," so it redacts
-    unconditionally, matching the runtime fix's blanket design)."""
+    NOTHING -- safely reused across tests and safely re-callable on an
+    already-seeded database)."""
     with engine.connect() as conn:
         conn.execute(
             text(
@@ -69,6 +63,20 @@ def _seed_legacy_rows(engine, id_prefix: str) -> None:
                 "ON CONFLICT (media_buy_id) DO NOTHING"
             )
         )
+        conn.commit()
+
+
+def _seed_legacy_rows(engine, id_prefix: str) -> None:
+    """Ensure the FK parents exist, then seed three webhook_delivery_log rows
+    under id_prefix: one with a credential-bearing URL and error_message (the
+    common case), one with a credential-bearing URL but NULL error_message (a
+    logged attempt with no captured error -- NULL must stay NULL, not become a
+    fake redacted string), and one whose error_message has no credential at
+    all (must still be swept -- the migration can't distinguish "safe" legacy
+    text from "unsafe," so it redacts unconditionally, matching the runtime
+    fix's blanket design)."""
+    _ensure_fk_parents(engine)
+    with engine.connect() as conn:
         conn.execute(
             text(
                 "INSERT INTO webhook_delivery_log "
@@ -145,6 +153,73 @@ class TestWebhookDeliveryLogRedactionMigration:
             for substring in CREDENTIAL_SUBSTRINGS:
                 assert substring not in (row_webhook_url or ""), f"{substring!r} survived in webhook_url"
                 assert substring not in (row_error_message or ""), f"{substring!r} survived in error_message"
+
+    def test_upgrade_redacts_raw_values_that_merely_contain_the_safe_keywords(self, migration_db_fresh):
+        """A raw, still-credentialed value can legitimately CONTAIN the words
+        "REDACTED" or "<redacted" as ordinary content -- e.g. a buyer's own
+        path segment, or a coincidental fragment of query-string text -- without
+        being an actual safe/redacted value in our shape. A substring check
+        (`LIKE '%REDACTED%'`, a real defect an earlier version of this
+        migration had) would misclassify these as already-safe and skip them,
+        leaving their real credentials unredacted forever. The anchored regex
+        predicate must still catch and redact every one of these.
+
+        Uses migration_db_fresh (function-scoped), not the shared module-scoped
+        migration_db: this migration's UPDATE fires exactly once, at its own
+        upgrade() transition, so on a DB another test already pushed past
+        REDACTION_REV, "upgrade to REDACTION_REV" is a no-op and these
+        collision rows -- seeded after that point -- would never actually be
+        swept by upgrade() at all (the exact class of bug the
+        migration_db_fresh fixture exists to sidestep -- see its docstring).
+        """
+        engine, db_url = migration_db_fresh
+        id_prefix = "collision-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        _ensure_fk_parents(engine)
+
+        collision_cases = {
+            f"{id_prefix}url-bare-redacted": (
+                "https://hooks.example/REDACTED/deliver?token=still-secret",
+                None,
+            ),
+            f"{id_prefix}url-angle-redacted": (
+                "https://hooks.example/<redacted>-not-really/deliver?token=still-secret-2",
+                None,
+            ),
+            f"{id_prefix}error-mid-string": (
+                "https://example.com/hook",
+                "some raw error message containing REDACTED in the middle, not at the end",
+            ),
+            f"{id_prefix}error-wrong-tail": (
+                "https://example.com/hook",
+                "delivering webhook to REDACTED but then more text follows REDACTED",
+            ),
+        }
+        with engine.connect() as conn:
+            for log_id, (url, err) in collision_cases.items():
+                conn.execute(
+                    text(
+                        "INSERT INTO webhook_delivery_log "
+                        "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                        "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                        " :url, 'delivery_report', 'failed', :err)"
+                    ),
+                    {"id": log_id, "url": url, "err": err},
+                )
+            conn.commit()
+
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        for log_id, (original_url, original_err) in collision_cases.items():
+            webhook_url, error_message = _fetch_row(engine, log_id)
+            assert webhook_url == "<redacted-by-migration>", (
+                f"{log_id}: collision value {original_url!r} survived redaction"
+            )
+            if original_err is not None:
+                assert error_message == "<redacted-by-migration>", (
+                    f"{log_id}: collision error_message {original_err!r} survived redaction"
+                )
 
     def test_downgrade_then_reupgrade_succeeds_and_keeps_placeholders(self, migration_db_fresh):
         """Independently initialized on its OWN fresh database (migration_db_fresh,

@@ -32,21 +32,30 @@ entirely) after upgrade() ran but before an operator downgrades still gets
 redacted -- a print-only downgrade would leave that window open.
 
 The sweep is NOT unconditional, though: it only touches rows whose
-webhook_url or error_message does not already look like an audit-safe value
-(the runtime's ``<redacted...>``/``REDACTED`` shapes -- see
-_redact_url_credentials() in protocol_webhook_service.py -- or this
-migration's own placeholder, which itself matches that shape). An earlier
-version of this migration swept every row unconditionally on every
-upgrade/downgrade/re-upgrade, which would blow away the KEYED, correlatable
-digest and bounded failure classification the runtime redaction produces for
-rows written normally after this migration first ran -- replacing genuinely
-useful audit data with the generic non-correlating placeholder for no reason.
-It also is not a "no-op" in the way an earlier version of this docstring
-claimed: PostgreSQL creates a new row version (and writes WAL, and takes a row
-lock) for any UPDATE that touches a row, regardless of whether the written
-value differs from the old one -- so re-writing every row on every downgrade
-was real, unnecessary churn, not a free operation. Scoping the WHERE clause to
-rows that actually need it avoids both problems.
+webhook_url or error_message does not already exactly match an audit-safe
+shape -- one of the runtime's ``<redacted...>``/``REDACTED`` forms (see
+_redact_url_credentials() in protocol_webhook_service.py) or this migration's
+own placeholder. An earlier version of this migration swept every row
+unconditionally on every upgrade/downgrade/re-upgrade, which would blow away
+the KEYED, correlatable digest and bounded failure classification the runtime
+redaction produces for rows written normally after this migration first ran
+-- replacing genuinely useful audit data with the generic non-correlating
+placeholder for no reason. It also is not a "no-op" in the way an earlier
+version of this docstring claimed: PostgreSQL creates a new row version (and
+writes WAL, and takes a row lock) for any UPDATE that touches a row,
+regardless of whether the written value differs from the old one -- so
+re-writing every row on every downgrade was real, unnecessary churn, not a
+free operation.
+
+The "already safe" check matches the EXACT anchored shape (``^...$`` for
+webhook_url; the literal " delivering webhook to " marker followed by the
+exact shape and nothing else, anchored to end-of-string, for error_message)
+-- never a bare substring test. A still-earlier version of this migration
+used `LIKE '%REDACTED%'`, which misclassified any raw, still-credentialed
+value that merely happened to CONTAIN the word REDACTED somewhere in its own
+path or query (e.g. a buyer webhook URL with a path segment that happens to
+read "REDACTED") as already-safe -- skipping it, and leaving its real
+credential unredacted forever, in both the upgraded AND downgraded state.
 
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
@@ -68,29 +77,40 @@ depends_on: str | Sequence[str] | None = None
 
 _REDACTED_PLACEHOLDER = "<redacted-by-migration>"
 
+# Building blocks anchored to the EXACT shapes _redact_url_credentials()
+# (protocol_webhook_service.py) can produce -- never a bare substring check.
+# A loose `LIKE '%REDACTED%'` (a real, fixed defect in an earlier version of
+# this migration) would misclassify a raw, still-credentialed URL that merely
+# happens to contain the word REDACTED somewhere in its OWN path/query --
+# e.g. https://hooks.example/REDACTED/deliver?token=still-secret -- as
+# already-safe, leaving its real credential unredacted forever. Anchoring to
+# the exact shape closes that: the pattern below requires the WHOLE column
+# value (webhook_url) or the tail of it (error_message, after the
+# " delivering webhook to " marker) to match one of the three literal forms
+# _redact_url_credentials() can emit -- not just contain a keyword anywhere.
+#   scheme: RFC 3986 ALPHA *(ALPHA / DIGIT / "+" / "-" / ".")
+#   key_id: constrained by AppConfig.webhook_audit_hmac_key_id's validator to [A-Za-z0-9._-]{1,32}
+#   digest: hashlib .hexdigest()[:32] -> exactly 32 lowercase hex characters
+_SCHEME = r"[a-zA-Z][a-zA-Z0-9+.-]*"
+_KEY_ID = r"[A-Za-z0-9._-]{1,32}"
+_DIGEST = r"[0-9a-f]{32}"
+_REDACT_URL_SHAPE = rf"(?:REDACTED|{_SCHEME}://<redacted>|{_SCHEME}://<redacted:{_KEY_ID}:{_DIGEST}>)"
 
-def _already_safe(column: str) -> str:
-    """SQL boolean expression: does *column* already look like an audit-safe
-    value, rather than a raw legacy one that still needs redacting?
-
-    Every shape _redact_url_credentials() (protocol_webhook_service.py) can
-    produce -- f"{scheme}://<redacted:{key_id}:{digest}>",
-    f"{scheme}://<redacted>", or the bare "REDACTED" fallback -- contains one
-    of these two substrings. _safe_delivery_error_message() always embeds
-    that same output, so this one pair of patterns recognizes an already-safe
-    value in EITHER column. This migration's own placeholder also matches (it
-    contains "<redacted"), so an already-migration-redacted row is correctly
-    recognized as needing no further work too. A real webhook URL cannot
-    contain a literal, un-percent-encoded "<" -- it isn't a valid URI
-    character -- so this can't collide with genuine buyer-supplied content.
-    """
-    return f"({column} LIKE '%<redacted%' OR {column} LIKE '%REDACTED%')"
+# webhook_url must be the shape in full; error_message must END with the
+# " delivering webhook to " marker _safe_delivery_error_message() always
+# emits, immediately followed by the shape and nothing else.
+_URL_SAFE_PATTERN = f"^{_REDACT_URL_SHAPE}$"
+_ERROR_SAFE_PATTERN = rf" delivering webhook to {_REDACT_URL_SHAPE}$"
 
 
 def _redact_all_rows() -> None:
     """Overwrite webhook_url and non-null error_message with a constant,
-    non-correlating placeholder -- but ONLY for rows that don't already look
-    like an audit-safe value (see _already_safe() above).
+    non-correlating placeholder -- but ONLY for rows that don't already
+    exactly match an audit-safe shape (see _URL_SAFE_PATTERN /
+    _ERROR_SAFE_PATTERN above; both compared as a full regex match, never a
+    substring test, via a BOUND parameter -- not interpolated into the SQL
+    text -- so a literal ``:`` inside the pattern, e.g. from the non-capturing
+    group ``(?:...)``, can never be misread as a bind-parameter placeholder).
 
     Shared by upgrade() and downgrade(): both revision states want the SAME
     invariant held (no raw credentials in these two columns), so both sweep
@@ -104,24 +124,32 @@ def _redact_all_rows() -> None:
     that don't need it is real, avoidable churn -- not the "no-op" an earlier
     version of this migration claimed.
     """
-    url_is_safe = _already_safe("webhook_url")
-    error_is_safe = _already_safe("error_message")
     connection = op.get_bind()
     connection.execute(
         text(
-            f"""
+            """
             UPDATE webhook_delivery_log
-            SET webhook_url = CASE WHEN {url_is_safe} THEN webhook_url ELSE :placeholder END,
+            SET webhook_url = CASE
+                    WHEN webhook_url = :placeholder OR webhook_url ~ :url_pattern THEN webhook_url
+                    ELSE :placeholder
+                END,
                 error_message = CASE
                     WHEN error_message IS NULL THEN NULL
-                    WHEN {error_is_safe} THEN error_message
+                    WHEN error_message = :placeholder OR error_message ~ :error_pattern THEN error_message
                     ELSE :placeholder
                 END
-            WHERE NOT {url_is_safe}
-               OR (error_message IS NOT NULL AND NOT {error_is_safe})
+            WHERE NOT (webhook_url = :placeholder OR webhook_url ~ :url_pattern)
+               OR (
+                    error_message IS NOT NULL
+                    AND NOT (error_message = :placeholder OR error_message ~ :error_pattern)
+                  )
             """
         ),
-        {"placeholder": _REDACTED_PLACEHOLDER},
+        {
+            "placeholder": _REDACTED_PLACEHOLDER,
+            "url_pattern": _URL_SAFE_PATTERN,
+            "error_pattern": _ERROR_SAFE_PATTERN,
+        },
     )
 
 
