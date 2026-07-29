@@ -124,13 +124,27 @@ class TestInternalModelsRejectExtra:
 
 
 class TestConfigHelperFunctions:
-    """Test the config helper functions directly."""
+    """Test the config helper functions directly.
+
+    is_production() recognizes THREE independent signals (ENVIRONMENT=production,
+    PRODUCTION set, FLY_APP_NAME set) -- matching what scripts/run_server.py (the
+    real server bootstrap) and several src/core modules already treat as
+    production. Every test here that asserts `not is_production()` pops all THREE
+    env vars, not just ENVIRONMENT -- otherwise it would only be pinning the first
+    signal and silently stop covering the others the moment any one of them
+    changed.
+    """
+
+    def _clear_production_signals(self):
+        os.environ.pop("ENVIRONMENT", None)
+        os.environ.pop("PRODUCTION", None)
+        os.environ.pop("FLY_APP_NAME", None)
 
     def test_development_mode(self):
         from src.core.config import get_pydantic_extra_mode, is_production
 
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ENVIRONMENT", None)
+            self._clear_production_signals()
             assert not is_production()
             assert get_pydantic_extra_mode() == "forbid"
 
@@ -144,7 +158,9 @@ class TestConfigHelperFunctions:
     def test_staging_defaults_to_strict(self):
         from src.core.config import get_pydantic_extra_mode, is_production
 
-        with patch.dict(os.environ, {"ENVIRONMENT": "staging"}):
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_production_signals()
+            os.environ["ENVIRONMENT"] = "staging"
             assert not is_production()
             assert get_pydantic_extra_mode() == "forbid"
 
@@ -154,6 +170,29 @@ class TestConfigHelperFunctions:
         with patch.dict(os.environ, {"ENVIRONMENT": "PRODUCTION"}):
             assert is_production()
         with patch.dict(os.environ, {"ENVIRONMENT": "Production"}):
+            assert is_production()
+
+    def test_production_env_var_is_recognized_even_with_environment_at_its_default(self):
+        """The gap this pins: a deployment that sets PRODUCTION (an established
+        signal -- see scripts/run_server.py, src/core/auth.py, src/core/logging_config.py,
+        src/core/audit_logger.py) but never explicitly sets ENVIRONMENT=production
+        must still be recognized as production, not silently read as development."""
+        from src.core.config import is_production
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_production_signals()
+            os.environ["PRODUCTION"] = "true"
+            assert is_production()
+
+    def test_fly_app_name_is_recognized_even_with_environment_at_its_default(self):
+        """FLY_APP_NAME is set automatically by Fly.io on every deploy -- a Fly
+        deployment that never explicitly sets ENVIRONMENT=production must still be
+        recognized as production."""
+        from src.core.config import is_production
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_production_signals()
+            os.environ["FLY_APP_NAME"] = "salesagent-prod"
             assert is_production()
 
 

@@ -5,10 +5,13 @@ management using environment variables.
 """
 
 import os
+import re
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 
 
 class GAMOAuthConfig(BaseSettings):
@@ -129,6 +132,23 @@ class AppConfig(BaseSettings):
     google_oauth: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
     superadmin: SuperAdminConfig = Field(default_factory=SuperAdminConfig)
 
+    @field_validator("webhook_audit_hmac_key_id")
+    @classmethod
+    def validate_webhook_audit_hmac_key_id(cls, v: str) -> str:
+        """Restrict to a bounded, safe format.
+
+        This value is embedded verbatim into log lines and the durable
+        WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so an
+        unrestricted value -- colons, angle brackets, newlines, control characters,
+        unbounded length -- could corrupt the audit identifier's structure or open a
+        log-injection vector. It's operator-set deployment config, not buyer input,
+        but a copy-paste error (e.g. pasting a whole secret-manager blob into the
+        wrong env var) shouldn't be able to do either of those things.
+        """
+        if not _WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN.match(v):
+            raise ValueError(f"WEBHOOK_AUDIT_HMAC_KEY_ID must match ^[A-Za-z0-9._-]{{1,32}}$ (got {v!r})")
+        return v
+
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=False)
 
 
@@ -166,14 +186,15 @@ def validate_configuration() -> None:
         # Note: SUPER_ADMIN_EMAILS is optional - per-tenant OIDC with Setup Mode is the default auth flow
 
         if is_production():
-            if not config.webhook_audit_hmac_key:
+            stripped_hmac_key = config.webhook_audit_hmac_key.strip()
+            if not stripped_hmac_key:
                 raise ValueError(
                     "WEBHOOK_AUDIT_HMAC_KEY must be set in production -- it keys the "
                     "HMAC that redacts buyer-supplied webhook URLs before they reach "
-                    "logs and WebhookDeliveryLog; an unset key leaves those audit "
-                    "identifiers matchable offline against guessed URLs."
+                    "logs and WebhookDeliveryLog; an unset (or whitespace-only) key "
+                    "leaves those audit identifiers matchable offline against guessed URLs."
                 )
-            if len(config.webhook_audit_hmac_key) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
+            if len(stripped_hmac_key) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
                 raise ValueError(
                     f"WEBHOOK_AUDIT_HMAC_KEY must be at least {MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH} "
                     "characters in production"
@@ -201,10 +222,25 @@ def get_gam_oauth_config() -> GAMOAuthConfig:
 def is_production() -> bool:
     """Check if running in production environment.
 
+    True if any recognized production signal is present -- matching the union of
+    signals the real server bootstrap (scripts/run_server.py) and several src/core
+    modules (auth.py, logging_config.py, audit_logger.py) already treat as
+    production. A deployment that sets PRODUCTION or relies on Fly.io's
+    auto-populated FLY_APP_NAME, but never explicitly sets ENVIRONMENT=production,
+    used to read as non-production here even though scripts/run_server.py already
+    bound it to 0.0.0.0 as production traffic -- silently skipping every
+    production-only check gated on this function (e.g. WEBHOOK_AUDIT_HMAC_KEY
+    strength in validate_configuration()).
+
     Returns:
-        bool: True if ENVIRONMENT=production, False otherwise
+        bool: True if ENVIRONMENT=production, or PRODUCTION is set, or FLY_APP_NAME
+            is set (Fly.io sets this automatically on every deploy).
     """
-    return os.getenv("ENVIRONMENT", "development").lower() == "production"
+    return (
+        os.getenv("ENVIRONMENT", "development").lower() == "production"
+        or bool(os.environ.get("PRODUCTION"))
+        or bool(os.environ.get("FLY_APP_NAME"))
+    )
 
 
 def get_pydantic_extra_mode() -> Literal["ignore", "forbid"]:

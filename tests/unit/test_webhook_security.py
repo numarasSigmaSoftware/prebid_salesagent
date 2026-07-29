@@ -18,6 +18,28 @@ from src.core.webhook_validator import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _webhook_audit_hmac_key_configured():
+    """Give every test in this module a real (non-blank) webhook_audit_hmac_key.
+
+    _redact_url_credentials treats a blank key as "no real secret configured" and
+    emits a constant, non-correlating placeholder instead of a digest -- see its
+    docstring. Most tests in this file exercise the KEYED (digest) path and would
+    otherwise silently hit the placeholder path instead, since no
+    WEBHOOK_AUDIT_HMAC_KEY is set in the test environment. Tests that specifically
+    want the placeholder path (a blank/whitespace-only key) re-patch get_config
+    within their own body -- an inner ``with patch(...)`` overrides this outer one
+    for its scope, then reverts to this default afterward.
+    """
+    from src.core.config import AppConfig
+
+    with patch(
+        "src.services.protocol_webhook_service.get_config",
+        return_value=AppConfig(webhook_audit_hmac_key="test-suite-default-hmac-key-not-a-real-secret"),
+    ):
+        yield
+
+
 class TestValidateWebhookTaskType:
     """Coercion of untrusted action labels to SDK-accepted TaskType values."""
 
@@ -504,6 +526,41 @@ class TestRedactUrlCredentials:
         self._redact(original)
         assert original == "https://buyer:s3cr3t@example.com/hook"
 
+    def test_blank_key_emits_a_constant_placeholder_not_a_digest(self):
+        """A blank webhook_audit_hmac_key is legal OUTSIDE production (shared
+        staging/dev environments can still hold real buyer URLs), but computing an
+        HMAC keyed with an empty string would produce a value that LOOKS like a real
+        per-URL digest while being exactly as guessable as an unkeyed hash -- zero
+        secret material. The honest behavior is a constant, non-correlating
+        placeholder, not a fake-looking digest."""
+        from src.core.config import AppConfig
+
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key=""),
+        ):
+            assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
+
+    def test_whitespace_only_key_is_treated_as_blank(self):
+        from src.core.config import AppConfig
+
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key="   \t  "),
+        ):
+            assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
+
+    def test_blank_key_placeholder_does_not_vary_by_url(self):
+        """Confidence check on the placeholder's own honesty: it must NOT look like
+        it's correlating different URLs when there's no real key backing it."""
+        from src.core.config import AppConfig
+
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key=""),
+        ):
+            assert self._redact("https://example.com/hook-a") == self._redact("https://example.com/hook-b")
+
 
 class TestCredentialsNeverReachTheLog:
     """The two ``protocol_webhook_service`` log sites that emit a webhook URL must never
@@ -873,5 +930,70 @@ class TestWebhookAuditHmacKeyProductionValidation:
         with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be at least"):
             self._validate(webhook_audit_hmac_key="too-short", is_production=True)
 
+    def test_whitespace_only_key_is_rejected_in_production(self):
+        """A whitespace-only key would satisfy `if not key` (it's a non-empty
+        string) but is exactly as useless as an unset one -- the same "no real
+        secret" gap _redact_url_credentials treats as blank."""
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+            self._validate(webhook_audit_hmac_key="   \t\n  ", is_production=True)
+
     def test_sufficiently_long_key_is_accepted_in_production(self):
         self._validate(webhook_audit_hmac_key="x" * 32, is_production=True)  # must not raise
+
+    def test_key_surrounded_by_whitespace_but_long_enough_when_stripped_is_accepted(self):
+        """Padding whitespace around an otherwise-sufficient key must not be
+        double-counted against the length floor."""
+        self._validate(webhook_audit_hmac_key="  " + "x" * 32 + "  ", is_production=True)  # must not raise
+
+
+class TestWebhookAuditHmacKeyIdFormatValidation:
+    """webhook_audit_hmac_key_id is embedded verbatim into log lines and the durable
+    WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so it must
+    be restricted to a bounded, safe format -- an operator typo or copy-paste error
+    (colons, angle brackets, newlines, control characters, unbounded length)
+    shouldn't be able to corrupt the audit identifier's structure or open a
+    log-injection vector."""
+
+    def _build(self, key_id: str):
+        from src.core.config import AppConfig
+
+        return AppConfig(webhook_audit_hmac_key_id=key_id)
+
+    @pytest.mark.parametrize("valid_key_id", ["v1", "v2", "2026-07-key", "key.id_v3", "a" * 32])
+    def test_valid_key_ids_are_accepted(self, valid_key_id):
+        assert self._build(valid_key_id).webhook_audit_hmac_key_id == valid_key_id
+
+    def test_colon_is_rejected(self):
+        """A colon would break the key_id:digest structure the redacted output uses."""
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v1:evil")
+
+    def test_angle_bracket_is_rejected(self):
+        """A `>` could prematurely close the <redacted:...> bracket notation."""
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v1>injected")
+
+    def test_newline_is_rejected(self):
+        """A classic log-injection vector: a newline could forge a fake subsequent
+        log line in plain-text logs."""
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v1\nFAKE LOG LINE: admin logged in")
+
+    def test_control_character_is_rejected(self):
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v1\x00\x1b[31m")
+
+    def test_excessive_length_is_rejected(self):
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v" * 33)
+
+    def test_empty_string_is_rejected(self):
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("")
+
+    def test_default_value_is_itself_valid(self):
+        """The shipped default must satisfy the same constraint enforced on
+        operator-supplied values -- otherwise the constraint is only decorative."""
+        from src.core.config import AppConfig
+
+        assert AppConfig().webhook_audit_hmac_key_id == "v1"

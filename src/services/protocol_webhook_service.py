@@ -217,6 +217,16 @@ def _redact_url_credentials(url: str) -> str:
     written under the old key — the row's own audit identifier still says which key
     generation produced it.
 
+    ``validate_configuration()`` requires a real key in production, but a blank
+    (or whitespace-only) key is legal OUTSIDE production — the same shared
+    staging/dev environments that skip it can still hold real buyer URLs and
+    write real ``WebhookDeliveryLog`` rows, so this function must not silently
+    degrade to an HMAC keyed with an empty string: that would produce a value
+    that *looks* like a real per-URL digest while being exactly as guessable as
+    an unkeyed hash (zero secret material). Instead it emits a constant,
+    non-correlating placeholder (``scheme://<redacted>``, no digest, no key ID)
+    — honestly offering no correlation rather than a fake one.
+
     Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
     (pure audit data — never read back to dial a real request). Never use this on the URL
     passed to ``requests`` for the actual outbound call — that one needs the untouched original.
@@ -226,10 +236,12 @@ def _redact_url_credentials(url: str) -> str:
         if not parsed.hostname:
             return "REDACTED"
         config = get_config()
+        raw_key = config.webhook_audit_hmac_key
+        if not raw_key.strip():
+            return f"{parsed.scheme}://<redacted>"
         key_id = config.webhook_audit_hmac_key_id
-        key = config.webhook_audit_hmac_key.encode()
         message = _AUDIT_REDACTION_CONTEXT + b":" + key_id.encode() + b":" + url.encode()
-        digest = hmac.new(key, message, hashlib.sha256).hexdigest()[:32]
+        digest = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()[:32]
         return f"{parsed.scheme}://<redacted:{key_id}:{digest}>"
     except Exception:
         return "REDACTED"
