@@ -57,8 +57,8 @@ COPY pyproject.toml uv.lock ./
 ENV UV_HTTP_TIMEOUT=300
 # Install runtime deps only — dev group (pytest, factory-boy, ruff, etc.) stays out
 # of the production image. See [dependency-groups].dev in pyproject.toml.
-RUN --mount=type=cache,target=/cache/uv \
-    --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     uv sync --frozen --no-dev
 
 # Runtime stage
