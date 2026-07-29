@@ -4,6 +4,11 @@ APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE = (
     "Workflow approved, but media buy creation failed. Review server logs before retrying."
 )
 
+APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE = (
+    "Media buy was created externally, but activation could not be finalized. "
+    "The workflow remains pending for safe reconciliation."
+)
+
 
 def waiting_for_creatives_message(blocking_count: int) -> str:
     """The one operator-facing message for an approved media buy still blocked on creatives.

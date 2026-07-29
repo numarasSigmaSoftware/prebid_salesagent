@@ -11,7 +11,11 @@ from sqlalchemy import select
 from werkzeug.wrappers import Response
 
 from src.admin.utils import echo_context, require_auth, require_tenant_access, session_user_email
-from src.admin.utils.approval import APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE, waiting_for_creatives_message
+from src.admin.utils.approval import (
+    APPROVED_MEDIA_BUY_EXECUTION_FAILURE_MESSAGE,
+    APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE,
+    waiting_for_creatives_message,
+)
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
@@ -458,11 +462,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",
                             log_safe(media_buy_id),
                         )
-                        flash(
-                            "Media buy was created externally, but activation could not be finalized. "
-                            "The workflow remains pending for safe reconciliation.",
-                            "warning",
-                        )
+                        flash(APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE, "warning")
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )

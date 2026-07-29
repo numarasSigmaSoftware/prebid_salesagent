@@ -954,3 +954,38 @@ class TestWaitingForCreativesMessage:
         ]
 
         assert offenders == [], f"WAITING_FOR_CREATIVES wording re-inlined outside approval.py: {offenders}"
+
+
+class TestPendingReconciliationMessage:
+    """One operator-facing message for the PENDING_RECONCILIATION outcome.
+
+    Both admin approve routes (operations.py, workflows.py) branch on the SAME
+    ``ApprovalExecutionStatus.PENDING_RECONCILIATION`` from
+    ``prepare_media_buy_approval_execution``, but each hand-inlined the identical sentence —
+    the exact shape that let WAITING_FOR_CREATIVES's copies drift (see
+    TestWaitingForCreativesMessage above). This mirrors that guard for the sibling outcome.
+    """
+
+    def test_no_route_reinlines_the_message(self):
+        """The wording lives in exactly one place.
+
+        Derives the fragment FROM the constant rather than hardcoding it, so rewording the
+        message re-points the guard automatically instead of silently disarming it.
+        """
+        from pathlib import Path
+
+        from src.admin.utils.approval import APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE
+
+        tail = APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE.split("The workflow", 1)[-1].strip()
+        assert tail and "reconciliation" in tail, "message shape changed — re-derive this guard's fragment"
+
+        src_root = Path(__file__).resolve().parents[2] / "src"
+        offenders = [
+            f"{path.relative_to(src_root)}:{lineno}"
+            for path in src_root.rglob("*.py")
+            if path.name != "approval.py"
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+            if tail in line
+        ]
+
+        assert offenders == [], f"PENDING_RECONCILIATION wording re-inlined outside approval.py: {offenders}"
