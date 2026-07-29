@@ -464,7 +464,9 @@ class AdCPRequestHandler(RequestHandler):
         }
 
     @staticmethod
-    async def _dispatch_under_sanitize_seam(operation: str, identity: Any, handler_coro: Awaitable[Any]) -> Any:
+    async def _dispatch_under_sanitize_seam(
+        operation: str, identity: ResolvedIdentity | ToolContext | None, handler_coro: Awaitable[Any]
+    ) -> Any:
         """Await ``handler_coro`` with the boundary's provenance policy applied to failures.
 
         The seam every buyer-reachable handler call goes through — explicit-skill dispatch

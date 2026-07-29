@@ -1523,7 +1523,7 @@ def _scrubbed_error(
     wire_code: str,
     recovery: RecoveryHint,
     status_code: int,
-    context: Any,
+    context: ContextObject | dict[str, Any] | None,
     field: str | None = None,
 ) -> AdCPError:
     """A wire-safe ``AdCPError`` carrying the given code/recovery but a SANITIZED, secret-free

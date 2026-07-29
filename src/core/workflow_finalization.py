@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from adcp.types import ContextObject
 from sqlalchemy.exc import SQLAlchemyError
@@ -20,6 +20,9 @@ from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_S
 from src.core.exceptions import build_two_layer_error_envelope, safe_adcp_error
 from src.core.schemas import CreateMediaBuySuccess, Package
 from src.core.tools._media_buy_status import resolve_canonical_status
+
+if TYPE_CHECKING:
+    from src.core.database.models import WorkflowStep
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +168,7 @@ def _unknown_execution_claim_result(
 
 def _existing_terminal_finalization(
     *,
-    existing: Any,
+    existing: WorkflowStep | None,
     expected_status: str,
     succeeded: bool,
     media_buy_id: str | None,

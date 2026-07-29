@@ -27,12 +27,20 @@ from ._assets import _build_creative_data, _extract_message_from_assets, _extrac
 
 if TYPE_CHECKING:
     from src.core.database.repositories.creative import CreativeRepository
+    from src.core.schemas import Format, LibraryFormatId
 
 logger = logging.getLogger(__name__)
 
 
-def _find_matching_format(all_formats: list[Any], creative_format: Any) -> Any | None:
-    """Find a format by its canonical AdCP federation identity."""
+def _find_matching_format(all_formats: list[Format], creative_format: LibraryFormatId) -> Format | None:
+    """Find a format by its canonical AdCP federation identity.
+
+    ``all_formats`` is the registry's pre-fetched ``list[Format]`` (registry.list_all_formats
+    return type). ``creative_format`` accepts ``LibraryFormatId`` rather than the narrower
+    local ``FormatId`` subclass because callers pass either — e.g. ``CreativeAsset.format_id``
+    is typed ``FormatReferenceStructuredObject`` (an ``adcp.types`` alias for the same
+    ``LibraryFormatId`` base ``Format.format_id`` also extends).
+    """
     target_identity = format_id_identity(creative_format)
     return next(
         (fmt for fmt in all_formats if format_id_identity(fmt.format_id) == target_identity),
@@ -78,7 +86,7 @@ def _update_existing_creative(
     tenant: dict[str, Any],
     webhook_url: str | None,
     context: dict[str, Any] | BaseModel | None,
-    all_formats: list[Any],
+    all_formats: list[Format],
     registry: Any,
     principal_id: str,
 ) -> tuple[SyncCreativeResult, bool]:
@@ -478,7 +486,7 @@ def _create_new_creative(
     tenant: dict[str, Any],
     webhook_url: str | None,
     context: dict[str, Any] | BaseModel | None,
-    all_formats: list[Any],
+    all_formats: list[Format],
     registry: Any,
     principal_id: str,
 ) -> tuple[SyncCreativeResult, bool]:
