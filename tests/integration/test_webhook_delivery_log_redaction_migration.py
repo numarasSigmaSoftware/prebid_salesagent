@@ -9,14 +9,21 @@ scrubs credential-bearing legacy data, preserves NULL error_message as NULL
 that the CI-mandated upgrade -> downgrade -> upgrade roundtrip succeeds
 without un-redacting anything.
 
+upgrade() and downgrade() are NOT the same operation (see the migration's
+module docstring): upgrade() redacts unconditionally, since every row at
+upgrade time is guaranteed legacy/unsafe, while downgrade() uses a
+shape-based safety check, since it can genuinely encounter rows the fixed
+runtime already wrote safely. Tests below are grouped accordingly --
+upgrade-focused tests first, then downgrade-focused tests.
+
 The atomic test uses the module-scoped migration_db fixture (fine here: it
 seeds, upgrades, and asserts in one method, so there's no cross-test ordering
-dependency). The downgrade/roundtrip test uses its OWN function-scoped
-migration_db_fresh fixture instead: a migration's data UPDATE fires exactly
-once, at its own transition, so on a shared already-migrated database
-"upgrade to the revision before mine" is a no-op that would let freshly-seeded
-rows silently skip the redaction entirely -- a fresh database sidesteps that
-whole class of bug rather than working around it with a `pass` no-op.
+dependency). Every other test uses its OWN function-scoped migration_db_fresh
+fixture instead: a migration's data UPDATE fires exactly once, at its own
+transition, so on a shared already-migrated database "upgrade to the revision
+before mine" is a no-op that would let freshly-seeded rows silently skip the
+redaction entirely -- a fresh database sidesteps that whole class of bug
+rather than working around it with a `pass` no-op.
 """
 
 import pytest
@@ -30,6 +37,12 @@ REDACTION_REV = "168914d7ca05"
 LEGACY_CREDENTIALED_URL = "https://buyer:s3cr3t-password@secret.example/hook?token=leaked-legacy-value"
 LEGACY_ERROR_MESSAGE = f"HTTP 404: 404 Client Error: Not Found for url: {LEGACY_CREDENTIALED_URL}"
 CREDENTIAL_SUBSTRINGS = ("buyer", "s3cr3t-password", "secret.example", "leaked-legacy-value")
+
+# A safe-shaped webhook_url, matching what _redact_url_credentials()
+# (protocol_webhook_service.py) actually produces for a keyed digest --
+# shared by every test below that needs a webhook_url its scenario does NOT
+# intend to exercise (only error_message is under test).
+_SAFE_KEYED_URL = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
 
 
 def _ensure_fk_parents(engine) -> None:
@@ -100,6 +113,25 @@ def _seed_legacy_rows(engine, id_prefix: str) -> None:
         conn.commit()
 
 
+def _insert_row(engine, log_id: str, url: str, error_message: str | None) -> None:
+    """Insert a single webhook_delivery_log row with an explicit
+    webhook_url/error_message pair. The shared primitive every collision/
+    preservation case below needs -- only the values under test differ
+    between call sites, so each test constructs its own scenario values and
+    passes them here rather than open-coding the same INSERT."""
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO webhook_delivery_log "
+                "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                " :url, 'delivery_report', 'failed', :err)"
+            ),
+            {"id": log_id, "url": url, "err": error_message},
+        )
+        conn.commit()
+
+
 def _fetch_row(engine, log_id):
     with engine.connect() as conn:
         result = conn.execute(
@@ -161,8 +193,34 @@ class TestWebhookDeliveryLogRedactionMigration:
         being an actual safe/redacted value in our shape. A substring check
         (`LIKE '%REDACTED%'`, a real defect an earlier version of this
         migration had) would misclassify these as already-safe and skip them,
-        leaving their real credentials unredacted forever. The anchored regex
-        predicate must still catch and redact every one of these.
+        leaving their real credentials unredacted forever.
+
+        Three further collision cases below (credential_prefix_*,
+        identifier_shaped_*, numeric_status_*) cover DIFFERENT failure modes
+        from the substring collisions above -- not a substring anywhere in
+        the value, but the value's OWN shape colliding with what an
+        anchored-both-ends predicate accepts as safe:
+
+        - credential_prefix: a credential-bearing PREFIX before the safe
+          marker (only an end-anchor, no leading "^", would miss this).
+        - identifier_shaped: a plain-identifier credential (e.g.
+          "tokenSecret123", an ordinary shape for a real API token) is
+          grammatically indistinguishable from a bare exception class name
+          like "ConnectionError" -- anchoring both ends does NOT resolve
+          this, since the credential matches _EXCEPTION_CLASS_NAME exactly.
+        - numeric_status: an unbounded digit run embedded in "HTTP <it>
+          error" is grammatically indistinguishable from a real 3-digit HTTP
+          status once _HTTP_STATUS is left as `[0-9]+` instead of exactly 3
+          digits.
+
+        No fully-anchored REGEX can resolve identifier_shaped -- a real
+        exception class name and a credential that happens to look like one
+        are the same grammar (see the _EXCEPTION_CLASS_NAME comment in the
+        migration). This is exactly why upgrade() no longer consults shape
+        at all (_redact_unconditionally()): these three cases pin THAT
+        structural fix. upgrade() must still catch and redact every one of
+        them -- not because a smarter regex classifies them correctly, but
+        because upgrade() no longer asks the question in the first place.
 
         Uses migration_db_fresh (function-scoped), not the shared module-scoped
         migration_db: this migration's UPDATE fires exactly once, at its own
@@ -196,38 +254,33 @@ class TestWebhookDeliveryLogRedactionMigration:
                 "delivering webhook to REDACTED but then more text follows REDACTED",
             ),
         }
-        # webhook_url IS a genuinely safe exact value here ('REDACTED') -- the
-        # attack is entirely in error_message's UNANCHORED-prefix credential.
-        # A fix that only anchors the trailing "$" (not a leading "^" too)
-        # lets "<anything> delivering webhook to REDACTED" through, since
-        # PostgreSQL's `~` searches anywhere in the string unless the pattern
-        # itself starts with `^`. Kept separate from collision_cases above:
-        # its correct post-upgrade webhook_url is 'REDACTED' (unchanged, it
-        # was already safe), not the placeholder every other case expects.
-        credential_prefix_id = f"{id_prefix}error-credential-prefix"
-        credential_prefix_error = "token=still-secret delivering webhook to REDACTED"
+        for log_id, (url, err) in collision_cases.items():
+            _insert_row(engine, log_id, url, err)
 
-        with engine.connect() as conn:
-            for log_id, (url, err) in collision_cases.items():
-                conn.execute(
-                    text(
-                        "INSERT INTO webhook_delivery_log "
-                        "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
-                        "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
-                        " :url, 'delivery_report', 'failed', :err)"
-                    ),
-                    {"id": log_id, "url": url, "err": err},
-                )
-            conn.execute(
-                text(
-                    "INSERT INTO webhook_delivery_log "
-                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
-                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
-                    " 'REDACTED', 'delivery_report', 'failed', :err)"
-                ),
-                {"id": credential_prefix_id, "err": credential_prefix_error},
-            )
-            conn.commit()
+        # webhook_url is a genuinely safe-SHAPED exact value in each case
+        # below ('REDACTED') -- the collision is entirely in error_message.
+        # Kept as a separate dict from collision_cases above purely for
+        # documentation (each key names a distinct collision class); the
+        # post-upgrade expectation is the SAME as collision_cases, though:
+        # upgrade() no longer checks shape at all, so even a webhook_url
+        # that already reads 'REDACTED' gets overwritten too. There is no
+        # real legacy scenario where a pre-fix webhook_url would already
+        # equal that exact string -- the old code never wrote it -- so
+        # nothing meaningful is lost by upgrade() not special-casing it.
+        error_shape_collision_cases = {
+            # A fix that only anchors the trailing "$" (not a leading "^"
+            # too) lets "<anything> delivering webhook to REDACTED" through,
+            # since PostgreSQL's `~` searches anywhere in the string unless
+            # the pattern itself starts with `^`.
+            f"{id_prefix}error-credential-prefix": "token=still-secret delivering webhook to REDACTED",
+            # A plain identifier -- matches _EXCEPTION_CLASS_NAME exactly,
+            # same grammar as a bare exception class name.
+            f"{id_prefix}error-identifier-shaped": "tokenSecret123 delivering webhook to REDACTED",
+            # An unbounded digit run is not a real 3-digit HTTP status.
+            f"{id_prefix}error-numeric-status": "HTTP 40412345678 error delivering webhook to REDACTED",
+        }
+        for log_id, err in error_shape_collision_cases.items():
+            _insert_row(engine, log_id, "REDACTED", err)
 
         run_alembic_upgrade(db_url, REDACTION_REV)
 
@@ -241,57 +294,65 @@ class TestWebhookDeliveryLogRedactionMigration:
                     f"{log_id}: collision error_message {original_err!r} survived redaction"
                 )
 
-        webhook_url, error_message = _fetch_row(engine, credential_prefix_id)
-        assert webhook_url == "REDACTED", "a genuinely-safe webhook_url must not be touched"
-        assert error_message == "<redacted-by-migration>", (
-            f"credential-bearing error_message prefix survived redaction: {credential_prefix_error!r}"
-        )
+        for log_id, original_err in error_shape_collision_cases.items():
+            webhook_url, error_message = _fetch_row(engine, log_id)
+            assert webhook_url == "<redacted-by-migration>", (
+                f"{log_id}: upgrade() must redact webhook_url unconditionally, even a safe-shaped one"
+            )
+            assert error_message == "<redacted-by-migration>", (
+                f"{log_id}: credential-bearing error_message survived redaction: {original_err!r}"
+            )
 
-    def test_upgrade_preserves_all_three_legitimate_reason_formats(self, migration_db_fresh):
-        """_safe_delivery_error_message() (protocol_webhook_service.py) is only
-        ever called with one of three bounded *reason* prefixes -- an
-        "HTTP <status> error" (including the literal "HTTP None error", when
-        e.response is None), a bare exception class name, or
-        "Unexpected error (<class>)". Each must be recognized as already-safe
-        and survive upgrade byte-for-byte: a fix that over-tightens the
-        anchored pattern (e.g. forgetting the "None" status alternative, or
-        misspelling the "Unexpected error (...)" shape) would start
-        needlessly destroying real, legitimate production audit data --
-        exactly the over-broad-redaction defect an earlier round of this
-        migration already fixed once."""
+    def test_upgrade_redacts_even_safe_shaped_legacy_data(self, migration_db_fresh):
+        """upgrade() no longer checks shape at all (_redact_unconditionally()):
+        every row present when it runs was necessarily written by the OLD,
+        unredacted code path (see the migration's module docstring), so
+        there is no "already safe" legacy row to preserve, and a shape-based
+        check applied at upgrade() time can only produce a false negative.
+
+        Seeds rows using the exact three bounded *reason* formats
+        _safe_delivery_error_message() (protocol_webhook_service.py) can
+        produce -- an "HTTP <status> error" (including the literal "HTTP
+        None error"), a bare exception class name, and "Unexpected error
+        (<class>)" -- paired with a genuinely-safe-shaped webhook_url, and
+        confirms upgrade() redacts all of them anyway. An earlier version of
+        this migration applied its shape check to upgrade() too, and would
+        have left every one of these rows completely unredacted --
+        including the bare-exception-class-name row, which is grammatically
+        identical to a raw, credential-bearing legacy value like
+        "tokenSecret123 delivering webhook to REDACTED" (see
+        test_upgrade_redacts_raw_values_that_merely_contain_the_safe_keywords
+        above).
+
+        (downgrade()'s COMPLEMENTARY obligation -- that it must NOT redact
+        these same three formats when they are written by the fixed runtime
+        AFTER upgrade() already ran -- is covered separately by
+        test_downgrade_preserves_all_three_legitimate_reason_formats below.)
+        """
         engine, db_url = migration_db_fresh
         id_prefix = "legit-reason-"
 
         run_alembic_upgrade(db_url, PRE_REDACTION_REV)
         _ensure_fk_parents(engine)
 
-        safe_url = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
-        legitimate_cases = {
-            f"{id_prefix}http-status": f"HTTP 404 error delivering webhook to {safe_url}",
-            f"{id_prefix}http-none": f"HTTP None error delivering webhook to {safe_url}",
-            f"{id_prefix}exception-class": f"ConnectionError delivering webhook to {safe_url}",
-            f"{id_prefix}unexpected-error": f"Unexpected error (RuntimeError) delivering webhook to {safe_url}",
+        legitimate_shaped_cases = {
+            f"{id_prefix}http-status": f"HTTP 404 error delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}http-none": f"HTTP None error delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}exception-class": f"ConnectionError delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}unexpected-error": f"Unexpected error (RuntimeError) delivering webhook to {_SAFE_KEYED_URL}",
         }
-        with engine.connect() as conn:
-            for log_id, err in legitimate_cases.items():
-                conn.execute(
-                    text(
-                        "INSERT INTO webhook_delivery_log "
-                        "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
-                        "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
-                        " :url, 'delivery_report', 'failed', :err)"
-                    ),
-                    {"id": log_id, "url": safe_url, "err": err},
-                )
-            conn.commit()
+        for log_id, err in legitimate_shaped_cases.items():
+            _insert_row(engine, log_id, _SAFE_KEYED_URL, err)
 
         run_alembic_upgrade(db_url, REDACTION_REV)
 
-        for log_id, original_err in legitimate_cases.items():
+        for log_id, original_err in legitimate_shaped_cases.items():
             webhook_url, error_message = _fetch_row(engine, log_id)
-            assert webhook_url == safe_url, f"{log_id}: already-safe webhook_url must not be touched"
-            assert error_message == original_err, (
-                f"{log_id}: legitimate reason format wrongly redacted: {original_err!r} -> {error_message!r}"
+            assert webhook_url == "<redacted-by-migration>", (
+                f"{log_id}: safe-SHAPED legacy webhook_url must still be redacted at upgrade time"
+            )
+            assert error_message == "<redacted-by-migration>", (
+                f"{log_id}: safe-SHAPED legacy error_message must still be redacted at upgrade time: {original_err!r}"
             )
 
     def test_downgrade_then_reupgrade_succeeds_and_keeps_placeholders(self, migration_db_fresh):
@@ -337,20 +398,28 @@ class TestWebhookDeliveryLogRedactionMigration:
         """A pure no-op downgrade would leave a real gap: a row inserted (e.g.
         via raw SQL, bypassing the application) AFTER upgrade() already ran but
         BEFORE an operator downgrades would sail through unredacted, since
-        nothing else would ever touch it. downgrade() re-runs the same sweep
-        as upgrade() specifically to close this window -- this test seeds a
-        row only after upgrade() has already completed, so it could only be
-        redacted by downgrade() itself re-sweeping.
+        nothing else would ever touch it. downgrade() re-sweeps the table
+        specifically to close this window -- this test seeds rows only after
+        upgrade() has already completed, so they could only be redacted by
+        downgrade() itself re-sweeping.
 
-        Seeded ALONGSIDE it: a row already carrying an audit-safe value in the
-        shape the fixed runtime actually produces (a keyed digest for
-        webhook_url, a bounded failure classification for error_message,
-        matching _redact_url_credentials()/_safe_delivery_error_message() in
-        protocol_webhook_service.py). The sweep must leave THAT row untouched
-        byte-for-byte: it is not raw legacy data, and overwriting it with the
-        generic migration placeholder would destroy the keyed correlation and
-        diagnostic detail the runtime redaction was designed to preserve --
-        exactly what a naive unconditional re-sweep on every downgrade would do.
+        Seeded ALONGSIDE the redact-me rows: one row already carrying an
+        audit-safe value in the shape the fixed runtime actually produces (a
+        keyed digest for webhook_url, a bounded failure classification for
+        error_message, matching _redact_url_credentials()/
+        _safe_delivery_error_message() in protocol_webhook_service.py). The
+        sweep must leave THAT row untouched byte-for-byte: it is not raw
+        legacy data, and overwriting it with the generic migration
+        placeholder would destroy the keyed correlation and diagnostic detail
+        the runtime redaction was designed to preserve -- exactly what a
+        naive unconditional re-sweep on every downgrade would do.
+
+        Also seeded: a credential-bearing PREFIX before the safe-looking tail
+        (an end-anchor-only predicate would miss this), and a numeric
+        credential exploiting an unbounded-digit-run _HTTP_STATUS (an
+        unbounded `[0-9]+` would misclassify this as a real HTTP status) --
+        both must still be caught on downgrade too, even though their own
+        webhook_url ('REDACTED') is genuinely safe and must be left alone.
         """
         engine, db_url = migration_db_fresh
         id_prefix = "post-upgrade-"
@@ -367,37 +436,15 @@ class TestWebhookDeliveryLogRedactionMigration:
 
         # ALSO seeded after upgrade(): a row the fixed runtime would produce --
         # already audit-safe, not raw legacy data.
-        safe_url = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
-        safe_error = f"HTTP 404 error delivering webhook to {safe_url}"
+        safe_error = f"HTTP 404 error delivering webhook to {_SAFE_KEYED_URL}"
+        _insert_row(engine, f"{id_prefix}already-safe", _SAFE_KEYED_URL, safe_error)
 
-        # ALSO seeded after upgrade(): webhook_url is genuinely safe
-        # ('REDACTED'), but error_message has a credential-bearing PREFIX
-        # before the safe-looking " delivering webhook to REDACTED" tail. An
-        # end-anchored-only error predicate (missing a leading `^`) would
-        # classify this as already-safe and skip it on downgrade too, since
-        # PostgreSQL's `~` searches anywhere in the string by default.
-        credential_prefix_error = "token=still-secret delivering webhook to REDACTED"
-
-        with engine.connect() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO webhook_delivery_log "
-                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
-                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
-                    " :url, 'delivery_report', 'failed', :err)"
-                ),
-                {"id": f"{id_prefix}already-safe", "url": safe_url, "err": safe_error},
-            )
-            conn.execute(
-                text(
-                    "INSERT INTO webhook_delivery_log "
-                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
-                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
-                    " 'REDACTED', 'delivery_report', 'failed', :err)"
-                ),
-                {"id": f"{id_prefix}error-credential-prefix", "err": credential_prefix_error},
-            )
-            conn.commit()
+        already_safe_url_cases = {
+            f"{id_prefix}error-credential-prefix": "token=still-secret delivering webhook to REDACTED",
+            f"{id_prefix}error-numeric-status": "HTTP 40412345678 error delivering webhook to REDACTED",
+        }
+        for log_id, err in already_safe_url_cases.items():
+            _insert_row(engine, log_id, "REDACTED", err)
 
         run_alembic_downgrade(db_url, PRE_REDACTION_REV)
 
@@ -408,14 +455,103 @@ class TestWebhookDeliveryLogRedactionMigration:
         # The already-safe row must survive byte-for-byte -- not just "still
         # contain no credentials," but literally unchanged, keyed digest intact.
         webhook_url, error_message = _fetch_row(engine, f"{id_prefix}already-safe")
-        assert webhook_url == safe_url, "downgrade must not destroy an already-safe keyed digest"
+        assert webhook_url == _SAFE_KEYED_URL, "downgrade must not destroy an already-safe keyed digest"
         assert error_message == safe_error, "downgrade must not destroy an already-safe failure classification"
 
-        # The credential-bearing error_message prefix must be caught on
-        # downgrade too, even though its own webhook_url ('REDACTED') is
-        # genuinely safe and must be left alone.
-        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}error-credential-prefix")
-        assert webhook_url == "REDACTED", "a genuinely-safe webhook_url must not be touched"
-        assert error_message == "<redacted-by-migration>", (
-            f"credential-bearing error_message prefix survived downgrade: {credential_prefix_error!r}"
+        for log_id, original_err in already_safe_url_cases.items():
+            webhook_url, error_message = _fetch_row(engine, log_id)
+            assert webhook_url == "REDACTED", f"{log_id}: a genuinely-safe webhook_url must not be touched"
+            assert error_message == "<redacted-by-migration>", (
+                f"{log_id}: credential-bearing error_message survived downgrade: {original_err!r}"
+            )
+
+    def test_downgrade_preserves_all_three_legitimate_reason_formats(self, migration_db_fresh):
+        """downgrade() keeps the shape-based check upgrade() no longer uses
+        (_redact_if_unsafe()), because -- unlike upgrade() -- it can
+        genuinely encounter rows the FIXED runtime already wrote safely.
+
+        Seeds all three bounded *reason* formats _safe_delivery_error_message()
+        (protocol_webhook_service.py) can produce -- an "HTTP <status> error"
+        (including the literal "HTTP None error"), a bare exception class
+        name, and "Unexpected error (<class>)" -- AFTER upgrade() has already
+        run, simulating the fixed application writing them for real, then
+        confirms downgrade() leaves every one of them untouched byte-for-byte.
+        A fix that over-tightens the anchored pattern (e.g. forgetting the
+        "None" status alternative, or misspelling the "Unexpected error (...)"
+        shape) would start needlessly destroying real, legitimate production
+        audit data -- exactly the over-broad-redaction defect an earlier
+        round of this migration already fixed once.
+
+        (upgrade()'s COMPLEMENTARY obligation -- that it must redact these
+        same three formats when they appear as LEGACY data, before upgrade()
+        has run -- is covered separately by
+        test_upgrade_redacts_even_safe_shaped_legacy_data above.)
+        """
+        engine, db_url = migration_db_fresh
+        id_prefix = "downgrade-legit-reason-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        run_alembic_upgrade(db_url, REDACTION_REV)
+        _ensure_fk_parents(engine)
+
+        legitimate_shaped_cases = {
+            f"{id_prefix}http-status": f"HTTP 404 error delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}http-none": f"HTTP None error delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}exception-class": f"ConnectionError delivering webhook to {_SAFE_KEYED_URL}",
+            f"{id_prefix}unexpected-error": f"Unexpected error (RuntimeError) delivering webhook to {_SAFE_KEYED_URL}",
+        }
+        for log_id, err in legitimate_shaped_cases.items():
+            _insert_row(engine, log_id, _SAFE_KEYED_URL, err)
+
+        run_alembic_downgrade(db_url, PRE_REDACTION_REV)
+
+        for log_id, original_err in legitimate_shaped_cases.items():
+            webhook_url, error_message = _fetch_row(engine, log_id)
+            assert webhook_url == _SAFE_KEYED_URL, f"{log_id}: already-safe webhook_url must not be touched"
+            assert error_message == original_err, (
+                f"{log_id}: legitimate reason format wrongly redacted by downgrade: "
+                f"{original_err!r} -> {error_message!r}"
+            )
+
+    def test_downgrade_accepts_identifier_shaped_credential_as_safe_by_design(self, migration_db_fresh):
+        """Pins the ACCEPTED residual documented on _redact_if_unsafe() and
+        the _EXCEPTION_CLASS_NAME comment in the migration: unlike upgrade()
+        (test_upgrade_redacts_raw_values_that_merely_contain_the_safe_keywords
+        above), downgrade() still cannot distinguish an identifier-shaped
+        credential (e.g. "tokenSecret123", an ordinary shape for a real API
+        token) from a genuinely-safe bare exception class name -- both match
+        the same grammar. Closing this for downgrade() too would require an
+        exhaustive allowlist of real exception class names sourced from
+        application code, which the migration's module docstring already
+        rejects for the digest computation, for the same app/migration-
+        coupling reason.
+
+        This is a DELIBERATE, narrow, documented trade-off, not a silent gap:
+        it is only reachable via a raw-SQL bypass of the application -- the
+        same threat model downgrade()'s re-sweep exists for in the first
+        place -- combined with a value that happens to match this one narrow
+        grammar. This test exists so a future change to _EXCEPTION_CLASS_NAME
+        or _redact_if_unsafe() that flips this behavior is a deliberate,
+        reviewed decision -- update this test (and the referenced docs)
+        alongside it, don't just delete the assertion because it started
+        failing.
+        """
+        engine, db_url = migration_db_fresh
+        id_prefix = "downgrade-residual-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        run_alembic_upgrade(db_url, REDACTION_REV)
+        _ensure_fk_parents(engine)
+
+        identifier_shaped_error = "tokenSecret123 delivering webhook to REDACTED"
+        _insert_row(engine, f"{id_prefix}identifier-shaped", "REDACTED", identifier_shaped_error)
+
+        run_alembic_downgrade(db_url, PRE_REDACTION_REV)
+
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}identifier-shaped")
+        assert webhook_url == "REDACTED"
+        assert error_message == identifier_shaped_error, (
+            "accepted residual regressed: downgrade() now redacts an identifier-shaped reason -- "
+            "update this test (and the _EXCEPTION_CLASS_NAME / _redact_if_unsafe() docs) to reflect "
+            "the new, narrower behavior instead of just deleting the assertion"
         )
