@@ -283,7 +283,27 @@ def then_no_natural_key_lookup_performed(ctx: dict) -> None:
     fail this one. Restoration of the patched methods is handled by the
     ``ctx`` fixture's teardown, not here, so it still runs if this assertion
     fails.
+
+    Skipped on e2e_* transports: the create runs in the separate Docker app
+    process, out of the in-process spy's reach (mirrors
+    ``then_high_value_alert_observed`` in uc002_nfr.py for the same reason).
+    ``AccountRepository.list_by_natural_key``/``count_by_natural_key`` are
+    pure reads with no persisted side effect a test process could read back
+    out-of-process, so there is no observable signal to re-express this
+    guarantee against on e2e — the output-side check above still runs there.
     """
+    import pytest
+
+    from tests.bdd.steps._outcome_helpers import is_e2e
+
+    if is_e2e(ctx):
+        pytest.skip(
+            "natural-key lookup spy is in-process only; the e2e create runs in the "
+            "separate Docker app, out of the spy's reach — see "
+            "then_auth_error_discloses_no_account_resolution for the output-side "
+            "check, which still runs on this transport"
+        )
+
     calls = ctx.get("_natural_key_lookup_calls")
     assert calls is not None, (
         "No natural-key lookup spy installed — scenario must call "
