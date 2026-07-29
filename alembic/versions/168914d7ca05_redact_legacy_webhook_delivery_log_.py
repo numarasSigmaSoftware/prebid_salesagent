@@ -20,6 +20,16 @@ and simpler -- we cannot recover any operationally useful information from
 these rows regardless, so there is nothing lost by not attempting a "real"
 digest.
 
+downgrade() is a structural no-op, not a raise: this migration makes no schema
+changes to revert, and CI's mandatory Migration Roundtrip job
+(scripts/ci/migration_roundtrip.py) runs upgrade(head) -> downgrade(one step
+back) -> upgrade(head) on every PR, so downgrade() failing here would break
+that job on every future PR, not just this one. The placeholder values it
+wrote on upgrade are intentionally left in place on downgrade -- the original
+credential-bearing data was never archived and genuinely cannot be restored,
+but "cannot restore the data" and "must not let the job fail" are different
+concerns; only the schema-reversibility question belongs in downgrade().
+
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
 Create Date: 2026-07-29 02:26:40.333322
@@ -59,9 +69,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Irreversible by design: the original webhook_url and error_message
-    values contained buyer credentials and were destroyed on upgrade, not
-    archived anywhere they could be restored from."""
-    raise NotImplementedError(
-        "168914d7ca05 destroys credential data on upgrade; there is nothing to restore on downgrade."
-    )
+    """No schema to revert -- the redacted placeholder values stay in place.
+
+    The original webhook_url/error_message content they replaced contained
+    buyer credentials, was never archived anywhere, and cannot be restored.
+    Downgrading past this revision does not un-redact anything; it only moves
+    the alembic_version bookkeeping backward, matching what CI's mandatory
+    upgrade -> downgrade -> upgrade roundtrip expects to be able to do.
+    """
+    print("168914d7ca05 downgrade: no schema change to revert; redacted placeholder values remain in place.")

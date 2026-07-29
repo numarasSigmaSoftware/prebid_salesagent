@@ -6,7 +6,17 @@ could carry the same data via unsanitized exception text in error_message).
 This migration must scrub every existing row when it runs -- verifies upgrade
 scrubs credential-bearing legacy data, preserves NULL error_message as NULL
 (rather than corrupting "no error occurred" into a fake redacted string), and
-that downgrade is an honest, explicit failure rather than a silent no-op.
+that the CI-mandated upgrade -> downgrade -> upgrade roundtrip succeeds
+without un-redacting anything.
+
+The atomic test uses the module-scoped migration_db fixture (fine here: it
+seeds, upgrades, and asserts in one method, so there's no cross-test ordering
+dependency). The downgrade/roundtrip test uses its OWN function-scoped
+migration_db_fresh fixture instead: a migration's data UPDATE fires exactly
+once, at its own transition, so on a shared already-migrated database
+"upgrade to the revision before mine" is a no-op that would let freshly-seeded
+rows silently skip the redaction entirely -- a fresh database sidesteps that
+whole class of bug rather than working around it with a `pass` no-op.
 """
 
 import pytest
@@ -22,20 +32,22 @@ LEGACY_ERROR_MESSAGE = f"HTTP 404: 404 Client Error: Not Found for url: {LEGACY_
 CREDENTIAL_SUBSTRINGS = ("buyer", "s3cr3t-password", "secret.example", "leaked-legacy-value")
 
 
-def _seed_legacy_rows(engine):
-    """Seed tenant/principal/media_buy + three webhook_delivery_log rows:
-    one with a credential-bearing URL and error_message (the common case),
-    one with a credential-bearing URL but NULL error_message (successful
-    delivery attempt logged, later attempt failed with no error captured --
-    NULL must stay NULL, not become a fake redacted string), and one whose
-    error_message has no credential at all (must still be swept -- the
-    migration can't distinguish "safe" legacy text from "unsafe," so it
-    redacts unconditionally, matching the blanket non-correlating design)."""
+def _seed_legacy_rows(engine, id_prefix: str) -> None:
+    """Ensure the shared tenant/principal/media_buy exist (ON CONFLICT DO
+    NOTHING -- safely reused across tests) and seed three webhook_delivery_log
+    rows under id_prefix: one with a credential-bearing URL and error_message
+    (the common case), one with a credential-bearing URL but NULL
+    error_message (a logged attempt with no captured error -- NULL must stay
+    NULL, not become a fake redacted string), and one whose error_message has
+    no credential at all (must still be swept -- the migration can't
+    distinguish "safe" legacy text from "unsafe," so it redacts
+    unconditionally, matching the runtime fix's blanket design)."""
     with engine.connect() as conn:
         conn.execute(
             text(
                 "INSERT INTO tenants (tenant_id, name, subdomain, created_at, updated_at) "
-                "VALUES ('legacy-tenant', 'Legacy Tenant', 'legacy-test', NOW(), NOW())"
+                "VALUES ('legacy-tenant', 'Legacy Tenant', 'legacy-test', NOW(), NOW()) "
+                "ON CONFLICT (tenant_id) DO NOTHING"
             )
         )
         conn.execute(
@@ -43,7 +55,8 @@ def _seed_legacy_rows(engine):
                 "INSERT INTO principals (tenant_id, principal_id, name, access_token, "
                 "platform_mappings, created_at, updated_at) "
                 "VALUES ('legacy-tenant', 'legacy-principal', 'Legacy Principal', 'legacy-token', "
-                '\'{"mock": {"advertiser_id": "test"}}\'::jsonb, NOW(), NOW())'
+                '\'{"mock": {"advertiser_id": "test"}}\'::jsonb, NOW(), NOW()) '
+                "ON CONFLICT (tenant_id, principal_id) DO NOTHING"
             )
         )
         conn.execute(
@@ -52,7 +65,8 @@ def _seed_legacy_rows(engine):
                 "advertiser_name, status, raw_request, start_date, end_date, budget) "
                 "VALUES ('legacy-media-buy', 'legacy-tenant', 'legacy-principal', 'Legacy Order', "
                 "'Legacy Advertiser', 'active', '{}'::jsonb, CURRENT_DATE, "
-                "CURRENT_DATE + interval '30 days', 1000)"
+                "CURRENT_DATE + interval '30 days', 1000) "
+                "ON CONFLICT (media_buy_id) DO NOTHING"
             )
         )
         conn.execute(
@@ -60,14 +74,20 @@ def _seed_legacy_rows(engine):
                 "INSERT INTO webhook_delivery_log "
                 "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
                 "VALUES "
-                "('legacy-log-with-error', 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                "(:id_with_error, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
                 " :url, 'delivery_report', 'failed', :err), "
-                "('legacy-log-null-error', 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                "(:id_null_error, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
                 " :url, 'delivery_report', 'success', NULL), "
-                "('legacy-log-safe-error', 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                "(:id_safe_error, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
                 " :url, 'delivery_report', 'failed', 'Connection reset by peer')"
             ),
-            {"url": LEGACY_CREDENTIALED_URL, "err": LEGACY_ERROR_MESSAGE},
+            {
+                "id_with_error": f"{id_prefix}with-error",
+                "id_null_error": f"{id_prefix}null-error",
+                "id_safe_error": f"{id_prefix}safe-error",
+                "url": LEGACY_CREDENTIALED_URL,
+                "err": LEGACY_ERROR_MESSAGE,
+            },
         )
         conn.commit()
 
@@ -85,56 +105,82 @@ def _fetch_row(engine, log_id):
 
 @pytest.mark.requires_db
 class TestWebhookDeliveryLogRedactionMigration:
-    def test_upgrade_redacts_url_and_error_message(self, migration_db):
+    def test_upgrade_redacts_legacy_data(self, migration_db):
+        """Atomic: seeds and asserts every upgrade outcome in one test, so it
+        never depends on state left behind by another test method."""
         engine, db_url = migration_db
+        id_prefix = "atomic-"
 
-        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
-        _seed_legacy_rows(engine)
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)  # no-op if already past this point
+        _seed_legacy_rows(engine, id_prefix)
 
         # Confirm the legacy data really is unredacted before the migration runs.
-        webhook_url, error_message = _fetch_row(engine, "legacy-log-with-error")
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
         assert webhook_url == LEGACY_CREDENTIALED_URL
         assert error_message == LEGACY_ERROR_MESSAGE
 
         run_alembic_upgrade(db_url, REDACTION_REV)
 
-        webhook_url, error_message = _fetch_row(engine, "legacy-log-with-error")
+        # webhook_url + error_message redacted for the common case.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
         assert webhook_url == "<redacted-by-migration>"
         assert error_message == "<redacted-by-migration>"
 
-    def test_upgrade_preserves_null_error_message(self, migration_db):
-        """A row with NO error (NULL error_message) must stay NULL -- turning it
-        into a "redacted" string would misrepresent a successful delivery as
-        having had a scrubbed error."""
-        engine, _ = migration_db
-        webhook_url, error_message = _fetch_row(engine, "legacy-log-null-error")
+        # NULL error_message preserved as NULL, not corrupted into a fake string.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}null-error")
         assert webhook_url == "<redacted-by-migration>"
         assert error_message is None
 
-    def test_upgrade_redacts_error_message_with_no_credential_too(self, migration_db):
-        """The migration can't distinguish "this legacy error_message happens to
-        be safe" from "this one leaks a credential" -- it redacts every non-null
-        value unconditionally, the same blanket design as the runtime fix."""
-        engine, _ = migration_db
-        _webhook_url, error_message = _fetch_row(engine, "legacy-log-safe-error")
+        # Non-credentialed error_message still swept unconditionally.
+        _webhook_url, error_message = _fetch_row(engine, f"{id_prefix}safe-error")
         assert error_message == "<redacted-by-migration>"
 
-    def test_no_legacy_credentials_survive_anywhere_in_the_table(self, migration_db):
-        engine, _ = migration_db
+        # No credential substring survives ANYWHERE in the table -- including
+        # rows any other test method in this module may have already seeded.
         with engine.connect() as conn:
             result = conn.execute(text("SELECT webhook_url, error_message FROM webhook_delivery_log"))
             rows = result.fetchall()
         assert rows, "expected seeded rows to still be present"
-        for webhook_url, error_message in rows:
+        for row_webhook_url, row_error_message in rows:
             for substring in CREDENTIAL_SUBSTRINGS:
-                assert substring not in (webhook_url or ""), f"{substring!r} survived in webhook_url"
-                assert substring not in (error_message or ""), f"{substring!r} survived in error_message"
+                assert substring not in (row_webhook_url or ""), f"{substring!r} survived in webhook_url"
+                assert substring not in (row_error_message or ""), f"{substring!r} survived in error_message"
 
-    def test_downgrade_refuses_rather_than_silently_no_opping(self, migration_db):
-        """The original values were destroyed on upgrade and never archived --
-        downgrade must fail loudly, not silently leave the redacted state in
-        place while claiming to have "reverted" it."""
-        _engine, db_url = migration_db
+    def test_downgrade_then_reupgrade_succeeds_and_keeps_placeholders(self, migration_db_fresh):
+        """Independently initialized on its OWN fresh database (migration_db_fresh,
+        function-scoped) -- never shares state with test_upgrade_redacts_legacy_data
+        or with any future test added to this module, even though this one also
+        mutates revision state via downgrade.
 
-        with pytest.raises(Exception, match="destroys credential data"):
-            run_alembic_downgrade(db_url, PRE_REDACTION_REV)
+        The mandatory CI "Migration Roundtrip" job (scripts/ci/migration_roundtrip.py)
+        runs upgrade(head) -> downgrade(one step back) -> upgrade(head) on
+        every PR. downgrade() MUST succeed here -- not raise -- or that job
+        breaks on every future PR, not just this migration's own introduction
+        (confirmed: this happened for real in CI before this fix, job 90492416550).
+        """
+        engine, db_url = migration_db_fresh
+        id_prefix = "roundtrip-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        _seed_legacy_rows(engine, id_prefix)
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
+        assert webhook_url == "<redacted-by-migration>"
+        assert error_message == "<redacted-by-migration>"
+
+        run_alembic_downgrade(db_url, PRE_REDACTION_REV)  # must not raise
+
+        # Downgrade is a structural no-op: the placeholders are never
+        # un-redacted (there is nothing to restore them from), so they must
+        # still be in place immediately after downgrading.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
+        assert webhook_url == "<redacted-by-migration>"
+        assert error_message == "<redacted-by-migration>"
+
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        # And placeholders remain after re-upgrading, completing the roundtrip.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
+        assert webhook_url == "<redacted-by-migration>"
+        assert error_message == "<redacted-by-migration>"
