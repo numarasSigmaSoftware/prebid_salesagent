@@ -189,10 +189,21 @@ class TestWebhookDeliveryLogRedactionMigration:
         """A pure no-op downgrade would leave a real gap: a row inserted (e.g.
         via raw SQL, bypassing the application) AFTER upgrade() already ran but
         BEFORE an operator downgrades would sail through unredacted, since
-        nothing else would ever touch it. downgrade() re-runs the same
-        unconditional sweep as upgrade() specifically to close this window --
-        this test seeds a row only after upgrade() has already completed, so
-        it could only be redacted by downgrade() itself re-sweeping."""
+        nothing else would ever touch it. downgrade() re-runs the same sweep
+        as upgrade() specifically to close this window -- this test seeds a
+        row only after upgrade() has already completed, so it could only be
+        redacted by downgrade() itself re-sweeping.
+
+        Seeded ALONGSIDE it: a row already carrying an audit-safe value in the
+        shape the fixed runtime actually produces (a keyed digest for
+        webhook_url, a bounded failure classification for error_message,
+        matching _redact_url_credentials()/_safe_delivery_error_message() in
+        protocol_webhook_service.py). The sweep must leave THAT row untouched
+        byte-for-byte: it is not raw legacy data, and overwriting it with the
+        generic migration placeholder would destroy the keyed correlation and
+        diagnostic detail the runtime redaction was designed to preserve --
+        exactly what a naive unconditional re-sweep on every downgrade would do.
+        """
         engine, db_url = migration_db_fresh
         id_prefix = "post-upgrade-"
 
@@ -206,8 +217,30 @@ class TestWebhookDeliveryLogRedactionMigration:
         assert webhook_url == LEGACY_CREDENTIALED_URL, "sanity check: row must start out unredacted"
         assert error_message == LEGACY_ERROR_MESSAGE
 
+        # ALSO seeded after upgrade(): a row the fixed runtime would produce --
+        # already audit-safe, not raw legacy data.
+        safe_url = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
+        safe_error = f"HTTP 404 error delivering webhook to {safe_url}"
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO webhook_delivery_log "
+                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                    " :url, 'delivery_report', 'failed', :err)"
+                ),
+                {"id": f"{id_prefix}already-safe", "url": safe_url, "err": safe_error},
+            )
+            conn.commit()
+
         run_alembic_downgrade(db_url, PRE_REDACTION_REV)
 
         webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
         assert webhook_url == "<redacted-by-migration>", "downgrade must redact rows inserted after upgrade too"
         assert error_message == "<redacted-by-migration>"
+
+        # The already-safe row must survive byte-for-byte -- not just "still
+        # contain no credentials," but literally unchanged, keyed digest intact.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}already-safe")
+        assert webhook_url == safe_url, "downgrade must not destroy an already-safe keyed digest"
+        assert error_message == safe_error, "downgrade must not destroy an already-safe failure classification"
