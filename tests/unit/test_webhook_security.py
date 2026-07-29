@@ -979,6 +979,17 @@ class TestWebhookAuditHmacKeyIdFormatValidation:
         with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
             self._build("v1\nFAKE LOG LINE: admin logged in")
 
+    def test_bare_trailing_newline_is_rejected(self):
+        """re's `$` anchor matches immediately before a FINAL trailing newline,
+        not just at the true end of string -- so a `^...$` pattern checked with
+        `.match()` (not `.fullmatch()`) would accept "v1\\n" even though the
+        newline-with-more-text-after case above is correctly rejected. That
+        distinction matters: this exact bare-trailing-newline shape is what a
+        copy-paste from a shell prompt or a text editor's "always end with a
+        newline" convention would actually produce."""
+        with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
+            self._build("v1\n")
+
     def test_control_character_is_rejected(self):
         with pytest.raises(ValueError, match="WEBHOOK_AUDIT_HMAC_KEY_ID"):
             self._build("v1\x00\x1b[31m")

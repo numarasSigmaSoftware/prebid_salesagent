@@ -195,6 +195,31 @@ class TestConfigHelperFunctions:
             os.environ["FLY_APP_NAME"] = "salesagent-prod"
             assert is_production()
 
+    @pytest.mark.parametrize("truthy_value", ["true", "TRUE", "True", "1", "yes", "on", "  true  "])
+    def test_production_recognizes_the_truthy_vocabulary(self, truthy_value):
+        from src.core.config import is_production
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_production_signals()
+            os.environ["PRODUCTION"] = truthy_value
+            assert is_production(), f"PRODUCTION={truthy_value!r} should be production"
+
+    @pytest.mark.parametrize("falsy_value", ["false", "FALSE", "False", "0", "no", "off", "", "banana"])
+    def test_production_false_is_not_treated_as_production(self, falsy_value):
+        """The gap this pins: bool(os.environ.get("PRODUCTION")) treats ANY
+        non-empty string as true, so PRODUCTION=false -- an operator EXPLICITLY
+        turning it off -- used to flip is_production() to True. Since
+        is_production() also controls schema strictness (get_pydantic_extra_mode)
+        and the WEBHOOK_AUDIT_HMAC_KEY production requirement, that silently
+        switched a schema from strict extra="forbid" to permissive extra="ignore"
+        and demanded a key the operator never intended to need."""
+        from src.core.config import is_production
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_production_signals()
+            os.environ["PRODUCTION"] = falsy_value
+            assert not is_production(), f"PRODUCTION={falsy_value!r} should NOT be production"
+
 
 class TestProductionModeBehavior:
     """Verify production mode end-to-end: env var → config helper → model behavior.

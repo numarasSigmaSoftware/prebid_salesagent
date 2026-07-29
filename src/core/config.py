@@ -11,7 +11,21 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+_WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,32}")
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def _env_flag_is_true(name: str) -> bool:
+    """Parse a boolean-ish env var against an explicit truthy vocabulary (case-
+    insensitive, surrounding whitespace ignored).
+
+    ``bool(os.environ.get(name))`` treats ANY non-empty string as true --
+    including "false", "0", "no", "off" -- which is exactly backwards for a flag
+    an operator set specifically to turn something OFF. A value not in the
+    truthy vocabulary (including unset, "", or an unrecognized string) is false.
+    """
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 class GAMOAuthConfig(BaseSettings):
@@ -144,8 +158,15 @@ class AppConfig(BaseSettings):
         log-injection vector. It's operator-set deployment config, not buyer input,
         but a copy-paste error (e.g. pasting a whole secret-manager blob into the
         wrong env var) shouldn't be able to do either of those things.
+
+        Uses fullmatch(), not match(): re's `$` anchor matches immediately before
+        a FINAL trailing newline (not just at the true end of string), so
+        `PATTERN.match(v)` with a `^...$` pattern would accept "v1\n" -- the exact
+        newline-injection payload this validator exists to reject. fullmatch()
+        requires the match to consume the entire string, which a trailing
+        character outside the allowed class (the newline) prevents.
         """
-        if not _WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN.match(v):
+        if not _WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN.fullmatch(v):
             raise ValueError(f"WEBHOOK_AUDIT_HMAC_KEY_ID must match ^[A-Za-z0-9._-]{{1,32}}$ (got {v!r})")
         return v
 
@@ -232,13 +253,19 @@ def is_production() -> bool:
     production-only check gated on this function (e.g. WEBHOOK_AUDIT_HMAC_KEY
     strength in validate_configuration()).
 
+    PRODUCTION is parsed against an explicit truthy vocabulary (_env_flag_is_true),
+    not bare presence -- an operator setting PRODUCTION=false to explicitly turn
+    it off must not flip this to True. FLY_APP_NAME is a presence check, not a
+    boolean flag: Fly.io populates it with the actual app name, so any non-empty
+    value already means "running on Fly.io."
+
     Returns:
-        bool: True if ENVIRONMENT=production, or PRODUCTION is set, or FLY_APP_NAME
-            is set (Fly.io sets this automatically on every deploy).
+        bool: True if ENVIRONMENT=production, or PRODUCTION is truthy, or
+            FLY_APP_NAME is set (Fly.io sets this automatically on every deploy).
     """
     return (
         os.getenv("ENVIRONMENT", "development").lower() == "production"
-        or bool(os.environ.get("PRODUCTION"))
+        or _env_flag_is_true("PRODUCTION")
         or bool(os.environ.get("FLY_APP_NAME"))
     )
 
