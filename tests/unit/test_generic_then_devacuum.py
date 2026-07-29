@@ -28,7 +28,10 @@ from __future__ import annotations
 import pytest
 
 from src.core.schemas import ListCreativeFormatsResponse
-from tests.bdd.steps.generic.then_error import then_error_message_contains
+from tests.bdd.steps.generic.then_error import (
+    then_error_message_contains,
+    then_error_message_sanitized_without_disclosing,
+)
 from tests.bdd.steps.generic.then_payload import (
     then_boundary_handling_result,
     then_partition_filtering_result,
@@ -139,8 +142,17 @@ def test_response_status_non_completed_against_statusless_fails() -> None:
         then_response_status(_valid_uc005_ctx(), status="working")
 
 
-def test_wire_message_assertion_proves_untrusted_fragment_was_scrubbed() -> None:
-    """Generated BDD text assertions remain meaningful after wire sanitization."""
+def test_sanitized_step_proves_untrusted_fragment_was_scrubbed() -> None:
+    """The dedicated non-disclosure step catches a scrubbed wire message correctly.
+
+    Was ``test_wire_message_assertion_proves_untrusted_fragment_was_scrubbed``,
+    calling ``then_error_message_contains(ctx, text="past")`` — which passed only
+    because THAT step used to silently switch to an ABSENCE check whenever the
+    wire message happened to already equal the canonical scrubbed text. SF-1
+    removed that switching behavior (see ``then_error.py``): "should contain" is
+    now pure containment, always, and this non-disclosure assertion has its own
+    dedicated step. This test proves the invariant through the correct step.
+    """
     from src.core.exceptions import AdCPValidationError, build_two_layer_error_envelope, safe_adcp_error
 
     raw_fragment = "start time is in the past"
@@ -151,7 +163,13 @@ def test_wire_message_assertion_proves_untrusted_fragment_was_scrubbed() -> None
         "result": TransportResult(error=wire_error, wire_error_envelope=envelope),
     }
 
-    then_error_message_contains(ctx, text="past")
+    then_error_message_sanitized_without_disclosing(ctx, text="past")
+
+    # And the containment step now means exactly what it says: the raw fragment
+    # is genuinely absent from the scrubbed wire message, so asserting its
+    # PRESENCE via "should contain" correctly fails.
+    with pytest.raises(AssertionError):
+        then_error_message_contains(ctx, text="past")
 
 
 def test_error_code_step_grades_the_wire_not_the_reconstruction() -> None:

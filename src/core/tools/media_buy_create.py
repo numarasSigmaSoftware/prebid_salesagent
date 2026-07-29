@@ -2537,6 +2537,9 @@ async def _create_media_buy_impl(
                 raise AdCPValidationError(
                     error_msg,
                     suggestion="Each package must reference a distinct product_id; remove the duplicate package or change its product_id.",
+                    # Interpolates only product_ids the buyer submitted in this same request — no
+                    # secret or internal detail crosses the boundary.
+                    _wire_safe_message=True,
                 )
 
         # 4. Currency-specific budget validation
@@ -2888,6 +2891,10 @@ async def _create_media_buy_impl(
                             error_msg,
                             suggestion="Check targeting constraints.",
                             field="targeting_overlay",
+                            # All three violation sources interpolate only static text, the
+                            # buyer's own submitted field names/values, or fixed known dimension
+                            # names — never a secret or internal detail.
+                            _wire_safe_message=True,
                         )
 
     except (AdCPError, ValueError, PermissionError) as e:

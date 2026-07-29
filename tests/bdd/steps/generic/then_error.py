@@ -344,30 +344,52 @@ def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
 
 @then(parsers.parse('the error message should contain "{text}"'))
 def then_error_message_contains(ctx: dict, text: str) -> None:
-    """Assert trusted text is retained, or untrusted text is canonically scrubbed.
+    """Assert the error message contains the given text — wire-first, reconstructed fallback.
 
-    Wire boundaries intentionally replace unaudited validation messages because
-    they may interpolate rejected buyer input or adapter internals.  In that
-    case the security contract is the exact canonical message/suggestion on
-    both envelope layers plus absence of the raw fragment.  Direct implementation
-    tests still assert the unsanitized business message.
+    A pure literal containment check, matching every sibling step in this file
+    (``_wire_code``, ``_wire_suggestion``). It does NOT special-case sanitized
+    codes: a scenario asserting the buyer-facing NON-DISCLOSURE contract for a
+    scrubbed message must use ``the error message should be sanitized, not
+    disclosing "..."`` below instead. An assertion that silently flips to
+    checking ABSENCE when a code happens to be scrubbed is indistinguishable,
+    from the Gherkin, from checking PRESENCE — the same English step would mean
+    opposite things depending on the response code, and 190+ scenarios could
+    pass after their expected diagnostic silently disappeared.
+    """
+    wire_error = _wire_error_object(ctx)
+    if wire_error is not None:
+        msg = str(wire_error.get("message", "")).lower()
+    else:
+        error = ctx.get("error")
+        assert error is not None, "No error recorded in ctx"
+        msg = _get_error_message(error).lower()
+    assert text.lower() in msg, f"Expected '{text}' in error message: {msg}"
+
+
+@then(parsers.parse('the error message should be sanitized, not disclosing "{text}"'))
+def then_error_message_sanitized_without_disclosing(ctx: dict, text: str) -> None:
+    """Assert the wire error uses the canonical scrubbed presentation and never echoes ``text``.
+
+    The dedicated non-disclosure step: production replaces an unaudited raw
+    message (which may interpolate rejected buyer input or adapter internals)
+    with the canonical sanitized message/suggestion on BOTH envelope layers.
+    Distinct from ``the error message should contain "..."`` above, which is a
+    literal containment check — a scenario asserting non-disclosure must name
+    that explicitly rather than relying on a containment step to double as one.
     """
     result = ctx.get("result")
     envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
-    if envelope:
-        from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
-        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+    assert envelope is not None, "Sanitization assertion requires a captured wire error envelope"
 
-        code = (envelope.get("adcp_error") or {}).get("code")
-        expected = _SANITIZED_BY_WIRE_CODE.get(code)
-        if expected and (envelope.get("adcp_error") or {}).get("message") == expected[0]:
-            assert_sanitized_wire_error(envelope, code, rejected_fragments=(text,))
-            return
+    from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
+    from tests.helpers.secret_scrub import assert_sanitized_wire_error
 
-    error = ctx.get("error")
-    assert error is not None, "No error recorded in ctx"
-    msg = _get_error_message(error).lower()
-    assert text.lower() in msg, f"Expected '{text}' in error message: {_get_error_message(error)}"
+    code = (envelope.get("adcp_error") or {}).get("code")
+    assert code in _SANITIZED_BY_WIRE_CODE, (
+        f"{code!r} has no canonical sanitized presentation — this step only applies to codes "
+        "production scrubs (VALIDATION_ERROR / INVALID_REQUEST / AUTH_REQUIRED)"
+    )
+    assert_sanitized_wire_error(envelope, code, rejected_fragments=(text,))
 
 
 @then(parsers.parse('the suggestion should contain "{text}"'))

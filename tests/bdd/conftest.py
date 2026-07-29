@@ -445,7 +445,17 @@ _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
 # (_impl does not filter by disclosure) is all-transport and handled by
 # _UC005_PARTIAL_TAGS / _XFAIL_TAGS, so no MCP-specific entries remain.
 # (tag, example_substrings, reason, strict)
-_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = []
+_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = [
+    (
+        "T-UC-002-ext-h-agent",
+        set(),
+        "MCP-only: raw_wire_payload carries a structured FormatId, which "
+        "rfc8785 canonicalization cannot serialize, crashing idempotency "
+        "hashing before the format-agent validator this scenario targets "
+        "ever runs. A2A/REST don't hit this path. prebid/salesagent#1768.",
+        True,
+    ),
+]
 
 # NOTE: the former _REST_XFAIL_TAGS set was retired once the stale
 # CreativeFormatsEnv.build_rest_body override (which returned {}) was removed.
