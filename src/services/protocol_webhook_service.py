@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import requests
@@ -73,7 +73,13 @@ def _delivery_log_context(
     notification_type: str | None,
     payload_size_bytes: int,
 ) -> _DeliveryLogContext | None:
-    """Build durable delivery state only for fully identified report webhooks."""
+    """Build durable delivery state only for fully identified report webhooks.
+
+    ``webhook_url`` is redacted before it enters this dataclass: the value is
+    persisted verbatim to ``WebhookDeliveryLog.webhook_url`` by ``_write_delivery_log``
+    and never read back to dial a real request, so this is the single point that
+    controls what a buyer-supplied credential-bearing URL leaves in durable storage.
+    """
     if task_type not in _LOGGABLE_DELIVERY_TASK_TYPES or not tenant_id or not principal_id or not media_buy_id:
         return None
     return _DeliveryLogContext(
@@ -81,7 +87,7 @@ def _delivery_log_context(
         tenant_id=tenant_id,
         principal_id=principal_id,
         media_buy_id=media_buy_id,
-        webhook_url=url,
+        webhook_url=_redact_url_credentials(url),
         task_type=task_type,
         idempotency_key=idempotency_key,
         sequence_number=sequence_number,
@@ -175,20 +181,65 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
-def _redact_url_for_logging(url: str) -> str:
-    """Return *url* with any embedded userinfo (``user:pass@``) stripped, for log output only.
+# Best-effort, not exhaustive: common conventions for a credential carried as a
+# query-string value rather than URL userinfo. Matched case-insensitively against
+# the parameter NAME; the VALUE is what gets replaced.
+_SENSITIVE_QUERY_PARAM_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "signature",
+        "auth",
+        "authorization",
+        "key",
+    }
+)
 
-    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields accept userinfo-bearing
-    URLs (``https://user:pass@host/hook``); the credentials must never reach a log line even
-    when the surrounding code is careful to omit the separate ``authentication_token`` field.
-    Never use this on the URL passed to ``requests`` — only on the value handed to ``logger``.
+
+def _redact_url_credentials(url: str) -> str:
+    """Return *url* with embedded credentials removed, for log output AND durable storage.
+
+    Two carriers are redacted:
+    - userinfo (``https://user:pass@host/hook``) — replaced with a single ``REDACTED@`` marker;
+    - sensitive query-parameter VALUES (name matched against
+      ``_SENSITIVE_QUERY_PARAM_NAMES``, case-insensitive) — replaced with ``REDACTED``,
+      the parameter name and every other query parameter are left intact.
+
+    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields accept both forms and
+    place no constraint on query-string content, so a buyer-supplied URL can carry a bearer
+    token as a query parameter instead of userinfo. The query-parameter denylist is
+    necessarily best-effort — it cannot be exhaustive — but covers the common conventions.
+
+    Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
+    (pure audit data — never read back to dial a real request). Never use this on the URL
+    passed to ``requests`` for the actual outbound call.
     """
     try:
         parsed = urlparse(url)
-        if not parsed.username and not parsed.password:
+        netloc = parsed.netloc
+        has_userinfo = bool(parsed.username or parsed.password)
+        if has_userinfo:
+            port = f":{parsed.port}" if parsed.port else ""
+            netloc = f"REDACTED@{parsed.hostname}{port}"
+
+        query = parsed.query
+        if query:
+            pairs = parse_qsl(query, keep_blank_values=True)
+            if any(name.lower() in _SENSITIVE_QUERY_PARAM_NAMES for name, _ in pairs):
+                query = urlencode(
+                    [
+                        (name, "REDACTED" if name.lower() in _SENSITIVE_QUERY_PARAM_NAMES else value)
+                        for name, value in pairs
+                    ]
+                )
+
+        if not has_userinfo and query == parsed.query:
             return url
-        port = f":{parsed.port}" if parsed.port else ""
-        return urlunparse(parsed._replace(netloc=f"REDACTED@{parsed.hostname}{port}"))
+        return urlunparse(parsed._replace(netloc=netloc, query=query))
     except Exception:
         return "REDACTED"
 
@@ -241,7 +292,7 @@ class ProtocolWebhookService:
         # must not leave a different credential in the log line.
         safe_config = {
             "url": (
-                _redact_url_for_logging(push_notification_config.url)
+                _redact_url_credentials(push_notification_config.url)
                 if hasattr(push_notification_config, "url") and push_notification_config.url
                 else None
             ),
@@ -398,7 +449,7 @@ class ProtocolWebhookService:
         for attempt in range(max_attempts):
             try:
                 logger.info(
-                    f"Sending webhook for task {task_id} to {_redact_url_for_logging(url)} "
+                    f"Sending webhook for task {task_id} to {_redact_url_credentials(url)} "
                     f"(attempt {attempt + 1}/{max_attempts})"
                 )
 

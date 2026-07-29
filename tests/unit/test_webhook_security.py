@@ -298,13 +298,14 @@ class TestWebhookAuthenticator:
         assert not is_valid
 
 
-class TestRedactUrlForLogging:
-    """``_redact_url_for_logging`` strips userinfo credentials before a URL reaches a log line."""
+class TestRedactUrlCredentials:
+    """``_redact_url_credentials`` strips userinfo AND sensitive query-param values
+    before a URL reaches a log line or durable storage."""
 
     def _redact(self, url: str) -> str:
-        from src.services.protocol_webhook_service import _redact_url_for_logging
+        from src.services.protocol_webhook_service import _redact_url_credentials
 
-        return _redact_url_for_logging(url)
+        return _redact_url_credentials(url)
 
     def test_strips_username_and_password(self):
         redacted = self._redact("https://buyer:s3cr3t@example.com/hook")
@@ -323,9 +324,33 @@ class TestRedactUrlForLogging:
         assert "buyer" not in redacted
         assert redacted == "https://REDACTED@example.com/hook"
 
-    def test_url_without_userinfo_is_returned_unchanged(self):
-        url = "https://example.com/hook?token=abc"
+    def test_url_without_credentials_is_returned_unchanged(self):
+        url = "https://example.com/hook?media_buy_id=mb_123&format=json"
         assert self._redact(url) == url
+
+    def test_sensitive_query_param_value_is_redacted(self):
+        redacted = self._redact("https://example.com/hook?token=abc123&media_buy_id=mb_1")
+        assert "abc123" not in redacted
+        assert "token=REDACTED" in redacted
+        # Non-sensitive params survive untouched, including their position/name.
+        assert "media_buy_id=mb_1" in redacted
+
+    @pytest.mark.parametrize(
+        "param_name", ["token", "access_token", "api_key", "apikey", "secret", "password", "signature", "auth", "key"]
+    )
+    def test_every_denylisted_param_name_is_redacted(self, param_name):
+        redacted = self._redact(f"https://example.com/hook?{param_name}=leaked-value")
+        assert "leaked-value" not in redacted
+
+    def test_denylist_match_is_case_insensitive(self):
+        redacted = self._redact("https://example.com/hook?TOKEN=leaked-value")
+        assert "leaked-value" not in redacted
+
+    def test_userinfo_and_query_credentials_both_redacted_together(self):
+        redacted = self._redact("https://buyer:s3cr3t@example.com/hook?token=also-leaked")
+        assert "buyer" not in redacted
+        assert "s3cr3t" not in redacted
+        assert "also-leaked" not in redacted
 
     def test_malformed_url_falls_back_to_a_safe_placeholder(self):
         """A parse failure must never smuggle the raw (possibly credentialed) string through.
@@ -380,6 +405,7 @@ class TestCredentialsNeverReachTheLog:
             )
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
+        assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
         # The real outbound request must still receive the FULL, unredacted URL --
         # redaction is a log-output concern only, never a functional rewrite. Count
         # and the url arg checked atomically (not a separate call_args read).
@@ -419,5 +445,123 @@ class TestCredentialsNeverReachTheLog:
             )
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
+        assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
         # The real outbound request must still receive the FULL, unredacted URL.
         mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+
+    @pytest.mark.asyncio
+    async def test_retry_send_log_line_omits_a_bare_username(self, caplog):
+        """Username-only URLs (no password) are credential material too -- a fix that only
+        stripped 'user:pass@' and left a bare 'user@' behind would pass every other test here."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        username_only_url = "https://buyer-identity@example.com/hook"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=mock_response) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service._send_with_retry_and_logging(
+                url=username_only_url,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata={
+                    "task_type": "media_buy_delivery",
+                    "tenant_id": "tenant-1",
+                    "principal_id": "principal-1",
+                    "media_buy_id": "media-buy-1",
+                },
+            )
+
+        assert "buyer-identity" not in caplog.text, f"bare username leaked into the log: {caplog.text}"
+        mock_post.assert_called_once_with(username_only_url, headers=ANY, timeout=ANY, json=ANY)
+
+
+class TestDurableDeliveryLogRedactsCredentials:
+    """WebhookDeliveryLog.webhook_url is persisted, not just logged -- durable storage is a
+    stronger exposure than a log line (DB access, backups, replicas). _delivery_log_context
+    is the single builder for that persisted value, so it is the point that must redact.
+    """
+
+    def test_context_webhook_url_omits_userinfo(self):
+        from src.services.protocol_webhook_service import _delivery_log_context
+
+        context = _delivery_log_context(
+            log_id="log-1",
+            url="https://buyer:s3cr3t-password@example.com/hook",
+            task_type="media_buy_delivery",
+            tenant_id="tenant-1",
+            principal_id="principal-1",
+            media_buy_id="media-buy-1",
+            idempotency_key=None,
+            sequence_number=1,
+            notification_type="scheduled",
+            payload_size_bytes=100,
+        )
+        assert context is not None
+        assert "buyer" not in context.webhook_url
+        assert "s3cr3t-password" not in context.webhook_url
+        assert context.webhook_url == "https://REDACTED@example.com/hook"
+
+    def test_context_webhook_url_omits_sensitive_query_param_values(self):
+        from src.services.protocol_webhook_service import _delivery_log_context
+
+        context = _delivery_log_context(
+            log_id="log-1",
+            url="https://example.com/hook?token=leaked-in-db",
+            task_type="media_buy_delivery",
+            tenant_id="tenant-1",
+            principal_id="principal-1",
+            media_buy_id="media-buy-1",
+            idempotency_key=None,
+            sequence_number=1,
+            notification_type="scheduled",
+            payload_size_bytes=100,
+        )
+        assert context is not None
+        assert "leaked-in-db" not in context.webhook_url
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_persisted_webhook_url_is_redacted(self):
+        """Drives the real send path (only the DB write and the HTTP POST are mocked) and
+        inspects the EXACT value that would be persisted to WebhookDeliveryLog.webhook_url --
+        proving the redaction is wired into the real call chain, not just the builder."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        credentialed_url = "https://buyer:s3cr3t-password@example.com/hook?token=also-leaked"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", return_value=mock_response),
+        ):
+            await service._send_with_retry_and_logging(
+                url=credentialed_url,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata={
+                    "task_type": "media_buy_delivery",
+                    "tenant_id": "tenant-1",
+                    "principal_id": "principal-1",
+                    "media_buy_id": "media-buy-1",
+                },
+            )
+
+        assert mock_write_log.call_count >= 1
+        for call in mock_write_log.call_args_list:
+            context = call.kwargs["context"]
+            if context is None:
+                continue
+            assert "buyer" not in context.webhook_url
+            assert "s3cr3t-password" not in context.webhook_url
+            assert "also-leaked" not in context.webhook_url
