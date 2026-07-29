@@ -47,15 +47,22 @@ regardless of whether the written value differs from the old one -- so
 re-writing every row on every downgrade was real, unnecessary churn, not a
 free operation.
 
-The "already safe" check matches the EXACT anchored shape (``^...$`` for
-webhook_url; the literal " delivering webhook to " marker followed by the
-exact shape and nothing else, anchored to end-of-string, for error_message)
--- never a bare substring test. A still-earlier version of this migration
-used `LIKE '%REDACTED%'`, which misclassified any raw, still-credentialed
-value that merely happened to CONTAIN the word REDACTED somewhere in its own
-path or query (e.g. a buyer webhook URL with a path segment that happens to
-read "REDACTED") as already-safe -- skipping it, and leaving its real
-credential unredacted forever, in both the upgraded AND downgraded state.
+The "already safe" check matches the EXACT anchored shape -- ``^...$`` for
+webhook_url; for error_message, both the bounded *reason* prefix AND the URL
+suffix, ALSO anchored at both ends -- never a bare substring test and never
+an anchor at only one end. Two earlier versions of this migration got this
+wrong at different granularities: one used `LIKE '%REDACTED%'`, which
+misclassified any raw, still-credentialed value that merely happened to
+CONTAIN the word REDACTED somewhere in its own path or query as already-safe.
+The next version anchored error_message only at the end (``... delivering
+webhook to <shape>$`` with no leading ``^``), which is not the same
+guarantee: PostgreSQL's ``~`` searches anywhere in the string unless the
+pattern itself starts with ``^``, so a credential-bearing PREFIX before that
+marker -- e.g. "token=still-secret delivering webhook to REDACTED" -- still
+passed. Both mistakes led to the same outcome: the row was skipped, and its
+real credential survived unredacted forever, in both the upgraded and
+downgraded state. Anchoring the full error_message to the three bounded
+*reason* forms production actually emits closes this for good.
 
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
@@ -96,11 +103,31 @@ _KEY_ID = r"[A-Za-z0-9._-]{1,32}"
 _DIGEST = r"[0-9a-f]{32}"
 _REDACT_URL_SHAPE = rf"(?:REDACTED|{_SCHEME}://<redacted>|{_SCHEME}://<redacted:{_KEY_ID}:{_DIGEST}>)"
 
-# webhook_url must be the shape in full; error_message must END with the
-# " delivering webhook to " marker _safe_delivery_error_message() always
-# emits, immediately followed by the shape and nothing else.
+# The *reason* prefix _safe_delivery_error_message() (protocol_webhook_service.py)
+# is called with, at its three call sites -- nothing else is ever passed:
+#   f"HTTP {status_code} error"                  (status_code can be the
+#                                                   literal None: see the
+#                                                   `e.response is not None`
+#                                                   comment at that call site)
+#   type(e).__name__                             (a Python exception class name)
+#   f"Unexpected error ({type(e).__name__})"
+_EXCEPTION_CLASS_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_HTTP_STATUS = r"(?:[0-9]+|None)"
+_REASON_SHAPE = rf"(?:HTTP {_HTTP_STATUS} error|{_EXCEPTION_CLASS_NAME}|Unexpected error \({_EXCEPTION_CLASS_NAME}\))"
+
+# webhook_url must be the shape in full. error_message must be the shape in
+# full TOO: the bounded reason, then " delivering webhook to ", then the URL
+# shape, and NOTHING else before or after -- anchored at BOTH ends (^...$).
+# An earlier version of this migration anchored only the trailing "$", which
+# let error_message = "<anything>" + " delivering webhook to " + <safe URL>
+# through: PostgreSQL's `~` searches anywhere in the string unless the
+# pattern itself starts with `^`, so a credential-bearing prefix before that
+# marker (e.g. "token=still-secret delivering webhook to REDACTED") was
+# wrongly classified as already-safe and would have survived untouched
+# forever. Anchoring the reason too closes that: only the exact three bounded
+# forms production actually emits are recognized, nothing else.
 _URL_SAFE_PATTERN = f"^{_REDACT_URL_SHAPE}$"
-_ERROR_SAFE_PATTERN = rf" delivering webhook to {_REDACT_URL_SHAPE}$"
+_ERROR_SAFE_PATTERN = rf"^{_REASON_SHAPE} delivering webhook to {_REDACT_URL_SHAPE}$"
 
 
 def _redact_all_rows() -> None:

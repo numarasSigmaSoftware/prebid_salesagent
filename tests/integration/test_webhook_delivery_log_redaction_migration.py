@@ -196,6 +196,17 @@ class TestWebhookDeliveryLogRedactionMigration:
                 "delivering webhook to REDACTED but then more text follows REDACTED",
             ),
         }
+        # webhook_url IS a genuinely safe exact value here ('REDACTED') -- the
+        # attack is entirely in error_message's UNANCHORED-prefix credential.
+        # A fix that only anchors the trailing "$" (not a leading "^" too)
+        # lets "<anything> delivering webhook to REDACTED" through, since
+        # PostgreSQL's `~` searches anywhere in the string unless the pattern
+        # itself starts with `^`. Kept separate from collision_cases above:
+        # its correct post-upgrade webhook_url is 'REDACTED' (unchanged, it
+        # was already safe), not the placeholder every other case expects.
+        credential_prefix_id = f"{id_prefix}error-credential-prefix"
+        credential_prefix_error = "token=still-secret delivering webhook to REDACTED"
+
         with engine.connect() as conn:
             for log_id, (url, err) in collision_cases.items():
                 conn.execute(
@@ -207,6 +218,15 @@ class TestWebhookDeliveryLogRedactionMigration:
                     ),
                     {"id": log_id, "url": url, "err": err},
                 )
+            conn.execute(
+                text(
+                    "INSERT INTO webhook_delivery_log "
+                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                    " 'REDACTED', 'delivery_report', 'failed', :err)"
+                ),
+                {"id": credential_prefix_id, "err": credential_prefix_error},
+            )
             conn.commit()
 
         run_alembic_upgrade(db_url, REDACTION_REV)
@@ -220,6 +240,59 @@ class TestWebhookDeliveryLogRedactionMigration:
                 assert error_message == "<redacted-by-migration>", (
                     f"{log_id}: collision error_message {original_err!r} survived redaction"
                 )
+
+        webhook_url, error_message = _fetch_row(engine, credential_prefix_id)
+        assert webhook_url == "REDACTED", "a genuinely-safe webhook_url must not be touched"
+        assert error_message == "<redacted-by-migration>", (
+            f"credential-bearing error_message prefix survived redaction: {credential_prefix_error!r}"
+        )
+
+    def test_upgrade_preserves_all_three_legitimate_reason_formats(self, migration_db_fresh):
+        """_safe_delivery_error_message() (protocol_webhook_service.py) is only
+        ever called with one of three bounded *reason* prefixes -- an
+        "HTTP <status> error" (including the literal "HTTP None error", when
+        e.response is None), a bare exception class name, or
+        "Unexpected error (<class>)". Each must be recognized as already-safe
+        and survive upgrade byte-for-byte: a fix that over-tightens the
+        anchored pattern (e.g. forgetting the "None" status alternative, or
+        misspelling the "Unexpected error (...)" shape) would start
+        needlessly destroying real, legitimate production audit data --
+        exactly the over-broad-redaction defect an earlier round of this
+        migration already fixed once."""
+        engine, db_url = migration_db_fresh
+        id_prefix = "legit-reason-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        _ensure_fk_parents(engine)
+
+        safe_url = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
+        legitimate_cases = {
+            f"{id_prefix}http-status": f"HTTP 404 error delivering webhook to {safe_url}",
+            f"{id_prefix}http-none": f"HTTP None error delivering webhook to {safe_url}",
+            f"{id_prefix}exception-class": f"ConnectionError delivering webhook to {safe_url}",
+            f"{id_prefix}unexpected-error": f"Unexpected error (RuntimeError) delivering webhook to {safe_url}",
+        }
+        with engine.connect() as conn:
+            for log_id, err in legitimate_cases.items():
+                conn.execute(
+                    text(
+                        "INSERT INTO webhook_delivery_log "
+                        "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                        "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                        " :url, 'delivery_report', 'failed', :err)"
+                    ),
+                    {"id": log_id, "url": safe_url, "err": err},
+                )
+            conn.commit()
+
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        for log_id, original_err in legitimate_cases.items():
+            webhook_url, error_message = _fetch_row(engine, log_id)
+            assert webhook_url == safe_url, f"{log_id}: already-safe webhook_url must not be touched"
+            assert error_message == original_err, (
+                f"{log_id}: legitimate reason format wrongly redacted: {original_err!r} -> {error_message!r}"
+            )
 
     def test_downgrade_then_reupgrade_succeeds_and_keeps_placeholders(self, migration_db_fresh):
         """Independently initialized on its OWN fresh database (migration_db_fresh,
@@ -296,6 +369,15 @@ class TestWebhookDeliveryLogRedactionMigration:
         # already audit-safe, not raw legacy data.
         safe_url = "https://<redacted:v1:3c8408c37e13c649e7279960abb2c3b5>"
         safe_error = f"HTTP 404 error delivering webhook to {safe_url}"
+
+        # ALSO seeded after upgrade(): webhook_url is genuinely safe
+        # ('REDACTED'), but error_message has a credential-bearing PREFIX
+        # before the safe-looking " delivering webhook to REDACTED" tail. An
+        # end-anchored-only error predicate (missing a leading `^`) would
+        # classify this as already-safe and skip it on downgrade too, since
+        # PostgreSQL's `~` searches anywhere in the string by default.
+        credential_prefix_error = "token=still-secret delivering webhook to REDACTED"
+
         with engine.connect() as conn:
             conn.execute(
                 text(
@@ -305,6 +387,15 @@ class TestWebhookDeliveryLogRedactionMigration:
                     " :url, 'delivery_report', 'failed', :err)"
                 ),
                 {"id": f"{id_prefix}already-safe", "url": safe_url, "err": safe_error},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO webhook_delivery_log "
+                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                    "VALUES (:id, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                    " 'REDACTED', 'delivery_report', 'failed', :err)"
+                ),
+                {"id": f"{id_prefix}error-credential-prefix", "err": credential_prefix_error},
             )
             conn.commit()
 
@@ -319,3 +410,12 @@ class TestWebhookDeliveryLogRedactionMigration:
         webhook_url, error_message = _fetch_row(engine, f"{id_prefix}already-safe")
         assert webhook_url == safe_url, "downgrade must not destroy an already-safe keyed digest"
         assert error_message == safe_error, "downgrade must not destroy an already-safe failure classification"
+
+        # The credential-bearing error_message prefix must be caught on
+        # downgrade too, even though its own webhook_url ('REDACTED') is
+        # genuinely safe and must be left alone.
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}error-credential-prefix")
+        assert webhook_url == "REDACTED", "a genuinely-safe webhook_url must not be touched"
+        assert error_message == "<redacted-by-migration>", (
+            f"credential-bearing error_message prefix survived downgrade: {credential_prefix_error!r}"
+        )
