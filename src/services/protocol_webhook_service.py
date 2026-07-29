@@ -13,6 +13,7 @@ Application-level webhooks are configured via:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -20,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import requests
@@ -182,41 +183,34 @@ def _normalize_localhost_for_docker(url: str) -> str:
 
 
 def _redact_url_credentials(url: str) -> str:
-    """Return *url* with embedded credentials removed, for log output AND durable storage.
+    """Return a non-reversible audit form of *url*, for log output AND durable storage.
 
-    Two carriers are redacted:
-    - userinfo (``https://user:pass@host/hook``) — replaced with a single ``REDACTED@`` marker;
-    - EVERY query-parameter VALUE — replaced with ``REDACTED``, parameter NAMES are kept so
-      the redacted form still shows the URL's shape for debugging.
+    Keeps only ``scheme://host[:port]/<redacted:hash>`` — every component past the
+    host (path, query names AND values, fragment) is buyer-supplied and unconstrained,
+    so ANY of them can carry an opaque credential under some webhook provider's own
+    convention: a bearer token as a path segment, a secret spelled as a blank-valued
+    query NAME rather than a value, a token in the fragment. Two earlier versions of
+    this function redacted userinfo only, then userinfo plus query VALUES — both were
+    the same incomplete-enumeration mistake at different granularities (a list of
+    known carriers can never cover an open set of provider conventions). Keeping only
+    the host identifies WHERE a delivery was attempted without reconstructing
+    anything sent to it.
 
-    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields place no constraint on
-    query-string content, so a buyer-supplied URL can carry a credential as a query value
-    under any name a given provider chooses (``client_secret``, ``sig``, ``X-Amz-Signature``,
-    ...). An allow/deny-list of known names is inherently incomplete against that open set, so
-    every value is treated as sensitive rather than guessing which names are safe — this URL
-    is a webhook endpoint the buyer configured, not an AdCP request the seller needs the exact
-    query values of; the parameter names alone are enough for debugging.
+    The hash (first 12 hex chars of a SHA-256 of the full original URL) lets two log
+    lines or DB rows be recognized as the same target without exposing it — pure
+    correlation, not reversible.
 
     Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
     (pure audit data — never read back to dial a real request). Never use this on the URL
-    passed to ``requests`` for the actual outbound call.
+    passed to ``requests`` for the actual outbound call — that one needs the untouched original.
     """
     try:
         parsed = urlparse(url)
-        netloc = parsed.netloc
-        has_userinfo = bool(parsed.username or parsed.password)
-        if has_userinfo:
-            port = f":{parsed.port}" if parsed.port else ""
-            netloc = f"REDACTED@{parsed.hostname}{port}"
-
-        query = parsed.query
-        if query:
-            pairs = parse_qsl(query, keep_blank_values=True)
-            query = urlencode([(name, "REDACTED") for name, _value in pairs])
-
-        if not has_userinfo and not query:
-            return url
-        return urlunparse(parsed._replace(netloc=netloc, query=query))
+        if not parsed.hostname:
+            return "REDACTED"
+        port = f":{parsed.port}" if parsed.port else ""
+        digest = hashlib.sha256(url.encode()).hexdigest()[:12]
+        return f"{parsed.scheme}://{parsed.hostname}{port}/<redacted:{digest}>"
     except Exception:
         return "REDACTED"
 

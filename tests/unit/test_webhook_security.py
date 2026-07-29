@@ -299,14 +299,17 @@ class TestWebhookAuthenticator:
 
 
 class TestRedactUrlCredentials:
-    """``_redact_url_credentials`` strips userinfo AND every query-parameter VALUE
-    (names kept) before a URL reaches a log line or durable storage.
+    """``_redact_url_credentials`` keeps only scheme://host[:port]/<redacted:hash> --
+    a non-reversible audit form -- before a URL reaches a log line or durable storage.
 
-    Query values are redacted UNCONDITIONALLY rather than against a denylist of
-    known credential-parameter names: an allow/deny-list is inherently incomplete
-    against an open set of provider conventions (``client_secret``, ``sig``,
-    ``X-Amz-Signature``, ...), and this URL is a buyer-configured webhook
-    endpoint, not an AdCP request whose exact query values the seller needs.
+    Two earlier versions of this function redacted a specific carrier (userinfo, then
+    userinfo + query VALUES) and left everything else untouched. Both were the same
+    incomplete-enumeration mistake at different granularities: a webhook provider can
+    put a credential in a PATH segment, in a query-parameter NAME (not just its value —
+    a blank-valued ``?some-secret-token=``), or in the fragment, and no fixed list of
+    "carriers" covers every provider's own convention. So nothing past the host
+    survives; a stable hash of the full original URL lets two log lines be recognized
+    as the same target without exposing it.
     """
 
     def _redact(self, url: str) -> str:
@@ -314,64 +317,56 @@ class TestRedactUrlCredentials:
 
         return _redact_url_credentials(url)
 
-    def test_strips_username_and_password(self):
+    def test_scheme_host_and_port_survive(self):
+        redacted = self._redact("https://example.com:8443/hook")
+        assert redacted.startswith("https://example.com:8443/<redacted:")
+
+    def test_userinfo_does_not_survive(self):
         redacted = self._redact("https://buyer:s3cr3t@example.com/hook")
         assert "buyer" not in redacted
         assert "s3cr3t" not in redacted
-        assert redacted == "https://REDACTED@example.com/hook"
 
-    def test_preserves_port_alongside_redaction(self):
-        redacted = self._redact("https://buyer:s3cr3t@example.com:8443/hook")
-        assert "s3cr3t" not in redacted
-        assert redacted == "https://REDACTED@example.com:8443/hook"
+    def test_path_segment_credential_does_not_survive(self):
+        """A webhook provider that puts an opaque bearer-style token directly in the
+        path (no query string at all) is a real, common convention."""
+        redacted = self._redact("https://example.com/hooks/xK9mP2vQ7z-path-secret-token")
+        assert "path-secret-token" not in redacted
+        assert "xK9mP2vQ7z" not in redacted
 
-    def test_username_only_is_also_redacted(self):
-        """Even a bare username (no password) is credential material worth hiding."""
-        redacted = self._redact("https://buyer@example.com/hook")
-        assert "buyer" not in redacted
-        assert redacted == "https://REDACTED@example.com/hook"
+    def test_query_parameter_name_credential_does_not_survive(self):
+        """The credential can be the parameter NAME itself with a blank value
+        (?client-secret-abc123=) -- a prior version of this function kept every
+        parameter name verbatim, which would have leaked exactly this."""
+        redacted = self._redact("https://example.com/hook?client-secret-abc123=")
+        assert "client-secret-abc123" not in redacted
 
-    def test_url_with_no_query_string_at_all_is_returned_unchanged(self):
-        url = "https://example.com/hook"
-        assert self._redact(url) == url
-
-    def test_every_query_param_value_is_redacted_regardless_of_name(self):
-        """Non-credential-sounding names are redacted too -- there is no allowlist
-        of 'safe' names, since the seller has no way to distinguish a buyer's
-        opaque webhook-routing token from a genuinely harmless value."""
-        redacted = self._redact("https://example.com/hook?media_buy_id=mb_1&format=json")
-        assert "mb_1" not in redacted
-        assert "json" not in redacted
-        assert redacted == "https://example.com/hook?media_buy_id=REDACTED&format=REDACTED"
-
-    @pytest.mark.parametrize(
-        "param_name",
-        [
-            "token",
-            "client_secret",
-            "auth_token",
-            "sig",
-            "X-Amz-Credential",
-            "X-Amz-Signature",
-            "some_provider_specific_credential_name",
-        ],
-    )
-    def test_arbitrary_provider_specific_param_names_are_redacted(self, param_name):
-        """The exact names a review found missing from the old denylist -- and an
-        invented one, proving this isn't just a longer denylist in disguise."""
-        redacted = self._redact(f"https://example.com/hook?{param_name}=leaked-value")
+    def test_query_parameter_value_credential_does_not_survive(self):
+        redacted = self._redact("https://example.com/hook?token=leaked-value")
         assert "leaked-value" not in redacted
-        assert param_name in redacted, "the parameter NAME must survive for debugging shape"
+        assert "token" not in redacted
 
-    def test_parameter_names_survive_only_values_are_redacted(self):
-        redacted = self._redact("https://example.com/hook?media_buy_id=mb_1")
-        assert "media_buy_id=REDACTED" in redacted
+    def test_fragment_credential_does_not_survive(self):
+        redacted = self._redact("https://example.com/hook#fragment-secret-token")
+        assert "fragment-secret-token" not in redacted
 
-    def test_userinfo_and_query_credentials_both_redacted_together(self):
-        redacted = self._redact("https://buyer:s3cr3t@example.com/hook?token=also-leaked")
-        assert "buyer" not in redacted
-        assert "s3cr3t" not in redacted
-        assert "also-leaked" not in redacted
+    def test_every_carrier_together_does_not_survive(self):
+        redacted = self._redact(
+            "https://buyer:s3cr3t@example.com/hooks/path-secret?client_secret=q&blank-name-secret=#frag-secret"
+        )
+        for leaked in ("buyer", "s3cr3t", "path-secret", "client_secret", "blank-name-secret", "frag-secret"):
+            assert leaked not in redacted, f"{leaked!r} leaked into: {redacted}"
+
+    def test_redaction_is_deterministic_for_the_same_url(self):
+        """Same input -> same output, so two log lines / DB rows referencing the
+        same webhook target can be recognized as the same target."""
+        url = "https://example.com/hook?token=abc"
+        assert self._redact(url) == self._redact(url)
+
+    def test_different_urls_produce_different_redacted_forms(self):
+        """The hash must actually depend on the full URL, not just the host --
+        otherwise two DIFFERENT buyer endpoints on the same host would be
+        indistinguishable in the audit trail."""
+        assert self._redact("https://example.com/hook-a") != self._redact("https://example.com/hook-b")
 
     def test_malformed_url_falls_back_to_a_safe_placeholder(self):
         """A parse failure must never smuggle the raw (possibly credentialed) string through.
@@ -600,7 +595,7 @@ class TestDurableDeliveryLogRedactsCredentials:
         assert context is not None
         assert "buyer" not in context.webhook_url
         assert "s3cr3t-password" not in context.webhook_url
-        assert context.webhook_url == "https://REDACTED@example.com/hook"
+        assert context.webhook_url.startswith("https://example.com/<redacted:")
 
     def test_context_webhook_url_omits_sensitive_query_param_values(self):
         from src.services.protocol_webhook_service import _delivery_log_context
@@ -619,6 +614,26 @@ class TestDurableDeliveryLogRedactsCredentials:
         )
         assert context is not None
         assert "leaked-in-db" not in context.webhook_url
+
+    def test_context_webhook_url_omits_a_path_segment_credential(self):
+        """The durable-storage counterpart of TestRedactUrlCredentials's path-segment
+        case -- a provider that puts an opaque token directly in the path."""
+        from src.services.protocol_webhook_service import _delivery_log_context
+
+        context = _delivery_log_context(
+            log_id="log-1",
+            url="https://example.com/hooks/path-secret-token-in-db",
+            task_type="media_buy_delivery",
+            tenant_id="tenant-1",
+            principal_id="principal-1",
+            media_buy_id="media-buy-1",
+            idempotency_key=None,
+            sequence_number=1,
+            notification_type="scheduled",
+            payload_size_bytes=100,
+        )
+        assert context is not None
+        assert "path-secret-token-in-db" not in context.webhook_url
 
     def test_write_delivery_log_forwards_the_redacted_url_to_the_repository(self):
         """Exercises _write_delivery_log FOR REAL (only get_db_session and DeliveryRepository
