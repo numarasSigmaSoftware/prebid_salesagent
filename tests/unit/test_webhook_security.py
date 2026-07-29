@@ -5,7 +5,7 @@ import hmac
 import json
 import logging
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from adcp.types import TaskType
@@ -381,9 +381,9 @@ class TestCredentialsNeverReachTheLog:
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         # The real outbound request must still receive the FULL, unredacted URL --
-        # redaction is a log-output concern only, never a functional rewrite.
-        mock_post.assert_called_once()
-        assert mock_post.call_args.args[0] == credentialed_url
+        # redaction is a log-output concern only, never a functional rewrite. Count
+        # and the url arg checked atomically (not a separate call_args read).
+        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, json=ANY)
 
     @pytest.mark.asyncio
     async def test_sanitized_config_log_line_omits_url_credentials(self, caplog):
@@ -420,5 +420,4 @@ class TestCredentialsNeverReachTheLog:
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         # The real outbound request must still receive the FULL, unredacted URL.
-        mock_post.assert_called_once()
-        assert mock_post.call_args.args[0] == credentialed_url
+        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, json=ANY)
