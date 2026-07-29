@@ -20,15 +20,22 @@ and simpler -- we cannot recover any operationally useful information from
 these rows regardless, so there is nothing lost by not attempting a "real"
 digest.
 
-downgrade() is a structural no-op, not a raise: this migration makes no schema
-changes to revert, and CI's mandatory Migration Roundtrip job
-(scripts/ci/migration_roundtrip.py) runs upgrade(head) -> downgrade(one step
-back) -> upgrade(head) on every PR, so downgrade() failing here would break
-that job on every future PR, not just this one. The placeholder values it
-wrote on upgrade are intentionally left in place on downgrade -- the original
-credential-bearing data was never archived and genuinely cannot be restored,
-but "cannot restore the data" and "must not let the job fail" are different
-concerns; only the schema-reversibility question belongs in downgrade().
+downgrade() does not raise: this migration makes no schema changes to revert,
+and CI's mandatory Migration Roundtrip job (scripts/ci/migration_roundtrip.py)
+runs upgrade(head) -> downgrade(one step back) -> upgrade(head) on every PR,
+so downgrade() failing here would break that job on every future PR, not just
+this one.
+
+downgrade() also does not merely no-op: it re-runs the SAME unconditional
+redaction sweep as upgrade(). This is deliberate, not decorative -- a
+print-only downgrade would leave a gap: a row inserted (e.g. via raw SQL,
+bypassing the application entirely) after upgrade() ran but before an operator
+downgrades would sail through unredacted, since nothing else would ever touch
+it. Both revision states -- "at 168914d7ca05" and "at its parent" -- want the
+SAME data invariant (no credentials in these two columns); the only thing that
+differs across this boundary is bookkeeping, not the desired shape of the
+data. Re-sweeping on downgrade is safe regardless of how many times it runs:
+redacting an already-redacted row is a no-op assignment.
 
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
@@ -51,10 +58,16 @@ depends_on: str | Sequence[str] | None = None
 _REDACTED_PLACEHOLDER = "<redacted-by-migration>"
 
 
-def upgrade() -> None:
+def _redact_all_rows() -> None:
     """Overwrite every existing webhook_url and non-null error_message with a
     constant, non-correlating placeholder -- credentials in these columns
-    predate the redaction fix and cannot be recovered or safely re-derived."""
+    predate the redaction fix and cannot be recovered or safely re-derived.
+
+    Shared by upgrade() and downgrade(): both revision states want the SAME
+    data invariant held, so both sweep the table the same way. Safe to run
+    any number of times -- redacting an already-redacted row is a no-op
+    assignment.
+    """
     connection = op.get_bind()
     connection.execute(
         text(
@@ -68,13 +81,23 @@ def upgrade() -> None:
     )
 
 
-def downgrade() -> None:
-    """No schema to revert -- the redacted placeholder values stay in place.
+def upgrade() -> None:
+    """Redact every row present at upgrade time."""
+    _redact_all_rows()
 
-    The original webhook_url/error_message content they replaced contained
-    buyer credentials, was never archived anywhere, and cannot be restored.
-    Downgrading past this revision does not un-redact anything; it only moves
-    the alembic_version bookkeeping backward, matching what CI's mandatory
-    upgrade -> downgrade -> upgrade roundtrip expects to be able to do.
+
+def downgrade() -> None:
+    """No schema to revert, but re-sweep anyway rather than no-op.
+
+    The original webhook_url/error_message content upgrade() replaced
+    contained buyer credentials, was never archived anywhere, and cannot be
+    restored -- downgrading past this revision does not (and cannot) un-redact
+    anything. But a pure no-op here would leave a real gap: a row inserted
+    (e.g. via raw SQL, bypassing the application) after upgrade() ran but
+    before an operator downgrades would sail through unredacted, since
+    nothing else would ever touch it. Re-running the same sweep closes that
+    gap and still satisfies CI's mandatory upgrade -> downgrade -> upgrade
+    roundtrip (scripts/ci/migration_roundtrip.py), which requires this
+    function not to raise.
     """
-    print("168914d7ca05 downgrade: no schema change to revert; redacted placeholder values remain in place.")
+    _redact_all_rows()

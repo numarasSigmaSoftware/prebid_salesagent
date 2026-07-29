@@ -184,3 +184,30 @@ class TestWebhookDeliveryLogRedactionMigration:
         webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
         assert webhook_url == "<redacted-by-migration>"
         assert error_message == "<redacted-by-migration>"
+
+    def test_downgrade_also_redacts_rows_inserted_after_upgrade(self, migration_db_fresh):
+        """A pure no-op downgrade would leave a real gap: a row inserted (e.g.
+        via raw SQL, bypassing the application) AFTER upgrade() already ran but
+        BEFORE an operator downgrades would sail through unredacted, since
+        nothing else would ever touch it. downgrade() re-runs the same
+        unconditional sweep as upgrade() specifically to close this window --
+        this test seeds a row only after upgrade() has already completed, so
+        it could only be redacted by downgrade() itself re-sweeping."""
+        engine, db_url = migration_db_fresh
+        id_prefix = "post-upgrade-"
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        # Seeded AFTER upgrade() already ran and redacted whatever existed at
+        # that point -- this row was never touched by upgrade().
+        _seed_legacy_rows(engine, id_prefix)
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
+        assert webhook_url == LEGACY_CREDENTIALED_URL, "sanity check: row must start out unredacted"
+        assert error_message == LEGACY_ERROR_MESSAGE
+
+        run_alembic_downgrade(db_url, PRE_REDACTION_REV)
+
+        webhook_url, error_message = _fetch_row(engine, f"{id_prefix}with-error")
+        assert webhook_url == "<redacted-by-migration>", "downgrade must redact rows inserted after upgrade too"
+        assert error_message == "<redacted-by-migration>"
