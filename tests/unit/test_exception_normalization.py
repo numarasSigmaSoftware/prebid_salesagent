@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from src.core.exceptions import (
     VALIDATION_ERROR_SUGGESTION,
+    AdCPInvalidRequestError,
     AdCPValidationError,
     build_two_layer_error_envelope,
     normalize_to_adcp_error,
@@ -275,3 +276,101 @@ def test_deliberate_typed_validation_message_requires_explicit_wire_safe_opt_in(
 
     assert envelope["errors"][0]["message"] == "At least one field must be provided for update."
     assert envelope["errors"][0]["suggestion"] == "Provide a field to update and resend."
+
+
+# A URL/token-shaped string standing in for "the buyer's own submitted value" in the two
+# tests below — deliberately distinct from SECRET_BEARING_MESSAGE's tokens so a test can
+# assert this value IS echoed (expected) while still asserting NO _SECRET_TOKENS leak
+# alongside it (media_buy_create.py's raise sites never interpolate anything else).
+_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE = "https://example.com/callback?token=buyer-rotated-secret-789"
+
+
+def test_duplicate_product_id_echoes_the_buyers_own_value_after_audited_opt_in():
+    """Mirrors media_buy_create.py's duplicate-product_id raise site exactly.
+
+    Proves the AdCP spec's sanctioned buyer-value echo (dist/schemas/3.1.1/core/error.json
+    ``details.rejected_value``: "the offending value the buyer supplied, echoed for
+    buyer-side diagnostic clarity") survives to the wire for a credential-/URL-shaped
+    value, while confirming this exact template has no path for a genuine system secret
+    to leak alongside it — the template only ever interpolates the buyer's own submitted
+    product_ids, nothing adapter- or system-sourced.
+    """
+    duplicate_products = [_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE]
+    error_msg = (
+        f"Duplicate product_id(s) found in packages: {', '.join(duplicate_products)}. "
+        "Each product can only be used once per media buy."
+    )
+    error = AdCPValidationError(
+        error_msg,
+        suggestion="Each package must reference a distinct product_id; remove the duplicate package or change its product_id.",
+        _wire_safe_message=True,
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert _BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE in envelope["errors"][0]["message"]
+    assert_no_secret_leak(envelope)
+
+
+def test_duplicate_product_id_without_wire_safe_opt_in_is_scrubbed():
+    """Same buyer value, opt-in removed — proves the flag is load-bearing, not decorative."""
+    error_msg = (
+        f"Duplicate product_id(s) found in packages: {_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE}. "
+        "Each product can only be used once per media buy."
+    )
+    error = AdCPValidationError(
+        error_msg,
+        suggestion="Each package must reference a distinct product_id; remove the duplicate package or change its product_id.",
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert _BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE not in envelope["errors"][0]["message"]
+
+
+def test_targeting_overlay_echoes_the_buyers_own_unknown_field_after_audited_opt_in():
+    """Mirrors media_buy_create.py's targeting-overlay raise site exactly.
+
+    ``validate_unknown_targeting_fields`` (the real production validator) reports
+    ``model_extra`` keys — a duck-typed stub stands in for ``Targeting`` here because
+    this environment's ``extra='forbid'`` config (CLAUDE.md's Schema Validation
+    pattern) rejects an unknown field at construction time, before model_extra could
+    ever be populated for a direct Targeting() construction; the validator itself
+    accepts ``Any`` and only reads ``.model_extra``, so the stub exercises the same
+    code the raise site calls.
+    """
+    from types import SimpleNamespace
+
+    from src.services.targeting_capabilities import validate_unknown_targeting_fields
+
+    stub = SimpleNamespace(model_extra={_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE: "irrelevant"})
+    violations = validate_unknown_targeting_fields(stub)
+    assert violations == [f"{_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE} is not a recognized targeting field"]
+
+    error_msg = f"Targeting validation failed: {'; '.join(violations)}"
+    error = AdCPInvalidRequestError(
+        error_msg,
+        suggestion="Check targeting constraints.",
+        field="targeting_overlay",
+        _wire_safe_message=True,
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert _BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE in envelope["errors"][0]["message"]
+    assert_no_secret_leak(envelope)
+
+
+def test_targeting_overlay_without_wire_safe_opt_in_is_scrubbed():
+    """Same buyer value, opt-in removed — proves the flag is load-bearing, not decorative."""
+    violations = [f"{_BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE} is not a recognized targeting field"]
+    error_msg = f"Targeting validation failed: {'; '.join(violations)}"
+    error = AdCPInvalidRequestError(
+        error_msg,
+        suggestion="Check targeting constraints.",
+        field="targeting_overlay",
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    assert _BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE not in envelope["errors"][0]["message"]

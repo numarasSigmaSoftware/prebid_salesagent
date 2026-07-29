@@ -2537,8 +2537,11 @@ async def _create_media_buy_impl(
                 raise AdCPValidationError(
                     error_msg,
                     suggestion="Each package must reference a distinct product_id; remove the duplicate package or change its product_id.",
-                    # Interpolates only product_ids the buyer submitted in this same request — no
-                    # secret or internal detail crosses the boundary.
+                    # Deliberate deviation: echoes product_ids the buyer submitted in this same
+                    # request, not a static string. Sanctioned by adcp/dist/schemas/3.1.1/core/
+                    # error.json's details.rejected_value convention (echoing the buyer's own
+                    # rejected value back "for buyer-side diagnostic clarity") — see the fuller
+                    # citation in safe_adcp_error's AdCPValidationError branch.
                     _wire_safe_message=True,
                 )
 
@@ -2891,9 +2894,12 @@ async def _create_media_buy_impl(
                             error_msg,
                             suggestion="Check targeting constraints.",
                             field="targeting_overlay",
-                            # All three violation sources interpolate only static text, the
-                            # buyer's own submitted field names/values, or fixed known dimension
-                            # names — never a secret or internal detail.
+                            # Deliberate deviation: all three violation sources interpolate only
+                            # static text, fixed known dimension names, or the buyer's own
+                            # submitted field names/values from this same request — never a
+                            # secret or internal detail. Sanctioned by adcp/dist/schemas/3.1.1/
+                            # core/error.json's details.rejected_value convention; see the fuller
+                            # citation in safe_adcp_error's AdCPValidationError branch.
                             _wire_safe_message=True,
                         )
 

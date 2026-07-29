@@ -1638,8 +1638,17 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         return normalized
     if isinstance(exc, AdCPValidationError) and not exc._wire_safe_message:
         # Typed validation text is untrusted by default because business
-        # validators frequently interpolate rejected request values. Only
-        # audited static messages opt in with ``_wire_safe_message=True``.
+        # validators frequently interpolate exception/adapter internals a raise
+        # site never audited. ``_wire_safe_message=True`` opts in a message that
+        # is either static, OR built entirely from values traceable to THIS
+        # buyer's current request (never adapter/system internals or another
+        # principal's data) — the AdCP spec's own canonical error shape
+        # (adcp/dist/schemas/3.1.1/core/error.json, ``details.rejected_value``:
+        # "the offending value the buyer supplied, echoed for buyer-side
+        # diagnostic clarity") sanctions echoing exactly this back to the buyer
+        # who submitted it; error-handling.mdx's only MUST-be-generic cases are
+        # cross-tenant resource enumeration and seller-internal secrets, neither
+        # of which this covers.
         safe_message, safe_suggestion = _sanitized_text_for(wire_code, normalized.recovery)
         return type(exc)(
             safe_message,
