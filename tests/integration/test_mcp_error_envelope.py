@@ -214,8 +214,17 @@ class TestMcpWireErrorEnvelope:
         Removing the opt-in at that raise site would redden this test (the message would
         fall back to the generic VALIDATION_ERROR scrub text and no longer contain
         "Duplicate" or the product_id) — mutation-verified during this fix's development.
+
+        Uses a credential-/URL-shaped product_id (duplicate-detection runs before any
+        catalog lookup — media_buy_create.py's duplicate check at ~2528 precedes the
+        AdCPProductNotFoundError check at ~2572, so this value never needs to resolve to a
+        real product) rather than the plain ``_PRODUCT_ID`` fixture value, so
+        ``assert_no_secret_leak`` below is a genuine check on THIS real wire response, not
+        a trivially-true one — the plain fixture value could never contain a leaked
+        fragment regardless of whether production is correct.
         """
         identity = mcp_real_tenant_setup
+        credential_shaped_product_id = "https://example.com/callback?token=buyer-rotated-secret-789"
 
         is_error, envelope = call_mcp_tool_capturing_envelope(
             "create_media_buy",
@@ -224,10 +233,10 @@ class TestMcpWireErrorEnvelope:
                 "idempotency_key": f"int-key-{uuid.uuid4().hex}",
                 "packages": [
                     create_test_package_request_dict(
-                        product_id=_PRODUCT_ID, pricing_option_id="cpm_usd_fixed", budget=5000.0
+                        product_id=credential_shaped_product_id, pricing_option_id="cpm_usd_fixed", budget=5000.0
                     ),
                     create_test_package_request_dict(
-                        product_id=_PRODUCT_ID, pricing_option_id="cpm_usd_fixed", budget=5000.0
+                        product_id=credential_shaped_product_id, pricing_option_id="cpm_usd_fixed", budget=5000.0
                     ),
                 ],
                 "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
@@ -241,7 +250,11 @@ class TestMcpWireErrorEnvelope:
         assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
         for error in (envelope["adcp_error"], envelope["errors"][0]):
             assert "Duplicate" in error["message"]
-            assert _PRODUCT_ID in error["message"]
+            assert credential_shaped_product_id in error["message"]
+
+        from tests.helpers.secret_scrub import assert_no_secret_leak
+
+        assert_no_secret_leak(envelope)
 
     def test_managed_only_targeting_dimension_emits_envelope_on_wire(self, mcp_real_tenant_setup):
         """Production's _wire_safe_message=True opt-in (media_buy_create.py ~2893) actually
@@ -279,6 +292,10 @@ class TestMcpWireErrorEnvelope:
         assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
         for error in (envelope["adcp_error"], envelope["errors"][0]):
             assert "managed" in error["message"].lower()
+
+        from tests.helpers.secret_scrub import assert_no_secret_leak
+
+        assert_no_secret_leak(envelope)
 
     def test_typed_validation_failure_from_impl_emits_scrubbed_envelope_on_wire(
         self, mcp_real_tenant_setup, monkeypatch
