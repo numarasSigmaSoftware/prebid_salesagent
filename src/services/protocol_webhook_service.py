@@ -181,38 +181,21 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
-# Best-effort, not exhaustive: common conventions for a credential carried as a
-# query-string value rather than URL userinfo. Matched case-insensitively against
-# the parameter NAME; the VALUE is what gets replaced.
-_SENSITIVE_QUERY_PARAM_NAMES = frozenset(
-    {
-        "token",
-        "access_token",
-        "api_key",
-        "apikey",
-        "secret",
-        "password",
-        "signature",
-        "auth",
-        "authorization",
-        "key",
-    }
-)
-
-
 def _redact_url_credentials(url: str) -> str:
     """Return *url* with embedded credentials removed, for log output AND durable storage.
 
     Two carriers are redacted:
     - userinfo (``https://user:pass@host/hook``) — replaced with a single ``REDACTED@`` marker;
-    - sensitive query-parameter VALUES (name matched against
-      ``_SENSITIVE_QUERY_PARAM_NAMES``, case-insensitive) — replaced with ``REDACTED``,
-      the parameter name and every other query parameter are left intact.
+    - EVERY query-parameter VALUE — replaced with ``REDACTED``, parameter NAMES are kept so
+      the redacted form still shows the URL's shape for debugging.
 
-    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields accept both forms and
-    place no constraint on query-string content, so a buyer-supplied URL can carry a bearer
-    token as a query parameter instead of userinfo. The query-parameter denylist is
-    necessarily best-effort — it cannot be exhaustive — but covers the common conventions.
+    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields place no constraint on
+    query-string content, so a buyer-supplied URL can carry a credential as a query value
+    under any name a given provider chooses (``client_secret``, ``sig``, ``X-Amz-Signature``,
+    ...). An allow/deny-list of known names is inherently incomplete against that open set, so
+    every value is treated as sensitive rather than guessing which names are safe — this URL
+    is a webhook endpoint the buyer configured, not an AdCP request the seller needs the exact
+    query values of; the parameter names alone are enough for debugging.
 
     Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
     (pure audit data — never read back to dial a real request). Never use this on the URL
@@ -229,15 +212,9 @@ def _redact_url_credentials(url: str) -> str:
         query = parsed.query
         if query:
             pairs = parse_qsl(query, keep_blank_values=True)
-            if any(name.lower() in _SENSITIVE_QUERY_PARAM_NAMES for name, _ in pairs):
-                query = urlencode(
-                    [
-                        (name, "REDACTED" if name.lower() in _SENSITIVE_QUERY_PARAM_NAMES else value)
-                        for name, value in pairs
-                    ]
-                )
+            query = urlencode([(name, "REDACTED") for name, _value in pairs])
 
-        if not has_userinfo and query == parsed.query:
+        if not has_userinfo and not query:
             return url
         return urlunparse(parsed._replace(netloc=netloc, query=query))
     except Exception:
