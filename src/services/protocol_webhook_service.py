@@ -14,6 +14,7 @@ Application-level webhooks are configured via:
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -31,6 +32,7 @@ from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
 from src.core.audit_logger import get_audit_logger
+from src.core.config import get_config
 from src.core.database.database_session import get_db_session
 from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
@@ -182,23 +184,26 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
+_AUDIT_REDACTION_CONTEXT = b"protocol_webhook_service._redact_url_credentials.v3"
+
+
 def _redact_url_credentials(url: str) -> str:
     """Return a non-reversible audit form of *url*, for log output AND durable storage.
 
-    Keeps only ``scheme://host[:port]/<redacted:hash>`` — every component past the
-    host (path, query names AND values, fragment) is buyer-supplied and unconstrained,
-    so ANY of them can carry an opaque credential under some webhook provider's own
-    convention: a bearer token as a path segment, a secret spelled as a blank-valued
-    query NAME rather than a value, a token in the fragment. Two earlier versions of
-    this function redacted userinfo only, then userinfo plus query VALUES — both were
-    the same incomplete-enumeration mistake at different granularities (a list of
-    known carriers can never cover an open set of provider conventions). Keeping only
-    the host identifies WHERE a delivery was attempted without reconstructing
-    anything sent to it.
+    Keeps only ``scheme://<redacted:hmac>`` — nothing about the buyer-supplied host,
+    port, path, query, or fragment survives. Two earlier versions of this function
+    kept the hostname on the theory that a hostname can't carry a credential; that
+    assumption is wrong for capability-style delivery URLs, where the credential IS
+    the (sub)domain (e.g. ``https://tok-9fK2z8mQ.hooks.example.com/deliver``) — a
+    private/unique or otherwise unclassifiable subdomain is exactly as unconstrained
+    as the path or query, so it gets the same treatment.
 
-    The hash (first 12 hex chars of a SHA-256 of the full original URL) lets two log
-    lines or DB rows be recognized as the same target without exposing it — pure
-    correlation, not reversible.
+    The digest is a server-keyed HMAC-SHA256 (never a bare hash) truncated to 128
+    bits, so two log lines or DB rows can be recognized as the same target without
+    exposing it — but unlike an unkeyed digest, it can't be matched offline against
+    a dictionary of guessed URLs (low-entropy webhook URLs are a real threat model
+    an unkeyed hash doesn't defend against). The key is the server's own secret, so
+    correlation requires that secret, not just candidate URLs.
 
     Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
     (pure audit data — never read back to dial a real request). Never use this on the URL
@@ -208,9 +213,9 @@ def _redact_url_credentials(url: str) -> str:
         parsed = urlparse(url)
         if not parsed.hostname:
             return "REDACTED"
-        port = f":{parsed.port}" if parsed.port else ""
-        digest = hashlib.sha256(url.encode()).hexdigest()[:12]
-        return f"{parsed.scheme}://{parsed.hostname}{port}/<redacted:{digest}>"
+        key = get_config().flask_secret_key.encode()
+        digest = hmac.new(key, _AUDIT_REDACTION_CONTEXT + b":" + url.encode(), hashlib.sha256).hexdigest()[:32]
+        return f"{parsed.scheme}://<redacted:{digest}>"
     except Exception:
         return "REDACTED"
 

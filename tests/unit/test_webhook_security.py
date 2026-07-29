@@ -299,17 +299,21 @@ class TestWebhookAuthenticator:
 
 
 class TestRedactUrlCredentials:
-    """``_redact_url_credentials`` keeps only scheme://host[:port]/<redacted:hash> --
-    a non-reversible audit form -- before a URL reaches a log line or durable storage.
+    """``_redact_url_credentials`` keeps only ``scheme://<redacted:hmac>`` -- a
+    non-reversible audit form -- before a URL reaches a log line or durable storage.
 
     Two earlier versions of this function redacted a specific carrier (userinfo, then
-    userinfo + query VALUES) and left everything else untouched. Both were the same
-    incomplete-enumeration mistake at different granularities: a webhook provider can
-    put a credential in a PATH segment, in a query-parameter NAME (not just its value —
-    a blank-valued ``?some-secret-token=``), or in the fragment, and no fixed list of
-    "carriers" covers every provider's own convention. So nothing past the host
-    survives; a stable hash of the full original URL lets two log lines be recognized
-    as the same target without exposing it.
+    userinfo + query VALUES), then a third kept the full HOST while redacting
+    everything else. All three were the same incomplete-enumeration mistake: a
+    webhook provider can put a credential in a PATH segment, in a query-parameter
+    NAME (not just its value -- a blank-valued ``?some-secret-token=``), in the
+    fragment, or in the HOST ITSELF via a capability/unique subdomain (e.g.
+    ``https://tok-9fK2z8mQ.hooks.example.com/deliver``) -- no fixed list of
+    "carriers" covers every provider's own convention, including where in the URL
+    they choose to put it. So nothing about the URL survives in cleartext; a
+    server-keyed HMAC-SHA256 of the full original URL lets two log lines be
+    recognized as the same target without exposing it AND without being matchable
+    offline against a dictionary of guessed URLs (an unkeyed hash would be).
     """
 
     def _redact(self, url: str) -> str:
@@ -317,9 +321,50 @@ class TestRedactUrlCredentials:
 
         return _redact_url_credentials(url)
 
-    def test_scheme_host_and_port_survive(self):
+    def test_scheme_survives(self):
         redacted = self._redact("https://example.com:8443/hook")
-        assert redacted.startswith("https://example.com:8443/<redacted:")
+        assert redacted.startswith("https://<redacted:")
+
+    def test_host_does_not_survive(self):
+        """A prior version of this function kept the full hostname on the theory
+        that a hostname can't carry a credential -- wrong for capability-style URLs
+        where the credential IS the (sub)domain."""
+        redacted = self._redact("https://tok-9fK2z8mQ.hooks.example.com:8443/deliver")
+        assert "tok-9fK2z8mQ" not in redacted
+        assert "hooks.example.com" not in redacted
+        assert "example.com" not in redacted
+        assert "8443" not in redacted
+
+    def test_digest_is_at_least_128_bits(self):
+        redacted = self._redact("https://example.com/hook")
+        digest = redacted.removeprefix("https://<redacted:").removesuffix(">")
+        assert len(digest) >= 32, f"digest {digest!r} is shorter than 128 bits (32 hex chars)"
+        int(digest, 16)  # must be valid hex
+
+    def test_digest_changes_when_the_server_secret_changes(self):
+        """An unkeyed digest can be matched offline against a dictionary of guessed
+        URLs -- a real threat for low-entropy webhook URLs. Proving the digest is
+        KEYED (not e.g. hashlib.sha256(url) truncated) means proving it depends on a
+        secret the attacker doesn't have: swap the server secret and confirm the
+        digest for the SAME url changes. A digest that ignores the secret (a bare
+        hash, or an HMAC with a hardcoded key) would produce the same output both times.
+        """
+        from src.core.config import AppConfig
+
+        url = "https://example.com/hook?token=abc"
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(flask_secret_key="secret-one"),
+        ):
+            redacted_with_secret_one = self._redact(url)
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(flask_secret_key="secret-two"),
+        ):
+            redacted_with_secret_two = self._redact(url)
+        assert redacted_with_secret_one != redacted_with_secret_two, (
+            "digest did not change when the server secret changed -- it is not actually keyed"
+        )
 
     def test_userinfo_does_not_survive(self):
         redacted = self._redact("https://buyer:s3cr3t@example.com/hook")
@@ -351,9 +396,18 @@ class TestRedactUrlCredentials:
 
     def test_every_carrier_together_does_not_survive(self):
         redacted = self._redact(
-            "https://buyer:s3cr3t@example.com/hooks/path-secret?client_secret=q&blank-name-secret=#frag-secret"
+            "https://buyer:s3cr3t@tok-capability-host.example.com/hooks/path-secret"
+            "?client_secret=q&blank-name-secret=#frag-secret"
         )
-        for leaked in ("buyer", "s3cr3t", "path-secret", "client_secret", "blank-name-secret", "frag-secret"):
+        for leaked in (
+            "buyer",
+            "s3cr3t",
+            "tok-capability-host",
+            "path-secret",
+            "client_secret",
+            "blank-name-secret",
+            "frag-secret",
+        ):
             assert leaked not in redacted, f"{leaked!r} leaked into: {redacted}"
 
     def test_redaction_is_deterministic_for_the_same_url(self):
@@ -368,15 +422,34 @@ class TestRedactUrlCredentials:
         indistinguishable in the audit trail."""
         assert self._redact("https://example.com/hook-a") != self._redact("https://example.com/hook-b")
 
+    def test_ipv6_host_with_port_does_not_produce_a_malformed_result(self):
+        """``urlparse().hostname`` strips the brackets from an IPv6 literal, so any
+        formatter that re-embeds ``parsed.hostname`` verbatim produces an ambiguous
+        ``host:port`` string. This function never re-embeds the host at all, so the
+        digest is computed over the untouched raw URL and the output is just the
+        scheme plus the keyed digest -- no IPv6-specific formatting to get wrong."""
+        redacted = self._redact("https://[2001:db8::1]:8443/hook")
+        assert redacted.startswith("https://<redacted:")
+        assert "2001" not in redacted
+        assert "db8" not in redacted
+
+    def test_ipv6_host_without_port_does_not_produce_a_malformed_result(self):
+        redacted = self._redact("https://[2001:db8::1]/hook")
+        assert redacted.startswith("https://<redacted:")
+        assert "2001" not in redacted
+        assert "db8" not in redacted
+
+    def test_ipv6_and_ipv4_hosts_on_an_otherwise_identical_url_differ(self):
+        assert self._redact("https://[2001:db8::1]:8443/hook") != self._redact("https://192.0.2.1:8443/hook")
+
     def test_malformed_url_falls_back_to_a_safe_placeholder(self):
         """A parse failure must never smuggle the raw (possibly credentialed) string through.
 
-        ``urlparse`` itself is lenient and rarely raises, but a userinfo-bearing URL with
-        a non-numeric port raises ValueError lazily, from the ``.port`` property access --
-        exactly the case where fail-open (returning the string unchanged) would leak
-        the credentials this function exists to hide.
+        An unterminated/invalid IPv6 host literal raises ``ValueError`` directly out
+        of ``urlparse`` -- exactly the case where fail-open (returning the string
+        unchanged) would leak the credentials this function exists to hide.
         """
-        assert self._redact("http://user:pass@example.com:notaport/hook") == "REDACTED"
+        assert self._redact("http://[invalid") == "REDACTED"
 
     def test_does_not_mutate_the_input_string(self):
         """Confidence check: redaction must be a pure function, not an in-place rewrite --
@@ -595,7 +668,7 @@ class TestDurableDeliveryLogRedactsCredentials:
         assert context is not None
         assert "buyer" not in context.webhook_url
         assert "s3cr3t-password" not in context.webhook_url
-        assert context.webhook_url.startswith("https://example.com/<redacted:")
+        assert context.webhook_url.startswith("https://<redacted:")
 
     def test_context_webhook_url_omits_sensitive_query_param_values(self):
         from src.services.protocol_webhook_service import _delivery_log_context
@@ -634,6 +707,27 @@ class TestDurableDeliveryLogRedactsCredentials:
         )
         assert context is not None
         assert "path-secret-token-in-db" not in context.webhook_url
+
+    def test_context_webhook_url_omits_a_capability_subdomain_credential(self):
+        """The durable-storage counterpart of TestRedactUrlCredentials's host test --
+        a provider that puts the credential in the (sub)domain itself."""
+        from src.services.protocol_webhook_service import _delivery_log_context
+
+        context = _delivery_log_context(
+            log_id="log-1",
+            url="https://tok-db-capability-host.example.com/hook",
+            task_type="media_buy_delivery",
+            tenant_id="tenant-1",
+            principal_id="principal-1",
+            media_buy_id="media-buy-1",
+            idempotency_key=None,
+            sequence_number=1,
+            notification_type="scheduled",
+            payload_size_bytes=100,
+        )
+        assert context is not None
+        assert "tok-db-capability-host" not in context.webhook_url
+        assert "example.com" not in context.webhook_url
 
     def test_write_delivery_log_forwards_the_redacted_url_to_the_repository(self):
         """Exercises _write_delivery_log FOR REAL (only get_db_session and DeliveryRepository
