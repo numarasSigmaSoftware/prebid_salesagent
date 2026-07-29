@@ -81,7 +81,6 @@ Changelog = "https://github.com/prebid/salesagent/blob/main/CHANGELOG.md"
 dev = [
     "asgi-lifespan>=2.1.0",
     "factory-boy>=3.3.0",
-    "mocker>=1.1.1",
     "mypy>=1.18.2",
     "pytest>=9.0.3",  # GHSA-6w46-j5rx-g56g
     "pytest-asyncio>=1.1.0",
