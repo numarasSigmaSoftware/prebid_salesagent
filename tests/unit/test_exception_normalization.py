@@ -278,10 +278,19 @@ def test_deliberate_typed_validation_message_requires_explicit_wire_safe_opt_in(
     assert envelope["errors"][0]["suggestion"] == "Provide a field to update and resend."
 
 
-# A URL/token-shaped string standing in for "the buyer's own submitted value" in the two
-# tests below — deliberately distinct from SECRET_BEARING_MESSAGE's tokens so a test can
-# assert this value IS echoed (expected) while still asserting NO _SECRET_TOKENS leak
-# alongside it (media_buy_create.py's raise sites never interpolate anything else).
+# A URL/token-shaped string standing in for "the buyer's own submitted value" in the four
+# tests below. These tests prove TWO SEPARATE properties, not one — do not read the
+# assertions as contradictory:
+#   1. THIS value echoes to the wire — that's the expected, spec-sanctioned behavior (it's
+#      the buyer's own data; they already have it — see safe_adcp_error's grounding comment).
+#   2. No OTHER content — specifically nothing from SECRET_BEARING_MESSAGE's _SECRET_TOKENS,
+#      standing in for genuine system/adapter secrets — ever rides along with it.
+# Property 2 is only STATABLE if this constant is a different literal than
+# SECRET_BEARING_MESSAGE: asserting "value X is present" and "value X's own tokens are
+# absent" on the identical string is a contradiction, not a stronger test. Using a distinct
+# literal here is what lets the test prove "this raise site interpolates ONLY the buyer's
+# value, nothing adapter/system-sourced" — which is the actual security property that
+# matters, not "this specific fixture never appears."
 _BUYER_SUPPLIED_CREDENTIAL_SHAPED_VALUE = "https://example.com/callback?token=buyer-rotated-secret-789"
 
 

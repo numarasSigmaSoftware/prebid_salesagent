@@ -205,6 +205,81 @@ class TestMcpWireErrorEnvelope:
         assert "2020-01-01" not in serialized
         assert "2020-02-01" not in serialized
 
+    def test_duplicate_product_id_echoes_the_buyers_value_on_the_real_wire(self, mcp_real_tenant_setup):
+        """Production's _wire_safe_message=True opt-in (media_buy_create.py ~2537) actually
+        reaches the wire — not just the mechanism tested in isolation by
+        tests/unit/test_exception_normalization.py's mirrored-template tests.
+
+        Drives REAL duplicate product_ids through the full pipeline, no ``_impl`` patching.
+        Removing the opt-in at that raise site would redden this test (the message would
+        fall back to the generic VALIDATION_ERROR scrub text and no longer contain
+        "Duplicate" or the product_id) — mutation-verified during this fix's development.
+        """
+        identity = mcp_real_tenant_setup
+
+        is_error, envelope = call_mcp_tool_capturing_envelope(
+            "create_media_buy",
+            {
+                "brand": {"domain": "wiretest.example"},
+                "idempotency_key": f"int-key-{uuid.uuid4().hex}",
+                "packages": [
+                    create_test_package_request_dict(
+                        product_id=_PRODUCT_ID, pricing_option_id="cpm_usd_fixed", budget=5000.0
+                    ),
+                    create_test_package_request_dict(
+                        product_id=_PRODUCT_ID, pricing_option_id="cpm_usd_fixed", budget=5000.0
+                    ),
+                ],
+                "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "end_time": (datetime.now(UTC) + timedelta(days=31)).isoformat(),
+            },
+            identity,
+        )
+
+        assert is_error, "duplicate product_id must produce a tool error"
+        assert envelope is not None, "Error must include content text carrying the envelope"
+        assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
+        for error in (envelope["adcp_error"], envelope["errors"][0]):
+            assert "Duplicate" in error["message"]
+            assert _PRODUCT_ID in error["message"]
+
+    def test_managed_only_targeting_dimension_emits_envelope_on_wire(self, mcp_real_tenant_setup):
+        """Production's _wire_safe_message=True opt-in (media_buy_create.py ~2893) actually
+        reaches the wire for the targeting-overlay raise site.
+
+        Drives a REAL managed-only dimension (key_value_pairs) through the full pipeline —
+        the same trigger tests/bdd/steps/generic/given_media_buy.py's
+        given_managed_targeting_dimension uses for the BDD scenario covering this raise
+        site. Removing the opt-in would redden this test the same way it reddens that
+        scenario (mutation-verified during this fix's development).
+        """
+        identity = mcp_real_tenant_setup
+
+        is_error, envelope = call_mcp_tool_capturing_envelope(
+            "create_media_buy",
+            {
+                "brand": {"domain": "wiretest.example"},
+                "idempotency_key": f"int-key-{uuid.uuid4().hex}",
+                "packages": [
+                    create_test_package_request_dict(
+                        product_id=_PRODUCT_ID,
+                        pricing_option_id="cpm_usd_fixed",
+                        budget=5000.0,
+                        targeting_overlay={"key_value_pairs": {"section": "sports"}},
+                    )
+                ],
+                "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "end_time": (datetime.now(UTC) + timedelta(days=31)).isoformat(),
+            },
+            identity,
+        )
+
+        assert is_error, "managed-only targeting dimension must produce a tool error"
+        assert envelope is not None, "Error must include content text carrying the envelope"
+        assert_envelope_shape(envelope, "INVALID_REQUEST", recovery="correctable")
+        for error in (envelope["adcp_error"], envelope["errors"][0]):
+            assert "managed" in error["message"].lower()
+
     def test_typed_validation_failure_from_impl_emits_scrubbed_envelope_on_wire(
         self, mcp_real_tenant_setup, monkeypatch
     ):

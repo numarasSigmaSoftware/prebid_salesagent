@@ -1642,13 +1642,22 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         # site never audited. ``_wire_safe_message=True`` opts in a message that
         # is either static, OR built entirely from values traceable to THIS
         # buyer's current request (never adapter/system internals or another
-        # principal's data) — the AdCP spec's own canonical error shape
-        # (adcp/dist/schemas/3.1.1/core/error.json, ``details.rejected_value``:
-        # "the offending value the buyer supplied, echoed for buyer-side
-        # diagnostic clarity") sanctions echoing exactly this back to the buyer
-        # who submitted it; error-handling.mdx's only MUST-be-generic cases are
-        # cross-tenant resource enumeration and seller-internal secrets, neither
-        # of which this covers.
+        # principal's data).
+        #
+        # Grounding — this applies to ``message`` itself, not only ``details``:
+        # adcp/dist/schemas/3.1.1/core/error.json's own canonical worked example
+        # echoes the rejected value in BOTH places at once:
+        #   {"code": "INVALID_PRICING_MODEL",
+        #    "message": "Pricing option not found: po_prism_abandoner_cpm",
+        #    "field": "pricing_option_id",
+        #    "details": {"rejected_value": "po_prism_abandoner_cpm", ...}}
+        # ``details.rejected_value`` is documented there as "the offending value
+        # the buyer supplied, echoed for buyer-side diagnostic clarity" — the
+        # same value the example ALSO puts in ``message``. ``message`` itself has
+        # no documented wording constraint ("Human-readable error message" is the
+        # entire schema description); error-handling.mdx's only MUST-be-generic
+        # cases are cross-tenant resource enumeration and seller-internal
+        # secrets, neither of which this covers.
         safe_message, safe_suggestion = _sanitized_text_for(wire_code, normalized.recovery)
         return type(exc)(
             safe_message,

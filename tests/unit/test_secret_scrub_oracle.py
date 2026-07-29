@@ -11,7 +11,12 @@ case when a token was removed rather than reddening, which is no oracle at all.
 
 import pytest
 
-from tests.helpers.secret_scrub import _SECRET_TOKENS, SECRET_BEARING_MESSAGE, assert_no_secret_leak
+from tests.helpers.secret_scrub import (
+    _EXPECTED_SANITIZED_MESSAGE,
+    _SECRET_TOKENS,
+    SECRET_BEARING_MESSAGE,
+    assert_no_secret_leak,
+)
 
 # INDEPENDENT restatement of what the oracle must detect — deliberately NOT derived from
 # ``_SECRET_TOKENS``. Parametrizing over the constant under test is circular: deleting a token
@@ -113,3 +118,23 @@ def test_oracle_refuses_none_rather_than_passing_vacuously():
     populating would otherwise "pass" while proving nothing."""
     with pytest.raises(AssertionError, match="cannot prove a scrub"):
         assert_no_secret_leak(None)
+
+
+def test_expected_sanitized_message_keys_match_production_table():
+    """``_EXPECTED_SANITIZED_MESSAGE``'s key set must equal ``_SANITIZED_BY_WIRE_CODE``'s.
+
+    Key-set equality ONLY — never value equality, which would reintroduce the exact
+    circularity ``_EXPECTED_SANITIZED_MESSAGE`` exists to avoid (assert_sanitized_wire_error's
+    message check is independently pinned literal text, deliberately not read from
+    production; see that function's docstring). Without this, a code added to
+    ``_SANITIZED_BY_WIRE_CODE`` without a matching literal added here wouldn't surface until
+    some later scenario happened to call ``assert_sanitized_wire_error`` for that new code —
+    this test catches the gap immediately, the same role
+    ``test_shared_token_set_matches_the_independent_expectation`` plays for ``_SECRET_TOKENS``.
+    """
+    from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
+
+    assert set(_EXPECTED_SANITIZED_MESSAGE.keys()) == set(_SANITIZED_BY_WIRE_CODE.keys()), (
+        "_EXPECTED_SANITIZED_MESSAGE (tests/helpers/secret_scrub.py) drifted from "
+        "_SANITIZED_BY_WIRE_CODE (src/core/exceptions.py) — update both deliberately"
+    )
