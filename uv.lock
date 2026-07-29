@@ -167,7 +167,6 @@ dev = [
     { name = "datamodel-code-generator" },
     { name = "factory-boy" },
     { name = "jsonref" },
-    { name = "mocker" },
     { name = "mypy" },
     { name = "pylint" },
     { name = "pytest" },
@@ -251,7 +250,6 @@ dev = [
     { name = "datamodel-code-generator", specifier = ">=0.26.0" },
     { name = "factory-boy", specifier = ">=3.3.0" },
     { name = "jsonref", specifier = ">=1.1.0" },
-    { name = "mocker", specifier = ">=1.1.1" },
     { name = "mypy", specifier = ">=1.18.2" },
     { name = "pylint", specifier = ">=4.0.5" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -2477,12 +2475,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/e1/f1/f22fa0fac767279df
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/bc/977b65cddce185dce0414d14c783040a9f9d647bbfe9b0f5c74ff9262816/mistralai-2.4.9-py3-none-any.whl", hash = "sha256:8e2f8a58697455f2113b4f6d0d1bd28d66d3eb51f94ff24b9d22a21dea531520", size = 1121336, upload-time = "2026-06-03T13:04:20.694Z" },
 ]
-
-[[package]]
-name = "mocker"
-version = "1.1.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2b/be/7347e7ec91c7598eed358ed40ff4c5cd59002490f537adf4a43f92f81abe/mocker-1.1.1.tar.bz2", hash = "sha256:2009911707c74b28bdc9959b5224717e45fcb93475b4b7bb4efad3285fcf2919", size = 36357, upload-time = "2012-05-25T03:57:54.295Z" }
 
 [[package]]
 name = "more-itertools"
