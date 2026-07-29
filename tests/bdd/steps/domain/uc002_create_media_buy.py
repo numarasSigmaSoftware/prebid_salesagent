@@ -208,6 +208,90 @@ def given_multiple_matches(ctx: dict, count: int) -> None:
         AgentAccountAccessFactory(tenant_id=tenant.tenant_id, principal=principal, account=account)
 
 
+class _RestoreOnStop:
+    """Adapts a plain restore callback to the ``ctx["_patchers"]`` cleanup contract.
+
+    The ``ctx`` fixture (``conftest.py``) drains ``ctx["_patchers"]`` and calls
+    ``.stop()`` on each entry in its own ``finally`` block, so cleanup runs
+    whether the scenario passes, fails, or errors before reaching a Then step.
+    Wrapping a plain callable in this shim lets a step use that same guaranteed
+    teardown without a real ``unittest.mock`` patcher underneath.
+    """
+
+    def __init__(self, restore: Any) -> None:
+        self._restore = restore
+        self._stopped = False
+
+    def stop(self) -> None:
+        if not self._stopped:
+            self._restore()
+            self._stopped = True
+
+
+@given("natural-key account resolution is being observed")
+def given_natural_key_resolution_observed(ctx: dict) -> None:
+    """Install a call-count spy on ``AccountRepository``'s natural-key queries.
+
+    Proves the auth-ordering claim ("rejected credentials must never reach
+    natural-key resolution") from the PROCESS side, not just the output. The
+    envelope-scan Then step (``then_auth_error_discloses_no_account_resolution``)
+    only inspects the final wire response — it would pass unchanged even if
+    production queried the tenant-wide match count and then discarded the
+    result before responding, which is itself the timing/query side channel
+    the scenario exists to rule out.
+
+    A plain wrapper function, not ``MagicMock(wraps=...)``: patching a class
+    attribute with a ``MagicMock`` breaks the descriptor protocol that binds
+    ``self`` on instance-method access, so the wrapped call would be missing
+    its first argument. Threading ``self`` through explicitly keeps the
+    patched methods callable exactly like the originals.
+    """
+    from src.core.database.repositories.account import AccountRepository
+
+    original_list = AccountRepository.list_by_natural_key
+    original_count = AccountRepository.count_by_natural_key
+    calls: list[str] = []
+
+    def list_wrapper(self: AccountRepository, *args: Any, **kwargs: Any) -> Any:
+        calls.append("list_by_natural_key")
+        return original_list(self, *args, **kwargs)
+
+    def count_wrapper(self: AccountRepository, *args: Any, **kwargs: Any) -> Any:
+        calls.append("count_by_natural_key")
+        return original_count(self, *args, **kwargs)
+
+    AccountRepository.list_by_natural_key = list_wrapper  # type: ignore[method-assign]
+    AccountRepository.count_by_natural_key = count_wrapper  # type: ignore[method-assign]
+
+    def _restore() -> None:
+        AccountRepository.list_by_natural_key = original_list  # type: ignore[method-assign]
+        AccountRepository.count_by_natural_key = original_count  # type: ignore[method-assign]
+
+    ctx["_natural_key_lookup_calls"] = calls
+    ctx.setdefault("_patchers", []).append(_RestoreOnStop(_restore))
+
+
+@then("no natural-key account lookup should have been performed")
+def then_no_natural_key_lookup_performed(ctx: dict) -> None:
+    """Assert the process-side guarantee: the repository queries never ran.
+
+    Complements, does not replace, the output-side
+    ``then_auth_error_discloses_no_account_resolution`` check — that step
+    proves the response never DISCLOSES account-resolution data; this step
+    proves the resolution was never ATTEMPTED. A response that happens to omit
+    leaked data after the query already ran would satisfy the first check and
+    fail this one. Restoration of the patched methods is handled by the
+    ``ctx`` fixture's teardown, not here, so it still runs if this assertion
+    fails.
+    """
+    calls = ctx.get("_natural_key_lookup_calls")
+    assert calls is not None, (
+        "No natural-key lookup spy installed — scenario must call "
+        '"Given natural-key account resolution is being observed" first'
+    )
+    assert calls == [], f"Expected zero natural-key account lookups for rejected credentials, got: {calls}"
+
+
 @given(parsers.parse("the natural key matches {total:d} accounts but the agent can access {accessible:d}"))
 def given_natural_key_partial_access(ctx: dict, total: int, accessible: int) -> None:
     """Create ``total`` active accounts matching the request natural key, granting the

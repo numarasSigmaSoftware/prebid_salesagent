@@ -30,7 +30,9 @@ Feature: BR-UC-002 Account access scoping
     Given a valid create_media_buy request with account natural key brand "leak-brand.com" operator "leak-agency.com"
     And the natural key matches 2 accounts
     And the Buyer Agent's token resolves no principal
+    And natural-key account resolution is being observed
     When the Buyer Agent sends the create_media_buy request
     Then the operation should fail
     And the authentication error should match invalid credentials for the active transport
     And the authentication error should disclose no account resolution information
+    And no natural-key account lookup should have been performed
