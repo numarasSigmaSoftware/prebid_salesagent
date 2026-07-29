@@ -5,9 +5,10 @@ import hmac
 import json
 import logging
 import time
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+import requests
 from adcp.types import TaskType
 
 from src.core.webhook_authenticator import WebhookAuthenticator
@@ -745,6 +746,211 @@ class TestCredentialsNeverReachTheLog:
 
         assert "query-leak-config" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(query_credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+
+
+class TestFailurePathsNeverLeakCredentials:
+    """The three exception branches in _send_with_retry_and_logging (HTTPError,
+    RequestException, and bare Exception) must never let str(exception) or an
+    f-string {exception} reach a log line or the persisted
+    WebhookDeliveryLog.error_message.
+
+    requests exceptions routinely embed the complete request URL in their
+    string form -- verified empirically: HTTPError.__str__() includes it
+    VERBATIM (userinfo, capability subdomain, query values, all of it, since
+    it's built from response.url), and ConnectionError/Timeout messages
+    include host+path+query. TestCredentialsNeverReachTheLog proves the
+    explicit `_redact_url_credentials(url)` logging call sites are safe; this
+    class proves the EXCEPTION-DERIVED messages on the failure paths are too
+    -- a fix that only touched the former would still leak every carrier the
+    moment a delivery attempt failed.
+    """
+
+    CREDENTIALED_URL = (
+        "https://buyer:s3cr3t-password@tok-capability-secret.hooks.example.com"
+        "/hooks/path-secret-token?client_secret=leaked-query-value"
+    )
+    CREDENTIAL_SUBSTRINGS = (
+        "buyer",
+        "s3cr3t-password",
+        "tok-capability-secret",
+        "path-secret-token",
+        "client_secret",
+        "leaked-query-value",
+    )
+
+    def _assert_no_credentials_leaked(self, *, caplog_text: str, write_log_mock: MagicMock) -> None:
+        for substring in self.CREDENTIAL_SUBSTRINGS:
+            assert substring not in caplog_text, f"{substring!r} leaked into the log: {caplog_text}"
+        assert write_log_mock.call_args_list, "expected _write_delivery_log to have been called"
+        for call in write_log_mock.call_args_list:
+            error_message = call.kwargs.get("error_message")
+            if error_message is None:
+                continue
+            for substring in self.CREDENTIAL_SUBSTRINGS:
+                assert substring not in error_message, (
+                    f"{substring!r} leaked into persisted error_message: {error_message!r}"
+                )
+
+    def _metadata(self) -> dict[str, str]:
+        return {
+            "task_type": "media_buy_delivery",
+            "tenant_id": "tenant-1",
+            "principal_id": "principal-1",
+            "media_buy_id": "media-buy-1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_4xx_client_error_does_not_leak_credentials(self, caplog):
+        """A real requests.Response (not a mock) so raise_for_status() produces
+        the EXACT HTTPError message shape production would -- the whole point
+        is proving our code is safe against what requests actually emits."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        mock_response = requests.Response()
+        mock_response.status_code = 404
+        mock_response.url = self.CREDENTIALED_URL
+        mock_response.reason = "Not Found"
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", return_value=mock_response),
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            result = await service._send_with_retry_and_logging(
+                url=self.CREDENTIALED_URL,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+            )
+
+        assert result is False
+        # "pending" (written before the retry loop starts) + "failed" (4xx never retries).
+        assert mock_write_log.call_count == 2
+        self._assert_no_credentials_leaked(caplog_text=caplog.text, write_log_mock=mock_write_log)
+
+    @pytest.mark.asyncio
+    async def test_5xx_server_error_retry_and_final_failure_do_not_leak_credentials(self, caplog):
+        """max_attempts=2 forces BOTH write sites in the HTTPError branch:
+        the mid-retry "retrying" write and the terminal "failed" write. Both
+        read from the same error_message local, but this proves it directly
+        rather than relying on that implementation detail."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        mock_response = requests.Response()
+        mock_response.status_code = 503
+        mock_response.url = self.CREDENTIALED_URL
+        mock_response.reason = "Service Unavailable"
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", return_value=mock_response),
+            patch("src.services.protocol_webhook_service.asyncio.sleep", new_callable=AsyncMock),
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            result = await service._send_with_retry_and_logging(
+                url=self.CREDENTIALED_URL,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+                max_attempts=2,
+            )
+
+        assert result is False
+        # "pending" + one "retrying" (attempt 1 of 2) + one "failed" (attempt 2 of 2).
+        assert mock_write_log.call_count == 3, "expected pending, retrying, and failed writes"
+        self._assert_no_credentials_leaked(caplog_text=caplog.text, write_log_mock=mock_write_log)
+
+    @pytest.mark.asyncio
+    async def test_connection_error_does_not_leak_credentials(self, caplog):
+        """Mirrors the message shape urllib3/requests actually produces for a
+        DNS/connection failure (host + path + query embedded), verified
+        empirically against a real unreachable-host request."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        connection_error = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='tok-capability-secret.hooks.example.com', port=443): "
+            "Max retries exceeded with url: /hooks/path-secret-token?client_secret=leaked-query-value "
+            f'(Caused by NameResolutionError("Failed to resolve for {self.CREDENTIALED_URL}"))'
+        )
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", side_effect=connection_error),
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            result = await service._send_with_retry_and_logging(
+                url=self.CREDENTIALED_URL,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+                max_attempts=1,
+            )
+
+        assert result is False
+        assert mock_write_log.call_count == 2, "expected pending and failed writes (max_attempts=1)"
+        self._assert_no_credentials_leaked(caplog_text=caplog.text, write_log_mock=mock_write_log)
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_does_not_leak_credentials(self, caplog):
+        """requests.Timeout is a RequestException subclass -- same branch as
+        ConnectionError, but the reviewer's ask names it explicitly, and a
+        Timeout's message shape (no connection-pool repr) differs enough from
+        ConnectionError's to be worth pinning separately."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        timeout_error = requests.exceptions.Timeout(
+            f"HTTPSConnectionPool: Read timed out. url: {self.CREDENTIALED_URL}"
+        )
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", side_effect=timeout_error),
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            result = await service._send_with_retry_and_logging(
+                url=self.CREDENTIALED_URL,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+                max_attempts=1,
+            )
+
+        assert result is False
+        assert mock_write_log.call_count == 2, "expected pending and failed writes (max_attempts=1)"
+        self._assert_no_credentials_leaked(caplog_text=caplog.text, write_log_mock=mock_write_log)
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_does_not_leak_credentials(self, caplog):
+        """The bare `except Exception` branch has no retry logic at all (always
+        a single write + return, regardless of max_attempts) -- a non-requests
+        exception (RuntimeError) proves this catch-all is safe too, not just
+        the two requests-specific branches."""
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        unexpected_error = RuntimeError(f"Something broke while POSTing to {self.CREDENTIALED_URL}")
+
+        with (
+            patch.object(service, "_write_delivery_log") as mock_write_log,
+            patch.object(service._session, "post", side_effect=unexpected_error),
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            result = await service._send_with_retry_and_logging(
+                url=self.CREDENTIALED_URL,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+            )
+
+        assert result is False
+        # "pending" + "failed" -- the bare Exception branch never retries, regardless
+        # of max_attempts (not passed here, so it defaults to 3, but only 1 attempt runs).
+        assert mock_write_log.call_count == 2
+        self._assert_no_credentials_leaked(caplog_text=caplog.text, write_log_mock=mock_write_log)
 
 
 class TestDurableDeliveryLogRedactsCredentials:

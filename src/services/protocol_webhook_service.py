@@ -247,6 +247,23 @@ def _redact_url_credentials(url: str) -> str:
         return "REDACTED"
 
 
+def _safe_delivery_error_message(url: str, *, reason: str) -> str:
+    """Build a bounded, non-leaking error_message for a failed webhook delivery.
+
+    NEVER embed ``str(exception)`` or an f-string ``{exception}`` for a failure
+    that touched the network/URL layer (``requests.HTTPError``,
+    ``requests.RequestException``, or any bare ``Exception`` raised from within
+    the same try block): ``requests`` exceptions routinely embed the complete
+    request URL in their string form -- ``HTTPError.__str__()`` includes it
+    verbatim, userinfo and all; ``ConnectionError``'s message includes
+    host+path+query -- which would leak exactly the credentials
+    ``_redact_url_credentials()`` exists to keep out of logs and
+    ``WebhookDeliveryLog``. *reason* must be bounded, already-safe text (an
+    exception type name, an HTTP status phrase) -- never raw exception text.
+    """
+    return f"{reason} delivering webhook to {_redact_url_credentials(url)}"
+
+
 class ProtocolWebhookService:
     """
     Service for sending protocol-level push notifications to clients.
@@ -489,9 +506,15 @@ class ProtocolWebhookService:
             except DeliveryLogPersistenceError:
                 raise
             except requests.HTTPError as e:
-                status_code = e.response.status_code if e.response else None
+                # `if e.response else None` (not `is not None`) is the bug this replaced:
+                # requests.Response.__bool__() returns self.ok, which is False for EVERY
+                # 4xx/5xx response -- exactly the only case raise_for_status() ever raises
+                # HTTPError for. So the old check made status_code always None, which
+                # defeated the "don't retry 4xx" branch below and always persisted a NULL
+                # http_status_code, regardless of the real status.
+                status_code = e.response.status_code if e.response is not None else None
                 response_time_ms = int((time.time() - start_time) * 1000)
-                error_message = f"HTTP {status_code}: {str(e)}"
+                error_message = _safe_delivery_error_message(url, reason=f"HTTP {status_code} error")
 
                 # Don't retry on 4xx errors (client errors - permanent failures)
                 if status_code and 400 <= status_code < 500:
@@ -554,7 +577,7 @@ class ProtocolWebhookService:
 
             except requests.RequestException as e:
                 response_time_ms = int((time.time() - start_time) * 1000)
-                error_message = f"{type(e).__name__}: {str(e)}"
+                error_message = _safe_delivery_error_message(url, reason=type(e).__name__)
 
                 # Network errors - retry
                 if attempt < max_attempts - 1:
@@ -574,9 +597,7 @@ class ProtocolWebhookService:
                     )
                     await asyncio.sleep(wait_seconds)
                 else:
-                    logger.error(
-                        f"Webhook failed for task {task_id} after {max_attempts} attempts: {type(e).__name__} - {e}"
-                    )
+                    logger.error(f"Webhook failed for task {task_id} after {max_attempts} attempts: {error_message}")
 
                     self._write_delivery_log(
                         context=delivery_log_context,
@@ -594,13 +615,14 @@ class ProtocolWebhookService:
                     return False
 
             except Exception as e:
-                logger.error(f"Unexpected error sending webhook for task {task_id}: {e}")
+                error_message = _safe_delivery_error_message(url, reason=f"Unexpected error ({type(e).__name__})")
+                logger.error(f"Unexpected error sending webhook for task {task_id}: {error_message}")
 
                 self._write_delivery_log(
                     context=delivery_log_context,
                     status="failed",
                     attempt_count=attempt + 1,
-                    error_message=f"Unexpected error: {str(e)}",
+                    error_message=error_message,
                     completed_at=datetime.now(UTC),
                 )
 
