@@ -3,7 +3,9 @@
 import hashlib
 import hmac
 import json
+import logging
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types import TaskType
@@ -294,3 +296,129 @@ class TestWebhookAuthenticator:
             tampered_str, headers["X-Webhook-Signature"], headers["X-Webhook-Timestamp"], secret
         )
         assert not is_valid
+
+
+class TestRedactUrlForLogging:
+    """``_redact_url_for_logging`` strips userinfo credentials before a URL reaches a log line."""
+
+    def _redact(self, url: str) -> str:
+        from src.services.protocol_webhook_service import _redact_url_for_logging
+
+        return _redact_url_for_logging(url)
+
+    def test_strips_username_and_password(self):
+        redacted = self._redact("https://buyer:s3cr3t@example.com/hook")
+        assert "buyer" not in redacted
+        assert "s3cr3t" not in redacted
+        assert redacted == "https://REDACTED@example.com/hook"
+
+    def test_preserves_port_alongside_redaction(self):
+        redacted = self._redact("https://buyer:s3cr3t@example.com:8443/hook")
+        assert "s3cr3t" not in redacted
+        assert redacted == "https://REDACTED@example.com:8443/hook"
+
+    def test_username_only_is_also_redacted(self):
+        """Even a bare username (no password) is credential material worth hiding."""
+        redacted = self._redact("https://buyer@example.com/hook")
+        assert "buyer" not in redacted
+        assert redacted == "https://REDACTED@example.com/hook"
+
+    def test_url_without_userinfo_is_returned_unchanged(self):
+        url = "https://example.com/hook?token=abc"
+        assert self._redact(url) == url
+
+    def test_malformed_url_falls_back_to_a_safe_placeholder(self):
+        """A parse failure must never smuggle the raw (possibly credentialed) string through.
+
+        ``urlparse`` itself is lenient and rarely raises, but a userinfo-bearing URL with
+        a non-numeric port raises ValueError lazily, from the ``.port`` property access --
+        exactly the case where fail-open (returning the string unchanged) would leak
+        the credentials this function exists to hide.
+        """
+        assert self._redact("http://user:pass@example.com:notaport/hook") == "REDACTED"
+
+    def test_does_not_mutate_the_input_string(self):
+        """Confidence check: redaction must be a pure function, not an in-place rewrite --
+        the caller still needs the ORIGINAL url for the real outbound request."""
+        original = "https://buyer:s3cr3t@example.com/hook"
+        self._redact(original)
+        assert original == "https://buyer:s3cr3t@example.com/hook"
+
+
+class TestCredentialsNeverReachTheLog:
+    """The two ``protocol_webhook_service`` log sites that emit a webhook URL must never
+    emit the userinfo credentials embedded in it -- even though ``authentication_token``
+    is already (correctly) excluded, the URL itself can carry the same class of secret.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retry_send_log_line_omits_url_credentials(self, caplog):
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=mock_response) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service._send_with_retry_and_logging(
+                url=credentialed_url,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata={
+                    "task_type": "media_buy_delivery",
+                    "tenant_id": "tenant-1",
+                    "principal_id": "principal-1",
+                    "media_buy_id": "media-buy-1",
+                },
+            )
+
+        assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
+        # The real outbound request must still receive the FULL, unredacted URL --
+        # redaction is a log-output concern only, never a functional rewrite.
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == credentialed_url
+
+    @pytest.mark.asyncio
+    async def test_sanitized_config_log_line_omits_url_credentials(self, caplog):
+        from src.core.database.models import PushNotificationConfig
+        from src.services.protocol_webhook_service import ProtocolWebhookService
+
+        service = ProtocolWebhookService()
+        credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
+        config = PushNotificationConfig(
+            url=credentialed_url,
+            authentication_type=None,
+            authentication_token=None,
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=mock_response) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service.send_notification(
+                push_notification_config=config,
+                payload={"task_id": "media-buy-1"},
+                metadata={
+                    "task_type": "media_buy_delivery",
+                    "tenant_id": "tenant-1",
+                    "principal_id": "principal-1",
+                    "media_buy_id": "media-buy-1",
+                },
+            )
+
+        assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
+        # The real outbound request must still receive the FULL, unredacted URL.
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == credentialed_url

@@ -175,6 +175,24 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
+def _redact_url_for_logging(url: str) -> str:
+    """Return *url* with any embedded userinfo (``user:pass@``) stripped, for log output only.
+
+    AdCP's ``ReportingWebhook``/``PushNotificationConfig`` URL fields accept userinfo-bearing
+    URLs (``https://user:pass@host/hook``); the credentials must never reach a log line even
+    when the surrounding code is careful to omit the separate ``authentication_token`` field.
+    Never use this on the URL passed to ``requests`` — only on the value handed to ``logger``.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.username and not parsed.password:
+            return url
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunparse(parsed._replace(netloc=f"REDACTED@{parsed.hostname}{port}"))
+    except Exception:
+        return "REDACTED"
+
+
 class ProtocolWebhookService:
     """
     Service for sending protocol-level push notifications to clients.
@@ -218,9 +236,15 @@ class ProtocolWebhookService:
         # Prepare headers
         headers = {"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"}
 
-        # Log sanitized config (exclude sensitive authentication_token)
+        # Log sanitized config (exclude sensitive authentication_token). The URL
+        # itself may carry userinfo credentials, so it is redacted too — "sanitized"
+        # must not leave a different credential in the log line.
         safe_config = {
-            "url": push_notification_config.url if hasattr(push_notification_config, "url") else None,
+            "url": (
+                _redact_url_for_logging(push_notification_config.url)
+                if hasattr(push_notification_config, "url") and push_notification_config.url
+                else None
+            ),
             "authentication_type": (
                 push_notification_config.authentication_type
                 if hasattr(push_notification_config, "authentication_type")
@@ -373,7 +397,10 @@ class ProtocolWebhookService:
 
         for attempt in range(max_attempts):
             try:
-                logger.info(f"Sending webhook for task {task_id} to {url} (attempt {attempt + 1}/{max_attempts})")
+                logger.info(
+                    f"Sending webhook for task {task_id} to {_redact_url_for_logging(url)} "
+                    f"(attempt {attempt + 1}/{max_attempts})"
+                )
 
                 def _post() -> requests.Response:
                     request_body: dict[str, Any] = {"data": body_bytes} if body_bytes is not None else {"json": payload}
