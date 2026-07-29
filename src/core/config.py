@@ -97,6 +97,27 @@ class AppConfig(BaseSettings):
         default=None, description="Platform-level Gemini API key (optional - tenants can configure their own)"
     )
     flask_secret_key: str = Field(default="dev-secret-key-change-in-production", description="Flask secret key")
+    webhook_audit_hmac_key: str = Field(
+        default="",
+        description=(
+            "Server secret keying the webhook delivery-log URL-redaction HMAC "
+            "(WEBHOOK_AUDIT_HMAC_KEY). A blank value is only acceptable outside "
+            "production; validate_configuration() rejects it in production. Deliberately "
+            "separate from flask_secret_key -- reusing a session-signing key as a durable "
+            "correlation key means routine session-key rotation silently severs "
+            "correlation with every historical WebhookDeliveryLog row."
+        ),
+    )
+    webhook_audit_hmac_key_id: str = Field(
+        default="v1",
+        description=(
+            "Identifier for the current webhook_audit_hmac_key generation "
+            "(WEBHOOK_AUDIT_HMAC_KEY_ID), embedded in every redacted audit identifier. "
+            "Bump this alongside a webhook_audit_hmac_key rotation so historical rows "
+            "stay labeled with the key generation that produced them, instead of "
+            "becoming silently unrecognizable."
+        ),
+    )
     debug: bool = Field(default=False, description="Enable debug mode")
     environment: str = Field(default="development", description="Environment: production, staging, or development")
 
@@ -123,6 +144,9 @@ def get_config() -> AppConfig:
     return _config
 
 
+MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH = 32
+
+
 def validate_configuration() -> None:
     """Validate all configuration at startup.
 
@@ -140,6 +164,20 @@ def validate_configuration() -> None:
 
         # Note: GEMINI_API_KEY is optional - tenants configure their own AI keys
         # Note: SUPER_ADMIN_EMAILS is optional - per-tenant OIDC with Setup Mode is the default auth flow
+
+        if is_production():
+            if not config.webhook_audit_hmac_key:
+                raise ValueError(
+                    "WEBHOOK_AUDIT_HMAC_KEY must be set in production -- it keys the "
+                    "HMAC that redacts buyer-supplied webhook URLs before they reach "
+                    "logs and WebhookDeliveryLog; an unset key leaves those audit "
+                    "identifiers matchable offline against guessed URLs."
+                )
+            if len(config.webhook_audit_hmac_key) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
+                raise ValueError(
+                    f"WEBHOOK_AUDIT_HMAC_KEY must be at least {MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH} "
+                    "characters in production"
+                )
 
         print("✅ Configuration validation passed")
         print(f"   GAM OAuth: {'✅ Configured' if config.gam_oauth.client_id else '❌ Not configured'}")

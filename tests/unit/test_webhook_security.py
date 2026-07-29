@@ -299,27 +299,35 @@ class TestWebhookAuthenticator:
 
 
 class TestRedactUrlCredentials:
-    """``_redact_url_credentials`` keeps only ``scheme://<redacted:hmac>`` -- a
-    non-reversible audit form -- before a URL reaches a log line or durable storage.
+    """``_redact_url_credentials`` keeps only ``scheme://<redacted:key_id:hmac>`` --
+    a non-reversible audit form -- before a URL reaches a log line or durable storage.
 
-    Two earlier versions of this function redacted a specific carrier (userinfo, then
-    userinfo + query VALUES), then a third kept the full HOST while redacting
-    everything else. All three were the same incomplete-enumeration mistake: a
-    webhook provider can put a credential in a PATH segment, in a query-parameter
-    NAME (not just its value -- a blank-valued ``?some-secret-token=``), in the
-    fragment, or in the HOST ITSELF via a capability/unique subdomain (e.g.
-    ``https://tok-9fK2z8mQ.hooks.example.com/deliver``) -- no fixed list of
-    "carriers" covers every provider's own convention, including where in the URL
-    they choose to put it. So nothing about the URL survives in cleartext; a
-    server-keyed HMAC-SHA256 of the full original URL lets two log lines be
-    recognized as the same target without exposing it AND without being matchable
-    offline against a dictionary of guessed URLs (an unkeyed hash would be).
+    Three earlier versions of this function redacted a specific carrier (userinfo,
+    then userinfo + query VALUES, then everything but the HOST). All three were the
+    same incomplete-enumeration mistake: a webhook provider can put a credential in
+    a PATH segment, in a query-parameter NAME (not just its value -- a blank-valued
+    ``?some-secret-token=``), in the fragment, or in the HOST ITSELF via a
+    capability/unique subdomain (e.g. ``https://tok-9fK2z8mQ.hooks.example.com/deliver``)
+    -- no fixed list of "carriers" covers every provider's own convention. So
+    nothing about the URL survives in cleartext; a dedicated-secret-keyed
+    HMAC-SHA256 of the full original URL lets two log lines be recognized as the
+    same target without exposing it AND without being matchable offline against a
+    dictionary of guessed URLs (an unkeyed hash would be). The key is deliberately
+    ``AppConfig.webhook_audit_hmac_key``, not the Flask session key -- see
+    ``_redact_url_credentials``'s docstring for why reusing a session-signing key
+    as a durable correlation key is its own defect. The key ID is embedded in the
+    output so a future key rotation doesn't silently orphan every historical row.
     """
 
     def _redact(self, url: str) -> str:
         from src.services.protocol_webhook_service import _redact_url_credentials
 
         return _redact_url_credentials(url)
+
+    def _key_id_and_digest(self, redacted: str) -> tuple[str, str]:
+        inner = redacted.removeprefix("https://<redacted:").removeprefix("http://<redacted:").removesuffix(">")
+        key_id, _, digest = inner.rpartition(":")
+        return key_id, digest
 
     def test_scheme_survives(self):
         redacted = self._redact("https://example.com:8443/hook")
@@ -337,7 +345,7 @@ class TestRedactUrlCredentials:
 
     def test_digest_is_at_least_128_bits(self):
         redacted = self._redact("https://example.com/hook")
-        digest = redacted.removeprefix("https://<redacted:").removesuffix(">")
+        _key_id, digest = self._key_id_and_digest(redacted)
         assert len(digest) >= 32, f"digest {digest!r} is shorter than 128 bits (32 hex chars)"
         int(digest, 16)  # must be valid hex
 
@@ -354,17 +362,55 @@ class TestRedactUrlCredentials:
         url = "https://example.com/hook?token=abc"
         with patch(
             "src.services.protocol_webhook_service.get_config",
-            return_value=AppConfig(flask_secret_key="secret-one"),
+            return_value=AppConfig(webhook_audit_hmac_key="secret-one"),
         ):
             redacted_with_secret_one = self._redact(url)
         with patch(
             "src.services.protocol_webhook_service.get_config",
-            return_value=AppConfig(flask_secret_key="secret-two"),
+            return_value=AppConfig(webhook_audit_hmac_key="secret-two"),
         ):
             redacted_with_secret_two = self._redact(url)
         assert redacted_with_secret_one != redacted_with_secret_two, (
             "digest did not change when the server secret changed -- it is not actually keyed"
         )
+
+    def test_redacted_form_embeds_the_key_id_for_rotation_support(self):
+        """A rotation that swaps webhook_audit_hmac_key without also bumping
+        webhook_audit_hmac_key_id would silently orphan every row written under the
+        old key -- there'd be no way to tell, from the row itself, which key
+        produced it. The key ID must be visible in the output, not just folded
+        into the (irreversible) digest."""
+        from src.core.config import AppConfig
+
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key="a-real-secret", webhook_audit_hmac_key_id="v7"),
+        ):
+            redacted = self._redact("https://example.com/hook")
+        key_id, _digest = self._key_id_and_digest(redacted)
+        assert key_id == "v7"
+
+    def test_digest_changes_when_the_key_id_changes_even_with_the_same_key(self):
+        """The key ID must be bound into the HMAC input (domain separation), not
+        just appended as a cosmetic label -- otherwise a rotation that bumps the
+        key ID without also rotating the underlying secret wouldn't actually
+        invalidate old offline-guessing attempts."""
+        from src.core.config import AppConfig
+
+        url = "https://example.com/hook?token=abc"
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v1"),
+        ):
+            redacted_v1 = self._redact(url)
+        with patch(
+            "src.services.protocol_webhook_service.get_config",
+            return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v2"),
+        ):
+            redacted_v2 = self._redact(url)
+        _key_id_1, digest_1 = self._key_id_and_digest(redacted_v1)
+        _key_id_2, digest_2 = self._key_id_and_digest(redacted_v2)
+        assert digest_1 != digest_2
 
     def test_userinfo_does_not_survive(self):
         redacted = self._redact("https://buyer:s3cr3t@example.com/hook")
@@ -795,3 +841,37 @@ class TestDurableDeliveryLogRedactsCredentials:
             completed_at=None,
             next_retry_at=None,
         )
+
+
+class TestWebhookAuditHmacKeyProductionValidation:
+    """validate_configuration() must reject a production deployment that would
+    silently redact webhook URLs with an unset (or weak) webhook_audit_hmac_key --
+    AppConfig.webhook_audit_hmac_key defaults to "" precisely because it's fine
+    to run without it OUTSIDE production, so the enforcement has to live here,
+    not in the field default."""
+
+    def _validate(self, *, webhook_audit_hmac_key: str, is_production: bool) -> None:
+        from src.core.config import AppConfig, validate_configuration
+
+        with (
+            patch(
+                "src.core.config.get_config",
+                return_value=AppConfig(webhook_audit_hmac_key=webhook_audit_hmac_key),
+            ),
+            patch("src.core.config.is_production", return_value=is_production),
+        ):
+            validate_configuration()
+
+    def test_unset_key_is_accepted_outside_production(self):
+        self._validate(webhook_audit_hmac_key="", is_production=False)  # must not raise
+
+    def test_unset_key_is_rejected_in_production(self):
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+            self._validate(webhook_audit_hmac_key="", is_production=True)
+
+    def test_short_key_is_rejected_in_production(self):
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be at least"):
+            self._validate(webhook_audit_hmac_key="too-short", is_production=True)
+
+    def test_sufficiently_long_key_is_accepted_in_production(self):
+        self._validate(webhook_audit_hmac_key="x" * 32, is_production=True)  # must not raise

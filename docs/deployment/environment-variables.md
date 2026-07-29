@@ -171,6 +171,8 @@ The SSO requirement varies based on deployment mode:
 | `ENCRYPTION_KEY` | auto-generated | Key for encrypting sensitive data in database |
 | `FLASK_SECRET_KEY` | dev key | Flask session secret (auto-generated in production) |
 | `WEBHOOK_SECRET` | - | Secret for verifying incoming webhooks |
+| `WEBHOOK_AUDIT_HMAC_KEY` | - | Keys the HMAC used to redact buyer-supplied webhook URLs before they reach logs / `WebhookDeliveryLog`. Required (≥32 chars) in production -- a separate secret from `FLASK_SECRET_KEY` so session-key rotation doesn't sever correlation with historical delivery-log rows |
+| `WEBHOOK_AUDIT_HMAC_KEY_ID` | `v1` | Label for the current `WEBHOOK_AUDIT_HMAC_KEY` generation, embedded in every redacted audit identifier. Bump alongside a key rotation |
 
 ---
 
@@ -213,6 +215,7 @@ These contain sensitive credentials and should never be in config files:
 - `APPROXIMATED_API_KEY`
 - `WEBHOOK_SECRET`
 - `FLASK_SECRET_KEY`
+- `WEBHOOK_AUDIT_HMAC_KEY`
 
 > **Note**: Admin OAuth credentials (`GOOGLE_CLIENT_ID`, etc.) are now configured per-tenant via the Admin UI instead of environment variables.
 
