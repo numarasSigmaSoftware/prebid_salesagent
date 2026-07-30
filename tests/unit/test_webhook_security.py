@@ -645,7 +645,7 @@ class TestCredentialsNeverReachTheLog:
         # The real outbound request must still receive the FULL, unredacted URL --
         # redaction is a log-output concern only, never a functional rewrite. Count
         # and the url arg checked atomically (not a separate call_args read).
-        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY)
 
     @pytest.mark.asyncio
     async def test_sanitized_config_log_line_omits_url_credentials(self, caplog):
@@ -683,7 +683,7 @@ class TestCredentialsNeverReachTheLog:
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
         # The real outbound request must still receive the FULL, unredacted URL.
-        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+        mock_post.assert_called_once_with(credentialed_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY)
 
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_a_bare_username(self, caplog):
@@ -716,7 +716,7 @@ class TestCredentialsNeverReachTheLog:
             )
 
         assert "buyer-identity" not in caplog.text, f"bare username leaked into the log: {caplog.text}"
-        mock_post.assert_called_once_with(username_only_url, headers=ANY, timeout=ANY, json=ANY)
+        mock_post.assert_called_once_with(username_only_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY)
 
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_query_credentials(self, caplog):
@@ -750,7 +750,9 @@ class TestCredentialsNeverReachTheLog:
             )
 
         assert "query-leak-retry" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
-        mock_post.assert_called_once_with(query_credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+        mock_post.assert_called_once_with(
+            query_credentialed_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY
+        )
 
     @pytest.mark.asyncio
     async def test_sanitized_config_log_line_omits_query_credentials(self, caplog):
@@ -788,7 +790,9 @@ class TestCredentialsNeverReachTheLog:
             )
 
         assert "query-leak-config" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
-        mock_post.assert_called_once_with(query_credentialed_url, headers=ANY, timeout=ANY, json=ANY)
+        mock_post.assert_called_once_with(
+            query_credentialed_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY
+        )
 
 
 class TestFailurePathsNeverLeakCredentials:
