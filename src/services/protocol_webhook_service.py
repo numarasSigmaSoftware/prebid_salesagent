@@ -37,6 +37,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
+from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +303,17 @@ class ProtocolWebhookService:
             )
             return False
 
+        # SSRF gate on the configured URL *before* docker localhost rewrite.
+        # Under ADCP_TESTING, localhost/loopback is allowed for capture servers;
+        # production uses the full DNS-backed check (HTTPS required).
+        rejected, _error_msg = reject_unsafe_outbound_webhook_url(
+            push_notification_config.url,
+            log=logger,
+            kind="Protocol",
+        )
+        if rejected:
+            return False
+
         url = _normalize_localhost_for_docker(push_notification_config.url)
 
         # Prepare headers
@@ -474,8 +486,10 @@ class ProtocolWebhookService:
                 )
 
                 def _post() -> requests.Response:
+                    # Never follow redirects: a 302 to metadata/private IPs would
+                    # bypass the pre-POST SSRF check (open-redirect SSRF).
                     request_body: dict[str, Any] = {"data": body_bytes} if body_bytes is not None else {"json": payload}
-                    return self._session.post(url, headers=headers, timeout=10.0, **request_body)
+                    return self._session.post(url, headers=headers, timeout=10.0, allow_redirects=False, **request_body)
 
                 response = await asyncio.to_thread(_post)
                 response.raise_for_status()

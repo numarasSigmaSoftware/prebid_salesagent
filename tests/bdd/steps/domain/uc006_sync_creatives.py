@@ -94,6 +94,14 @@ def _e2e_unique_id(prefix: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+@given(parsers.parse('the request includes a push_notification_config with url "{url}"'))
+def given_push_notification_config_url(ctx: dict, url: str) -> None:
+    """Attach push_notification_config to the upcoming sync_creatives dispatch."""
+    push_config = {"url": url}
+    ctx["push_notification_config"] = push_config
+    ctx["push_notification_url"] = url
+
+
 @given("a creative with a known format_id")
 def given_creative_with_format(ctx: dict) -> None:
     """Set up a creative payload with a known format_id for sync_creatives dispatch.
@@ -277,6 +285,8 @@ def when_sync_creative(ctx: dict) -> None:
         kwargs["validation_mode"] = ctx["validation_mode"]
     if "idempotency_key" in ctx:
         kwargs["idempotency_key"] = ctx["idempotency_key"]
+    if "push_notification_config" in ctx:
+        kwargs["push_notification_config"] = ctx["push_notification_config"]
     if ctx.get("has_auth") is False:
         dispatch_request(ctx, identity=ctx.get("identity"), **kwargs)
     else:

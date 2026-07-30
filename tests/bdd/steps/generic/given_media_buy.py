@@ -21,6 +21,7 @@ from tests.factories import (
     PricingOptionFactory,
     ProductFactory,
 )
+from tests.helpers.adcp_factories import valid_reporting_webhook
 
 # Gherkin date token resolver — single source for all BDD step files.
 # Matches {now}, {N days from now}, {N days ago}.
@@ -3246,3 +3247,14 @@ def given_webhook_configured(ctx: dict) -> None:
     # Also wire into request_kwargs if they exist (for create requests)
     if "request_kwargs" in ctx:
         ctx["request_kwargs"]["push_notification_config"] = push_config
+
+
+@given(parsers.parse('the request includes a reporting_webhook with url "{url}"'))
+def given_reporting_webhook_url(ctx: dict, url: str) -> None:
+    """Attach a reporting_webhook (valid auth credentials) targeting ``url``.
+
+    Used by registration SSRF scenarios: credentials satisfy MinLen=32 so the
+    request reaches the SSRF gate rather than failing Pydantic auth validation.
+    """
+    kwargs = _ensure_request_defaults(ctx)
+    kwargs["reporting_webhook"] = valid_reporting_webhook(url)
