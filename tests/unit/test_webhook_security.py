@@ -612,33 +612,60 @@ class TestCredentialsNeverReachTheLog:
     is already (correctly) excluded, the URL itself can carry the same class of secret.
     """
 
+    def _metadata(self) -> dict[str, str]:
+        return {
+            "task_type": "media_buy_delivery",
+            "tenant_id": "tenant-1",
+            "principal_id": "principal-1",
+            "media_buy_id": "media-buy-1",
+        }
+
+    def _mock_response(self) -> MagicMock:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+        return mock_response
+
+    async def _send_via_retry(self, service, url: str, caplog) -> MagicMock:
+        """Drive the ``_send_with_retry_and_logging`` log site, return the outbound-POST mock."""
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=self._mock_response()) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service._send_with_retry_and_logging(
+                url=url,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+            )
+        return mock_post
+
+    async def _send_via_config(self, service, url: str, caplog) -> MagicMock:
+        """Drive the ``send_notification`` safe-config log site, return the outbound-POST mock."""
+        from src.core.database.models import PushNotificationConfig
+
+        config = PushNotificationConfig(url=url, authentication_type=None, authentication_token=None)
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=self._mock_response()) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service.send_notification(
+                push_notification_config=config,
+                payload={"task_id": "media-buy-1"},
+                metadata=self._metadata(),
+            )
+        return mock_post
+
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_url_credentials(self, caplog):
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=credentialed_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, credentialed_url, caplog)
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
@@ -649,36 +676,11 @@ class TestCredentialsNeverReachTheLog:
 
     @pytest.mark.asyncio
     async def test_sanitized_config_log_line_omits_url_credentials(self, caplog):
-        from src.core.database.models import PushNotificationConfig
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
-        config = PushNotificationConfig(
-            url=credentialed_url,
-            authentication_type=None,
-            authentication_token=None,
-        )
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service.send_notification(
-                push_notification_config=config,
-                payload={"task_id": "media-buy-1"},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_config(service, credentialed_url, caplog)
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
@@ -693,27 +695,7 @@ class TestCredentialsNeverReachTheLog:
 
         service = ProtocolWebhookService()
         username_only_url = "https://buyer-identity@example.com/hook"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=username_only_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, username_only_url, caplog)
 
         assert "buyer-identity" not in caplog.text, f"bare username leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(username_only_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY)
@@ -727,27 +709,7 @@ class TestCredentialsNeverReachTheLog:
 
         service = ProtocolWebhookService()
         query_credentialed_url = "https://example.com/hook?token=query-leak-retry"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=query_credentialed_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, query_credentialed_url, caplog)
 
         assert "query-leak-retry" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(
@@ -758,36 +720,11 @@ class TestCredentialsNeverReachTheLog:
     async def test_sanitized_config_log_line_omits_query_credentials(self, caplog):
         """Same regression class as above, for the OTHER log site (send_notification's
         safe_config line, which reads push_notification_config.url directly)."""
-        from src.core.database.models import PushNotificationConfig
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         query_credentialed_url = "https://example.com/hook?token=query-leak-config"
-        config = PushNotificationConfig(
-            url=query_credentialed_url,
-            authentication_type=None,
-            authentication_token=None,
-        )
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service.send_notification(
-                push_notification_config=config,
-                payload={"task_id": "media-buy-1"},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_config(service, query_credentialed_url, caplog)
 
         assert "query-leak-config" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(
@@ -1006,12 +943,12 @@ class TestDurableDeliveryLogRedactsCredentials:
     is the single builder for that persisted value, so it is the point that must redact.
     """
 
-    def test_context_webhook_url_omits_userinfo(self):
+    def _build_redacted_context(self, url: str):
         from src.services.protocol_webhook_service import _delivery_log_context
 
-        context = _delivery_log_context(
+        return _delivery_log_context(
             log_id="log-1",
-            url="https://buyer:s3cr3t-password@example.com/hook",
+            url=url,
             task_type="media_buy_delivery",
             tenant_id="tenant-1",
             principal_id="principal-1",
@@ -1021,66 +958,30 @@ class TestDurableDeliveryLogRedactsCredentials:
             notification_type="scheduled",
             payload_size_bytes=100,
         )
+
+    def test_context_webhook_url_omits_userinfo(self):
+        context = self._build_redacted_context("https://buyer:s3cr3t-password@example.com/hook")
         assert context is not None
         assert "buyer" not in context.webhook_url
         assert "s3cr3t-password" not in context.webhook_url
         assert context.webhook_url.startswith("https://<redacted:")
 
     def test_context_webhook_url_omits_sensitive_query_param_values(self):
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://example.com/hook?token=leaked-in-db",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://example.com/hook?token=leaked-in-db")
         assert context is not None
         assert "leaked-in-db" not in context.webhook_url
 
     def test_context_webhook_url_omits_a_path_segment_credential(self):
         """The durable-storage counterpart of TestRedactUrlCredentials's path-segment
         case -- a provider that puts an opaque token directly in the path."""
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://example.com/hooks/path-secret-token-in-db",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://example.com/hooks/path-secret-token-in-db")
         assert context is not None
         assert "path-secret-token-in-db" not in context.webhook_url
 
     def test_context_webhook_url_omits_a_capability_subdomain_credential(self):
         """The durable-storage counterpart of TestRedactUrlCredentials's host test --
         a provider that puts the credential in the (sub)domain itself."""
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://tok-db-capability-host.example.com/hook",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://tok-db-capability-host.example.com/hook")
         assert context is not None
         assert "tok-db-capability-host" not in context.webhook_url
         assert "example.com" not in context.webhook_url
