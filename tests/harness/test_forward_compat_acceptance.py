@@ -28,6 +28,7 @@ import pytest
 from src.core.request_compat import normalize_request_params
 from tests.helpers import assert_envelope_shape
 from tests.helpers.pinned_schema import pinned_error_code_suggestion
+from tests.helpers.secret_scrub import assert_no_secret_leak
 
 # ---------------------------------------------------------------------------
 # Payloads: each is a (tool_name, params) tuple
@@ -655,11 +656,19 @@ class TestErrorPropagation:
                         assert result.is_error, "Empty get_products should return an error, not succeed silently"
                         assert result.content and len(result.content) == 1
                         envelope = json.loads(result.content[0].text)
+                        # The raise site is a bare literal naming the three acceptable
+                        # parameters, so it opts in via ``_wire_safe_message`` and its text
+                        # reaches the wire. This previously pinned the generic scrub sentence
+                        # AND asserted "brief"/"brand"/"filter" were absent from the
+                        # serialized envelope — which contradicted this class's own premise
+                        # ("validation whose errors must reach the buyer"). Those three
+                        # strings are get_products' own public request parameters, already in
+                        # the schema the caller invoked; withholding them discloses nothing
+                        # and costs the buyer the one thing they can act on for a
+                        # ``correctable`` error.
                         expected_error = {
                             "code": "VALIDATION_ERROR",
-                            "message": (
-                                "The request could not be validated; review the submitted fields and resubmit."
-                            ),
+                            "message": "At least one of 'brief', 'brand', or 'filters' is required",
                             "recovery": "correctable",
                             "suggestion": pinned_error_code_suggestion("VALIDATION_ERROR"),
                         }
@@ -668,8 +677,10 @@ class TestErrorPropagation:
                             "adcp_error": expected_error,
                             "errors": [expected_error],
                         }
-                        serialized = json.dumps(envelope, sort_keys=True).lower()
-                        assert all(raw_text not in serialized for raw_text in ("brief", "brand", "filter"))
+                        # The real non-disclosure property, unchanged: nothing seller-side
+                        # rides along. Naming the caller's own request parameters is not a
+                        # leak; a connection string or adapter internal would be.
+                        assert_no_secret_leak(envelope)
                 finally:
                     for p in patches:
                         p.stop()

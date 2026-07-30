@@ -420,12 +420,28 @@ class AdCPError(Exception):
         )
 
 
+# Canonical buyer-facing suggestions from error-code.json enumMetadata (AdCP 3.1.1):
+# each code carries its own default hint, so a VALIDATION_ERROR must not borrow
+# INVALID_REQUEST's text. Text is byte-identical to the pinned enum and graded
+# by the pinned-fixture oracle in test_error_boundary_translation.
+INVALID_REQUEST_SUGGESTION = "check request parameters and fix"
+VALIDATION_ERROR_SUGGESTION = "review error details and fix field values"
+
+
 class AdCPValidationError(AdCPError):
     """Invalid parameters or request data (400)."""
 
     _default_status_code: ClassVar[int] = 400
     _default_error_code: ClassVar[str] = "VALIDATION_ERROR"
     _default_recovery: ClassVar[RecoveryHint] = "correctable"
+    # The buyer gets a hint even when a raise site supplies none — same reason
+    # AdCPAuthenticationError carries one below. The scrub used to synthesize this
+    # text on the way out, so a site that opts its message in via
+    # ``_wire_safe_message`` (and thereby skips the scrub) would otherwise trade a
+    # restored ``message`` for a lost ``suggestion``; 23 of the opted-in sites pass
+    # no explicit suggestion. Byte-identical to what the scrub emitted, so the
+    # opt-in is a pure gain rather than a swap. Per-raise ``suggestion=`` overrides.
+    _default_suggestion: ClassVar[str | None] = VALIDATION_ERROR_SUGGESTION
 
 
 class AdCPInvalidRequestError(AdCPValidationError):
@@ -438,6 +454,9 @@ class AdCPInvalidRequestError(AdCPValidationError):
     """
 
     _default_error_code: ClassVar[str] = "INVALID_REQUEST"
+    # Its own code's enum text, NOT the inherited VALIDATION_ERROR one — the two
+    # codes carry different canonical hints and a subclass must not borrow.
+    _default_suggestion: ClassVar[str | None] = INVALID_REQUEST_SUGGESTION
 
 
 AUTH_REQUIRED_CANONICAL_SUGGESTION = (
@@ -1059,14 +1078,6 @@ def build_two_layer_error_envelope(exc: AdCPError) -> dict[str, Any]:
     if serialized_context is not None:
         envelope["context"] = serialized_context
     return envelope
-
-
-# Canonical buyer-facing suggestions from error-code.json enumMetadata (AdCP 3.1.1):
-# each code carries its own default hint, so a VALIDATION_ERROR must not borrow
-# INVALID_REQUEST's text. Text is byte-identical to the pinned enum and graded
-# by the pinned-fixture oracle in test_error_boundary_translation.
-INVALID_REQUEST_SUGGESTION = "check request parameters and fix"
-VALIDATION_ERROR_SUGGESTION = "review error details and fix field values"
 
 
 def first_validation_error_field(validation_error: ValidationError) -> str | None:
