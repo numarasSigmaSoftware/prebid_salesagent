@@ -243,7 +243,8 @@ class TestCanonicalVocabularyPinnedToSdk:
 
         The storyboard-graded prose only mandates "final" for campaign
         completion (optimization-reporting.mdx §Publisher Commitment), but
-        webhooks.mdx §Termination (dist/docs/3.1.0, latest snapshot at the
+        webhooks.mdx §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1
+        docs snapshot, not spec-target drift], latest snapshot at the
         3.1.1 pin) states persistent-webhook final delivery fires after
         completed, canceled, OR rejected — see WEBHOOK_TERMINAL_CANONICAL_STATUSES's
         own comment. Ungraded by any storyboard found, but grounded in spec

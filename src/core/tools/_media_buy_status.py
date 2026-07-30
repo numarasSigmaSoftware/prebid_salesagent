@@ -191,7 +191,8 @@ COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - S
 # arrive" is a broader question than the spec's completion-only "final". The
 # storyboard-graded prose (optimization-reporting.mdx §Publisher Commitment)
 # describes "final" narrowly as campaign completion, but webhooks.mdx
-# §Termination (dist/docs/3.1.0, latest snapshot at the 3.1.1 pin) states
+# §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1 docs snapshot,
+# not spec-target drift], latest snapshot at the 3.1.1 pin) states
 # explicitly that a persistent webhook's final delivery fires after the buy
 # reaches completed, canceled, OR rejected — so treating canceled/rejected as
 # terminal here is grounded in that spec prose, though ungraded by any
@@ -249,7 +250,8 @@ def derive_notification_type(statuses: Iterable[str]) -> str | None:
     UNGRADED: the storyboard-graded prose (optimization-reporting.mdx
     §Publisher Commitment) describes "final" narrowly as "the campaign
     completes". Extending "final" to rejected/canceled is grounded in
-    webhooks.mdx §Termination (dist/docs/3.1.0, latest snapshot at the 3.1.1
+    webhooks.mdx §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1
+    docs snapshot, not spec-target drift], latest snapshot at the 3.1.1
     pin), which states persistent-webhook final delivery fires after
     completed, canceled, or rejected. Extending it further to "failed" (not
     part of the AdCP status enum at all) has no spec text to cite — that part
