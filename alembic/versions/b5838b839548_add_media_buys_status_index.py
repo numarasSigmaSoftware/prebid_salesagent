@@ -21,9 +21,13 @@ Base.metadata.create_all() (e.g. fresh test databases) already has it, and
 omitting the guard would make this migration fail there.
 
 If CREATE INDEX CONCURRENTLY fails partway through (e.g. the process is
-killed), it can leave an INVALID index behind under the same name -- in that
-case IF NOT EXISTS will silently skip creating it on retry, and an operator
-must DROP INDEX idx_media_buys_status manually before re-running.
+killed), it can leave an INVALID index behind under the same name --
+IF NOT EXISTS only checks the catalog NAME, not pg_index.indisvalid, so a
+naive retry would silently skip rebuilding it and "succeed" while leaving
+production without a usable index. upgrade() below checks indisvalid and
+drops an invalid leftover before retrying CREATE, so a retry after an
+interruption self-heals instead of requiring an operator to notice and
+intervene manually.
 
 Revision ID: b5838b839548
 Revises: 168914d7ca05
@@ -33,6 +37,8 @@ Create Date: 2026-07-30 17:32:43.481260
 
 from collections.abc import Sequence
 
+from sqlalchemy import text
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -41,15 +47,37 @@ down_revision: str | Sequence[str] | None = "168914d7ca05"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_INDEX_NAME = "idx_media_buys_status"
+
 
 def upgrade() -> None:
-    """Create the status index declared in the model but never migrated."""
+    """Create the status index declared in the model but never migrated.
+
+    Self-heals a leftover INVALID index from a prior interrupted CONCURRENTLY
+    build (see module docstring) -- IF NOT EXISTS alone would silently skip
+    rebuilding it since it only checks the catalog name, not indisvalid.
+    """
     with op.get_context().autocommit_block():
-        op.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_media_buys_status ON media_buys (status)")
+        conn = op.get_bind()
+        invalid_leftover = conn.execute(
+            text(
+                "SELECT 1 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid "
+                "WHERE c.relname = :name AND NOT i.indisvalid"
+            ),
+            {"name": _INDEX_NAME},
+        ).scalar()
+        if invalid_leftover:
+            op.execute(f"DROP INDEX CONCURRENTLY {_INDEX_NAME}")
+        op.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {_INDEX_NAME} ON media_buys (status)")
 
 
 def downgrade() -> None:
     """Drop the status index -- the model still declares it, so a fresh
-    Base.metadata.create_all() environment is unaffected by this downgrade."""
+    Base.metadata.create_all() environment is unaffected by this downgrade.
+
+    No indisvalid self-heal needed here (unlike upgrade()): DROP ... IF EXISTS
+    removes whatever catalog entry is present by name regardless of validity,
+    so it's already correct against an INVALID leftover with no extra check.
+    """
     with op.get_context().autocommit_block():
-        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_media_buys_status")
+        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}")
