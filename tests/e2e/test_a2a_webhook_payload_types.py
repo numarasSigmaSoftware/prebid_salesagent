@@ -699,13 +699,23 @@ class TestProtocolWebhookWireFormat:
 
         # host='127.0.0.1': this class is unit-style (no Docker) — the service
         # runs in-process, so loopback is always the right callback host.
-        # Real outbound validator allows localhost when ADCP_TESTING=true
-        # (do not patch the SSRF gate — that would hide regressions).
+        # The SSRF gate is NOT patched — that would hide regressions. It is
+        # satisfied for real by naming this exact loopback host through the
+        # development-only test-host seam, the same mechanism the Docker E2E
+        # stack uses for its own callback host, so the real
+        # validate_protocol_webhook_url still runs and still has to pass.
         with (
             run_webhook_capture_server(
                 WebhookPayloadCapture, WebhookPayloadCapture.received_webhooks, host="127.0.0.1"
             ) as info,
-            patch.dict("os.environ", {"ADCP_TESTING": "true"}),
+            patch.dict(
+                "os.environ",
+                {
+                    "ADCP_TESTING": "true",
+                    "ENVIRONMENT": "development",
+                    "ADCP_WEBHOOK_TEST_HOST": "127.0.0.1",
+                },
+            ),
         ):
             config = PushNotificationConfig(
                 id="pnc-test",
@@ -716,13 +726,7 @@ class TestProtocolWebhookWireFormat:
                 authentication_token=None,
             )
             service = ProtocolWebhookService()
-            with patch(
-                "src.services.protocol_webhook_service.WebhookURLValidator.validate_protocol_webhook_url",
-                return_value=(True, ""),
-            ):
-                sent = asyncio.run(
-                    service.send_notification(config, payload, metadata={"task_type": "create_media_buy"})
-                )
+            sent = asyncio.run(service.send_notification(config, payload, metadata={"task_type": "create_media_buy"}))
             assert sent is True, "ProtocolWebhookService.send_notification should report success"
 
             received = list(info["received"])

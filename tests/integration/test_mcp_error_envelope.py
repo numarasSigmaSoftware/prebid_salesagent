@@ -218,10 +218,18 @@ class TestMcpWireErrorEnvelope:
         Uses a credential-/URL-shaped product_id (duplicate-detection runs before any
         catalog lookup — media_buy_create.py's duplicate check at ~2528 precedes the
         AdCPProductNotFoundError check at ~2572, so this value never needs to resolve to a
-        real product) rather than the plain ``_PRODUCT_ID`` fixture value, so
-        ``assert_no_secret_leak`` below is a genuine check on THIS real wire response, not
-        a trivially-true one — the plain fixture value could never contain a leaked
-        fragment regardless of whether production is correct.
+        real product) to show the echo carries a value of that SHAPE intact, rather than
+        only the tidy fixture id.
+
+        What ``assert_no_secret_leak`` below does and does not prove: it is a regression
+        guard that no SERVER-side fragment (connection string, token, inline SQL — the
+        fixed set in tests/helpers/secret_scrub.py) joins this message. It is NOT made
+        stronger by the buyer value above, which deliberately contains none of those
+        fragments; it reads the same either way. The guard was shown to bite by mutation
+        during development — appending a fake connection string to the raise site's
+        f-string reddened it — not by anything this particular product_id contributes.
+        A sentinel cannot be threaded through this path instead: the buyer value is
+        expected to echo, so it cannot simultaneously serve as a must-be-absent marker.
         """
         identity = mcp_real_tenant_setup
         credential_shaped_product_id = "https://example.com/callback?token=buyer-rotated-secret-789"
