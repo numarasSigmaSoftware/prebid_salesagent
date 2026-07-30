@@ -118,6 +118,13 @@ def check_url_ssrf(
         hostname = parsed.hostname
         if not hostname:
             return False, "URL must have a valid hostname"
+        # The password operand is redundant TODAY, and is kept deliberately. Probed across
+        # every userinfo form urlparse accepts (`:pass@`, `user@`, `user:pass@`, bare, `@`,
+        # `:@`, `:p@host:port`), a non-None password always arrives with a non-None username —
+        # the EMPTY STRING, which is not None — so the first operand already covers it.
+        # Retained as belt-and-braces: this is a credential-leak boundary, the redundancy
+        # costs one comparison, and keeping it means the guard does not silently depend on
+        # that urlparse detail holding across versions.
         if parsed.username is not None or parsed.password is not None:
             return False, "URL must not contain embedded credentials"
 

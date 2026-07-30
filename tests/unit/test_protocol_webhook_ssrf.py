@@ -47,7 +47,16 @@ from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_media_buy_request_dict, valid_reporting_webhook
 
-_METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+# https:// on purpose: an http:// URL lets the scheme check reject before the host is
+# ever examined, so the test would pass without the host defence running at all.
+#
+# Note what this does NOT establish. check_url_ssrf blocks hosts in two independent
+# layers — BLOCKED_HOSTNAMES (a string set) and _blocked_ip_error (networks + the
+# is_private/is_loopback/is_link_local predicates) — and both of these URLs are caught
+# by the HOSTNAME layer, so disabling the IP layer entirely still leaves them green.
+# Switching to https removes the scheme short-circuit; making either individual layer
+# load-bearing needs a host that only that layer catches, which is separate work.
+_METADATA_URL = "https://169.254.169.254/latest/meta-data/"
 
 
 def _config(url: str) -> PushNotificationConfig:
@@ -109,7 +118,7 @@ async def test_send_notification_rejects_localhost_without_post(monkeypatch: pyt
     service = ProtocolWebhookService()
     with patch.object(service._session, "post", autospec=True) as mock_post:
         sent = await service.send_notification(
-            _config("http://localhost:9999/webhook"),
+            _config("https://localhost:9999/webhook"),  # https: blocklist is the sole rejector
             payload={"task_id": "t1", "status": "completed"},
             metadata={"task_type": "create_media_buy"},
         )
