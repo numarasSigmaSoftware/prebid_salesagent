@@ -175,6 +175,26 @@ class WebhookURLValidator:
         """Production requires HTTPS; ADCP_TESTING keeps HTTP for capture servers."""
         return _strict_mode()
 
+    @staticmethod
+    def _require_https_for_callback() -> bool:
+        """The ONE scheme rule for AdCP protocol callbacks — registration and delivery.
+
+        Both webhook gates read this, so they cannot disagree about the scheme the way
+        they previously did: registration used ``_require_https()`` while delivery keyed
+        on ``ENVIRONMENT == "development"``, and the two rules diverged in 7 of the 10
+        environment combinations, always register-permissive / deliver-strict. On the
+        default stack (``docker-compose.yml`` sets no ``ENVIRONMENT``) that meant an
+        ``http://`` reporting webhook registered with a success response and then
+        silently never delivered.
+
+        Keys on ``is_production()`` ALONE — deliberately NOT ``_strict_mode()``, whose
+        ``ADCP_TESTING`` term a deployment could flip. A testing flag must not be able to
+        downgrade a production deployment to plaintext: these callbacks carry notification
+        payloads and legacy Bearer credentials. This is the SCHEME axis of the same
+        single-definition fix ``_matches_development_test_host`` applies to the HOST axis.
+        """
+        return is_production()
+
     @classmethod
     def validate_webhook_url(cls, url: str) -> tuple[bool, str]:
         """
@@ -241,7 +261,7 @@ class WebhookURLValidator:
         is_valid, error = check_url_ssrf(
             url,
             resolve_dns=False,
-            require_https=cls._require_https(),
+            require_https=cls._require_https_for_callback(),
         )
         is_valid, error = cls._maybe_allow_localhost(is_valid, error, allow_localhost=allow_localhost)
         if is_valid:
@@ -267,21 +287,13 @@ class WebhookURLValidator:
         in development mode so delivery can be exercised without a public
         relay. Arbitrary private hosts are never enabled by this seam.
 
-        The HTTPS decision is ``_require_https()`` — the SAME policy the
-        registration gate and ``validate_webhook_url`` apply — so registration
-        and delivery cannot disagree about the SCHEME, exactly as
+        The HTTPS decision is ``_require_https_for_callback()``, shared with the
+        registration gate so the two cannot disagree about the SCHEME — exactly as
         ``_matches_development_test_host`` stops them disagreeing about the HOST.
-        This gate previously keyed on ``ENVIRONMENT == "development"`` alone,
-        which diverged from its two siblings in 7 of the 10 env combinations,
-        always in the register-permissive/deliver-strict direction: on the
-        default stack (``docker-compose.yml`` never sets ``ENVIRONMENT``) an
-        ``http://`` reporting webhook REGISTERED successfully and then silently
-        never delivered. It was also the sole gate of the three that ignored
-        ``ADCP_TESTING`` — registration and ``validate_outbound_webhook_url``
-        both honor it, so a test deployment got a callback it could register and
-        could not receive.
+        See that helper for the divergence this closed and for why the rule keys on
+        ``is_production()`` rather than on ``_strict_mode()``.
         """
-        is_valid, error = check_url_ssrf(url, require_https=cls._require_https())
+        is_valid, error = check_url_ssrf(url, require_https=cls._require_https_for_callback())
         if is_valid:
             return True, ""
         # Same seam definition the registration gate uses — one source of truth, so

@@ -327,23 +327,35 @@ def test_registration_and_delivery_agree_on_the_scheme(monkeypatch, environment,
     )
 
 
-def test_production_rejects_plaintext_callbacks_at_both_gates(monkeypatch) -> None:
+@pytest.mark.parametrize("adcp_testing", [None, "true"], ids=["no-testing-flag", "testing-flag-set"])
+def test_production_rejects_plaintext_callbacks_at_both_gates(monkeypatch, adcp_testing) -> None:
     """Unifying the scheme policy must not weaken real production.
 
-    The pairing above only proves the two gates agree; this pins WHERE they agree for
-    the one deployment that matters. ``ADCP_TESTING`` is deliberately unset — that flag
-    is the "this is a test deployment" switch every gate honors, and production does
-    not set it.
+    The pairing above only proves the two gates AGREE; this pins WHERE they agree for
+    the one deployment that matters, so agreement cannot be satisfied by making both
+    gates permissive.
+
+    Parametrized over ``ADCP_TESTING`` on purpose, and that is the load-bearing half.
+    A first attempt at this fix unified both gates onto ``_require_https()``
+    (``_strict_mode()`` = production AND NOT ADCP_TESTING) on the reasoning that the
+    protocol gate was the odd one out of three. That direction is backwards for a
+    security gate: "the other two are permissive" argues for tightening them, not for
+    loosening the strict one. It let a testing flag downgrade a production deployment
+    to plaintext for callbacks carrying notification payloads and legacy Bearer
+    credentials. The whole unit suite sets ADCP_TESTING=true via an autouse fixture, so
+    that cell is exactly where the weakening would hide.
     """
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.delenv("ADCP_TESTING", raising=False)
+    if adcp_testing is not None:
+        monkeypatch.setenv("ADCP_TESTING", adcp_testing)
     monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", "host.docker.internal")
 
     for url in ("http://reporting.example.com/webhook", "http://host.docker.internal:9999/webhook"):
         registers, _ = WebhookURLValidator.validate_webhook_url_registration(url)
         delivers, _ = WebhookURLValidator.validate_protocol_webhook_url(url)
-        assert not registers, f"production must not register plaintext {url}"
-        assert not delivers, f"production must not deliver to plaintext {url}"
+        assert not registers, f"production must not register plaintext {url} (ADCP_TESTING={adcp_testing!r})"
+        assert not delivers, f"production must not deliver to plaintext {url} (ADCP_TESTING={adcp_testing!r})"
 
 
 @pytest.mark.parametrize("blank", [None, "", "   "])
