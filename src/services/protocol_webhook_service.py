@@ -497,6 +497,37 @@ class ProtocolWebhookService:
                 # Calculate response time
                 response_time_ms = int((time.time() - start_time) * 1000)
 
+                # raise_for_status() only raises for 4xx/5xx -- a 3xx we deliberately
+                # did not follow (allow_redirects=False, above) passes right through it.
+                # Left unchecked, that response would fall into the success path below
+                # and record a delivery that never actually happened. Treated as a
+                # permanent failure, same as 4xx: retrying against the same URL would
+                # just get the same redirect again, and we've already decided not to
+                # trust it (that's the whole point of not following it).
+                if not (200 <= response.status_code < 300):
+                    error_message = _safe_delivery_error_message(url, reason=f"HTTP {response.status_code} redirect")
+                    logger.error(
+                        f"Webhook failed for task {task_id} with unfollowed redirect "
+                        f"{response.status_code} - not retrying"
+                    )
+
+                    self._write_delivery_log(
+                        context=delivery_log_context,
+                        status="failed",
+                        attempt_count=attempt + 1,
+                        http_status_code=response.status_code,
+                        error_message=error_message,
+                        response_time_ms=response_time_ms,
+                        completed_at=datetime.now(UTC),
+                    )
+
+                    if audit_logger:
+                        audit_logger.log_warning(
+                            f"{task_type} webhook failed with unfollowed redirect {response.status_code}"
+                        )
+
+                    return False
+
                 logger.info(f"Successfully sent webhook for task {task_id} (status: {response.status_code})")
 
                 self._write_delivery_log(

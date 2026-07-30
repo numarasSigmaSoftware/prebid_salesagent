@@ -154,12 +154,21 @@ async def test_send_notification_posts_when_url_is_public() -> None:
 
 @pytest.mark.asyncio
 async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
-    """302 to link-local metadata must not be followed (open-redirect SSRF)."""
+    """302 to link-local metadata must not be followed (open-redirect SSRF) AND
+    must not be recorded as a successful delivery.
+
+    Uses a REAL requests.Response, not a MagicMock with a fabricated
+    raise_for_status side_effect: requests.Response.raise_for_status() does
+    NOT raise for 3xx (verified against the real class, not assumed) -- a
+    mock that forces it to raise here masks that this exact response used to
+    fall through to the success branch below, since allow_redirects=False
+    means we only ever see the 302 itself, never a response from wherever it
+    points.
+    """
     service = ProtocolWebhookService()
-    redirect = MagicMock()
+    redirect = requests.Response()
     redirect.status_code = 302
-    redirect.headers = {"Location": _METADATA_URL}
-    redirect.raise_for_status.side_effect = requests.HTTPError("302 redirect")
+    redirect.headers["Location"] = _METADATA_URL
 
     with (
         patch(
@@ -175,7 +184,6 @@ async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
             "src.services.protocol_webhook_service.get_audit_logger",
             return_value=MagicMock(),
         ),
-        patch("src.services.protocol_webhook_service.asyncio.sleep", return_value=None),
     ):
         sent = await service.send_notification(
             _config("https://buyer.example.com/hooks/adcp"),
@@ -184,10 +192,59 @@ async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
         )
 
     assert sent is False
-    assert mock_post.call_count >= 1
-    for call in mock_post.call_args_list:
-        assert call.kwargs.get("allow_redirects") is False
-        assert call.args[0] == "https://buyer.example.com/hooks/adcp"
+    # Exactly one attempt: an un-followed redirect is a permanent failure
+    # (like 4xx), not something worth retrying against the same URL -- it
+    # would just get the same redirect again.
+    mock_post.assert_called_once_with(
+        "https://buyer.example.com/hooks/adcp",
+        json={"task_id": "t1", "status": "completed"},
+        headers={"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"},
+        timeout=10.0,
+        allow_redirects=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_notification_records_failure_on_ordinary_redirect() -> None:
+    """A redirect from an ordinary, non-SSRF-flagged target must ALSO be
+    recorded as a failed delivery, never success -- this is a general
+    correctness property of _send_with_retry_and_logging (raise_for_status()
+    never raises for any 3xx), not something that only matters for
+    metadata/private-IP targets specifically."""
+    service = ProtocolWebhookService()
+    redirect = requests.Response()
+    redirect.status_code = 307
+    redirect.headers["Location"] = "https://buyer.example.com/hooks/adcp-new"
+
+    with (
+        patch(
+            "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url",
+            return_value=(True, ""),
+        ),
+        patch.object(service._session, "post", return_value=redirect) as mock_post,
+        patch(
+            "src.services.protocol_webhook_service.extract_webhook_result_data",
+            return_value=None,
+        ),
+        patch(
+            "src.services.protocol_webhook_service.get_audit_logger",
+            return_value=MagicMock(),
+        ),
+    ):
+        sent = await service.send_notification(
+            _config("https://buyer.example.com/hooks/adcp"),
+            payload={"task_id": "t1", "status": "completed"},
+            metadata={"task_type": "create_media_buy", "tenant_id": "t1"},
+        )
+
+    assert sent is False
+    mock_post.assert_called_once_with(
+        "https://buyer.example.com/hooks/adcp",
+        json={"task_id": "t1", "status": "completed"},
+        headers={"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"},
+        timeout=10.0,
+        allow_redirects=False,
+    )
 
 
 def test_reject_unsafe_webhook_registration_url_raises_validation_error() -> None:
