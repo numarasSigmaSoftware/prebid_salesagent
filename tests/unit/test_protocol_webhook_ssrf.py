@@ -214,6 +214,45 @@ def test_reject_unsafe_webhook_registration_url_raises_validation_error() -> Non
     assert exc_info.value.recovery == "correctable"
 
 
+@pytest.mark.parametrize("callback_host", ["tests", "host.docker.internal"])
+def test_registration_admits_the_configured_e2e_callback_host(monkeypatch, callback_host: str) -> None:
+    """The E2E callback host must survive the create_media_buy registration gate.
+
+    Drives the exact production helper both create_media_buy call sites use for
+    reporting_webhook.url and push_notification_config.url. When this gate did not
+    consult the development-only test-host seam, every E2E webhook flow died here
+    — before any delivery was attempted — with VALIDATION_ERROR on those fields.
+
+    Both configured pairings are covered: "tests" for the in-network runner
+    (docker-compose.e2e.yml) and "host.docker.internal" for the standalone
+    fixture (tests/e2e/conftest.py), so neither CI mode can regress alone.
+    """
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ADCP_TESTING", "true")
+    monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", callback_host)
+
+    for field in ("reporting_webhook.url", "push_notification_config.url"):
+        # Does not raise — that IS the assertion (the helper's contract is
+        # raise-or-return-None, so a rejection surfaces as AdCPValidationError).
+        reject_unsafe_webhook_registration_url(
+            f"http://{callback_host}:9999/webhook",
+            field=field,
+        )
+
+
+def test_registration_seam_does_not_admit_other_hosts_in_development(monkeypatch) -> None:
+    """Admitting the E2E callback host must not admit private hosts generally."""
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ADCP_TESTING", "true")
+    monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", "host.docker.internal")
+
+    with pytest.raises(AdCPValidationError):
+        reject_unsafe_webhook_registration_url(
+            "http://metadata.google.internal/computeMetadata/v1/",
+            field="reporting_webhook.url",
+        )
+
+
 @pytest.mark.parametrize("blank", [None, "", "   "])
 def test_reject_unsafe_webhook_registration_url_noop_on_blank(blank: str | None) -> None:
     """Blank / missing URL is not a rejection — callers extract-then-call unconditionally."""

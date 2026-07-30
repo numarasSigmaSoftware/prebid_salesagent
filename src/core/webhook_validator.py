@@ -188,6 +188,37 @@ class WebhookURLValidator:
         """
         return check_url_ssrf(url, require_https=cls._require_https())
 
+    @staticmethod
+    def _matches_development_test_host(url: str) -> bool:
+        """True iff ``url`` is the ONE development-only callback host the seam admits.
+
+        The single definition of that seam, shared by the registration and protocol
+        gates so they cannot disagree about which host is admissible — a mismatch
+        between them rejects a callback at registration that delivery would have
+        accepted (or vice versa), which is how the E2E capture server broke.
+
+        Inert outside ``ENVIRONMENT=development``: in production this returns False
+        before reading anything else, so no seam can widen the production gate.
+        Admits exactly one hostname (the configured value), http/https only, and
+        never a URL carrying credentials — arbitrary private hosts stay blocked.
+        """
+        if os.getenv("ENVIRONMENT", "").lower() != "development":
+            return False
+        test_host = os.getenv("ADCP_WEBHOOK_TEST_HOST")
+        if not test_host:
+            return False
+        parsed = urlparse(url)
+        try:
+            _port = parsed.port  # malformed port raises here, not at comparison time
+        except ValueError:
+            return False
+        return (
+            parsed.hostname == test_host
+            and parsed.scheme in {"http", "https"}
+            and parsed.username is None
+            and parsed.password is None
+        )
+
     @classmethod
     def validate_webhook_url_registration(cls, url: str) -> tuple[bool, str]:
         """Registration-time SSRF gate (no DNS required).
@@ -197,6 +228,14 @@ class WebhookURLValidator:
         (``validate_outbound_webhook_url``). When ``ADCP_TESTING=true``,
         localhost/loopback are allowed for capture servers. Production
         requires HTTPS.
+
+        Also honors the development-only test-host seam (see
+        ``_matches_development_test_host``): the E2E stack's callback host must be
+        admissible at REGISTRATION as well as at delivery, or the capture server
+        can never be registered in the first place. Both E2E modes pair the
+        emitted callback host with this allowed host — ``tests`` in-network
+        (docker-compose.e2e.yml), ``host.docker.internal`` standalone
+        (tests/e2e/conftest.py).
         """
         allow_localhost = _adcp_testing()
         is_valid, error = check_url_ssrf(
@@ -204,7 +243,12 @@ class WebhookURLValidator:
             resolve_dns=False,
             require_https=cls._require_https(),
         )
-        return cls._maybe_allow_localhost(is_valid, error, allow_localhost=allow_localhost)
+        is_valid, error = cls._maybe_allow_localhost(is_valid, error, allow_localhost=allow_localhost)
+        if is_valid:
+            return True, ""
+        if cls._matches_development_test_host(url):
+            return True, ""
+        return False, error
 
     @classmethod
     def validate_outbound_webhook_url(cls, url: str) -> tuple[bool, str]:
@@ -223,26 +267,13 @@ class WebhookURLValidator:
         in development mode so delivery can be exercised without a public
         relay. Arbitrary private hosts are never enabled by this seam.
         """
-        environment = os.getenv("ENVIRONMENT", "").lower()
-        is_development = environment == "development"
+        is_development = os.getenv("ENVIRONMENT", "").lower() == "development"
         is_valid, error = check_url_ssrf(url, require_https=not is_development)
         if is_valid:
             return True, ""
-
-        test_host = os.getenv("ADCP_WEBHOOK_TEST_HOST")
-        parsed = urlparse(url)
-        try:
-            _port = parsed.port
-        except ValueError:
-            return False, error
-        if (
-            is_development
-            and test_host
-            and parsed.hostname == test_host
-            and parsed.scheme in {"http", "https"}
-            and parsed.username is None
-            and parsed.password is None
-        ):
+        # Same seam definition the registration gate uses — one source of truth, so
+        # a host admissible for delivery is admissible to register and vice versa.
+        if cls._matches_development_test_host(url):
             return True, ""
         return False, error
 

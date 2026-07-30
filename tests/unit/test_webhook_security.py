@@ -162,6 +162,45 @@ class TestWebhookURLValidator:
         )
         assert not malformed_is_valid
 
+    def test_registration_and_protocol_gates_agree_on_the_dev_test_host(self, monkeypatch):
+        """Both gates must admit the SAME development-only callback host.
+
+        The E2E capture server is registered through the registration gate and
+        delivered to through the protocol gate. When only the protocol gate honored
+        the seam, every E2E webhook flow failed at REGISTRATION (VALIDATION_ERROR on
+        reporting_webhook.url / push_notification_config.url) and no delivery was
+        ever attempted. Covers both configured pairings: "tests" in-network
+        (docker-compose.e2e.yml), "host.docker.internal" standalone (e2e/conftest.py).
+        """
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        monkeypatch.setenv("ADCP_TESTING", "true")
+        for host in ("tests", "host.docker.internal"):
+            monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", host)
+            url = f"http://{host}:9999/webhook"
+            assert WebhookURLValidator.validate_webhook_url_registration(url) == (True, ""), (
+                f"registration gate rejected the configured dev callback host {host!r}"
+            )
+            assert WebhookURLValidator.validate_protocol_webhook_url(url) == (True, ""), (
+                f"protocol gate rejected the configured dev callback host {host!r}"
+            )
+
+    def test_registration_seam_is_exact_and_never_widens_production(self, monkeypatch):
+        """The registration seam admits exactly one host, in development only."""
+        monkeypatch.setenv("ADCP_TESTING", "true")
+        monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", "host.docker.internal")
+
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        # A different private host is NOT admitted just because a seam is configured.
+        assert not WebhookURLValidator.validate_webhook_url_registration("http://10.0.0.5/webhook")[0]
+        # Nor is the seam host when the URL smuggles credentials.
+        assert not WebhookURLValidator.validate_webhook_url_registration(
+            "http://user:pw@host.docker.internal:9999/webhook"
+        )[0]
+
+        # Production ignores the seam even with the env var still set.
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert not WebhookURLValidator.validate_webhook_url_registration("http://host.docker.internal:9999/webhook")[0]
+
     def test_protocol_callback_requires_https_outside_development(self, monkeypatch, public_dns):
         """Production never sends payloads or legacy credentials over plaintext HTTP."""
         monkeypatch.setenv("ENVIRONMENT", "production")
