@@ -266,9 +266,22 @@ class WebhookURLValidator:
         E2E Docker stack may use HTTP only for its exact runner hostname while
         in development mode so delivery can be exercised without a public
         relay. Arbitrary private hosts are never enabled by this seam.
+
+        The HTTPS decision is ``_require_https()`` — the SAME policy the
+        registration gate and ``validate_webhook_url`` apply — so registration
+        and delivery cannot disagree about the SCHEME, exactly as
+        ``_matches_development_test_host`` stops them disagreeing about the HOST.
+        This gate previously keyed on ``ENVIRONMENT == "development"`` alone,
+        which diverged from its two siblings in 7 of the 10 env combinations,
+        always in the register-permissive/deliver-strict direction: on the
+        default stack (``docker-compose.yml`` never sets ``ENVIRONMENT``) an
+        ``http://`` reporting webhook REGISTERED successfully and then silently
+        never delivered. It was also the sole gate of the three that ignored
+        ``ADCP_TESTING`` — registration and ``validate_outbound_webhook_url``
+        both honor it, so a test deployment got a callback it could register and
+        could not receive.
         """
-        is_development = os.getenv("ENVIRONMENT", "").lower() == "development"
-        is_valid, error = check_url_ssrf(url, require_https=not is_development)
+        is_valid, error = check_url_ssrf(url, require_https=cls._require_https())
         if is_valid:
             return True, ""
         # Same seam definition the registration gate uses — one source of truth, so

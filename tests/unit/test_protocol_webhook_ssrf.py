@@ -37,7 +37,11 @@ from src.core.schemas import CreateMediaBuyRequest
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tools.creatives._sync import _sync_creatives_impl
 from src.core.tools.media_buy_create import _create_media_buy_impl
-from src.core.webhook_validator import WEBHOOK_SSRF_SUGGESTION_DEV, reject_unsafe_webhook_registration_url
+from src.core.webhook_validator import (
+    WEBHOOK_SSRF_SUGGESTION_DEV,
+    WebhookURLValidator,
+    reject_unsafe_webhook_registration_url,
+)
 from src.services.protocol_webhook_service import ProtocolWebhookService
 from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
@@ -251,6 +255,95 @@ def test_registration_seam_does_not_admit_other_hosts_in_development(monkeypatch
             "http://metadata.google.internal/computeMetadata/v1/",
             field="reporting_webhook.url",
         )
+
+
+# Every deployment shape the two gates can see, on the SCHEME axis. ``None`` means the
+# variable is unset — the default ``docker-compose.yml`` stack, which sets neither.
+_ENV_MATRIX = [
+    pytest.param(None, None, id="both-unset-default-compose-stack"),
+    pytest.param(None, "true", id="unset-env-testing"),
+    pytest.param("development", None, id="development"),
+    pytest.param("development", "true", id="development-testing"),
+    pytest.param("staging", None, id="staging"),
+    pytest.param("staging", "true", id="staging-testing"),
+    pytest.param("production", "true", id="production-testing"),
+]
+
+
+def _requires_https(gate, host: str) -> bool:
+    """Whether ``gate`` admits ``https://host`` but refuses ``http://host``.
+
+    Isolates the SCHEME axis. The two gates deliberately differ on the DNS axis —
+    registration passes ``resolve_dns=False`` so an unresolvable public hostname is
+    admissible at registration and re-checked at send time — so comparing their raw
+    verdicts on one URL measures DNS, not scheme (an earlier draft of this test did
+    exactly that and "failed" identically with and without the fix). Holding the host
+    fixed and flipping only the scheme cancels every other axis out.
+    """
+    https_ok, _ = gate(f"https://{host}/webhook")
+    http_ok, _ = gate(f"http://{host}/webhook")
+    assert https_ok, f"{gate.__name__} rejected https://{host} — the probe host must clear every other axis"
+    return not http_ok
+
+
+@pytest.mark.parametrize("environment,adcp_testing", _ENV_MATRIX)
+def test_registration_and_delivery_agree_on_the_scheme(monkeypatch, environment, adcp_testing) -> None:
+    """A plaintext callback is admissible to BOTH gates or NEITHER — never one.
+
+    The host axis has ``_matches_development_test_host`` keeping the two gates on one
+    definition; the scheme axis had none. ``validate_protocol_webhook_url`` keyed on
+    ``ENVIRONMENT == "development"`` while registration and ``validate_webhook_url``
+    both use ``_require_https()``/``_strict_mode()``, which diverged in 7 of the 10 env
+    combinations — always register-permissive / deliver-strict. The visible failure: on
+    the default stack (``docker-compose.yml`` sets neither variable) an ``http://``
+    reporting webhook REGISTERED with a success response and then silently never
+    delivered.
+
+    Asserted as AGREEMENT rather than as per-cell expected values on purpose: the
+    property that matters is that the two gates cannot drift apart again, and an
+    agreement assertion keeps holding if the shared policy is later retuned.
+    ``test_production_rejects_plaintext_callbacks_at_both_gates`` pins WHERE they agree
+    for the deployment that matters, so agreement here can't be satisfied by both gates
+    going permissive.
+    """
+    for var, value in (("ENVIRONMENT", environment), ("ADCP_TESTING", adcp_testing)):
+        monkeypatch.delenv(var, raising=False)
+        if value is not None:
+            monkeypatch.setenv(var, value)
+    monkeypatch.delenv("ADCP_WEBHOOK_TEST_HOST", raising=False)
+
+    # A resolvable public host, so DNS (the axis the gates legitimately differ on)
+    # is satisfied for both and only the scheme varies.
+    host = "reporting.example.com"
+    with patch("src.core.security.url_validator.socket.gethostbyname", return_value="93.184.216.34"):
+        register_strict = _requires_https(WebhookURLValidator.validate_webhook_url_registration, host)
+        deliver_strict = _requires_https(WebhookURLValidator.validate_protocol_webhook_url, host)
+
+    assert register_strict == deliver_strict, (
+        f"ENVIRONMENT={environment!r} ADCP_TESTING={adcp_testing!r}: registration "
+        f"{'requires HTTPS' if register_strict else 'accepts http'} but delivery "
+        f"{'requires HTTPS' if deliver_strict else 'accepts http'}. A callback that "
+        f"registers and never delivers is invisible to the buyer."
+    )
+
+
+def test_production_rejects_plaintext_callbacks_at_both_gates(monkeypatch) -> None:
+    """Unifying the scheme policy must not weaken real production.
+
+    The pairing above only proves the two gates agree; this pins WHERE they agree for
+    the one deployment that matters. ``ADCP_TESTING`` is deliberately unset — that flag
+    is the "this is a test deployment" switch every gate honors, and production does
+    not set it.
+    """
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("ADCP_TESTING", raising=False)
+    monkeypatch.setenv("ADCP_WEBHOOK_TEST_HOST", "host.docker.internal")
+
+    for url in ("http://reporting.example.com/webhook", "http://host.docker.internal:9999/webhook"):
+        registers, _ = WebhookURLValidator.validate_webhook_url_registration(url)
+        delivers, _ = WebhookURLValidator.validate_protocol_webhook_url(url)
+        assert not registers, f"production must not register plaintext {url}"
+        assert not delivers, f"production must not deliver to plaintext {url}"
 
 
 @pytest.mark.parametrize("blank", [None, "", "   "])
