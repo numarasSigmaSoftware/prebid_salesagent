@@ -1140,6 +1140,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # Date range validation: production doesn't validate start>end
             "T-UC-004-daterange-invalid": ("date range validation (start>end) not implemented", True),
             "T-UC-004-daterange-equal": ("date range validation (start==end) not implemented", True),
+            # Graduated: T-UC-004-webhook-scheduled (fixed the DeliveryPollEnv
+            # fixture's hardcoded non-resolving buyer.example.com URL that the
+            # real SSRF hostname-resolution check started rejecting after the
+            # upstream SSRF-hardening merge; verified PASS via
+            # test_scheduled_webhook_delivery_at_configured_frequency)
             # Graduated: T-UC-004-webhook-sequence (production fixed: sequence numbers now strictly ascending)
             # Graduated: T-UC-004-webhook-circuit-halfopen (merge from main fixed circuit breaker probe timing)
             # Graduated: T-UC-004-webhook-retry-5xx (production fixed: retry count now correct)

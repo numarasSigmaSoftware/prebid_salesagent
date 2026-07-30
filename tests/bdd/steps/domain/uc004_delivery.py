@@ -414,13 +414,17 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     from tests.harness.delivery_poll import DeliveryPollEnv
 
     if isinstance(env, DeliveryPollEnv):
+        # DeliveryPollEnv patches only get_adapter — everything else, including
+        # the outbound webhook POST, runs through the real SSRF gate. _WEBHOOK_URL
+        # ("buyer.example.com") is a non-resolving subdomain and gets rejected
+        # there; DAILY_REPORTING_WEBHOOK's own "https://example.com/webhook" is a
+        # real, resolvable placeholder domain, so let it flow through unmodified.
         reporting_webhook = {
             **DAILY_REPORTING_WEBHOOK,
-            "url": _WEBHOOK_URL,
             "reporting_frequency": ctx.get("reporting_frequency", "daily"),
         }
         _setup_scheduler_buy(ctx, mb_id, reporting_webhook=reporting_webhook)
-        ctx["webhook_url"] = _WEBHOOK_URL
+        ctx["webhook_url"] = DAILY_REPORTING_WEBHOOK["url"]
         return
     if getattr(env, "_session", None) is not None:
         _persist_webhook_config_if_needed(ctx, env)
