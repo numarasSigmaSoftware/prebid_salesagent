@@ -902,3 +902,66 @@ class TestMediaBuyDetailApprovalUI:
         # And the approve control posts to the media-buy approve route for THIS buy.
         assert f"/media-buy/{media_buy_id}/approve" in html
         assert f'name="workflow_step_id" value="{step_id}"' in html
+
+
+class TestAtomicTransitionTenantScope:
+    """``_atomic_transition`` must not reach across tenants.
+
+    Every conditional transition on this repository — ``transition_if_nonterminal``,
+    ``claim_approval``, ``complete_claimed_approval``, ``cancel_if_cancellable`` — funnels
+    through the one ``UPDATE workflow_steps`` in ``_atomic_transition``, so its
+    ``DBContext.tenant_id`` predicate is the single tenant boundary for all of them.
+
+    That predicate had no oracle: deleting it reddened nothing across the suite. The
+    repository-pattern guard (``test_architecture_workflow_tenant_isolation``) matches
+    ``select(WorkflowStep)``, while this method scopes with ``select(WorkflowStep.step_id)``
+    and writes with ``update(WorkflowStep)`` — different node shapes, so a static guard
+    that reads correct passes over it. Widening that matcher is separate work; this is the
+    behavioural oracle the boundary needs regardless of what any guard can see.
+    """
+
+    @staticmethod
+    def _step_in_its_own_tenant(suffix: str, status: str) -> tuple[str, str]:
+        from tests.factories import PrincipalFactory, TenantFactory
+
+        tenant = TenantFactory(tenant_id=f"t_{suffix}", subdomain=f"sub-{suffix}")
+        principal = PrincipalFactory(tenant=tenant, principal_id=f"p_{suffix}", access_token=f"tok_{suffix}")
+        return tenant.tenant_id, _make_step(tenant.tenant_id, principal.principal_id, status)
+
+    def test_transition_does_not_cross_tenants(self, integration_db, factory_session):
+        """A repo scoped to tenant A cannot transition tenant B's step.
+
+        Asserts on B's PERSISTED status, not merely on the returned value: ``_atomic_transition``
+        ends with ``get_by_step_id``, which is itself tenant-scoped, so a cross-tenant UPDATE
+        that actually applied would STILL return None. A return-value-only assertion would pass
+        while the row was being mutated — the write is the thing to observe.
+        """
+        suffix_a, suffix_b = uuid.uuid4().hex[:8], uuid.uuid4().hex[:8]
+        tenant_a, _step_a = self._step_in_its_own_tenant(suffix_a, "requires_approval")
+        tenant_b, step_b = self._step_in_its_own_tenant(suffix_b, "requires_approval")
+
+        with WorkflowUoW(tenant_a) as uow:
+            assert uow.workflows is not None
+            result = uow.workflows.transition_if_nonterminal(step_b, status="completed")
+
+        assert result is None, f"tenant {tenant_a} must not transition tenant {tenant_b}'s step"
+        assert _status(tenant_b, step_b) == "requires_approval", (
+            "the cross-tenant UPDATE applied — _atomic_transition's DBContext.tenant_id "
+            "predicate is not scoping the write"
+        )
+
+    def test_transition_still_applies_within_the_owning_tenant(self, integration_db, factory_session):
+        """The scoping must not block the legitimate same-tenant transition.
+
+        Without this, the isolation test above is satisfiable by a predicate that matches
+        nothing at all.
+        """
+        suffix = uuid.uuid4().hex[:8]
+        tenant_id, step_id = self._step_in_its_own_tenant(suffix, "requires_approval")
+
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            result = uow.workflows.transition_if_nonterminal(step_id, status="completed")
+
+        assert result is not None, "the owning tenant's transition must apply"
+        assert _status(tenant_id, step_id) == "completed"
