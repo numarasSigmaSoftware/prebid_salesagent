@@ -121,6 +121,34 @@ def reject_unsafe_webhook_registration_url(
         )
 
 
+def reject_unsafe_registration_source_url(
+    url_source: object,
+    *,
+    field: str,
+    context: ContextObject | dict[str, Any] | None = None,
+) -> None:
+    """Extract ``.url`` from a webhook-registration-shaped source and validate it.
+
+    ``url_source`` is whatever the caller has on hand for a ``reporting_webhook``
+    or ``push_notification_config`` field — a typed adcp model (``.url``
+    attribute) on some paths, a raw dict (``["url"]``) on others. Single call
+    site for the "extract url, stringify, validate" pattern repeated at every
+    registration point across create and update, on both fields, so drift
+    (someone forgets the URL check on a new field or a new call site) has one
+    place to be caught rather than N independently-copied bodies. A ``None``
+    source is a no-op, matching ``reject_unsafe_webhook_registration_url``'s
+    own None-is-a-no-op contract.
+    """
+    if url_source is None:
+        return
+    raw_url = url_source.get("url") if isinstance(url_source, dict) else getattr(url_source, "url", None)
+    reject_unsafe_webhook_registration_url(
+        str(raw_url) if raw_url is not None else None,
+        field=field,
+        context=context,
+    )
+
+
 def reject_unsafe_outbound_webhook_url(
     url: str,
     *,

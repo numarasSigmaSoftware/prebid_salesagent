@@ -25,7 +25,7 @@ from src.core.tools._reporting_webhook import (
     validate_reporting_webhook_product_support,
 )
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
-from src.core.webhook_validator import reject_unsafe_webhook_registration_url
+from src.core.webhook_validator import reject_unsafe_registration_source_url
 
 if TYPE_CHECKING:
     from src.core.database.models import MediaBuy
@@ -447,18 +447,22 @@ def _update_media_buy_impl(
                     ),
                 )
 
+            # SSRF gate at registration, mirroring create_media_buy — this is the
+            # same two capabilities (reporting_webhook, push_notification_config),
+            # and a rejected URL must not be silently accepted then persisted (the
+            # send-time gate in protocol_webhook_service still blocks the outbound
+            # POST, but the buyer would never learn their webhook can't fire).
+            # Both checks are unconditional here (not nested under the
+            # reporting_webhook branch below) since push_notification_config can be
+            # set on its own, independent of reporting_webhook.
+            reject_unsafe_registration_source_url(
+                req.reporting_webhook, field="reporting_webhook.url", context=req.context
+            )
+            reject_unsafe_registration_source_url(
+                req.push_notification_config, field="push_notification_config.url", context=req.context
+            )
+
             if req.reporting_webhook is not None:
-                # SSRF gate at registration, mirroring create_media_buy — this is
-                # the same capability, and a rejected URL must not be silently
-                # accepted then persisted (the send-time gate in
-                # protocol_webhook_service still blocks the outbound POST, but
-                # the buyer would never learn their webhook can't fire).
-                rw_url = getattr(req.reporting_webhook, "url", None)
-                reject_unsafe_webhook_registration_url(
-                    str(rw_url) if rw_url is not None else None,
-                    field="reporting_webhook.url",
-                    context=req.context,
-                )
                 validate_reporting_webhook_frequency(req.reporting_webhook)
                 assert uow.products is not None, "MediaBuyUoW.products required for reporting capability validation"
                 product_ids = {
