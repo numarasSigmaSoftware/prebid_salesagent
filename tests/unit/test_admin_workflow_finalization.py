@@ -1,7 +1,10 @@
 """Approval finalization retries DB commits without repeating adapter work."""
 
+import ast
+import os
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
@@ -902,6 +905,46 @@ def test_tasks_get_reconciles_approved_step_before_building_terminal_artifact():
     assert extract_data_from_artifact(task.artifacts[0])["media_buy_id"] == "mb_1"
 
 
+def _source_string_literals(tree: ast.AST) -> list[str]:
+    """Every string literal in ``tree``, as the AUTHOR wrote it semantically.
+
+    Reading literals off the AST rather than scanning source lines is what makes the
+    re-inline guards below survive wrapping: these messages are longer than the repo's
+    120-char line limit, so a real copy-paste is re-wrapped by the formatter into
+    implicit-concatenation pieces that NO single source line contains. A per-line
+    substring scan therefore misses exactly the re-inline it exists to catch. Python
+    folds adjacent literals into one ``ast.Constant``, so the AST sees the joined
+    string the author meant.
+
+    F-strings arrive as ``ast.JoinedStr``; their literal parts are joined with a NUL
+    placeholder standing in for each interpolation, so a fragment is matched only when
+    it lies wholly within literal text and can never span an interpolated value.
+    """
+    literals: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            literals.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            literals.append("".join(part.value if isinstance(part, ast.Constant) else "\x00" for part in node.values))
+    return literals
+
+
+def _reinline_offenders(fragment: str) -> list[str]:
+    """Files under ``src/`` outside ``approval.py`` whose source carries ``fragment``."""
+    src_root = Path(__file__).resolve().parents[2] / "src"
+    offenders = []
+    for path in sorted(src_root.rglob("*.py")):
+        if path.name == "approval.py":
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - a syntax error fails elsewhere, loudly
+            continue
+        if any(fragment in literal for literal in _source_string_literals(tree)):
+            offenders.append(str(path.relative_to(src_root)))
+    return offenders
+
+
 class TestWaitingForCreativesMessage:
     """One adapter-agnostic message for the WAITING_FOR_CREATIVES outcome.
 
@@ -923,6 +966,24 @@ class TestWaitingForCreativesMessage:
         # The drift that shipped: GAM is one of several registered adapters.
         assert "GAM" not in message
 
+    def test_zero_blocking_creatives_gets_its_own_message(self):
+        """No assignments at all is a different situation, not "waiting for 0".
+
+        ``_approval_creative_gate`` returns ``(False, ())`` when the buy has NO creative
+        assignments — the gate is unsatisfied precisely because nothing is assigned — so a
+        single count-interpolated sentence renders "Waiting for 0 creative(s) to be
+        approved", telling the operator to wait for an empty set. The two cases need
+        opposite actions: assign creatives, versus wait for the assigned ones to clear.
+        """
+        from src.admin.utils.approval import waiting_for_creatives_message
+
+        message = waiting_for_creatives_message(0)
+
+        assert "0 creative(s)" not in message
+        assert "No creatives are assigned yet" in message
+        assert "assign" in message.lower(), "the operator must be told the action, not just the state"
+        assert "GAM" not in message
+
     def test_no_route_reinlines_the_message(self):
         """The wording lives in exactly one place.
 
@@ -931,27 +992,22 @@ class TestWaitingForCreativesMessage:
         coverage needs route-level fixtures neither blueprint has). This guard is what makes
         the single-source property hold in the meantime.
         """
-        from pathlib import Path
-
         from src.admin.utils.approval import waiting_for_creatives_message
 
-        # Derive the fragment FROM the helper rather than hardcoding it, so rewording the
-        # message re-points the guard automatically instead of silently disarming it. The
-        # count-independent tail is the distinctive part; a reword that drops "creative(s)"
-        # trips the assert below rather than passing vacuously.
-        tail = waiting_for_creatives_message(1).split("creative(s)", 1)[-1].strip()
-        assert tail and "creative(s)" in waiting_for_creatives_message(1), (
-            "message shape changed — re-derive this guard's fragment"
+        # Match on the part of the sentence that SURVIVES a drift, not the part that drifts.
+        # The earlier fragment was the text AFTER "creative(s)" — i.e. "...before creating in
+        # the ad server", exactly the clause that had already drifted to "...in GAM". A route
+        # re-inlining that historical variant therefore did not match and the guard passed:
+        # it caught only re-inlines of the wording that was already correct. The common prefix
+        # of the helper's two branches is what identifies the sentence under either wording,
+        # and it sits before the count interpolation so it holds for both branches.
+        fragment = os.path.commonprefix([waiting_for_creatives_message(0), waiting_for_creatives_message(2)]).strip()
+        assert len(fragment) >= 15, (
+            f"message shape changed — the two branches no longer share a distinctive prefix "
+            f"({fragment!r}); re-derive this guard's fragment rather than letting it match everything"
         )
 
-        src_root = Path(__file__).resolve().parents[2] / "src"
-        offenders = [
-            f"{path.relative_to(src_root)}:{lineno}"
-            for path in src_root.rglob("*.py")
-            if path.name != "approval.py"
-            for lineno, line in enumerate(path.read_text().splitlines(), start=1)
-            if tail in line
-        ]
+        offenders = _reinline_offenders(fragment)
 
         assert offenders == [], f"WAITING_FOR_CREATIVES wording re-inlined outside approval.py: {offenders}"
 
@@ -970,22 +1026,18 @@ class TestPendingReconciliationMessage:
         """The wording lives in exactly one place.
 
         Derives the fragment FROM the constant rather than hardcoding it, so rewording the
-        message re-points the guard automatically instead of silently disarming it.
+        message re-points the guard automatically instead of silently disarming it. Uses the
+        opening clause rather than the closing one: the message is already written as two
+        implicitly-concatenated pieces in its own source, so a re-inline is re-wrapped by the
+        formatter at whatever column it lands in, and the leading clause is the stable half.
         """
-        from pathlib import Path
-
         from src.admin.utils.approval import APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE
 
-        tail = APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE.split("The workflow", 1)[-1].strip()
-        assert tail and "reconciliation" in tail, "message shape changed — re-derive this guard's fragment"
+        fragment = APPROVED_MEDIA_BUY_PENDING_RECONCILIATION_MESSAGE.split(".", 1)[0].strip()
+        assert len(fragment) >= 15, (
+            f"message shape changed — {fragment!r} is too short to discriminate; re-derive this guard's fragment"
+        )
 
-        src_root = Path(__file__).resolve().parents[2] / "src"
-        offenders = [
-            f"{path.relative_to(src_root)}:{lineno}"
-            for path in src_root.rglob("*.py")
-            if path.name != "approval.py"
-            for lineno, line in enumerate(path.read_text().splitlines(), start=1)
-            if tail in line
-        ]
+        offenders = _reinline_offenders(fragment)
 
         assert offenders == [], f"PENDING_RECONCILIATION wording re-inlined outside approval.py: {offenders}"
