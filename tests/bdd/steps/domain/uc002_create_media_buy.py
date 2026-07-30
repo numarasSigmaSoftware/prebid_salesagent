@@ -184,7 +184,13 @@ def given_account_needs_setup(ctx: dict, account_id: str) -> None:
 
 @given(parsers.parse("the natural key matches {count:d} accounts"))
 def given_multiple_matches(ctx: dict, count: int) -> None:
-    """Create multiple accounts matching the same natural key."""
+    """Create multiple accounts matching the same natural key.
+
+    Records ``natural_key_match_count`` so the non-disclosure Then can assert THIS
+    scenario's actual count is absent from the wire, rather than guessing at literals
+    production might use to express it.
+    """
+    ctx["natural_key_match_count"] = count
     env = ctx["env"]
     if "tenant" not in ctx:
         tenant, principal = env.setup_default_data()

@@ -10,6 +10,7 @@ an operation fails. Errors are real exceptions from production code:
 from __future__ import annotations
 
 import json
+import re
 
 from pytest_bdd import parsers, then
 
@@ -17,6 +18,14 @@ from tests.helpers.auth_contract import (
     CredentialState,
     assert_two_layer_auth_contract,
 )
+
+# The complete key set an auth-rejection envelope layer may carry, verified against what
+# AdCPAuthMissingError / AdCPAuthInvalidError actually serialize. Deliberately EXCLUDES
+# ``details`` and ``field``: authentication fails BEFORE account resolution, so there is no
+# resolution payload to attach, and any such payload is the disclosure the step below exists
+# to prevent. Adding a key here is a decision that the new field cannot describe account
+# resolution — not a way to make a failing assertion pass.
+_AUTH_ENVELOPE_ALLOWED_KEYS = frozenset({"code", "message", "recovery", "suggestion"})
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -321,22 +330,45 @@ def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
     envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
     assert envelope is not None, "Non-disclosure assertion requires the serialized wire envelope"
 
-    # Safe, generic metadata may be added to ``details`` in the future. Grade
-    # the disclosure boundary by content across the entire envelope instead of
-    # imposing an unrelated blanket ban on the field itself.
-    serialized = json.dumps(envelope, sort_keys=True).lower()
+    # STRUCTURE first. A guessed-literal denylist only catches phrasings someone imagined:
+    # four tokens this used to carry (``matched_count``, ``match_count``, ``matching
+    # accounts``, ``candidate_accounts``) match nothing anywhere in ``src/``. An auth
+    # rejection has a fixed pinned shape, so requiring EXACTLY that shape rules out an
+    # attached resolution payload in any phrasing, including ones nobody anticipated.
+    for layer_name, layer in (("adcp_error", envelope["adcp_error"]), ("errors[0]", envelope["errors"][0])):
+        unexpected = set(layer) - _AUTH_ENVELOPE_ALLOWED_KEYS
+        assert not unexpected, (
+            f"{layer_name} carries {sorted(unexpected)} on an auth rejection — an authentication "
+            f"error has no account-resolution payload to attach. Extend "
+            f"_AUTH_ENVELOPE_ALLOWED_KEYS only for a field proven not to describe resolution."
+        )
+
+    # Then content, restricted to data THIS scenario created, so the check cannot pass by
+    # ruling out strings production never had a way to emit. The count is the datum the
+    # ambiguity path would disclose, and the Given now records it.
+    # ensure_ascii=False on purpose: the default escapes non-ASCII, and the pinned auth
+    # suggestion contains an em dash, so the serialized form would carry the literal
+    # "\u2014" — whose digits then collide with a numeric match-count token.
+    serialized = json.dumps(envelope, sort_keys=True, ensure_ascii=False).lower()
     forbidden = {
         str(ctx.get("request_brand", "")).lower(),
         str(ctx.get("request_operator", "")).lower(),
+        # The only two remaining literals that exist in src/: the ambiguity code, and the
+        # account_id prefix the multi-match Given generates.
         "account_ambiguous",
         "acc-multi-",
-        "matched_count",
-        "match_count",
-        "matching accounts",
-        "candidate_accounts",
     }
     leaked = sorted(value for value in forbidden if value and value in serialized)
-    assert not leaked, f"Authentication envelope leaked account-resolution information: {leaked}"
+
+    # The match COUNT is the datum the ambiguity path would disclose, and the Given records
+    # it. Matched on a word boundary rather than as a substring: a small integer occurs
+    # inside unrelated tokens (version numbers, escapes, ids) and a bare `in` check would
+    # fire on those instead of on a disclosed count.
+    match_count = ctx.get("natural_key_match_count")
+    if match_count is not None and re.search(rf"\b{re.escape(str(match_count))}\b", serialized):
+        leaked.append(f"match count {match_count}")
+
+    assert not leaked, f"Authentication envelope leaked account-resolution information: {sorted(leaked)}"
 
 
 # ── Error message content (generic) ───────────────────────────────────
@@ -366,30 +398,17 @@ def then_error_message_contains(ctx: dict, text: str) -> None:
     assert text.lower() in msg, f"Expected '{text}' in error message: {msg}"
 
 
-@then(parsers.parse('the error message should be sanitized, not disclosing "{text}"'))
-def then_error_message_sanitized_without_disclosing(ctx: dict, text: str) -> None:
-    """Assert the wire error uses the canonical scrubbed presentation and never echoes ``text``.
-
-    The dedicated non-disclosure step: production replaces an unaudited raw
-    message (which may interpolate rejected buyer input or adapter internals)
-    with the canonical sanitized message/suggestion on BOTH envelope layers.
-    Distinct from ``the error message should contain "..."`` above, which is a
-    literal containment check — a scenario asserting non-disclosure must name
-    that explicitly rather than relying on a containment step to double as one.
-    """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
-    assert envelope is not None, "Sanitization assertion requires a captured wire error envelope"
-
-    from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
-    from tests.helpers.secret_scrub import assert_sanitized_wire_error
-
-    code = (envelope.get("adcp_error") or {}).get("code")
-    assert code in _SANITIZED_BY_WIRE_CODE, (
-        f"{code!r} has no canonical sanitized presentation — this step only applies to codes "
-        "production scrubs (VALIDATION_ERROR / INVALID_REQUEST / AUTH_REQUIRED)"
-    )
-    assert_sanitized_wire_error(envelope, code, rejected_fragments=(text,))
+# A dedicated non-disclosure step (`the error message should be sanitized, not disclosing
+# "..."`) lived here, bound by ZERO scenarios. Its intended home was the uc011
+# empty-accounts scenario — but that raise site is a bare literal, so the opt-in sweep
+# restored its text to the wire and the scenario now asserts PRESENCE, the opposite
+# contract. With no scenario left to bind, the step was coverage-shaped dead code.
+#
+# The contract it described is still graded, on real wires, by ``assert_sanitized_wire_error``
+# in tests/integration/{test_a2a_error_responses,test_mcp_error_envelope,
+# test_rest_error_envelope}.py — where the 17 remaining interpolated (still-scrubbed) raise
+# sites in src/core/tools are actually exercised. Re-add a BDD step the day a scenario needs
+# one, rather than keeping an unbound one that reads as coverage.
 
 
 @then(parsers.parse('the suggestion should contain "{text}"'))
