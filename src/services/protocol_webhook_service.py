@@ -498,17 +498,19 @@ class ProtocolWebhookService:
                 response_time_ms = int((time.time() - start_time) * 1000)
 
                 # raise_for_status() only raises for 4xx/5xx -- a 3xx we deliberately
-                # did not follow (allow_redirects=False, above) passes right through it.
+                # did not follow (allow_redirects=False, above) passes right through it
+                # (and so, in principle, would a stray 1xx -- hence "non-2xx" below, not
+                # "redirect": this branch does not assume which non-2xx shape it got).
                 # Left unchecked, that response would fall into the success path below
                 # and record a delivery that never actually happened. Treated as a
                 # permanent failure, same as 4xx: retrying against the same URL would
-                # just get the same redirect again, and we've already decided not to
-                # trust it (that's the whole point of not following it).
+                # just get the same response again, and for the 3xx case specifically,
+                # we've already decided not to trust it (that's the whole point of not
+                # following it).
                 if not (200 <= response.status_code < 300):
-                    error_message = _safe_delivery_error_message(url, reason=f"HTTP {response.status_code} redirect")
+                    error_message = _safe_delivery_error_message(url, reason=f"HTTP {response.status_code} response")
                     logger.error(
-                        f"Webhook failed for task {task_id} with unfollowed redirect "
-                        f"{response.status_code} - not retrying"
+                        f"Webhook failed for task {task_id} with non-2xx response {response.status_code} - not retrying"
                     )
 
                     self._write_delivery_log(
@@ -523,7 +525,7 @@ class ProtocolWebhookService:
 
                     if audit_logger:
                         audit_logger.log_warning(
-                            f"{task_type} webhook failed with unfollowed redirect {response.status_code}"
+                            f"{task_type} webhook failed with non-2xx response {response.status_code}"
                         )
 
                     return False

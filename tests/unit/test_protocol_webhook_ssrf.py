@@ -30,7 +30,7 @@ from a2a.types import (
 from adcp.types import ReportingWebhook
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler, _reject_unsafe_a2a_webhook_url
-from src.core.database.models import PushNotificationConfig
+from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.exceptions import AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import CreateMediaBuyRequest
@@ -38,7 +38,7 @@ from src.core.testing_hooks import AdCPTestContext
 from src.core.tools.creatives._sync import _sync_creatives_impl
 from src.core.tools.media_buy_create import _create_media_buy_impl
 from src.core.webhook_validator import WEBHOOK_SSRF_SUGGESTION_DEV, reject_unsafe_webhook_registration_url
-from src.services.protocol_webhook_service import ProtocolWebhookService
+from src.services.protocol_webhook_service import ProtocolWebhookService, _safe_delivery_error_message
 from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_media_buy_request_dict, valid_reporting_webhook
@@ -153,9 +153,69 @@ async def test_send_notification_posts_when_url_is_public() -> None:
 
 
 @pytest.mark.asyncio
+def _loggable_metadata() -> dict[str, str]:
+    """Metadata that makes _delivery_log_context() return a real context, not
+    None: task_type must be in _LOGGABLE_DELIVERY_TASK_TYPES, and tenant_id/
+    principal_id/media_buy_id must ALL be set. Without this,
+    _write_delivery_log() no-ops unconditionally on its `if context is None:
+    return` (protocol_webhook_service.py) -- a redirect test seeded with
+    non-loggable metadata (e.g. bare {"task_type": "create_media_buy",
+    "tenant_id": "t1"}) would only ever prove `sent is False` and that the
+    POST wasn't retried; the failed-state persistence and audit warning
+    would go completely unverified and could be deleted with the test
+    staying green."""
+    return {
+        "task_type": DELIVERY_TASK_TYPE,
+        "tenant_id": "tenant-1",
+        "principal_id": "principal-1",
+        "media_buy_id": "media-buy-1",
+    }
+
+
+def _assert_pending_then_failed_on_non_2xx(
+    mock_write_log: MagicMock,
+    audit_logger_mock: MagicMock,
+    *,
+    status_code: int,
+    url: str,
+) -> None:
+    """Assert _write_delivery_log was called exactly twice against the SAME
+    delivery-log row -- once to reserve the "pending" event identity before
+    the POST, once to record the actual non-2xx outcome as "failed" -- plus
+    a matching audit warning. Shared by every non-2xx-response test in this
+    module: the field-by-field verification is identical regardless of
+    which status code or URL triggered the failure.
+    """
+    assert mock_write_log.call_count == 2
+    pending_call, failed_call = mock_write_log.call_args_list
+
+    assert pending_call.kwargs["status"] == "pending"
+    assert pending_call.kwargs["attempt_count"] == 0
+
+    assert failed_call.kwargs["status"] == "failed"
+    assert failed_call.kwargs["attempt_count"] == 1
+    assert failed_call.kwargs["http_status_code"] == status_code
+    assert failed_call.kwargs["error_message"] == _safe_delivery_error_message(
+        url, reason=f"HTTP {status_code} response"
+    )
+    assert failed_call.kwargs["completed_at"] is not None
+    assert failed_call.kwargs["response_time_ms"] is not None
+
+    # Both writes persist the SAME delivery-log row (identity, not just
+    # equality -- _DeliveryLogContext carries a randomly-generated log_id) --
+    # a pending -> failed transition, not two unrelated rows.
+    assert pending_call.kwargs["context"] is failed_call.kwargs["context"]
+
+    audit_logger_mock.log_warning.assert_called_once_with(
+        f"{DELIVERY_TASK_TYPE} webhook failed with non-2xx response {status_code}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
     """302 to link-local metadata must not be followed (open-redirect SSRF) AND
-    must not be recorded as a successful delivery.
+    must be recorded as a failed delivery -- not silently dropped, not
+    recorded as success.
 
     Uses a REAL requests.Response, not a MagicMock with a fabricated
     raise_for_status side_effect: requests.Response.raise_for_status() does
@@ -169,6 +229,8 @@ async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
     redirect = requests.Response()
     redirect.status_code = 302
     redirect.headers["Location"] = _METADATA_URL
+    audit_logger_mock = MagicMock()
+    url = "https://buyer.example.com/hooks/adcp"
 
     with (
         patch(
@@ -182,13 +244,14 @@ async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
         ),
         patch(
             "src.services.protocol_webhook_service.get_audit_logger",
-            return_value=MagicMock(),
+            return_value=audit_logger_mock,
         ),
+        patch.object(service, "_write_delivery_log") as mock_write_log,
     ):
         sent = await service.send_notification(
-            _config("https://buyer.example.com/hooks/adcp"),
+            _config(url),
             payload={"task_id": "t1", "status": "completed"},
-            metadata={"task_type": "create_media_buy", "tenant_id": "t1"},
+            metadata=_loggable_metadata(),
         )
 
     assert sent is False
@@ -196,12 +259,13 @@ async def test_send_notification_does_not_follow_redirect_to_metadata() -> None:
     # (like 4xx), not something worth retrying against the same URL -- it
     # would just get the same redirect again.
     mock_post.assert_called_once_with(
-        "https://buyer.example.com/hooks/adcp",
+        url,
         json={"task_id": "t1", "status": "completed"},
         headers={"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"},
         timeout=10.0,
         allow_redirects=False,
     )
+    _assert_pending_then_failed_on_non_2xx(mock_write_log, audit_logger_mock, status_code=302, url=url)
 
 
 @pytest.mark.asyncio
@@ -215,6 +279,8 @@ async def test_send_notification_records_failure_on_ordinary_redirect() -> None:
     redirect = requests.Response()
     redirect.status_code = 307
     redirect.headers["Location"] = "https://buyer.example.com/hooks/adcp-new"
+    audit_logger_mock = MagicMock()
+    url = "https://buyer.example.com/hooks/adcp"
 
     with (
         patch(
@@ -228,23 +294,25 @@ async def test_send_notification_records_failure_on_ordinary_redirect() -> None:
         ),
         patch(
             "src.services.protocol_webhook_service.get_audit_logger",
-            return_value=MagicMock(),
+            return_value=audit_logger_mock,
         ),
+        patch.object(service, "_write_delivery_log") as mock_write_log,
     ):
         sent = await service.send_notification(
-            _config("https://buyer.example.com/hooks/adcp"),
+            _config(url),
             payload={"task_id": "t1", "status": "completed"},
-            metadata={"task_type": "create_media_buy", "tenant_id": "t1"},
+            metadata=_loggable_metadata(),
         )
 
     assert sent is False
     mock_post.assert_called_once_with(
-        "https://buyer.example.com/hooks/adcp",
+        url,
         json={"task_id": "t1", "status": "completed"},
         headers={"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"},
         timeout=10.0,
         allow_redirects=False,
     )
+    _assert_pending_then_failed_on_non_2xx(mock_write_log, audit_logger_mock, status_code=307, url=url)
 
 
 def test_reject_unsafe_webhook_registration_url_raises_validation_error() -> None:
