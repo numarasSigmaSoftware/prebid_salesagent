@@ -398,17 +398,39 @@ def then_error_message_contains(ctx: dict, text: str) -> None:
     assert text.lower() in msg, f"Expected '{text}' in error message: {msg}"
 
 
-# A dedicated non-disclosure step (`the error message should be sanitized, not disclosing
-# "..."`) lived here, bound by ZERO scenarios. Its intended home was the uc011
-# empty-accounts scenario — but that raise site is a bare literal, so the opt-in sweep
-# restored its text to the wire and the scenario now asserts PRESENCE, the opposite
-# contract. With no scenario left to bind, the step was coverage-shaped dead code.
-#
-# The contract it described is still graded, on real wires, by ``assert_sanitized_wire_error``
-# in tests/integration/{test_a2a_error_responses,test_mcp_error_envelope,
-# test_rest_error_envelope}.py — where the 17 remaining interpolated (still-scrubbed) raise
-# sites in src/core/tools are actually exercised. Re-add a BDD step the day a scenario needs
-# one, rather than keeping an unbound one that reads as coverage.
+# NOTE ON BINDING: this step is bound by ZERO feature scenarios today. Its intended home was
+# the uc011 empty-accounts scenario, but that raise site is a bare literal, so the opt-in sweep
+# restored its text to the wire and the scenario correctly asserts PRESENCE instead — the
+# opposite contract. It is kept rather than deleted because it is NOT dead: it is exercised by
+# tests/unit/test_generic_then_devacuum.py, which uses it to prove the scrub genuinely removes
+# an untrusted fragment AND that "should contain" no longer silently flips to an absence check.
+# It is the correct primitive for the 17 interpolated raise sites that are still scrubbed; bind
+# it when a scenario covers one, rather than letting a containment step double as a
+# non-disclosure step.
+@then(parsers.parse('the error message should be sanitized, not disclosing "{text}"'))
+def then_error_message_sanitized_without_disclosing(ctx: dict, text: str) -> None:
+    """Assert the wire error uses the canonical scrubbed presentation and never echoes ``text``.
+
+    The dedicated non-disclosure step: production replaces an unaudited raw
+    message (which may interpolate rejected buyer input or adapter internals)
+    with the canonical sanitized message/suggestion on BOTH envelope layers.
+    Distinct from ``the error message should contain "..."`` above, which is a
+    literal containment check — a scenario asserting non-disclosure must name
+    that explicitly rather than relying on a containment step to double as one.
+    """
+    result = ctx.get("result")
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    assert envelope is not None, "Sanitization assertion requires a captured wire error envelope"
+
+    from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
+    from tests.helpers.secret_scrub import assert_sanitized_wire_error
+
+    code = (envelope.get("adcp_error") or {}).get("code")
+    assert code in _SANITIZED_BY_WIRE_CODE, (
+        f"{code!r} has no canonical sanitized presentation — this step only applies to codes "
+        "production scrubs (VALIDATION_ERROR / INVALID_REQUEST / AUTH_REQUIRED)"
+    )
+    assert_sanitized_wire_error(envelope, code, rejected_fragments=(text,))
 
 
 @then(parsers.parse('the suggestion should contain "{text}"'))
