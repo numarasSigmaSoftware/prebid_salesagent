@@ -2,8 +2,8 @@
 
 Pins that ProtocolWebhookService refuses unsafe URLs before any outbound POST,
 mirrors application-level WebhookURLValidator usage in webhook_delivery, and
-covers registration wiring: create_media_buy, sync_creatives, A2A message/send,
-and A2A set_push_notification_config handler.
+covers registration wiring: create_media_buy, update_media_buy, sync_creatives,
+A2A message/send, and A2A set_push_notification_config handler.
 
 Wire-level VALIDATION_ERROR / recovery=correctable + suggestion for
 create_media_buy and sync_creatives is graded by transport-blind BDD scenarios
@@ -467,3 +467,48 @@ async def test_a2a_set_push_handler_rejects_metadata_url() -> None:
 
     assert_envelope_shape(exc_info.value.data, "VALIDATION_ERROR", recovery="correctable")
     mock_uow.assert_not_called()
+
+
+def test_update_media_buy_rejects_reporting_webhook_url() -> None:
+    """update_media_buy must reject an unsafe reporting_webhook.url at registration,
+    mirroring create_media_buy -- this is the same capability on the update path.
+    """
+    from tests.harness.media_buy_update import MediaBuyUpdateEnv
+
+    with MediaBuyUpdateEnv() as env:
+        env.set_media_buy(media_buy_id="mb-001", status="active")
+        with pytest.raises(AdCPValidationError) as exc_info:
+            env.call_impl(
+                media_buy_id="mb-001",
+                reporting_webhook={
+                    "url": _METADATA_URL,
+                    "authentication": {"schemes": ["Bearer"], "credentials": "x" * 40},
+                    "reporting_frequency": "daily",
+                },
+            )
+    assert exc_info.value.field == "reporting_webhook.url"
+    assert "Invalid reporting_webhook.url" in exc_info.value.message
+
+
+def test_update_media_buy_rejects_push_notification_config_url() -> None:
+    """update_media_buy must reject an unsafe push_notification_config.url at
+    registration -- the sibling field to reporting_webhook, on the same request,
+    validated the same way. This is the fix for the gap where an unsafe
+    push_notification_config.url was silently accepted and persisted on update
+    while the same URL on reporting_webhook was correctly rejected.
+    """
+    from tests.harness.media_buy_update import MediaBuyUpdateEnv
+
+    with MediaBuyUpdateEnv() as env:
+        env.set_media_buy(media_buy_id="mb-001", status="active")
+        with pytest.raises(AdCPValidationError) as exc_info:
+            env.call_impl(
+                media_buy_id="mb-001",
+                push_notification_config={
+                    "url": _METADATA_URL,
+                    "authentication_type": "bearer",
+                    "authentication_token": "x" * 40,
+                },
+            )
+    assert exc_info.value.field == "push_notification_config.url"
+    assert "Invalid push_notification_config.url" in exc_info.value.message
