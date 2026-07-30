@@ -108,6 +108,27 @@ other column on the row (id, tenant_id, principal_id, media_buy_id,
 task_type, status, timestamps) is untouched and still provides correlation
 value.
 
+Operational note: _redact_rows() issues one unbounded UPDATE with no
+batching. This is deliberate, not an oversight -- see the "What this gives
+up" reasoning above for why the sweep must be unconditional and exact, and
+batching would add cursor logic to a file whose entire value is being
+trivially auditable. But it has a real deployment cost worth knowing before
+running this against a production database: alembic/env.py does not set
+transaction_per_migration, so this migration's UPDATE runs inside the SAME
+ambient transaction as the whole `alembic upgrade head` invocation -- its
+row locks are held until that entire run commits, not just until this
+migration's own sweep finishes. Before deploying to an environment with
+meaningful traffic, check `SELECT count(*) FROM webhook_delivery_log`. If
+the table is large (rough guideline: over ~1M rows), run this specific
+revision as its own step -- `alembic upgrade 168914d7ca05` -- before
+continuing to head, so its lock/WAL footprint is isolated to a
+single-migration transaction instead of shared with whatever else is in
+the same upgrade run. (Separately: webhook_delivery_log has no
+retention/pruning policy anywhere in this codebase, so it grows
+unboundedly over time -- that is the actual root cause behind this
+migration's cost, and is a more durable fix than anything migration-side;
+worth its own follow-up.)
+
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
 Create Date: 2026-07-29 02:26:40.333322
