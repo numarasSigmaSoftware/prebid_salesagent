@@ -25,6 +25,7 @@ from src.core.tools._reporting_webhook import (
     validate_reporting_webhook_product_support,
 )
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
+from src.core.webhook_validator import reject_unsafe_webhook_registration_url
 
 if TYPE_CHECKING:
     from src.core.database.models import MediaBuy
@@ -447,6 +448,17 @@ def _update_media_buy_impl(
                 )
 
             if req.reporting_webhook is not None:
+                # SSRF gate at registration, mirroring create_media_buy — this is
+                # the same capability, and a rejected URL must not be silently
+                # accepted then persisted (the send-time gate in
+                # protocol_webhook_service still blocks the outbound POST, but
+                # the buyer would never learn their webhook can't fire).
+                rw_url = getattr(req.reporting_webhook, "url", None)
+                reject_unsafe_webhook_registration_url(
+                    str(rw_url) if rw_url is not None else None,
+                    field="reporting_webhook.url",
+                    context=req.context,
+                )
                 validate_reporting_webhook_frequency(req.reporting_webhook)
                 assert uow.products is not None, "MediaBuyUoW.products required for reporting capability validation"
                 product_ids = {
