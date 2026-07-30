@@ -425,6 +425,11 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
         }
         _setup_scheduler_buy(ctx, mb_id, reporting_webhook=reporting_webhook)
         ctx["webhook_url"] = DAILY_REPORTING_WEBHOOK["url"]
+        # Keep the generic webhook_config entry (set above, before this branch
+        # dispatch) consistent with the URL actually used here — a future
+        # reader reaching for ctx["webhook_config"][mb_id]["url"] must not get
+        # back the non-resolving _WEBHOOK_URL this branch doesn't use.
+        ctx["webhook_config"][mb_id]["url"] = DAILY_REPORTING_WEBHOOK["url"]
         return
     if getattr(env, "_session", None) is not None:
         _persist_webhook_config_if_needed(ctx, env)
