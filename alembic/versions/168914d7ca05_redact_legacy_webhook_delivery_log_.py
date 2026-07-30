@@ -112,19 +112,29 @@ Operational note: _redact_rows() issues one unbounded UPDATE with no
 batching. This is deliberate, not an oversight -- see the "What this gives
 up" reasoning above for why the sweep must be unconditional and exact, and
 batching would add cursor logic to a file whose entire value is being
-trivially auditable. But it has a real deployment cost worth knowing before
-running this against a production database: alembic/env.py does not set
-transaction_per_migration, so this migration's UPDATE runs inside the SAME
-ambient transaction as the whole `alembic upgrade head` invocation -- its
-row locks are held until that entire run commits, not just until this
-migration's own sweep finishes. Before deploying to an environment with
-meaningful traffic, check `SELECT count(*) FROM webhook_delivery_log`. If
-the table is large (rough guideline: over ~1M rows), run this specific
-revision as its own step -- `alembic upgrade 168914d7ca05` -- before
-continuing to head, so its lock/WAL footprint is isolated to a
-single-migration transaction instead of shared with whatever else is in
-the same upgrade run. (Separately: webhook_delivery_log has no
-retention/pruning policy anywhere in this codebase, so it grows
+trivially auditable.
+
+Its deployment cost is the UPDATE statement's own execution footprint --
+whatever WAL it generates and whatever row locks it holds while running,
+for however long it takes to touch every qualifying row -- and nothing
+mitigates that footprint; it is what it is, for the duration of the
+statement. (An earlier version of this note claimed the statement's locks
+persist until the whole `alembic upgrade head` invocation commits, and
+recommended running this revision as an isolated step to bound that. That
+claim was wrong: b5838b839548, the very next migration in this chain,
+opens an autocommit_block(), which alembic's own documentation states
+unconditionally commits the preceding ambient transaction -- so in this
+actual chain, this migration's locks are released as soon as the very
+next migration boots, automatically, regardless of what an operator does.
+Manually isolating this revision as its own step therefore achieves
+nothing beyond what already happens; that advice is intentionally removed
+rather than left to mislead.)
+
+Before deploying to an environment with meaningful traffic, check
+`SELECT count(*) FROM webhook_delivery_log` -- a large table means a
+correspondingly long-running single statement, full stop, with no
+operator-side mitigation available today. (Separately: webhook_delivery_log
+has no retention/pruning policy anywhere in this codebase, so it grows
 unboundedly over time -- that is the actual root cause behind this
 migration's cost, and is a more durable fix than anything migration-side;
 worth its own follow-up.)
