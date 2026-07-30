@@ -606,6 +606,20 @@ class TestRedactUrlCredentials:
             assert self._redact("https://example.com/hook-a") == self._redact("https://example.com/hook-b")
 
 
+def _delivery_test_metadata() -> dict[str, str]:
+    """Shared fixed metadata for a single-media-buy delivery send, reused by every
+    test class in this module that drives a real send/log call and needs a
+    metadata dict but doesn't vary it -- single source so the 4 fixed values
+    (task_type/tenant_id/principal_id/media_buy_id) live in one place.
+    """
+    return {
+        "task_type": "media_buy_delivery",
+        "tenant_id": "tenant-1",
+        "principal_id": "principal-1",
+        "media_buy_id": "media-buy-1",
+    }
+
+
 class TestCredentialsNeverReachTheLog:
     """The two ``protocol_webhook_service`` log sites that emit a webhook URL must never
     emit the userinfo credentials embedded in it -- even though ``authentication_token``
@@ -613,12 +627,7 @@ class TestCredentialsNeverReachTheLog:
     """
 
     def _metadata(self) -> dict[str, str]:
-        return {
-            "task_type": "media_buy_delivery",
-            "tenant_id": "tenant-1",
-            "principal_id": "principal-1",
-            "media_buy_id": "media-buy-1",
-        }
+        return _delivery_test_metadata()
 
     def _mock_response(self) -> MagicMock:
         mock_response = MagicMock()
@@ -776,12 +785,7 @@ class TestFailurePathsNeverLeakCredentials:
                 )
 
     def _metadata(self) -> dict[str, str]:
-        return {
-            "task_type": "media_buy_delivery",
-            "tenant_id": "tenant-1",
-            "principal_id": "principal-1",
-            "media_buy_id": "media-buy-1",
-        }
+        return _delivery_test_metadata()
 
     @pytest.mark.asyncio
     async def test_4xx_client_error_does_not_leak_credentials(self, caplog):
@@ -997,21 +1001,10 @@ class TestDurableDeliveryLogRedactsCredentials:
         keyword, or reading from a stale local instead of the context) would not have been
         caught. This drives _write_delivery_log's real body.
         """
-        from src.services.protocol_webhook_service import ProtocolWebhookService, _delivery_log_context
+        from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://buyer:s3cr3t-password@example.com/hook?token=also-leaked",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://buyer:s3cr3t-password@example.com/hook?token=also-leaked")
         assert context is not None
 
         mock_session = MagicMock()
