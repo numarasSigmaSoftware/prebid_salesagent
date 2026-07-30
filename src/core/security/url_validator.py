@@ -18,11 +18,15 @@ from urllib.parse import urlparse
 #   fd00:ec2::/32   AWS IPv6 instance metadata — sits INSIDE fc00::/7 (unique-local,
 #                   the private tier), so it needs its own always-block entry here or
 #                   it would be reachable whenever allow_private=True
+#   64:ff9b::/96    NAT64 well-known prefix (RFC 6052) — embeds an arbitrary IPv4
+#                   address (including loopback/metadata) behind an IPv6 literal, so
+#                   a translator would route it to the embedded IPv4 target
 METADATA_NETWORKS = [
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("fd00:ec2::/32"),
+    ipaddress.ip_network("64:ff9b::/96"),
 ]
 
 # RFC-1918 private + loopback + unique-local ranges. Blocked by default, but a
@@ -73,7 +77,13 @@ BLOCKED_HOSTNAMES = METADATA_HOSTNAMES | LOCAL_HOSTNAMES
 HTTPS_SCHEME_ERROR_PREFIX = "URL must use HTTPS scheme"
 
 
-def check_url_ssrf(url: str, *, require_https: bool = False, allow_private: bool = False) -> tuple[bool, str]:
+def check_url_ssrf(
+    url: str,
+    *,
+    require_https: bool = False,
+    allow_private: bool = False,
+    resolve_dns: bool = True,
+) -> tuple[bool, str]:
     """Check a URL for SSRF safety.
 
     Thin wrapper over :func:`resolve_and_validate_target` for callers that only
@@ -81,12 +91,14 @@ def check_url_ssrf(url: str, *, require_https: bool = False, allow_private: bool
     ``resolve_and_validate_target`` and CONNECT to the returned IP (connection
     pinning) so the address checked is the address used.
     """
-    _ip, error = resolve_and_validate_target(url, require_https=require_https, allow_private=allow_private)
+    _ip, error = resolve_and_validate_target(
+        url, require_https=require_https, allow_private=allow_private, resolve_dns=resolve_dns
+    )
     return (error == ""), error
 
 
 def resolve_and_validate_target(
-    url: str, *, require_https: bool = False, allow_private: bool = False
+    url: str, *, require_https: bool = False, allow_private: bool = False, resolve_dns: bool = True
 ) -> tuple[str | None, str]:
     """Validate a URL for SSRF safety and return a single validated IP to pin.
 
@@ -102,6 +114,13 @@ def resolve_and_validate_target(
             localhost/Docker aliases (a trusted test/dev receiver). Cloud-metadata
             and link-local ranges/hostnames (169.254.x, fe80::,
             metadata.google.internal) remain blocked regardless.
+        resolve_dns: If True (default), resolve the hostname, validate every
+            A/AAAA record, and return the pinned IP. If False, only apply
+            scheme, blocked-hostname, and literal-IP checks — used at webhook
+            *registration* so fixture hostnames (e.g. ``buyer.example.com``)
+            are not rejected for NXDOMAIN; send-time still resolves and pins.
+            A non-literal hostname validated without DNS returns ``(None, "")``
+            (accepted, nothing to pin).
     """
     try:
         parsed = urlparse(url)
@@ -122,12 +141,22 @@ def resolve_and_validate_target(
         if lowered in LOCAL_HOSTNAMES and not allow_private:
             return None, f"URL hostname '{hostname}' is blocked (internal/private)"
 
-        try:
-            resolved = _resolve_ips(hostname)
-        except OSError:
-            return None, f"Cannot resolve hostname: {hostname}"
-        if not resolved:
-            return None, f"Cannot resolve hostname: {hostname}"
+        if not resolve_dns:
+            # Registration-time mode: a fixture hostname (buyer.example.com) must
+            # not be rejected for NXDOMAIN — send-time validation still resolves
+            # and pins. A literal-IP hostname is still fully validated below.
+            try:
+                literal = ipaddress.ip_address(hostname)
+            except ValueError:
+                return None, ""
+            resolved = [str(literal)]
+        else:
+            try:
+                resolved = _resolve_ips(hostname)
+            except OSError:
+                return None, f"Cannot resolve hostname: {hostname}"
+            if not resolved:
+                return None, f"Cannot resolve hostname: {hostname}"
 
         # Validate EVERY resolved A/AAAA record — a hostname with one public and one
         # private/IPv6 record must not pass on the strength of its public record

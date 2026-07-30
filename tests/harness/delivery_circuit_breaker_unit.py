@@ -32,7 +32,7 @@ from unittest.mock import MagicMock
 
 from src.services.webhook_delivery_service import WebhookDeliveryService
 from tests.harness._base import BaseTestEnv
-from tests.harness._mixins import CircuitBreakerMixin
+from tests.harness._mixins import SSRF_EXTERNAL_PATCH, CircuitBreakerMixin
 
 
 class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
@@ -57,6 +57,7 @@ class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
         "random": f"{MODULE}.random.uniform",
         "db": "src.core.database.repositories.uow.get_db_session",
         "logger": f"{MODULE}.logger",
+        **SSRF_EXTERNAL_PATCH,
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -66,6 +67,7 @@ class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
 
     def _configure_mocks(self) -> None:
         self._configure_http_mocks()
+        self._configure_ssrf_default()
 
         # DB session: return a mock session with one active webhook config
         # (BDD Given steps store config in ctx dict; the unit env provides a default

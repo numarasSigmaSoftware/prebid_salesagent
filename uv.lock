@@ -167,7 +167,6 @@ dev = [
     { name = "datamodel-code-generator" },
     { name = "factory-boy" },
     { name = "jsonref" },
-    { name = "mocker" },
     { name = "mypy" },
     { name = "pylint" },
     { name = "pytest" },
@@ -251,7 +250,6 @@ dev = [
     { name = "datamodel-code-generator", specifier = ">=0.26.0" },
     { name = "factory-boy", specifier = ">=3.3.0" },
     { name = "jsonref", specifier = ">=1.1.0" },
-    { name = "mocker", specifier = ">=1.1.1" },
     { name = "mypy", specifier = ">=1.18.2" },
     { name = "pylint", specifier = ">=4.0.5" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -398,9 +396,9 @@ name = "aiologic"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "sniffio", marker = "python_full_version < '3.13'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
-    { name = "wrapt", marker = "python_full_version < '3.13'" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+    { name = "wrapt" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a8/13/50b91a3ea6b030d280d2654be97c48b6ed81753a50286ee43c646ba36d3c/aiologic-0.16.0.tar.gz", hash = "sha256:c267ccbd3ff417ec93e78d28d4d577ccca115d5797cdbd16785a551d9658858f", size = 225952, upload-time = "2025-11-27T23:48:41.195Z" }
 wheels = [
@@ -995,8 +993,8 @@ name = "culsans"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiologic", marker = "python_full_version < '3.13'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "aiologic" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/e3/49afa1bc180e0d28008ec6bcdf82a4072d1c7a41032b5b759b60814ca4b0/culsans-0.11.0.tar.gz", hash = "sha256:0b43d0d05dce6106293d114c86e3fb4bfc63088cfe8ff08ed3fe36891447fe33", size = 107546, upload-time = "2025-12-31T23:15:38.196Z" }
 wheels = [
@@ -1020,22 +1018,21 @@ wheels = [
 
 [[package]]
 name = "datamodel-code-generator"
-version = "0.51.0"
+version = "0.71.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argcomplete" },
-    { name = "black" },
+    { name = "black", marker = "sys_platform != 'emscripten'" },
     { name = "genson" },
     { name = "inflect" },
-    { name = "isort" },
+    { name = "isort", marker = "sys_platform != 'emscripten'" },
     { name = "jinja2" },
-    { name = "packaging" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/88/78/dd57f7cb55be1b5465718eb0a53be947984ae07e48c7cdfdef1ae3da976f/datamodel_code_generator-0.51.0.tar.gz", hash = "sha256:8944813cdd9a354e651513868204fffae56c004855f2316a660b023421c712d0", size = 758566, upload-time = "2026-01-01T00:02:32.532Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/f5/f4ce23d99503b147c9ec514dc995a96d3b4d2a3284252ad665f875a3145d/datamodel_code_generator-0.71.0.tar.gz", hash = "sha256:d27cd7a0d10f9b2db74a41db7f3e050c226da9cf0afb4916a7ab56275ebacbf2", size = 1684916, upload-time = "2026-07-24T15:32:04.334Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8c/8c/cdc5d3e6105adb6ff36da38187c8dfe9f0bbb2703edc953406ff6e85e6ed/datamodel_code_generator-0.51.0-py3-none-any.whl", hash = "sha256:dbca0a48dba156dcd7b3a53f9fdb8ecfcc77c4d21ee41c819a28d0cbaa98ac3a", size = 236968, upload-time = "2026-01-01T00:02:30.692Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/4d/556cb290170f41b97ce50fd872e10a266f141d7a38352bb3071e4ae61f41/datamodel_code_generator-0.71.0-py3-none-any.whl", hash = "sha256:680b68338d59e98a0559eeb54d8e5ca33c35b3ec0bef922ec2cc783f2cb28e9a", size = 452379, upload-time = "2026-07-24T15:32:02.467Z" },
 ]
 
 [[package]]
@@ -1462,14 +1459,14 @@ resolution-markers = [
     "python_full_version >= '3.14'",
 ]
 dependencies = [
-    { name = "google-api-core", marker = "python_full_version >= '3.14'" },
-    { name = "google-auth-oauthlib", marker = "python_full_version >= '3.14'" },
-    { name = "googleapis-common-protos", marker = "python_full_version >= '3.14'" },
-    { name = "grpcio", marker = "python_full_version >= '3.14'" },
-    { name = "grpcio-status", marker = "python_full_version >= '3.14'" },
-    { name = "proto-plus", marker = "python_full_version >= '3.14'" },
-    { name = "protobuf", marker = "python_full_version >= '3.14'" },
-    { name = "pyyaml", marker = "python_full_version >= '3.14'" },
+    { name = "google-api-core" },
+    { name = "google-auth-oauthlib" },
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "grpcio-status" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+    { name = "pyyaml" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0a/27/29c058cb160f8d507aa85585e75402fdb041506dfb172cbb06645a1d1f28/google_ads-28.1.1.tar.gz", hash = "sha256:9b6d18337fbecee783c882eab1f2ec1f99898ef11920aaf1d5d5cb70a5deb869", size = 9216790, upload-time = "2025-10-16T15:17:56.844Z" }
 wheels = [
@@ -1485,14 +1482,14 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 dependencies = [
-    { name = "google-api-core", marker = "python_full_version < '3.14'" },
-    { name = "google-auth-oauthlib", marker = "python_full_version < '3.14'" },
-    { name = "googleapis-common-protos", marker = "python_full_version < '3.14'" },
-    { name = "grpcio", marker = "python_full_version < '3.14'" },
-    { name = "grpcio-status", marker = "python_full_version < '3.14'" },
-    { name = "proto-plus", marker = "python_full_version < '3.14'" },
-    { name = "protobuf", marker = "python_full_version < '3.14'" },
-    { name = "pyyaml", marker = "python_full_version < '3.14'" },
+    { name = "google-api-core" },
+    { name = "google-auth-oauthlib" },
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "grpcio-status" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+    { name = "pyyaml" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/0d/4ea8b08bc66c2015e7b28268460477ff6cbb22baaad0ebe395da4e3551d8/google_ads-28.4.1.tar.gz", hash = "sha256:ecb9d651ac7728bfbf56c7dd20130cc1d093abce69df336d6b844d2ca8a1def3", size = 9227417, upload-time = "2025-12-04T18:27:28.892Z" }
 wheels = [
@@ -2478,12 +2475,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/e1/f1/f22fa0fac767279df
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/bc/977b65cddce185dce0414d14c783040a9f9d647bbfe9b0f5c74ff9262816/mistralai-2.4.9-py3-none-any.whl", hash = "sha256:8e2f8a58697455f2113b4f6d0d1bd28d66d3eb51f94ff24b9d22a21dea531520", size = 1121336, upload-time = "2026-06-03T13:04:20.694Z" },
 ]
-
-[[package]]
-name = "mocker"
-version = "1.1.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2b/be/7347e7ec91c7598eed358ed40ff4c5cd59002490f537adf4a43f92f81abe/mocker-1.1.1.tar.bz2", hash = "sha256:2009911707c74b28bdc9959b5224717e45fcb93475b4b7bb4efad3285fcf2919", size = 36357, upload-time = "2012-05-25T03:57:54.295Z" }
 
 [[package]]
 name = "more-itertools"

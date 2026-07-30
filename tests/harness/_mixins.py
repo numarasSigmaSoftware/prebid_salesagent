@@ -34,6 +34,11 @@ from src.services.webhook_delivery_service import (
 )
 from tests.harness._realize import e2e_unsupported, realize_e2e
 
+# Patch target for send-time SSRF gate in CircuitBreakerEnv (unit + integration).
+OUTBOUND_SSRF_VALIDATE_TARGET = "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url"
+# Shared EXTERNAL_PATCHES fragment — both CircuitBreakerEnv variants merge this.
+SSRF_EXTERNAL_PATCH: dict[str, str] = {"ssrf": OUTBOUND_SSRF_VALIDATE_TARGET}
+
 
 def _persist_simulation_config(env: Any, resp: AdapterGetMediaBuyDeliveryResponse) -> Any:
     """E2E realization of a delivery-poll adapter response (#1418).
@@ -398,6 +403,27 @@ class CircuitBreakerMixin:
     def set_http_sequence(self, responses: list[tuple[int, str]]) -> None:
         """Configure the pinned webhook POST seam to return status codes in order."""
         self.mock["post"].side_effect = [code for code, _text in responses]  # type: ignore[attr-defined]
+
+    def set_url_invalid(self, error_msg: str = "Invalid URL") -> None:
+        """Make send-time SSRF validation fail (skip delivery / record failure).
+
+        Default harness config passes the SSRF mock so fixture hostnames do not
+        NXDOMAIN-fail; scenarios that grade the outbound reject branch must call
+        this hook explicitly.
+        """
+        self.mock["ssrf"].return_value = (False, error_msg)  # type: ignore[attr-defined]
+
+    def set_url_valid(self) -> None:
+        """Allow fixture hostnames through send-time SSRF (default harness path)."""
+        self.mock["ssrf"].return_value = (True, "")  # type: ignore[attr-defined]
+
+    def _configure_ssrf_default(self) -> None:
+        """Default: allow fixture hostnames through send-time SSRF (DNS covered elsewhere).
+
+        Scenarios that grade the reject branch call set_url_invalid(). Both
+        CircuitBreakerEnv variants must call this from ``_configure_mocks``.
+        """
+        self.set_url_valid()
 
     def call_send(
         self,

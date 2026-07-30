@@ -245,6 +245,9 @@ class CreativeSyncEnv(IntegrationEnv):
             body["account"] = account.model_dump(mode="json") if hasattr(account, "model_dump") else account
         if "idempotency_key" in kwargs:
             body["idempotency_key"] = kwargs["idempotency_key"]
+        if "push_notification_config" in kwargs and kwargs["push_notification_config"] is not None:
+            pnc = kwargs["push_notification_config"]
+            body["push_notification_config"] = pnc.model_dump(mode="json") if hasattr(pnc, "model_dump") else pnc
         return body
 
     def parse_rest_response(self, data: dict[str, Any]) -> SyncCreativesResponse:

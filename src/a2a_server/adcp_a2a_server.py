@@ -130,10 +130,28 @@ from src.core.version import get_version
 from src.core.webhook_validator import (
     require_valid_callback_config_urls,
     validated_callback_url_scope,
+    webhook_ssrf_suggestion,
 )
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
+
+
+def _invalid_params_from_ssrf_error(exc: Exception) -> InvalidParamsError:
+    """Wrap an SSRF rejection as A2A InvalidParamsError with AdCP ``data`` envelope."""
+    if isinstance(exc, AdCPValidationError):
+        adcp_err = exc
+    else:
+        adcp_err = AdCPValidationError(
+            str(exc),
+            field="push_notification_config.url",
+            suggestion=webhook_ssrf_suggestion(),
+            recovery="correctable",
+        )
+    return InvalidParamsError(
+        message=adcp_err.message,
+        data=build_two_layer_error_envelope(adcp_err),
+    )
 
 
 def _restore_a2a_integer_version_pin(params: dict[str, Any]) -> dict[str, Any]:
@@ -609,9 +627,14 @@ class AdCPRequestHandler(RequestHandler):
                 "task_type": skills[0] if skills else "unknown",
             }
 
-            await push_notification_service.send_notification(
+            sent = await push_notification_service.send_notification(
                 push_notification_config=push_notification_config, payload=payload, metadata=metadata
             )
+            if not sent:
+                logger.warning(
+                    "Protocol webhook not delivered for task %s (send_notification returned False)",
+                    task.id,
+                )
         except Exception as e:
             # Don't fail the task if webhook fails
             logger.warning(
@@ -757,7 +780,9 @@ class AdCPRequestHandler(RequestHandler):
         msg_id = params.message.message_id or None
         context_id = params.message.context_id or msg_id or f"ctx_{task_id}"
 
-        # Extract push notification config from protocol layer (A2A SendMessageConfiguration)
+        # Extract push notification config from protocol layer (A2A SendMessageConfiguration).
+        # SSRF gate runs after auth resolution below (defense-in-depth: AUTH_REQUIRED
+        # before scheme/blocked-host checks when the request requires credentials).
         push_notification_config: TaskPushNotificationConfig | None = None
         if params.HasField("configuration") and params.configuration.HasField("task_push_notification_config"):
             push_notification_config = params.configuration.task_push_notification_config
@@ -1495,7 +1520,7 @@ class AdCPRequestHandler(RequestHandler):
                 async with validated_callback_url_scope(push_notification_config=callback_config):
                     require_valid_callback_config_urls(push_notification_config=callback_config)
             except AdCPValidationError as exc:
-                raise InvalidParamsError(message=f"Invalid callback url: {exc}") from exc
+                raise _invalid_params_from_ssrf_error(exc) from exc
 
             auth_type = None
             auth_token_value = None
@@ -1503,17 +1528,22 @@ class AdCPRequestHandler(RequestHandler):
                 auth_type = params.authentication.scheme or None
                 auth_token_value = params.authentication.credentials or None
 
-            with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
-                assert uow.push_notification_configs is not None
-                _config, created = uow.push_notification_configs.upsert(
-                    config_id=config_id,
-                    principal_id=tool_context.principal_id,
-                    url=url,
-                    authentication_type=auth_type,
-                    authentication_token=auth_token_value,
-                    validation_token=validation_token,
-                    session_id=None,
-                )
+            try:
+                with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
+                    assert uow.push_notification_configs is not None
+                    _config, created = uow.push_notification_configs.upsert(
+                        config_id=config_id,
+                        principal_id=tool_context.principal_id,
+                        url=url,
+                        authentication_type=auth_type,
+                        authentication_token=auth_token_value,
+                        validation_token=validation_token,
+                        session_id=None,
+                    )
+            except ValueError as e:
+                # Repository SSRF gate (defense in depth) — same enveloped path as
+                # the callback-scope validation above.
+                raise _invalid_params_from_ssrf_error(e) from e
 
             logger.info(
                 f"Push notification config {'created' if created else 'updated'}: {config_id} for tenant {tool_context.tenant_id}"
