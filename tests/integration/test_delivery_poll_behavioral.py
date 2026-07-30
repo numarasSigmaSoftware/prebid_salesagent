@@ -2,7 +2,10 @@
 
 Migrated from tests/unit/test_delivery_poll_behavioral.py — these tests use real
 PostgreSQL (via integration_db fixture) and factory_boy instead of inline @patch.
-Only the adapter is mocked (external ad server).
+The adapter (external ad server) and DNS resolution are mocked; see
+tests/harness/delivery_poll.py's module docstring for what stays real —
+notably the outbound SSRF gate itself, pinned by TestDeliveryPollEnvSsrfGate
+below.
 
 Each test targets exactly one obligation ID and follows the 6 hard rules:
 1. MUST import from src.
@@ -3989,3 +3992,119 @@ class TestGetReportableForDeliveryFinalAntiJoin:
             )
             reportable_ids = {mb.media_buy_id for mb in reportable}
         assert mb_id in reportable_ids
+
+
+class TestGetReportableForDeliveryRequiresReportingWebhook:
+    """get_reportable_for_delivery requires a configured reporting_webhook on
+    BOTH arms, not just the terminal one -- the serving arm previously had no
+    such predicate at all, so every serving buy (webhook-configured or not) was
+    selected and materialized, only to be discarded by the scheduler's
+    Python-side check one buy at a time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_serving_buy_with_webhook_is_selected(self, integration_db):
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="live")
+            mb_id = buy.media_buy_id
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=[]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_serving_buy_without_webhook_is_excluded(self, integration_db):
+        """The regression test for the bug: a serving buy with no reporting_webhook
+        configured must not be selected at all -- not selected-then-discarded in
+        Python, excluded at the SQL layer."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            buy = MediaBuyFactory(tenant=tenant, principal=principal, status="active")
+            mb_id = buy.media_buy_id
+            assert "reporting_webhook" not in buy.raw_request, "fixture must not configure a webhook"
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=[]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id not in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_both_arms_require_reporting_webhook(self, integration_db):
+        """One no-webhook buy per arm, one call. Written to fail if the shared
+        top-level predicate is ever re-split into a per-arm copy and one arm's
+        copy is dropped -- the exact shape of the bug this fix closes."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            serving_buy = MediaBuyFactory(tenant=tenant, principal=principal, status="active")
+            terminal_buy = MediaBuyFactory(tenant=tenant, principal=principal, status="completed")
+            serving_mb_id = serving_buy.media_buy_id
+            terminal_mb_id = terminal_buy.media_buy_id
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=["completed"]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert serving_mb_id not in reportable_ids
+        assert terminal_mb_id not in reportable_ids
+
+
+class TestDeliveryPollEnvSsrfGate:
+    """DeliveryPollEnv stubs DNS resolution (tests/harness/delivery_poll.py) so a
+    real webhook send doesn't depend on live network access -- this must not
+    widen what the outbound SSRF gate accepts. A reporting_webhook URL that
+    targets a blocked destination is still refused, and the mocked DNS answer
+    is never even consulted for a literal-IP/blocked-hostname target since
+    that check runs before hostname resolution (src/core/security/url_validator.py
+    check_url_ssrf: BLOCKED_HOSTNAMES / literal-IP branch precede
+    _check_hostname_resolution's DNS call)."""
+
+    @pytest.mark.asyncio
+    async def test_blocked_destination_is_refused_not_sent(self, integration_db):
+        """A reporting_webhook pointed at the cloud-metadata IP is refused by the
+        real send-time SSRF gate; the outbound POST is never attempted."""
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+        from tests.harness.delivery_poll import mock_webhook_post
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            start_date, end_date = flight_window("live")
+            blocked_webhook = {**DAILY_REPORTING_WEBHOOK, "url": "https://169.254.169.254/latest/meta-data/"}
+            buy = cast(
+                "MediaBuy",
+                MediaBuyFactory(
+                    tenant=tenant,
+                    principal=principal,
+                    status="active",
+                    start_date=start_date,
+                    end_date=end_date,
+                    raw_request={"reporting_webhook": blocked_webhook},
+                ),
+            )
+            env.set_adapter_response(buy.media_buy_id, impressions=5000)
+
+            scheduler = DeliveryWebhookScheduler()
+            with mock_webhook_post(scheduler) as mock_post:
+                with pytest.raises(RuntimeError, match="webhook send failed"):
+                    await scheduler._send_report_for_media_buy(
+                        buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+                    )
+            mock_post.assert_not_called()

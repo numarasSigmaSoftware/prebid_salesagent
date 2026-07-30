@@ -414,22 +414,20 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     from tests.harness.delivery_poll import DeliveryPollEnv
 
     if isinstance(env, DeliveryPollEnv):
-        # DeliveryPollEnv patches only get_adapter — everything else, including
-        # the outbound webhook POST, runs through the real SSRF gate. _WEBHOOK_URL
-        # ("buyer.example.com") is a non-resolving subdomain and gets rejected
-        # there; DAILY_REPORTING_WEBHOOK's own "https://example.com/webhook" is a
-        # real, resolvable placeholder domain, so let it flow through unmodified.
+        # DeliveryPollEnv mocks DNS resolution (tests/harness/delivery_poll.py)
+        # so the outbound webhook POST's real SSRF gate no longer needs a
+        # live-resolving hostname — _WEBHOOK_URL flows through like any other
+        # non-blocked URL, same as every other env branch here.
         reporting_webhook = {
             **DAILY_REPORTING_WEBHOOK,
+            "url": _WEBHOOK_URL,
             "reporting_frequency": ctx.get("reporting_frequency", "daily"),
         }
         _setup_scheduler_buy(ctx, mb_id, reporting_webhook=reporting_webhook)
-        ctx["webhook_url"] = DAILY_REPORTING_WEBHOOK["url"]
-        # Keep the generic webhook_config entry (set above, before this branch
-        # dispatch) consistent with the URL actually used here — a future
-        # reader reaching for ctx["webhook_config"][mb_id]["url"] must not get
-        # back the non-resolving _WEBHOOK_URL this branch doesn't use.
-        ctx["webhook_config"][mb_id]["url"] = DAILY_REPORTING_WEBHOOK["url"]
+        # then_webhook_post asserts the POST landed on ctx["webhook_url"] (a
+        # separate key from webhook_config — see its own default), so it must
+        # track the URL actually configured above.
+        ctx["webhook_url"] = _WEBHOOK_URL
         return
     if getattr(env, "_session", None) is not None:
         _persist_webhook_config_if_needed(ctx, env)

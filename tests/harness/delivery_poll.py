@@ -1,7 +1,11 @@
 """DeliveryPollEnv — integration test environment for _get_media_buy_delivery_impl.
 
-Patches: get_adapter ONLY (external ad server).
-Real: MediaBuyUoW, get_principal_object, _get_pricing_options (all hit real DB).
+Patches: get_adapter (external ad server) and DNS resolution for the outbound
+SSRF gate (see "dns" below).
+Real: MediaBuyUoW, get_principal_object, _get_pricing_options (all hit real DB),
+and the full SSRF check itself -- literal-IP handling, blocked-hostname list,
+and blocked-IP-range rejection are all still live; only the DNS lookup step
+is faked.
 
 Requires: integration_db fixture (creates test PostgreSQL DB).
 
@@ -19,7 +23,15 @@ Usage::
             assert response.aggregated_totals.impressions == 5000.0
 
 Available mocks via env.mock:
-    "adapter"    -- get_adapter mock (only external mock)
+    "adapter"    -- get_adapter mock (only ad-server-external mock)
+    "dns"        -- socket.gethostbyname mock (see _DNS_RESOLVED_IP); a test
+                    driving a real webhook send (send_delivery_webhook /
+                    run_delivery_batch) no longer depends on live network/DNS
+                    to get past the outbound SSRF gate's hostname-resolution
+                    step. The IP-range/blocked-hostname rejection logic this
+                    gate exists for stays fully real and testable -- see
+                    TestDeliveryPollEnvSsrfGate in
+                    tests/integration/test_delivery_poll_behavioral.py.
 """
 
 from __future__ import annotations
@@ -36,6 +48,14 @@ from tests.harness._mixins import DeliveryPollMixin
 if TYPE_CHECKING:  # annotations only — keeps the harness import graph unchanged at runtime
     from src.core.database.models import MediaBuy
     from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+# A genuinely public, non-blocked IP (example.com's own real address) --
+# matches the existing repo-wide idiom for stubbing socket.gethostbyname in
+# tests/unit/test_property_list_resolver.py, tests/unit/test_webhook_security.py,
+# and tests/unit/test_ssrf_url_validator.py. Any hostname resolves to this
+# under DeliveryPollEnv; the SSRF gate's IP-range check still runs on it for
+# real and allows it, same as it would for a real public address.
+_DNS_RESOLVED_IP = "93.184.216.34"
 
 
 @contextmanager
@@ -102,10 +122,13 @@ def mock_send_notification(scheduler: DeliveryWebhookScheduler, *, delivered: bo
 class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
     """Integration test environment for _get_media_buy_delivery_impl.
 
-    Only mocks the adapter (external ad server). Everything else is real:
+    Mocks the adapter (external ad server) and DNS resolution (see module
+    docstring). Everything else is real:
     - Real MediaBuyUoW -> real DB queries
     - Real get_principal_object -> real DB queries
     - Real _get_pricing_options -> real DB queries
+    - Real SSRF gate (only its DNS-resolution step is stubbed -- see
+      _DNS_RESOLVED_IP and the "dns" mock above)
 
     Fluent API (from DeliveryPollMixin):
         set_adapter_response(...)  -- configure adapter return for a media_buy_id
@@ -115,6 +138,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
 
     EXTERNAL_PATCHES = {
         "adapter": "src.core.tools.media_buy_delivery.get_adapter",
+        "dns": "src.core.security.url_validator.socket.gethostbyname",
     }
     REST_ENDPOINT = "/api/v1/media-buys/delivery"
 
@@ -124,6 +148,13 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
 
     def _configure_mocks(self) -> None:
         self._configure_adapter_mock()
+        self._configure_dns_mock()
+
+    def _configure_dns_mock(self) -> None:
+        """Stub DNS resolution so a real webhook send doesn't depend on live
+        network access to clear the outbound SSRF gate's hostname-resolution
+        step. See module docstring / _DNS_RESOLVED_IP for what stays real."""
+        self.mock["dns"].return_value = _DNS_RESOLVED_IP
 
     def call_a2a(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
         """Call get_media_buy_delivery via real AdCPRequestHandler — full A2A pipeline."""
