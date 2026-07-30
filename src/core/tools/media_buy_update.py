@@ -397,7 +397,7 @@ def _update_media_buy_impl(
             media_buy_id_to_use = req.media_buy_id
 
             if not media_buy_id_to_use:
-                raise AdCPValidationError("media_buy_id is required")
+                raise AdCPValidationError("media_buy_id is required", _wire_safe_message=True)
 
             # Verify principal owns this media buy
             _verify_principal(media_buy_id_to_use, identity, uow.media_buys, context=req.context)
@@ -797,6 +797,7 @@ def _update_media_buy_impl(
                                 "package_id is required when updating package budget",
                                 field=package_field_path("package_id"),
                                 context=req.context,
+                                _wire_safe_message=True,
                             )
                         # Extract budget amount - handle both float and Budget object
                         budget_amount: float
@@ -878,6 +879,7 @@ def _update_media_buy_impl(
                                 "package_id is required when updating creative_ids",
                                 field=package_field_path("package_id"),
                                 context=req.context,
+                                _wire_safe_message=True,
                             )
 
                         # Resolve media_buy_id
@@ -979,6 +981,7 @@ def _update_media_buy_impl(
                                 "package_id is required when uploading creatives",
                                 field=package_field_path("package_id"),
                                 context=req.context,
+                                _wire_safe_message=True,
                             )
 
                         # Sync creatives (upload/update)
@@ -1028,6 +1031,7 @@ def _update_media_buy_impl(
                                 "package_id is required when updating creative_assignments",
                                 field=package_field_path("package_id"),
                                 context=req.context,
+                                _wire_safe_message=True,
                             )
 
                         # Resolve media_buy_id
@@ -1209,6 +1213,7 @@ def _update_media_buy_impl(
                                 "package_id is required when updating targeting_overlay",
                                 field=package_field_path("package_id"),
                                 context=req.context,
+                                _wire_safe_message=True,
                             )
 
                         from sqlalchemy.orm import attributes
@@ -1513,6 +1518,7 @@ def _build_update_request(
                 "start_time, end_time, packages, budget, push_notification_config, "
                 "reporting_webhook, context, or ext."
             ),
+            _wire_safe_message=True,
         )
 
     return req

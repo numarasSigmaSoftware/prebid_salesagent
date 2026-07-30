@@ -3742,6 +3742,7 @@ async def _create_media_buy_impl(
             raise AdCPValidationError(
                 "start_time and end_time are required but were not properly set",
                 context=req.context,
+                _wire_safe_message=True,
             )
 
         # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter

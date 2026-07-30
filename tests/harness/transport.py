@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from tests.helpers.pinned_schema import pinned_error_code_metadata, pinned_error_code_suggestion
+from tests.helpers.pinned_schema import pinned_error_code_metadata
 
 
 def extract_wire_suggestion(envelope: dict | None) -> str | None:
@@ -162,10 +162,25 @@ class TransportResult:
         )
         assert_envelope_shape(envelope, code, recovery=expected_recovery, message_substr=message_substr)
         if require_suggestion:
-            expected_suggestion = pinned_error_code_suggestion(code)
-            assert envelope["adcp_error"].get("suggestion") == expected_suggestion, (
-                f"adcp_error.suggestion drifted from pinned {code} guidance: {envelope}"
-            )
-            assert envelope["errors"][0].get("suggestion") == expected_suggestion, (
-                f"errors[0].suggestion drifted from pinned {code} guidance: {envelope}"
-            )
+            # PRESENCE on both layers, not equality with the pinned enum text.
+            #
+            # 3.1.1 `core/error.json` defines `suggestion` as "Suggested fix for the error" —
+            # optional, free-form, with NO tie to `enumMetadata`. The sibling `recovery` field
+            # in that same file DOES spell out its enum relationship ("the enumMetadata.recovery
+            # block ... is the documentary mirror; error.recovery on the wire is authoritative"),
+            # so the authors wrote the tie-back where they meant one. `enums/error-code.json`'s
+            # own `$comment` binds SDKs *consuming* the block and scopes its normativity clause
+            # to `recovery`; it calls the suggestions "remediation hints". The spec's own worked
+            # examples emit site-specific text that differs from the enum default (BUDGET_TOO_LOW
+            # ships "Increase budget to at least 500 USD" against an enum default of "increase
+            # budget or check capabilities.media_buy.limits").
+            #
+            # Equality here was a harness tightening (5b41082ab) that generalized SCRUB-ONLY
+            # semantics to every error. It held only vacuously — while the raise sites were still
+            # being scrubbed. `assert_sanitized_wire_error` (tests/helpers/secret_scrub.py) keeps
+            # that equality where it belongs: verifying the scrub substitution itself.
+            for layer, error in (("adcp_error", envelope["adcp_error"]), ("errors[0]", envelope["errors"][0])):
+                assert error.get("suggestion"), (
+                    f"{layer} carries no buyer-facing suggestion for {code}; the spec places the "
+                    f"hint at the top level of the error object: {envelope}"
+                )

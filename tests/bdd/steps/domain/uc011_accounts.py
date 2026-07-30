@@ -2248,21 +2248,30 @@ def then_error_with_code(ctx: dict, code: str) -> None:
 
 @then("the error indicates accounts array must not be empty")
 def then_empty_accounts_error(ctx: dict) -> None:
-    """Assert empty accounts is rejected without leaking raw validator text."""
+    """Assert the buyer is told WHICH constraint they violated, on the wire.
+
+    The step name is the contract: the error must *indicate* the empty-array
+    rejection. The wire branch previously asserted the opposite — that the text
+    was scrubbed OFF the wire — which was right only while every literal
+    validation message was genericized by default. The raise site interpolates
+    no request data (a bare literal), so it opts in via ``_wire_safe_message``
+    and the buyer keeps the one diagnostic they can act on; the rejection is
+    ``recovery: correctable``, i.e. they are expected to fix it themselves.
+    """
     from src.core.exceptions import AdCPValidationError
 
     result = ctx.get("result")
     envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
     if envelope:
         from tests.helpers import assert_envelope_shape
-        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+        from tests.helpers.secret_scrub import assert_no_secret_leak
 
         assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
-        assert_sanitized_wire_error(
-            envelope,
-            "VALIDATION_ERROR",
-            rejected_fragments=("accounts array must not be empty",),
-        )
+        for layer, error in (("adcp_error", envelope["adcp_error"]), ("errors[0]", envelope["errors"][0])):
+            assert "accounts array must not be empty" in error["message"], (
+                f"{layer} must name the violated constraint on the wire, got {error['message']!r}"
+            )
+        assert_no_secret_leak(envelope)
         return
 
     error = _get_error(ctx)

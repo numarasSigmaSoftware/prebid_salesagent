@@ -439,6 +439,7 @@ def _extract_natural_key(entry: Any) -> tuple[str, str | None, str, bool | None]
             "Each account entry must include 'brand', 'operator', and 'billing'; "
             "the account-reference (settings-update) form is not supported by this seller.",
             recovery="correctable",
+            _wire_safe_message=True,
         )
     brand_domain = brand.domain
     brand_id = None
@@ -484,7 +485,9 @@ async def _sync_accounts_impl(
 
     # Validate non-empty accounts array
     if not req.accounts:
-        raise AdCPValidationError("accounts array must not be empty — at least one account is required.")
+        raise AdCPValidationError(
+            "accounts array must not be empty — at least one account is required.", _wire_safe_message=True
+        )
     dry_run = bool(req.dry_run)
     delete_missing = bool(req.delete_missing)
 

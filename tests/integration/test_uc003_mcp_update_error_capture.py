@@ -154,15 +154,30 @@ class TestUC003McpUpdateErrorCapture:
             "INVALID_REQUEST",
             recovery="correctable",
         )
-        from tests.helpers.secret_scrub import assert_sanitized_wire_error
+        from tests.helpers.secret_scrub import assert_no_secret_leak
 
-        assert_sanitized_wire_error(
-            result.wire_error_envelope,
-            "INVALID_REQUEST",
-            rejected_fragments=("at least one updatable field",),
-        )
+        # Bare static literal → opts in to the wire (nothing interpolated, nothing to
+        # leak). Asserting the SCRUB here pinned the diagnostic downgrade the opt-in
+        # sweep removed: an INVALID_REQUEST is recovery=correctable, so the buyer is
+        # expected to self-correct — "review the submitted fields and resubmit" does
+        # not tell them WHICH field to add.
+        envelope = result.wire_error_envelope
+        env_dict = envelope.envelope if hasattr(envelope, "envelope") else envelope
+        for label, error in (("adcp_error", env_dict["adcp_error"]), ("errors[0]", env_dict["errors"][0])):
+            assert "at least one updatable field" in error["message"], (
+                f"{transport}: {label} must carry the actionable empty-update text, got {error['message']!r}"
+            )
+        assert_no_secret_leak(env_dict)
+
+        # The graded property is PLACEMENT: a buyer-facing hint at the SPEC top level
+        # (error.json), never buried in details. This previously pinned the literal
+        # "check request parameters and fix" — INVALID_REQUEST's generic enum text —
+        # which is what the scrub substituted. With the opt-in, the raise site's own
+        # strictly-more-actionable hint survives (it names the acceptable fields), so
+        # assert that instead. The enum constants themselves stay pinned to the spec by
+        # test_architecture_error_suggestion_enum_conformance.py; that guard constrains
+        # the module-level constants, not what an individual raise site may supply.
         suggestion = self._top_level_suggestion(result.wire_error_envelope)
-        assert suggestion == "check request parameters and fix", (
-            f"{transport}: empty-update rejection must carry INVALID_REQUEST's "
-            f"canonical TOP-LEVEL suggestion, got {suggestion!r}"
+        assert suggestion and "at least one updatable field" in suggestion, (
+            f"{transport}: empty-update rejection must carry its actionable TOP-LEVEL suggestion, got {suggestion!r}"
         )

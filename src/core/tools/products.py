@@ -169,7 +169,7 @@ async def _get_products_impl(
 
     # Require at least one search criterion (brief, brand, or filters)
     if not req.brief and not req.brand and not req.filters:
-        raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
+        raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required", _wire_safe_message=True)
 
     # Extract identity fields
     identity = require_identity(identity, context=req.context)
@@ -412,7 +412,9 @@ async def _get_products_impl(
             # Log the raw exception server-side only — it may carry DB/connection
             # detail. The client-facing message must not interpolate str(e).
             logger.error(f"Property list resolution failed: {e}")
-            raise AdCPValidationError("Failed to resolve property list.", recovery="transient") from e
+            raise AdCPValidationError(
+                "Failed to resolve property list.", recovery="transient", _wire_safe_message=True
+            ) from e
 
     # Generate dynamic product variants from signals agents
     try:
@@ -824,6 +826,7 @@ async def get_products(
         raise AdCPValidationError(
             "Invalid get_products request.",
             suggestion="Correct the get_products request per the AdCP specification and resend.",
+            _wire_safe_message=True,
         ) from e
 
     # Read identity pre-resolved by MCPAuthMiddleware

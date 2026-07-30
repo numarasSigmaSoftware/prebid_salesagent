@@ -53,6 +53,7 @@ def _validate_attribution_window(attribution_window: "AttributionWindow | None")
                 "(the window spans the full campaign flight)",
                 field="attribution_window",
                 suggestion="interval must be 1 when unit is 'campaign'",
+                _wire_safe_message=True,
             )
 
 
@@ -217,6 +218,7 @@ def _get_media_buy_delivery_impl(
                 field="start_date",
                 suggestion="Set start_date to a date before end_date and resend.",
                 context=req.context,
+                _wire_safe_message=True,
             )
     else:
         # Default to last 30 days

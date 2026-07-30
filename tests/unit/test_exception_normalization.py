@@ -278,6 +278,57 @@ def test_deliberate_typed_validation_message_requires_explicit_wire_safe_opt_in(
     assert envelope["errors"][0]["suggestion"] == "Provide a field to update and resend."
 
 
+def test_wire_safe_opt_in_governs_details_and_message_together():
+    """``_wire_safe_message`` is ONE gate over BOTH untrusted text channels.
+
+    ``message`` and ``details`` on a typed ``AdCPValidationError`` have the same
+    provenance — the raise site builds both, from the same values, with the same
+    (absent) audit. So they are trusted together or scrubbed together; there is no
+    state where the raise site's prose is too untrusted to emit but its structured
+    payload of the same values is fine.
+
+    The scrubbed half is pinned by
+    ``test_untrusted_typed_validation_message_is_scrubbed`` (``details`` absent).
+    This pins the OTHER half, which was unenforced: an audited site that opts in
+    keeps its structured diagnostics, so opting in — not weakening the scrub — is
+    the sanctioned route to putting ``details`` on the wire.
+
+    Why this needs an oracle at all: read from the scrub branch alone, the dropped
+    ``details`` looks like an oversight (a reviewer read it exactly that way and
+    proposed forwarding ``normalize_to_adcp_error(exc).details``). On that branch
+    ``normalize_to_adcp_error`` returns the SAME typed instance it was given, so
+    that forward would re-emit the very raise-site payload the branch exists to
+    withhold — 8 of the 9 ``details=``-passing sites in ``src/`` sit on it.
+    """
+    audited = AdCPValidationError(
+        "Budget must be positive.",
+        field="budget",
+        details={"rejected_value": -5, "minimum": 0},
+        _wire_safe_message=True,
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(audited))
+
+    # Spec 3.1.1 core/error.json documents details.rejected_value as the buyer's own
+    # offending value, "echoed for buyer-side diagnostic clarity" — and VALIDATION_ERROR's
+    # canonical suggestion ("review error details and fix field values") points AT it.
+    assert envelope["errors"][0]["details"] == {"rejected_value": -5, "minimum": 0}
+    assert envelope["adcp_error"]["details"] == {"rejected_value": -5, "minimum": 0}
+
+    # Same raise site, same details, opt-in withdrawn -> both channels withheld together.
+    unaudited = AdCPValidationError(
+        "Budget must be positive.",
+        field="budget",
+        details={"rejected_value": -5, "minimum": 0},
+    )
+
+    scrubbed = build_two_layer_error_envelope(safe_adcp_error(unaudited))
+
+    assert "details" not in scrubbed["errors"][0]
+    assert "details" not in scrubbed["adcp_error"]
+    assert scrubbed["errors"][0]["message"] != "Budget must be positive."
+
+
 # A URL/token-shaped string standing in for "the buyer's own submitted value" in the four
 # tests below. These tests prove TWO SEPARATE properties, not one — do not read the
 # assertions as contradictory:

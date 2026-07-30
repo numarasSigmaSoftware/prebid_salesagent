@@ -92,10 +92,10 @@ def _validate_creative_input(
 
     # Additional business logic validation
     if not creative.name or str(creative.name).strip() == "":
-        raise AdCPValidationError("Creative name cannot be empty", field="name")
+        raise AdCPValidationError("Creative name cannot be empty", field="name", _wire_safe_message=True)
 
     if not creative.format_id:
-        raise AdCPValidationError("Creative format is required", field="format_id")
+        raise AdCPValidationError("Creative format is required", field="format_id", _wire_safe_message=True)
 
     # Use validated format (auto-upgraded from string if needed)
     format_value = validated_creative.format

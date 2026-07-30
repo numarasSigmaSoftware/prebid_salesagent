@@ -808,6 +808,7 @@ class MockAdServer(AdServerAdapter):
                 raise AdCPValidationError(
                     "Simulated error: Invalid targeting parameters",
                     field="targeting",
+                    _wire_safe_message=True,
                 )
 
             if self._should_force_error("inventory_unavailable"):

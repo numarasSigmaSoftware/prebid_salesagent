@@ -1929,6 +1929,7 @@ class AdCPPackageUpdate(LibraryPackageUpdate):
                     "package_id is required to identify the package being updated.",
                     field=package_field_path("package_id"),
                     suggestion="Include the package_id of the package you want to update.",
+                    _wire_safe_message=True,
                 )
             present = sorted(f for f in cls._IMMUTABLE_PACKAGE_FIELDS if f in data)
             if present:
@@ -1976,6 +1977,7 @@ def validate_idempotency_key_shape(key: str | None) -> None:
             "idempotency_key contains characters outside [A-Za-z0-9_.:-].",
             field="idempotency_key",
             suggestion="Use only letters, digits, and the characters _ . : -",
+            _wire_safe_message=True,
         )
 
 

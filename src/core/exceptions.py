@@ -1658,6 +1658,17 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
         # entire schema description); error-handling.mdx's only MUST-be-generic
         # cases are cross-tenant resource enumeration and seller-internal
         # secrets, neither of which this covers.
+        #
+        # ``details`` is withheld here DELIBERATELY, not by omission: it has the same
+        # provenance as ``message`` (the raise site builds both, from the same values,
+        # with the same absent audit), so one flag governs both channels — trusted
+        # together or scrubbed together. Do NOT "restore" it by forwarding
+        # ``normalized.details``: on this branch ``normalize_to_adcp_error`` returned
+        # ``exc`` itself, so that forwards the very raise-site payload this branch
+        # exists to withhold. ``field`` IS forwarded because it is a schema path, not
+        # raise-site prose. The sanctioned way to put ``details`` on the wire is to
+        # audit the site and opt in — then the untouched ``exc`` passes through below.
+        # Both halves pinned by test_wire_safe_opt_in_governs_details_and_message_together.
         safe_message, safe_suggestion = _sanitized_text_for(wire_code, normalized.recovery)
         return type(exc)(
             safe_message,

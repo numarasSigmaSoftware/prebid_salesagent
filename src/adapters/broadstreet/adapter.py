@@ -166,7 +166,7 @@ class BroadstreetAdapter(AdServerAdapter):
             AdCPValidationError: If media_buy_id is empty.
         """
         if not media_buy_id:
-            raise AdCPValidationError("media_buy_id cannot be empty")
+            raise AdCPValidationError("media_buy_id cannot be empty", _wire_safe_message=True)
 
         if media_buy_id.startswith("bs_"):
             return media_buy_id[3:]  # Remove "bs_" prefix
@@ -735,9 +735,15 @@ class BroadstreetAdapter(AdServerAdapter):
         # Budget update: persist to database (Broadstreet has no budget API)
         if action == "update_package_budget":
             if not package_id:
-                raise AdCPValidationError("package_id is required for update_package_budget action", field="package_id")
+                raise AdCPValidationError(
+                    "package_id is required for update_package_budget action",
+                    field="package_id",
+                    _wire_safe_message=True,
+                )
             if budget is None:
-                raise AdCPValidationError("budget is required for update_package_budget action", field="budget")
+                raise AdCPValidationError(
+                    "budget is required for update_package_budget action", field="budget", _wire_safe_message=True
+                )
 
             with get_db_session() as session:
                 repo = MediaBuyRepository(session, self.tenant_id)
@@ -764,12 +770,15 @@ class BroadstreetAdapter(AdServerAdapter):
         if action == "update_package_impressions":
             if not package_id:
                 raise AdCPValidationError(
-                    "package_id is required for update_package_impressions action", field="package_id"
+                    "package_id is required for update_package_impressions action",
+                    field="package_id",
+                    _wire_safe_message=True,
                 )
             if budget is None:
                 raise AdCPValidationError(
                     "budget (impressions) is required for update_package_impressions action",
                     field="budget",
+                    _wire_safe_message=True,
                 )
 
             with get_db_session() as session:

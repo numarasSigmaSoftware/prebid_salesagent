@@ -61,7 +61,9 @@ def canonical_payload_hash(payload: dict[str, Any]) -> str:
     except RecursionError as exc:
         # A pathologically nested payload must reject as a buyer error, not
         # crash the boundary with an unhandled RecursionError.
-        raise AdCPValidationError("request payload too deeply nested to canonicalize for idempotency") from exc
+        raise AdCPValidationError(
+            "request payload too deeply nested to canonicalize for idempotency", _wire_safe_message=True
+        ) from exc
 
 
 def canonical_request_hash(request: BaseModel) -> str:

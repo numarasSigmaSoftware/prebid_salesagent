@@ -504,13 +504,12 @@ class TestA2AErrorPropagation:
             "VALIDATION_ERROR",
             recovery="correctable",
         )
-        from tests.helpers.secret_scrub import assert_sanitized_wire_error
-
-        assert_sanitized_wire_error(
-            artifact_data,
-            "VALIDATION_ERROR",
-            rejected_fragments=("creatives",),
-        )
+        # Bare static literal → opts in to the wire (see the media_buy_id sibling below);
+        # the buyer must be told WHICH required parameter is missing, not just "review
+        # the submitted fields".
+        for label, error in (("adcp_error", artifact_data["adcp_error"]), ("errors[0]", artifact_data["errors"][0])):
+            assert "creatives" in error["message"], f"{label} must name the missing parameter, got {error['message']!r}"
+        assert_no_secret_leak(artifact_data)
 
     async def test_create_media_buy_response_includes_all_adcp_fields(self, handler, test_tenant, test_principal):
         """Test that A2A response includes all AdCP domain fields (not just cherry-picked ones).
@@ -771,13 +770,15 @@ class TestA2AErrorPropagation:
 
         artifact_data = self.extract_data_from_artifact(result.artifacts[0])
         assert_envelope_shape(artifact_data, "VALIDATION_ERROR", recovery="correctable")
-        from tests.helpers.secret_scrub import assert_sanitized_wire_error
-
-        assert_sanitized_wire_error(
-            artifact_data,
-            "VALIDATION_ERROR",
-            rejected_fragments=("media_buy_id",),
-        )
+        # Bare static literal → opts in to the wire (nothing interpolated, nothing to
+        # leak). Asserting the SCRUB here pinned the diagnostic downgrade the opt-in
+        # sweep removed: told only "review the submitted fields", a buyer cannot tell
+        # WHICH required parameter is missing.
+        for label, error in (("adcp_error", artifact_data["adcp_error"]), ("errors[0]", artifact_data["errors"][0])):
+            assert "media_buy_id" in error["message"], (
+                f"{label} must name the missing parameter, got {error['message']!r}"
+            )
+        assert_no_secret_leak(artifact_data)
 
     @pytest.fixture
     def active_media_buy(self, _seeded):

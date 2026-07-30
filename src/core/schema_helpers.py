@@ -164,6 +164,7 @@ def to_brand_reference(brand: dict[str, Any] | BrandReference | str | None) -> B
                 raise AdCPValidationError(
                     "Invalid brand: domain is required",
                     field="brand",
+                    _wire_safe_message=True,
                 )
             allowed = BrandReference.model_fields.keys()
             ref_data = {key: value for key, value in brand.items() if key in allowed}

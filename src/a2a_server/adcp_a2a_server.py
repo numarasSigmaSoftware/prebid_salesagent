@@ -2327,6 +2327,7 @@ class AdCPRequestHandler(RequestHandler):
             raise AdCPValidationError(
                 "Missing required parameter: 'creatives'",
                 suggestion="Required: ['creatives']",
+                _wire_safe_message=True,
             )
 
         # Construct typed models at the A2A boundary (Pydantic validation at entry).
@@ -2581,6 +2582,7 @@ class AdCPRequestHandler(RequestHandler):
             raise AdCPValidationError(
                 "Missing required parameter: media_buy_id",
                 suggestion="Provide the media_buy_id of the media buy to update",
+                _wire_safe_message=True,
             )
 
         # Validate top-level fields via typed model (packages validated by _raw

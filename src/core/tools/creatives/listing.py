@@ -108,6 +108,7 @@ def _build_list_creatives_request(
                 "Invalid created_after date format.",
                 field="created_after",
                 suggestion="Provide 'created_after' as an ISO 8601 datetime (e.g. 2026-01-01T00:00:00Z) and resend.",
+                _wire_safe_message=True,
             )
     if created_before:
         try:
@@ -117,6 +118,7 @@ def _build_list_creatives_request(
                 "Invalid created_before date format.",
                 field="created_before",
                 suggestion="Provide 'created_before' as an ISO 8601 datetime (e.g. 2026-01-01T00:00:00Z) and resend.",
+                _wire_safe_message=True,
             )
 
     # Validate sort_order is valid Literal
