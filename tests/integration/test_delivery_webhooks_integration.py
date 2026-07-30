@@ -29,7 +29,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tools._media_buy_status import SERVING_PERSISTED_STATUSES
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
-from tests.harness.delivery_poll import mock_webhook_post
+from tests.harness.delivery_poll import mock_send_notification, mock_webhook_post
 from tests.helpers.delivery_assertions import (
     DetachedPushConfigMatcher,
     WebhookHeadersMatcher,
@@ -207,21 +207,12 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        # Simulate successful webhook send without doing network I/O
-        return True
-
     # Patch only webhook sending
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        side_effect=fake_send_notification,
-    ) as mock_send_notification:
+    with mock_send_notification(scheduler) as mock_send:
         # Run a single batch (no need to run the full hourly loop)
         await scheduler._send_reports()
 
-        args, kwargs = mock_send_notification.await_args
+        args, kwargs = mock_send.await_args
 
         # Extract from kwargs
         metadata = kwargs.get("metadata")
@@ -241,7 +232,7 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
         result = payload.result
 
         # Webhook should have been sent exactly once
-        assert mock_send_notification.await_count == 1
+        assert mock_send.await_count == 1
         assert task_type == "media_buy_delivery"
         assert str(wire_task_type.value) == "media_buy_delivery"
         assert extracted_tenant_id == tenant_id
@@ -297,12 +288,7 @@ async def test_signed_reporting_webhook_carries_credentials_into_the_push_config
 
     scheduler = DeliveryWebhookScheduler()
 
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send_notification:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # Count and config identity checked together: a count-less read of
@@ -310,7 +296,7 @@ async def test_signed_reporting_webhook_carries_credentials_into_the_push_config
         # the LAST call still carried the right config. Concrete literals, not
         # re-derived from the fixture: the scheme->authentication_type and
         # credentials->authentication_token mapping is exactly what's graded.
-        mock_send_notification.assert_awaited_once_with(
+        mock_send.assert_awaited_once_with(
             push_notification_config=DetachedPushConfigMatcher(
                 tenant_id=tenant_id,
                 principal_id=principal_id,
@@ -361,6 +347,7 @@ async def test_signed_reporting_webhook_puts_a_bearer_header_on_the_wire(integra
                 "Authorization": "Bearer signed-webhook-test-credential-0001",
             },
             timeout=10.0,
+            allow_redirects=False,
         )
 
 
@@ -394,6 +381,7 @@ async def test_hmac_reporting_webhook_signs_the_exact_posted_body(integration_db
             dynamic_keys=frozenset({"X-AdCP-Signature", "X-AdCP-Timestamp"}),
         ),
         timeout=10.0,
+        allow_redirects=False,
     )
     call = mock_post.call_args
     assert "json" not in call.kwargs
@@ -429,12 +417,7 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
     )
 
     scheduler = DeliveryWebhookScheduler()
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
     (send_call,) = mock_send.await_args_list
@@ -464,12 +447,7 @@ async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_
     )
 
     scheduler = DeliveryWebhookScheduler()
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
     mock_send.assert_not_awaited()
@@ -491,17 +469,8 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        # Simulate successful webhook send without doing network I/O
-        return True
-
     with (
-        patch.object(
-            scheduler.webhook_service,
-            "send_notification",
-            new_callable=AsyncMock,
-            side_effect=fake_send_notification,
-        ) as mock_send_notification,
+        mock_send_notification(scheduler) as mock_send,
         patch("src.adapters.gam_reporting_service.GAMReportingService") as mock_reporting_service_class,
     ):
         # Set time to 3 AM
@@ -514,7 +483,7 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
             await scheduler._send_reports()
 
             # Expect there's no webhook has been called
-            assert mock_send_notification.await_count == 0
+            assert mock_send.await_count == 0
 
         # Set time to 4 AM
         with freeze_time("2025-1-1 04:00:00"):
@@ -526,10 +495,10 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
             await scheduler._send_reports()
 
             # Expect one webhook has been called
-            assert mock_send_notification.await_count == 1
+            assert mock_send.await_count == 1
 
             # Check payload of the delivery
-            args, kwargs = mock_send_notification.await_args
+            args, kwargs = mock_send.await_args
 
             payload = kwargs.get("payload")
             result = payload.result
@@ -581,10 +550,7 @@ async def test_call_get_media_buy_delivery_for_ended_campaign(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
-    with patch.object(scheduler.webhook_service, "send_notification", new_callable=AsyncMock) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # It should send a report because status is active in DB
@@ -624,15 +590,7 @@ async def test_scheduler_status_filter_includes_completed_campaigns(integration_
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        side_effect=fake_send_notification,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # Webhook must be sent
@@ -663,9 +621,6 @@ async def test_scheduler_uses_simulated_path_in_testing_mode(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
     # Helper to inject testing_context into ResolvedIdentity
     _original_resolved_identity = ResolvedIdentity
 
@@ -678,7 +633,7 @@ async def test_scheduler_uses_simulated_path_in_testing_mode(integration_db):
             "src.core.resolved_identity.ResolvedIdentity",
             side_effect=create_test_identity,
         ),
-        patch.object(scheduler.webhook_service, "send_notification", new_callable=AsyncMock) as mock_send,
+        mock_send_notification(scheduler) as mock_send,
         patch("src.core.tools.media_buy_delivery.DeliverySimulator.calculate_simulated_metrics") as mock_sim,
     ):
         mock_sim.return_value = {"impressions": 1234, "spend": 50.0}
