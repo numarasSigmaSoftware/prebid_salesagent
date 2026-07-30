@@ -99,7 +99,10 @@ async def test_message_send_rejects_private_push_notification_url_before_storage
         ),
     )
 
-    with pytest.raises(InvalidParamsError, match="public HTTP"):
+    # Pins the field AND the concrete block reason. #1697 replaced the former generic
+    # "must resolve to a public HTTPS endpoint" text with the specific SSRF verdict, so
+    # matching the reason is both current and a stronger assertion than the old phrase.
+    with pytest.raises(InvalidParamsError, match=r"push_notification_config\.url.*blocked"):
         await handler.on_message_send(params, context=ctx)
 
     assert handler._task_push_configs == {}
@@ -114,7 +117,9 @@ async def test_standalone_push_config_rejects_private_url_before_repository_writ
 
     with (
         patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW") as uow,
-        pytest.raises(InvalidParamsError, match="public HTTP"),
+        # See the sibling above: pins the field + the concrete block reason (#1697's
+        # specific SSRF verdict) rather than the retired generic phrase.
+        pytest.raises(InvalidParamsError, match=r"push_notification_config\.url.*blocked"),
     ):
         await handler.on_create_task_push_notification_config(
             TaskPushNotificationConfig(

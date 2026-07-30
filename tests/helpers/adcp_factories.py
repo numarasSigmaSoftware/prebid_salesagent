@@ -692,6 +692,19 @@ def create_test_media_buy_request_dict(
     return request
 
 
+def valid_reporting_webhook(url: str) -> dict[str, Any]:
+    """ReportingWebhook dict that clears auth MinLen=32 so SSRF gates are reachable.
+
+    Shared by unit SSRF helpers and BDD Given steps — credential length and shape
+    live in one place so auth-minimum drift cannot masquerade as an SSRF failure.
+    """
+    return {
+        "url": url,
+        "authentication": {"schemes": ["Bearer"], "credentials": "x" * 32},
+        "reporting_frequency": "daily",
+    }
+
+
 def create_test_media_buy_dict(
     media_buy_id: str = "test_media_buy_001",
     status: str = "active",

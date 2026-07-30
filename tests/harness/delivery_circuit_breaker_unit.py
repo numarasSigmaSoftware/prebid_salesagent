@@ -32,7 +32,7 @@ from unittest.mock import MagicMock
 
 from src.services.webhook_delivery_service import WebhookDeliveryService
 from tests.harness._base import BaseTestEnv
-from tests.harness._mixins import CircuitBreakerMixin
+from tests.harness._mixins import SSRF_EXTERNAL_PATCH, CircuitBreakerMixin
 
 
 class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
@@ -56,6 +56,7 @@ class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
         "random": f"{MODULE}.random.uniform",
         "db": "src.core.database.database_session.get_db_session",
         "logger": f"{MODULE}.logger",
+        **SSRF_EXTERNAL_PATCH,
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -66,6 +67,8 @@ class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
     def _configure_mocks(self) -> None:
         # random.uniform: return 0.0 for deterministic tests
         self.mock["random"].return_value = 0.0
+
+        self._configure_ssrf_default()
 
         # httpx.Client: 200 OK by default (from mixin)
         self.set_http_response(200)

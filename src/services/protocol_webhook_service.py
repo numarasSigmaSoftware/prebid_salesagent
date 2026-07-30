@@ -32,7 +32,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
-from src.core.webhook_validator import WebhookURLValidator
+from src.core.webhook_validator import WebhookURLValidator, webhook_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,14 @@ class ProtocolWebhookService:
             )
             return False
 
+        # No docker-localhost rewrite here: this branch replaced that server-side
+        # dev convenience with the client-side ADCP_WEBHOOK_HOST/ADCP_WEBHOOK_TEST_HOST
+        # pair set in tests/e2e/conftest.py, so the capture server is registered at its
+        # reachable host directly. The SSRF gate lives per-attempt in the retry loop
+        # below (validate_protocol_webhook_url) rather than once here: it re-checks on
+        # every retry (covering DNS rebinding between attempts) and it is the
+        # protocol-callback validator, which carries the ADCP_WEBHOOK_TEST_HOST seam
+        # that #1697's generic validate_outbound_webhook_url does not.
         url = push_notification_config.url
 
         # Prepare headers
@@ -275,16 +283,19 @@ class ProtocolWebhookService:
                 logger.warning("Refusing protocol webhook delivery to an unsafe URL")
                 return False
             try:
-                logger.info("Sending webhook for task %s (attempt %s/%s)", task_id, attempt + 1, max_attempts)
+                safe_url = webhook_url_for_log(url)
+                logger.info(
+                    "Sending webhook for task %s to %s (attempt %s/%s)",
+                    task_id,
+                    safe_url,
+                    attempt + 1,
+                    max_attempts,
+                )
 
                 def _post() -> requests.Response:
-                    return self._session.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=10.0,
-                        allow_redirects=False,
-                    )
+                    # Never follow redirects: a 302 to metadata/private IPs would
+                    # bypass the pre-POST SSRF check (open-redirect SSRF).
+                    return self._session.post(url, json=payload, headers=headers, timeout=10.0, allow_redirects=False)
 
                 response = await asyncio.to_thread(_post)
                 if 300 <= response.status_code < 400:
