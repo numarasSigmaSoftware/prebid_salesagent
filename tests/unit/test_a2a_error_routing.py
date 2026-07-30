@@ -1118,3 +1118,43 @@ async def test_tenantless_authenticated_principal_is_a_terminal_config_error_not
     err = exc_info.value
     assert_envelope_shape(err.data, "CONFIGURATION_ERROR", recovery="terminal")
     assert "p-orphan" not in json.dumps(err.data, default=str), "principal id leaked to the wire"
+
+
+def test_failed_task_reader_finds_the_error_artifact_behind_a_sibling():
+    """``_read_failed_a2a_task`` must scan EVERY artifact, not just the first.
+
+    The loose read is the reader nearly every A2A error assertion routes through. Its
+    comment names the defect the scan prevents — a first-artifact-only read being
+    order-dependent and surfacing a non-error sibling — but the property was prose-only:
+    reverting the loop to ``task.artifacts[:1]`` left 313 tests green, because no test
+    anywhere builds a FAILED Task whose FIRST artifact is a non-error sibling. The one
+    multi-artifact builder in this file is a SUBMITTED-status webhook-serializer test,
+    which never reaches this reader.
+
+    Ordering is the whole point, so the sibling is placed FIRST: a reader that stops at
+    artifacts[0] returns the products payload, whose two-layer reconstruction yields no
+    error code and therefore the bare fallback AdCPError instead of the real rejection.
+    """
+    from tests.harness._base import _read_failed_a2a_task
+
+    envelope = AdCPRequestHandler._build_error_envelope(
+        AdCPValidationError("package_id is required", _wire_safe_message=True)
+    )
+    task = Task(id="task_multi", context_id="ctx_multi", status=TaskStatus(state=TaskState.TASK_STATE_FAILED))
+    task.artifacts.append(
+        Artifact(
+            artifact_id="a1",
+            name="get_products_result",
+            parts=[Part(data=_dict_to_value({"products": [{"id": "p-sibling"}]}))],
+        )
+    )
+    task.artifacts.append(Artifact(artifact_id="a2", name="error_result", parts=[Part(data=_dict_to_value(envelope))]))
+
+    read_envelope, error = _read_failed_a2a_task(task, fallback_message="A2A skill failed")
+
+    assert read_envelope is not None
+    assert read_envelope["adcp_error"]["code"] == "VALIDATION_ERROR"
+    assert "products" not in read_envelope, "the non-error sibling was returned as the envelope"
+    assert getattr(error, "error_code", None) == "VALIDATION_ERROR", (
+        f"the reconstructed error fell back instead of using the real envelope: {error!r}"
+    )

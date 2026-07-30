@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_STATUSES
@@ -639,6 +640,49 @@ def test_shared_preparation_uses_repository_execution_source_statuses():
 
         assert outcome.status is ApprovalExecutionStatus.READY
         media_buy_repo.claim_approved_execution.assert_called_once_with("mb_1")
+
+
+@pytest.mark.parametrize(
+    ("creative_status", "expected_status"),
+    [
+        ("approved", ApprovalExecutionStatus.READY),
+        ("active", ApprovalExecutionStatus.READY),
+        ("pending_review", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
+        ("rejected", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
+    ],
+)
+def test_creative_gate_admits_active_as_well_as_approved(creative_status, expected_status):
+    """``active`` satisfies the gate, and that is a DECISION this PR made.
+
+    The two approve routes had drifted: one used ``not in ["approved", "active"]`` while the
+    other used ``!= "approved"``, so an ``active`` creative blocked execution on one path and
+    not the other. The reconciliation resolved to the permissive rule — and nothing pinned it.
+    Restoring the strict rule left 36 tests green, because no test anywhere fed the gate a
+    creative with status ``active``: every scaffold supplied ``approved``, ``pending_review``,
+    ``rejected`` or a bogus value.
+
+    Parametrized rather than added as a fifth near-identical scaffold, because the missing row
+    is exactly what a table makes visible and four copy-pasted mock blocks hid.
+    """
+    media_buy_repo = Mock()
+    media_buy_repo.get_by_id.return_value = SimpleNamespace(status="pending_approval", principal_id="principal_1")
+    media_buy_repo.claim_approved_execution.return_value = True
+    assignments = Mock()
+    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
+    creatives = Mock()
+    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status=creative_status)]
+
+    outcome = prepare_media_buy_approval_execution(
+        media_buys=media_buy_repo,
+        assignments=assignments,
+        creatives=creatives,
+        media_buy_id="mb_1",
+        approved_by=None,
+    )
+
+    assert outcome.status is expected_status
+    if expected_status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+        assert outcome.blocking_creative_ids == ("creative_1",)
 
 
 def test_shared_preparation_blocks_buy_without_creative_assignments():
