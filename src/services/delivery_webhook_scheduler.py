@@ -447,7 +447,9 @@ class DeliveryWebhookScheduler:
         # notification_type: derived from the reported statuses — "final" when
         # every buy will never produce more data ("one final notification when
         # the campaign completes", optimization-reporting.mdx §Publisher
-        # Commitment), "scheduled" otherwise.
+        # Commitment; extended to canceled/rejected per webhooks.mdx
+        # §Termination — see derive_notification_type()'s docstring), "scheduled"
+        # otherwise.
         derived = derive_notification_type(enum_value(d.status) for d in delivery_response.media_buy_deliveries or [])
         notification_type = NotificationType(derived) if derived else None
         delivery_response.notification_type = notification_type

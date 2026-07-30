@@ -241,10 +241,13 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_webhook_terminal_statuses_cover_persistent_channel_termination(self):
         """Pin the completed/canceled/rejected persistent-channel termination set.
 
-        The spec/storyboard only mandate "final" for campaign completion
-        (optimization-reporting.mdx §Publisher Commitment) — extending it to
-        canceled/rejected is our reading, per WEBHOOK_TERMINAL_CANONICAL_STATUSES's
-        own UNGRADED comment. This is a literal pin, not a spec pin.
+        The storyboard-graded prose only mandates "final" for campaign
+        completion (optimization-reporting.mdx §Publisher Commitment), but
+        webhooks.mdx §Termination (dist/docs/3.1.0, latest snapshot at the
+        3.1.1 pin) states persistent-webhook final delivery fires after
+        completed, canceled, OR rejected — see WEBHOOK_TERMINAL_CANONICAL_STATUSES's
+        own comment. Ungraded by any storyboard found, but grounded in spec
+        prose, not just a bare reading. This is a literal pin, not a spec pin.
         """
         assert WEBHOOK_REPORTABLE_CANONICAL_STATUSES == {
             "active",
@@ -261,11 +264,13 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_webhook_terminal_statuses_match_the_pinned_sdks_lifecycle_classification(self):
         """WEBHOOK_TERMINAL_CANONICAL_STATUSES is a literal; ground it on the SDK.
 
-        Our "our reading, ungraded" extension happens to coincide with the pinned
-        SDK's own terminal classification (``adcp.server.helpers.is_terminal_status``)
-        over the canonical status vocabulary. Asserting the two AGREE catches the
-        literal drifting from that classification, without claiming the spec text
-        itself mandates the extension — the module comment already says it doesn't.
+        Our spec-grounded-but-storyboard-ungraded extension (webhooks.mdx
+        §Termination) happens to coincide with the pinned SDK's own terminal
+        classification (``adcp.server.helpers.is_terminal_status``) over the
+        canonical status vocabulary. Asserting the two AGREE catches the
+        literal drifting from that classification, without claiming any
+        storyboard exercises the extension — the module comment already says
+        it doesn't.
 
         NOT the same set as NO_MORE_DATA_STATUSES: that one additionally includes
         "failed" (a delivery-only canonical status the SDK's lifecycle classifier
