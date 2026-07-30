@@ -12,10 +12,9 @@ beads: salesagent-2rq, salesagent-zh85
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from typing import Any
-from unittest.mock import ANY, MagicMock
+from unittest.mock import ANY
 
 from pytest_bdd import given, parsers, then, when
 
@@ -410,59 +409,51 @@ def given_account_active(ctx: dict) -> None:
 
 @when(parsers.parse('the buyer sends a natural-language "{request_text}" request'))
 def when_buyer_sends_nl_a2a_request(ctx: dict, request_text: str) -> None:
-    """Drive real A2A ``on_message_send`` with a natural-language text part."""
-    from a2a.server.routes.common import ServerCallContext
+    """Drive real A2A ``on_message_send`` with a natural-language text part.
+
+    Goes through the SAME ``dispatch_request`` seam every other When-step uses, with
+    ``nl_text`` selecting the natural-language message shape (see
+    ``BaseTestEnv._run_a2a_handler``). This step previously hand-rolled the entire
+    dispatch — its own ``AdCPRequestHandler``, its own identity mocks, its own
+    ``asyncio.run``, its own ``TransportResult`` — four independent chances to drift
+    from the harness, and it HAD already drifted: it set no ``ctx["result"]``, so the
+    generic wire-first Then-steps found nothing and silently fell back to grading the
+    RECONSTRUCTED exception instead of the wire.
+    """
+    from tests.bdd.steps.generic._dispatch import dispatch_request
+    from tests.harness.transport import Transport
+
+    # The scenario carries @a2a, so pytest_generate_tests skips transport parametrization
+    # and leaves ctx["transport"] unset — that tag's contract is "the When step picks the
+    # transport". Natural language IS an A2A-only entry point (neither MCP nor REST
+    # exposes one), so there is exactly one transport to pick, and naming it here is what
+    # lets the dispatch go through the shared seam instead of a step-local copy of it.
+    ctx["transport"] = Transport.A2A
+    dispatch_request(ctx, nl_text=request_text)
+
+
+@then("the failure is returned as a failed task, not a transport error")
+def then_failure_is_a_failed_task(ctx: dict) -> None:
+    """Pin the PR's actual thesis: layer separation on the A2A boundary.
+
+    An unsupported operation is an APPLICATION outcome, so it must come back as a
+    completed JSON-RPC call carrying a FAILED Task with the AdCP envelope — not as a
+    JSON-RPC ``InternalError``, which says the transport itself broke. Asserting only
+    the error code cannot tell those apart: both carry ``UNSUPPORTED_FEATURE``, and the
+    JSON-RPC-error shape would satisfy every other Then in this scenario.
+
+    Grounded: AdCP 3.1.1 building/operating/transport-errors.mdx, "Layer Separation".
+    """
     from a2a.types import Task, TaskState
 
-    from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-    from src.core.config_loader import set_current_tenant
-    from tests.harness._base import _read_failed_a2a_task
-    from tests.harness.transport import TransportResult
-    from tests.utils.a2a_helpers import make_nl_send_message_request
-
-    env = ctx["env"]
-    identity = ctx["authenticated_identity"]
-    set_current_tenant(identity.tenant)
-
-    handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value=identity.auth_token)
-    handler._resolve_a2a_identity = MagicMock(return_value=identity)
-
-    async def _call() -> Task:
-        return await handler.on_message_send(make_nl_send_message_request(request_text), ServerCallContext())
-
-    try:
-        result = asyncio.run(_call())
-    except Exception as exc:
-        ctx["error"] = exc
-        return
-
-    ctx["response"] = result
-    if result.status.state == TaskState.TASK_STATE_FAILED:
-        # Strict mode always yields an envelope (or raises AssertionError on a
-        # violated processing_error artifact contract), so no None-guard needed.
-        envelope, error = _read_failed_a2a_task(
-            result,
-            fallback_message="A2A natural-language request failed",
-            expect_processing_error=True,
-        )
-        ctx["wire_error_envelope"] = envelope
-        ctx["error"] = error
-        # Expose the same normalized TransportResult ``dispatch_request`` builds for every
-        # other scenario. Without it the generic wire-first Then-steps find no ``result``
-        # and silently fall back to grading the RECONSTRUCTED exception, so a wire-only
-        # regression (a code correct at the top layer but wrong in ``errors[0]``) passes.
-        # ``envelope`` here came off the real wire — the failed Task's processing_error
-        # artifact DataPart via ``_read_failed_a2a_task`` — not from re-serializing a model,
-        # so this is a wire read, not a synthesized one. ``synthesized_error_envelope`` is
-        # deliberately left unset: it is the IMPL-only builder output, and populating it on
-        # a wire transport would manufacture the exact tautology this exists to remove.
-        ctx["result"] = TransportResult(
-            error=error,
-            envelope={"transport": "a2a"},
-            raw_response=result,
-            wire_error_envelope=envelope,
-        )
+    task = ctx["env"]._last_a2a_task
+    assert isinstance(task, Task), (
+        f"no A2A Task was captured — the request never reached the failed-Task path (got {type(task).__name__})"
+    )
+    assert task.status.state == TaskState.TASK_STATE_FAILED, (
+        f"a transport-layer failure would surface as a JSON-RPC error, not a failed Task; "
+        f"Task state was {task.status.state}"
+    )
 
 
 @given(parsers.parse("a create_media_buy request with account configuration {partition}"))

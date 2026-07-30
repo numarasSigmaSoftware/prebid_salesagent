@@ -605,6 +605,12 @@ class BaseTestEnv:
         # Reset success-path wire capture; _run_a2a_handler / _run_mcp_client
         # set it fresh on success so A2A/MCP dispatchers can surface real wire.
         self._last_wire_response = None
+        # Same lifetime for the raw Task. Without this reset a scenario that dispatches
+        # twice leaves the FIRST call's Task visible, so a guard asserting on Task state
+        # after a second dispatch that never produced one would pass on the stale value —
+        # a per-call capture has to be cleared per call, or "absent" is indistinguishable
+        # from "left over".
+        self._last_a2a_task = None
         return dispatcher.dispatch(self, **kwargs)
 
     # -- Per-transport hooks (override in subclass) -------------------------
@@ -684,8 +690,20 @@ class BaseTestEnv:
             skill_name: A2A skill name (e.g., "get_products").
             response_cls: Pydantic model class to parse artifact data into.
             **kwargs: Skill parameters. ``identity`` or one presented-token
-                seam is popped for auth; remaining kwargs become skill
-                parameters.
+                seam is popped for auth; ``nl_text`` (see below) is popped for
+                message shape; remaining kwargs become skill parameters.
+
+        Passing ``nl_text`` sends that text as a natural-language message part
+        instead of an explicit skill invocation, driving ``on_message_send``'s
+        OUTER handler rather than skill routing — ``skill_name`` and the
+        remaining parameters are then unused. That path frames its failure in a
+        ``processing_error`` artifact rather than ``error_result``, so the failed
+        Task is read with ``expect_processing_error=True``, which PINS the strict
+        shape (artifact present, correct name, single DataPart) instead of
+        falling back to a bare error. Routing NL through this method rather than
+        a step-local copy is what keeps identity injection, ``asyncio`` driving,
+        Task capture and envelope stashing identical across the two message
+        shapes; a hand-rolled copy silently drifts from all four.
         """
         import asyncio
 
@@ -694,9 +712,16 @@ class BaseTestEnv:
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
         from tests.harness.transport import Transport
-        from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
+        from tests.utils.a2a_helpers import (
+            create_a2a_message_with_skill,
+            extract_data_from_artifact,
+            make_nl_send_message_request,
+        )
 
         self._commit_factory_data()
+
+        # Popped before parameter assembly so it can never leak into the skill payload.
+        nl_text: str | None = kwargs.pop("nl_text", None)
 
         presented_auth_token, presented_auth_headers = self._pop_presented_auth(kwargs)
 
@@ -773,8 +798,11 @@ class BaseTestEnv:
 
             set_current_tenant(a2a_identity.tenant)
 
-        message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
-        params = SendMessageRequest(message=message)
+        if nl_text is not None:
+            params = make_nl_send_message_request(nl_text)
+        else:
+            message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
+            params = SendMessageRequest(message=message)
 
         async def _call():
             return await handler.on_message_send(params, server_context)
@@ -802,7 +830,12 @@ class BaseTestEnv:
         from a2a.types import TaskState
 
         if task_result.status.state == TaskState.TASK_STATE_FAILED:
-            _envelope, error = _read_failed_a2a_task(task_result, fallback_message="A2A skill failed")
+            _envelope, error = _read_failed_a2a_task(
+                task_result,
+                fallback_message="A2A natural-language request failed" if nl_text else "A2A skill failed",
+                # The outer handler frames its failure in processing_error, not error_result.
+                expect_processing_error=nl_text is not None,
+            )
             raise error
 
         if task_result.status.state == TaskState.TASK_STATE_SUBMITTED:

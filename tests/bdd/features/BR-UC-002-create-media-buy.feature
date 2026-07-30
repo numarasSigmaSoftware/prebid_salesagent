@@ -219,7 +219,8 @@ Feature: BR-UC-002 Create Media Buy
   Scenario: NL media-buy request is unsupported -- returned as a failed task, not a transport error
     Given an authenticated buyer
     When the buyer sends a natural-language "create a media buy" request
-    Then the error code should be "UNSUPPORTED_FEATURE"
+    Then the failure is returned as a failed task, not a transport error
+    And the error code should be "UNSUPPORTED_FEATURE"
     And the error recovery should be "correctable"
     And the wire error envelope should carry code "UNSUPPORTED_FEATURE" with recovery "correctable"
     # HAND-EDITED: no adcp-req id yet; the generated scenario is intentionally preserved.
