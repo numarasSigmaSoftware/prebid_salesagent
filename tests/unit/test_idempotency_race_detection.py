@@ -96,7 +96,6 @@ class TestResolveIdempotencyRaceOrRaise:
                 principal_id="prin_x",
                 account_id=None,
                 request_hash="hash",
-                context=None,
             )
         # Re-raised verbatim — not translated, not swallowed into a replay.
         assert caught.value is exc

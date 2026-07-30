@@ -284,9 +284,10 @@ async with client:
 
     # 2. Book a media buy. Each package references a product and one of its
     #    pricing options. `idempotency_key` is REQUIRED and shape-validated
-    #    (16-255 chars). Retry an ambiguous request with the SAME key: completed
-    #    requests replay for the advertised 24-hour window, while active work
-    #    returns IDEMPOTENCY_IN_FLIGHT. Never mint a fresh key for a retry.
+    #    (16-255 chars), but this seller currently advertises idempotency as
+    #    unsupported: reusing a key can execute twice. If the outcome is
+    #    ambiguous, do not retry automatically; this seller has no natural-key
+    #    lookup, so reconcile through buyer-side records or seller support first.
     result = await client.tools.create_media_buy(
         brand="acme.com",                     # domain shorthand for a BrandReference
         start_time="2026-08-01T00:00:00Z",    # ISO 8601, or "asap"

@@ -1,6 +1,6 @@
 """IdempotencyAttempt repository — tenant-scoped access to the verbatim success cache.
 
-AdCP 3.1.1 idempotency contract: retrying a keyed tool call with the same
+AdCP 3.0.1 idempotency contract: retrying a mutating tool call with the same
 idempotency_key must return the ORIGINAL success response byte-for-byte (marked
 ``replayed: true``), and errors are NEVER cached — a retry after an error
 re-executes. This repository stores and replays those cached successes, keyed by
@@ -16,72 +16,16 @@ get_adcp_capabilities.adcp.idempotency.replay_ttl_seconds = 86400).
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from src.core.database.models import IdempotencyAttempt
 
 # Matches GetAdcpCapabilitiesResponse.adcp.idempotency.replay_ttl_seconds (86400 = 24h).
 DEFAULT_REPLAY_TTL = timedelta(seconds=86400)
-
-# Maximum lifetime of an in-flight reservation before it is treated as failed and
-# stealable (L1/security.mdx rule 9). Advertised via
-# get_adcp_capabilities.adcp.idempotency.in_flight_max_seconds. MUST be
-# <= DEFAULT_REPLAY_TTL (a bound past the replay window is vacuous) and > the
-# slowest handler (else a live attempt is stolen). 300s comfortably clears
-# sync_accounts/create_media_buy latency and is far below the 24h replay TTL.
-DEFAULT_IN_FLIGHT_LEASE = timedelta(seconds=300)
-assert DEFAULT_IN_FLIGHT_LEASE <= DEFAULT_REPLAY_TTL, "in-flight lease must not exceed the replay TTL"
-
-# Reservation lifecycle states (IdempotencyAttempt.status).
-_STATUS_IN_FLIGHT = "in_flight"
-_STATUS_COMPLETED = "completed"
-
-# PostgreSQL reports a unique-index collision with SQLSTATE 23505 and the
-# enforcing index name as ``diag.constraint_name``. Only this exact failure is
-# an idempotency race; foreign-key, check, and not-null failures must propagate.
-_UNIQUE_VIOLATION_SQLSTATE = "23505"
-_SCOPE_UNIQUE_INDEX = "idx_idempotency_attempts_lookup"
-
-# ReservationOutcome.kind values.
-RESERVED = "reserved"  # this caller won the reservation; proceed and complete()
-COMPLETED = "completed"  # a completed row already exists (replay or conflict — caller conflict-checks the hash)
-IN_FLIGHT = "in_flight"  # a live in-flight reservation holds the key; caller returns IDEMPOTENCY_IN_FLIGHT
-EXPIRED = "expired"  # a completed response exists, but its advertised replay window closed
-
-
-@dataclass(frozen=True)
-class ReservationOutcome:
-    """Result of a :meth:`IdempotencyAttemptRepository.reserve` attempt.
-
-    ``kind`` is one of :data:`RESERVED`, :data:`COMPLETED`, :data:`IN_FLIGHT`,
-    or :data:`EXPIRED`:
-
-    - ``RESERVED`` — the unique index accepted our in_flight INSERT (or we stole
-      an expired reservation). ``attempt_id`` identifies the row to
-      :meth:`complete` (on success) or :meth:`release` (on failure).
-    - ``COMPLETED`` — a completed row already holds the key. ``response_envelope``
-      + ``stored_hash`` let the caller distinguish a verbatim REPLAY (same hash)
-      from an ``IDEMPOTENCY_CONFLICT`` (different hash).
-    - ``IN_FLIGHT`` — a live (non-expired) in-flight reservation holds the key.
-      ``retry_after`` is the whole-second wait hint until the lease expires.
-    - ``EXPIRED`` — a completed response outlived the replay TTL and must not
-      be returned or silently re-executed under the old key.
-    """
-
-    kind: str
-    attempt_id: str | None = None
-    response_envelope: dict | None = None
-    stored_hash: str | None = None
-    retry_after: int | None = None
-    stored_tool_name: str | None = None
 
 
 class IdempotencyAttemptRepository:
@@ -102,33 +46,11 @@ class IdempotencyAttemptRepository:
         self._session = session
         self._tenant_id = tenant_id
 
-    def lock_admission_scope(
-        self,
-        *,
-        principal_id: str | None,
-        account_id: str | None,
-        operation_class: str,
-    ) -> None:
-        """Serialize ceiling checks and inserts for one idempotency scope.
-
-        PostgreSQL transaction-scoped advisory locks avoid a permanent quota
-        table while making COUNT → INSERT atomic across distinct keys.
-        """
-        material = "\x1f".join(
-            (
-                self._tenant_id,
-                principal_id or "",
-                account_id or "",
-                operation_class,
-            )
-        )
-        self._session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(material, 0))))
-
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def _scope_prefix(self, principal_id: str | None, account_id: str | None) -> tuple[ColumnElement[bool], ...]:
+    def _scope_prefix(self, principal_id: str, account_id: str | None) -> tuple[ColumnElement[bool], ...]:
         """The (tenant, principal, account) isolation terms shared by EVERY scoped query.
 
         One home for the isolation prefix so a tenant/principal/account scoping
@@ -147,7 +69,7 @@ class IdempotencyAttemptRepository:
         )
 
     def _scope_filter(
-        self, principal_id: str | None, account_id: str | None, idempotency_key: str
+        self, principal_id: str, account_id: str | None, idempotency_key: str
     ) -> tuple[ColumnElement[bool], ...]:
         """The (tenant, principal, account, key) WHERE terms the keyed lookups share.
 
@@ -178,7 +100,7 @@ class IdempotencyAttemptRepository:
     def find_by_key(
         self,
         *,
-        principal_id: str | None,
+        principal_id: str,
         idempotency_key: str,
         account_id: str | None = None,
         now: datetime | None = None,
@@ -188,21 +110,17 @@ class IdempotencyAttemptRepository:
         The lookup scope is the spec's idempotency tuple — (agent, account,
         key) — with NO tool dimension: a key reused by a different tool must
         hit this same row (and conflict on its differing payload hash), never
-        a separate per-tool cache. This completed-success lookup excludes
-        expired entries; the reservation path separately retains their
-        tombstone semantics and emits ``IDEMPOTENCY_EXPIRED``. Cleanup is the
-        responsibility of ``expire_old``. ``account_id is None`` matches rows
-        stored with no account (``IS NULL``), mirroring the NULLS NOT DISTINCT
-        unique index.
+        a separate per-tool cache. Expired entries are treated as absent —
+        callers should fall through to re-execution rather than returning a
+        stale answer. Cleanup of expired rows is the responsibility of
+        ``expire_old``. ``account_id is None`` matches rows stored with no
+        account (``IS NULL``), mirroring the NULLS NOT DISTINCT unique index.
         """
         current = now or datetime.now(UTC)
         stmt = (
             select(IdempotencyAttempt)
             .where(
                 *self._scope_filter(principal_id, account_id, idempotency_key),
-                # Only COMPLETED reservations replay — an in_flight row carries a
-                # NULL envelope and is a live attempt, never a cached success.
-                IdempotencyAttempt.status == _STATUS_COMPLETED,
                 IdempotencyAttempt.expires_at > current,
             )
             .limit(1)
@@ -212,7 +130,7 @@ class IdempotencyAttemptRepository:
     def find_including_expired(
         self,
         *,
-        principal_id: str | None,
+        principal_id: str,
         idempotency_key: str,
         account_id: str | None = None,
     ) -> IdempotencyAttempt | None:
@@ -232,7 +150,7 @@ class IdempotencyAttemptRepository:
     def record_success(
         self,
         *,
-        principal_id: str | None,
+        principal_id: str,
         tool_name: str,
         idempotency_key: str,
         response_model: BaseModel,
@@ -241,7 +159,6 @@ class IdempotencyAttemptRepository:
         account_id: str | None = None,
         ttl: timedelta = DEFAULT_REPLAY_TTL,
         now: datetime | None = None,
-        operation_class: str = "write",
     ) -> IdempotencyAttempt:
         """Cache a successful response so future retries with the same key replay it verbatim.
 
@@ -272,12 +189,7 @@ class IdempotencyAttemptRepository:
             principal_id=principal_id,
             account_id=account_id,
             tool_name=tool_name,
-            operation_class=operation_class,
             idempotency_key=idempotency_key,
-            # Best-effort single-phase write (create_media_buy path): the row is
-            # inserted already COMPLETED. The two-phase reserve()/complete() path
-            # (sync_accounts) inserts in_flight first, then flips to completed.
-            status=_STATUS_COMPLETED,
             response_envelope={"status": protocol_status, "response": response_model.model_dump(mode="json")},
             payload_hash=payload_hash,
             expires_at=current + ttl,
@@ -286,290 +198,12 @@ class IdempotencyAttemptRepository:
         self._session.flush()
         return attempt
 
-    # ------------------------------------------------------------------
-    # Two-phase reservation (durable, first-insert-wins)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _is_scope_collision(error: IntegrityError) -> bool:
-        """Return whether ``error`` is the idempotency-scope unique collision.
-
-        Treating every ``IntegrityError`` as a race is unsafe: an unrelated
-        foreign-key failure has no winning idempotency row to classify and
-        would otherwise retry recursively forever.
-        """
-        original = error.orig
-        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
-        diagnostic = getattr(original, "diag", None)
-        constraint_name = getattr(diagnostic, "constraint_name", None)
-        return sqlstate == _UNIQUE_VIOLATION_SQLSTATE and constraint_name == _SCOPE_UNIQUE_INDEX
-
-    def reserve(
-        self,
-        *,
-        principal_id: str | None,
-        account_id: str | None,
-        tool_name: str,
-        idempotency_key: str,
-        payload_hash: str,
-        lease: timedelta,
-        now: datetime | None = None,
-        operation_class: str = "write",
-    ) -> ReservationOutcome:
-        """Attempt to reserve the idempotency key by INSERTing an in_flight row.
-
-        The unique index on ``(tenant, principal, account, key)`` is the
-        first-insert-wins enforcer: the racer whose INSERT lands gets
-        :data:`RESERVED`; every other racer collides (``IntegrityError``) and is
-        classified against the row that won:
-
-        - completed row → :data:`COMPLETED` (caller conflict-checks ``stored_hash``
-          vs ``payload_hash`` to split a verbatim REPLAY from an
-          ``IDEMPOTENCY_CONFLICT``);
-        - live in_flight row → :data:`IN_FLIGHT` with a ``retry_after`` hint;
-        - EXPIRED in_flight row → a conditional UPDATE *steals* the lease
-          (``WHERE status='in_flight' AND expires_at<=now``); exactly one racer's
-          UPDATE matches and gets :data:`RESERVED`, the loser re-reads and
-          re-classifies.
-
-        The INSERT is wrapped in a SAVEPOINT so a collision rolls back only the
-        failed INSERT, leaving the session usable for the re-read. The CALLER is
-        responsible for committing the surrounding transaction so a
-        :data:`RESERVED` row is durable BEFORE any side effect (see
-        :func:`src.services.idempotency_replay.reserve_idempotent`).
-        """
-        current = now or datetime.now(UTC)
-        # A winner may release/expire its row between our unique violation and
-        # re-read. Retry that vanished-row race once, never recursively.
-        vanished_collision_count = 0
-        while True:
-            attempt = IdempotencyAttempt(
-                tenant_id=self._tenant_id,
-                principal_id=principal_id,
-                account_id=account_id,
-                tool_name=tool_name,
-                operation_class=operation_class,
-                idempotency_key=idempotency_key,
-                status=_STATUS_IN_FLIGHT,
-                response_envelope=None,
-                payload_hash=payload_hash,
-                expires_at=current + lease,
-            )
-            try:
-                with self._session.begin_nested():
-                    self._session.add(attempt)
-                    self._session.flush()
-            except IntegrityError as error:
-                if not self._is_scope_collision(error):
-                    raise
-                outcome = self._classify_collision(
-                    principal_id=principal_id,
-                    account_id=account_id,
-                    idempotency_key=idempotency_key,
-                    payload_hash=payload_hash,
-                    tool_name=tool_name,
-                    lease=lease,
-                    now=current,
-                )
-                if outcome is not None:
-                    return outcome
-                vanished_collision_count += 1
-                if vanished_collision_count >= 2:
-                    raise
-            else:
-                return ReservationOutcome(kind=RESERVED, attempt_id=attempt.attempt_id)
-
-    def _classify_collision(
-        self,
-        *,
-        principal_id: str | None,
-        account_id: str | None,
-        idempotency_key: str,
-        payload_hash: str,
-        tool_name: str,
-        lease: timedelta,
-        now: datetime,
-    ) -> ReservationOutcome | None:
-        """Classify a losing INSERT, or request one bounded retry if its winner vanished."""
-        existing = self.find_including_expired(
-            principal_id=principal_id,
-            account_id=account_id,
-            idempotency_key=idempotency_key,
-        )
-        if existing is None:
-            # The winner's row vanished between our failed INSERT and this read
-            # (evicted / released). The caller retries the INSERT once.
-            return None
-        if existing.tool_name != tool_name:
-            return ReservationOutcome(
-                kind=IN_FLIGHT,
-                attempt_id=existing.attempt_id,
-                stored_hash=existing.payload_hash,
-                stored_tool_name=existing.tool_name,
-            )
-        if existing.status == _STATUS_COMPLETED:
-            if existing.expires_at <= now:
-                return ReservationOutcome(
-                    kind=EXPIRED,
-                    attempt_id=existing.attempt_id,
-                    stored_hash=existing.payload_hash,
-                    stored_tool_name=existing.tool_name,
-                )
-            return ReservationOutcome(
-                kind=COMPLETED,
-                attempt_id=existing.attempt_id,
-                response_envelope=existing.response_envelope,
-                stored_hash=existing.payload_hash,
-                stored_tool_name=existing.tool_name,
-            )
-        # Payload identity applies while the first request is still running too:
-        # the pinned rule requires a different-payload collision to be CONFLICT,
-        # never IN_FLIGHT and never a stolen reservation.
-        if existing.payload_hash is not None and existing.payload_hash != payload_hash:
-            return ReservationOutcome(
-                kind=IN_FLIGHT,
-                attempt_id=existing.attempt_id,
-                stored_hash=existing.payload_hash,
-                stored_tool_name=existing.tool_name,
-            )
-        # in_flight row: live → IN_FLIGHT; expired → attempt to steal the lease.
-        if existing.expires_at > now:
-            retry_after = max(1, math.ceil((existing.expires_at - now).total_seconds()))
-            return ReservationOutcome(
-                kind=IN_FLIGHT,
-                attempt_id=existing.attempt_id,
-                stored_hash=existing.payload_hash,
-                retry_after=retry_after,
-                stored_tool_name=existing.tool_name,
-            )
-        return self._steal_expired(
-            existing.attempt_id,
-            principal_id=principal_id,
-            account_id=account_id,
-            idempotency_key=idempotency_key,
-            payload_hash=payload_hash,
-            lease=lease,
-            now=now,
-        )
-
-    def _steal_expired(
-        self,
-        attempt_id: str,
-        *,
-        principal_id: str | None,
-        account_id: str | None,
-        idempotency_key: str,
-        payload_hash: str,
-        lease: timedelta,
-        now: datetime,
-    ) -> ReservationOutcome:
-        """Conditionally take over an EXPIRED in_flight reservation. Only one racer wins."""
-        replacement_attempt_id = str(uuid4())
-        stmt = (
-            update(IdempotencyAttempt)
-            .where(
-                IdempotencyAttempt.attempt_id == attempt_id,
-                IdempotencyAttempt.tenant_id == self._tenant_id,
-                IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
-                IdempotencyAttempt.expires_at <= now,
-            )
-            .values(
-                # Fencing token: a stale worker still holding the old attempt_id
-                # cannot complete or release the successor's reservation.
-                attempt_id=replacement_attempt_id,
-                status=_STATUS_IN_FLIGHT,
-                payload_hash=payload_hash,
-                response_envelope=None,
-                expires_at=now + lease,
-            )
-        )
-        result = self._session.execute(stmt)
-        if (getattr(result, "rowcount", 0) or 0) == 1:
-            return ReservationOutcome(kind=RESERVED, attempt_id=replacement_attempt_id)
-        # Another racer stole it first (or it completed). Re-read + re-classify;
-        # the row is now a fresh in_flight owned by the winner (→ IN_FLIGHT) or
-        # completed (→ COMPLETED). It is no longer expired, so no infinite steal.
-        self._session.expire_all()
-        refreshed = self._session.scalars(
-            select(IdempotencyAttempt).where(
-                *self._scope_filter(principal_id, account_id, idempotency_key),
-            )
-        ).first()
-        if refreshed is None:
-            return ReservationOutcome(
-                kind=IN_FLIGHT, attempt_id=attempt_id, retry_after=max(1, math.ceil(lease.total_seconds()))
-            )
-        if refreshed.status == _STATUS_COMPLETED:
-            return ReservationOutcome(
-                kind=COMPLETED,
-                attempt_id=refreshed.attempt_id,
-                response_envelope=refreshed.response_envelope,
-                stored_hash=refreshed.payload_hash,
-                stored_tool_name=refreshed.tool_name,
-            )
-        retry_after = max(1, math.ceil((refreshed.expires_at - now).total_seconds()))
-        return ReservationOutcome(
-            kind=IN_FLIGHT,
-            attempt_id=refreshed.attempt_id,
-            stored_hash=refreshed.payload_hash,
-            retry_after=retry_after,
-            stored_tool_name=refreshed.tool_name,
-        )
-
-    def complete(
-        self,
-        attempt_id: str,
-        *,
-        response_model: BaseModel | dict,
-        protocol_status: str,
-        replay_ttl: timedelta = DEFAULT_REPLAY_TTL,
-        now: datetime | None = None,
-    ) -> bool:
-        """Flip an owned in_flight reservation to completed, caching the verbatim response.
-
-        Serializes the model HERE (never in ``_impl`` — the no-model-dump-in-impl
-        guard). The UPDATE is gated ``status='in_flight'`` so a released/stolen
-        reservation is never resurrected. The CALLER runs this inside the SAME
-        transaction as the guarded side effect (e.g. the account write) so the
-        cached success and the side effect commit atomically.
-        """
-        current = now or datetime.now(UTC)
-        response = response_model.model_dump(mode="json") if isinstance(response_model, BaseModel) else response_model
-        envelope = {"status": protocol_status, "response": response}
-        stmt = (
-            update(IdempotencyAttempt)
-            .where(
-                IdempotencyAttempt.attempt_id == attempt_id,
-                IdempotencyAttempt.tenant_id == self._tenant_id,
-                IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
-            )
-            .values(status=_STATUS_COMPLETED, response_envelope=envelope, expires_at=current + replay_ttl)
-        )
-        result = self._session.execute(stmt)
-        return (getattr(result, "rowcount", 0) or 0) == 1
-
-    def release(self, attempt_id: str, *, now: datetime | None = None) -> bool:
-        """Delete an owned in_flight reservation (handler failed — errors are NEVER cached).
-
-        Gated ``status='in_flight'`` so a row that raced to completion is never
-        deleted. A retry after release re-executes from scratch (correct: the
-        failed attempt produced no cached success).
-        """
-        stmt = delete(IdempotencyAttempt).where(
-            IdempotencyAttempt.attempt_id == attempt_id,
-            IdempotencyAttempt.tenant_id == self._tenant_id,
-            IdempotencyAttempt.status == _STATUS_IN_FLIGHT,
-        )
-        result = self._session.execute(stmt)
-        return (getattr(result, "rowcount", 0) or 0) == 1
-
     def count_inserts_since(
         self,
         *,
-        principal_id: str | None,
+        principal_id: str,
         account_id: str | None,
         since: datetime,
-        operation_class: str = "write",
     ) -> tuple[int, datetime | None]:
         """COUNT and MIN(created_at) of rows created after ``since`` in scope.
 
@@ -577,31 +211,22 @@ class IdempotencyAttemptRepository:
         about row creation, not liveness). Thresholds and the rejection
         decision live in :mod:`src.services.idempotency_policy`.
         """
-        scope = (
-            *self._scope_prefix(principal_id, account_id),
-            IdempotencyAttempt.operation_class == operation_class,
-            IdempotencyAttempt.created_at > since,
-        )
+        scope = (*self._scope_prefix(principal_id, account_id), IdempotencyAttempt.created_at > since)
         return self._count_and_oldest(scope, IdempotencyAttempt.created_at)
 
     def count_active(
         self,
         *,
-        principal_id: str | None,
+        principal_id: str,
         account_id: str | None,
         now: datetime,
-        operation_class: str = "write",
     ) -> tuple[int, datetime | None]:
         """COUNT and MIN(expires_at) of non-expired rows in scope.
 
         Pure scope query; the storage ceiling and ``retry_after`` derivation
         live in :mod:`src.services.idempotency_policy`.
         """
-        scope = (
-            *self._scope_prefix(principal_id, account_id),
-            IdempotencyAttempt.operation_class == operation_class,
-            IdempotencyAttempt.expires_at > now,
-        )
+        scope = (*self._scope_prefix(principal_id, account_id), IdempotencyAttempt.expires_at > now)
         return self._count_and_oldest(scope, IdempotencyAttempt.expires_at)
 
     def expire_old(self, *, now: datetime | None = None) -> int:

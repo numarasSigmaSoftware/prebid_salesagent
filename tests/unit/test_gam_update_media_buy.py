@@ -12,8 +12,8 @@ import pytest
 from src.core.schemas import UpdateMediaBuySuccess
 
 
-def test_update_package_budget_joins_caller_transaction():
-    """The adapter mutates the caller-owned ORM row without committing early."""
+def test_update_package_budget_persists_to_database():
+    """Test that update_package_budget action actually updates the database."""
     from src.adapters.google_ad_manager import GoogleAdManager
 
     media_buy_id = "mb_test123"
@@ -81,9 +81,8 @@ def test_update_package_budget_joins_caller_transaction():
         # Verify database was updated
         assert mock_package.package_config["budget"] == float(new_budget)
 
-        # The tool-level UoW owns the transaction so the package mutation and
-        # idempotency completion become durable atomically.
-        mock_session.commit.assert_not_called()
+        # Verify session.commit() was called
+        mock_session.commit.assert_called_once()
 
 
 def test_update_package_budget_returns_error_when_package_not_found():

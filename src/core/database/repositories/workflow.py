@@ -16,42 +16,14 @@ beads: salesagent-4d4
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from sqlalchemy.sql.elements import ColumnElement
 
 from src.core.database.models import Context as DBContext
-from src.core.database.models import ObjectWorkflowMapping, Principal, WorkflowNotificationEvent, WorkflowStep
-from src.core.database.repositories.notification_claim import finalize_notification_claim
-
-_NOTIFIABLE_WORKFLOW_STATUSES = frozenset(
-    {"requires_approval", "input-required", "completed", "failed", "rejected", "canceled"}
-)
-
-
-@dataclass(frozen=True)
-class StaleCreativeUnblockLease:
-    """Scalar scheduler work item for one expired creative-unblock lease."""
-
-    tenant_id: str
-    step_id: str
-    media_buy_id: str
-
-
-@dataclass(frozen=True)
-class PendingWorkflowNotification:
-    """Scalar workflow-event occurrence whose outbox is not acknowledged."""
-
-    tenant_id: str
-    step_id: str
-    status: str
-    event_id: str
-    response_data: dict | None
+from src.core.database.models import ObjectWorkflowMapping, Principal, WorkflowStep
 
 
 class WorkflowRepository:
@@ -77,16 +49,6 @@ class WorkflowRepository:
     # WorkflowStep reads
     # ------------------------------------------------------------------
 
-    def get_context(self, context_id: str, *, principal_id: str | None = None) -> DBContext | None:
-        """Get a context by ID within the tenant, optionally scoped to a principal."""
-        stmt = select(DBContext).where(
-            DBContext.context_id == context_id,
-            DBContext.tenant_id == self._tenant_id,
-        )
-        if principal_id is not None:
-            stmt = stmt.where(DBContext.principal_id == principal_id)
-        return self._session.scalars(stmt).first()
-
     def get_by_step_id(self, step_id: str) -> WorkflowStep | None:
         """Get a workflow step by its ID within the tenant."""
         return self._session.scalars(
@@ -94,31 +56,6 @@ class WorkflowRepository:
             .join(DBContext)
             .where(
                 WorkflowStep.step_id == step_id,
-                DBContext.tenant_id == self._tenant_id,
-            )
-        ).first()
-
-    def get_by_step_id_for_update(self, step_id: str) -> WorkflowStep | None:
-        """Lock one tenant-scoped workflow row for a monotonic transition."""
-        return self._session.scalars(
-            select(WorkflowStep)
-            .join(DBContext)
-            .where(
-                WorkflowStep.step_id == step_id,
-                DBContext.tenant_id == self._tenant_id,
-            )
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        ).first()
-
-    def get_by_step_and_context(self, step_id: str, context_id: str) -> WorkflowStep | None:
-        """Get a workflow step by ID and context within the tenant."""
-        return self._session.scalars(
-            select(WorkflowStep)
-            .join(DBContext)
-            .where(
-                WorkflowStep.step_id == step_id,
-                WorkflowStep.context_id == context_id,
                 DBContext.tenant_id == self._tenant_id,
             )
         ).first()
@@ -232,243 +169,6 @@ class WorkflowRepository:
             )
             .order_by(ObjectWorkflowMapping.created_at.desc())
         ).first()
-
-    def get_actionable_step_for_object_for_update(
-        self,
-        object_type: str,
-        object_id: str,
-        *,
-        tool_name: str,
-        statuses: set[str],
-        recover_processing_before: datetime | None = None,
-    ) -> WorkflowStep | None:
-        """Lock the newest matching actionable workflow, ignoring unrelated newer mappings."""
-        status_predicate: ColumnElement[bool] = WorkflowStep.status.in_(statuses)
-        if recover_processing_before is not None:
-            status_predicate = or_(
-                status_predicate,
-                (
-                    (WorkflowStep.status == "processing")
-                    & (WorkflowStep.processing_started_at < recover_processing_before)
-                ),
-            )
-        return self._session.scalars(
-            select(WorkflowStep)
-            .join(ObjectWorkflowMapping, ObjectWorkflowMapping.step_id == WorkflowStep.step_id)
-            .join(DBContext, WorkflowStep.context_id == DBContext.context_id)
-            .where(
-                ObjectWorkflowMapping.object_type == object_type,
-                ObjectWorkflowMapping.object_id == object_id,
-                WorkflowStep.tool_name == tool_name,
-                status_predicate,
-                DBContext.tenant_id == self._tenant_id,
-            )
-            .order_by(ObjectWorkflowMapping.created_at.desc())
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        ).first()
-
-    @staticmethod
-    def list_stale_creative_unblock_leases(
-        session: Session,
-        *,
-        before: datetime,
-    ) -> list[StaleCreativeUnblockLease]:
-        """List expired creative-unblock leases across tenants for the scheduler."""
-        rows = session.execute(
-            select(
-                DBContext.tenant_id,
-                WorkflowStep.step_id,
-                ObjectWorkflowMapping.object_id,
-            )
-            .join(WorkflowStep, WorkflowStep.context_id == DBContext.context_id)
-            .join(ObjectWorkflowMapping, ObjectWorkflowMapping.step_id == WorkflowStep.step_id)
-            .where(
-                ObjectWorkflowMapping.object_type == "media_buy",
-                WorkflowStep.tool_name == "create_media_buy",
-                WorkflowStep.status == "processing",
-                WorkflowStep.processing_started_at < before,
-            )
-            .order_by(DBContext.tenant_id, WorkflowStep.step_id)
-        ).all()
-        return [StaleCreativeUnblockLease(tenant_id=row[0], step_id=row[1], media_buy_id=row[2]) for row in rows]
-
-    def reclaim_processing_lease(self, step_id: str, *, before: datetime) -> WorkflowStep | None:
-        """Renew one expired processing lease under a tenant-scoped row lock."""
-        step = self.get_by_step_id_for_update(step_id)
-        if (
-            step is None
-            or step.status != "processing"
-            or step.processing_started_at is None
-            or step.processing_started_at >= before
-        ):
-            return None
-        step.processing_started_at = datetime.now(UTC)
-        self._session.flush()
-        return step
-
-    @staticmethod
-    def list_pending_workflow_notifications(session: Session) -> list[PendingWorkflowNotification]:
-        """List immutable workflow-event occurrences awaiting publication."""
-        rows = session.execute(
-            select(
-                WorkflowNotificationEvent.tenant_id,
-                WorkflowNotificationEvent.step_id,
-                WorkflowNotificationEvent.status,
-                WorkflowNotificationEvent.event_id,
-                WorkflowNotificationEvent.response_data,
-            )
-            .where(WorkflowNotificationEvent.delivered_at.is_(None))
-            .order_by(
-                WorkflowNotificationEvent.tenant_id,
-                WorkflowNotificationEvent.step_id,
-                WorkflowNotificationEvent.sequence,
-            )
-        ).all()
-        return [
-            PendingWorkflowNotification(
-                tenant_id=row[0],
-                step_id=row[1],
-                status=row[2],
-                event_id=row[3],
-                response_data=row[4],
-            )
-            for row in rows
-        ]
-
-    def claim_notification_publication(
-        self,
-        step_id: str,
-        status: str,
-        *,
-        event_id: str | None = None,
-        lease_seconds: int = 300,
-    ) -> tuple[str, str | None, dict | None] | None:
-        """Lease the oldest matching occurrence and return event/token/payload."""
-        stmt = (
-            select(WorkflowNotificationEvent)
-            .where(
-                WorkflowNotificationEvent.tenant_id == self._tenant_id,
-                WorkflowNotificationEvent.step_id == step_id,
-                WorkflowNotificationEvent.delivered_at.is_(None),
-            )
-            .order_by(WorkflowNotificationEvent.sequence)
-            .with_for_update()
-        )
-        event = self._session.scalars(stmt).first()
-        now = datetime.now(UTC)
-        claim_active = (
-            event is not None
-            and event.claimed_at is not None
-            and event.claimed_at >= now - timedelta(seconds=lease_seconds)
-        )
-        if (
-            event is not None
-            and event.status != "canceled"
-            and not claim_active
-            and self._has_later_pending_cancellation(event)
-        ):
-            event.superseded_at = now
-            event.delivered_at = now
-            event.claimed_at = None
-            event.claim_token = None
-            self._session.flush()
-            return event.event_id, None, None
-        if (
-            event is None
-            or event.status != status
-            or (event_id is not None and event.event_id != event_id)
-            or claim_active
-        ):
-            return None
-        token = str(uuid4())
-        event.claimed_at = now
-        event.claim_token = token
-        self._session.flush()
-        return event.event_id, token, event.response_data
-
-    def mark_notifications_published(self, event_id: str, *, claim_token: str) -> bool:
-        """Acknowledge one occurrence only for its current tenant-scoped owner."""
-        event = self._get_notification_event_for_update(event_id)
-        if not finalize_notification_claim(event, claim_token, published=True):
-            return False
-        self._session.flush()
-        return True
-
-    def release_notification_claim(self, event_id: str, *, claim_token: str) -> bool:
-        """Release a failed publication lease for immediate scheduler retry."""
-        event = self._get_notification_event_for_update(event_id)
-        if not finalize_notification_claim(event, claim_token, published=False):
-            return False
-        self._session.flush()
-        return True
-
-    def record_notification_transition(self, step: WorkflowStep, status: str) -> str | None:
-        """Record a directly-mutated transition before its surrounding commit."""
-        return self._enqueue_notification_event(step, status)
-
-    def _enqueue_notification_event(self, step: WorkflowStep, status: str) -> str | None:
-        if status not in _NOTIFIABLE_WORKFLOW_STATUSES:
-            return None
-        if status == "canceled":
-            superseded_at = datetime.now(UTC)
-            older_events = self._session.scalars(
-                select(WorkflowNotificationEvent)
-                .where(
-                    WorkflowNotificationEvent.tenant_id == self._tenant_id,
-                    WorkflowNotificationEvent.step_id == step.step_id,
-                    WorkflowNotificationEvent.delivered_at.is_(None),
-                )
-                .with_for_update()
-            ).all()
-            for event in older_events:
-                # An active claim may already be sending on the wire. Preserve
-                # it under FIFO so cancellation cannot overtake an in-flight
-                # nonterminal callback. Unclaimed events are safe to supersede.
-                if event.claimed_at is None:
-                    event.superseded_at = superseded_at
-                    event.delivered_at = superseded_at
-        step.notification_sequence += 1
-        event_id = f"workflow:{step.step_id}:{step.notification_sequence}:{status}"
-        self._session.add(
-            WorkflowNotificationEvent(
-                event_id=event_id,
-                tenant_id=self._tenant_id,
-                context_id=step.context_id,
-                step_id=step.step_id,
-                sequence=step.notification_sequence,
-                status=status,
-                response_data=step.response_data,
-            )
-        )
-        self._session.flush()
-        return event_id
-
-    def _get_notification_event_for_update(self, event_id: str) -> WorkflowNotificationEvent | None:
-        return self._session.scalars(
-            select(WorkflowNotificationEvent)
-            .where(
-                WorkflowNotificationEvent.event_id == event_id,
-                WorkflowNotificationEvent.tenant_id == self._tenant_id,
-            )
-            .with_for_update()
-        ).first()
-
-    def _has_later_pending_cancellation(self, event: WorkflowNotificationEvent) -> bool:
-        return (
-            self._session.scalars(
-                select(WorkflowNotificationEvent.event_id)
-                .where(
-                    WorkflowNotificationEvent.tenant_id == self._tenant_id,
-                    WorkflowNotificationEvent.step_id == event.step_id,
-                    WorkflowNotificationEvent.sequence > event.sequence,
-                    WorkflowNotificationEvent.status == "canceled",
-                    WorkflowNotificationEvent.delivered_at.is_(None),
-                )
-                .limit(1)
-            ).first()
-            is not None
-        )
 
     def get_step_by_id(self, step_id: str) -> WorkflowStep | None:
         """Alias of :meth:`get_by_step_id` (identical tenant-scoped lookup).
@@ -589,14 +289,11 @@ class WorkflowRepository:
         Returns the updated step, or None if not found.
         Does NOT commit — the caller handles that.
         """
-        step = self.get_by_step_id_for_update(step_id)
+        step = self.get_by_step_id(step_id)
         if step is None:
             return None
 
-        old_status = step.status
         step.status = status
-        if status == "processing":
-            step.processing_started_at = datetime.now(UTC)
         if completed_at is not None:
             step.completed_at = completed_at
         if response_data is not None:
@@ -607,46 +304,5 @@ class WorkflowRepository:
             # Clear error message on successful completion
             step.error_message = None
 
-        if status != old_status:
-            self._enqueue_notification_event(step, status)
-        self._session.flush()
-        return step
-
-    def transition_status(
-        self,
-        step_id: str,
-        *,
-        status: str,
-        allowed_from: set[str],
-        expected_processing_started_at: datetime | None = None,
-        completed_at: datetime | None = None,
-        response_data: dict[str, Any] | None = None,
-        error_message: str | None = None,
-    ) -> WorkflowStep | None:
-        """Lock and update only when the current state is explicitly allowed."""
-        step = self.get_by_step_id_for_update(step_id)
-        if (
-            step is None
-            or step.status not in allowed_from
-            or (
-                expected_processing_started_at is not None
-                and step.processing_started_at != expected_processing_started_at
-            )
-        ):
-            return None
-        old_status = step.status
-        step.status = status
-        if status == "processing":
-            step.processing_started_at = datetime.now(UTC)
-        if completed_at is not None:
-            step.completed_at = completed_at
-        if response_data is not None:
-            step.response_data = response_data
-        if error_message is not None:
-            step.error_message = error_message
-        elif status == "completed":
-            step.error_message = None
-        if status != old_status:
-            self._enqueue_notification_event(step, status)
         self._session.flush()
         return step

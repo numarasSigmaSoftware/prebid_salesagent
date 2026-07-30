@@ -116,14 +116,7 @@ def test_mcp_wrapper_preserves_existing_currency_for_float_budget():
     )
 
     mock_ctx = MagicMock(spec=Context)
-    state = {
-        "identity": identity,
-        "context_id": "ctx_transport",
-        # This test exercises currency preservation inside the worker. Wire
-        # idempotency hashing is covered by the dedicated boundary suites.
-        "raw_wire_payload": None,
-    }
-    mock_ctx.get_state = AsyncMock(side_effect=state.__getitem__)
+    mock_ctx.get_state = AsyncMock(side_effect=[identity, "ctx_transport"])
 
     with uow_patch, principal_patch, adapter_patch, ctx_patch, audit_patch, verify_patch:
         result = asyncio.run(

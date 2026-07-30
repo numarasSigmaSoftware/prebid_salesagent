@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -15,7 +13,6 @@ from requests.utils import select_proxy
 
 from src.core.bounded_executor import AsyncThreadPoolBulkhead, SyncThreadPoolBulkhead
 from src.core.security.url_validator import resolve_and_validate_target
-from src.core.webhook_signing_config import load_webhook_signing_config
 from src.core.webhook_validator import (
     _allow_private_webhook_targets,
     webhook_url_has_embedded_credentials,
@@ -29,23 +26,6 @@ from src.core.webhook_validator import (
 # delivery, which is why every comparison now goes through ``is_auth_scheme``.
 BEARER_AUTH_SCHEME = "Bearer"
 HMAC_AUTH_SCHEME = "HMAC-SHA256"
-_SIGNATURE_ERROR_RE = re.compile(r'(?:^|,)\s*error\s*=\s*"webhook_[^"]+"', re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class WebhookHTTPResult:
-    """Sanitized response metadata needed for retry classification."""
-
-    status_code: int
-    signature_error: bool
-
-
-def is_signature_auth_failure(status_code: int, www_authenticate: str | None) -> bool:
-    """Return true only for the AdCP terminal signature-error 401 taxonomy."""
-    if status_code != 401 or not isinstance(www_authenticate, str) or not www_authenticate:
-        return False
-    scheme, _, parameters = www_authenticate.partition(" ")
-    return scheme.casefold() == "signature" and bool(_SIGNATURE_ERROR_RE.search(parameters))
 
 
 def is_auth_scheme(configured: str | None, scheme: str) -> bool:
@@ -55,61 +35,6 @@ def is_auth_scheme(configured: str | None, scheme: str) -> bool:
     spelling exist; the canonical spelling is the constant, not the stored value.
     """
     return configured is not None and configured.casefold() == scheme.casefold()
-
-
-def validate_webhook_auth_selector(scheme: str | None, credentials: str | None) -> None:
-    """Validate the strict default-vs-legacy webhook signing mode selector."""
-    if scheme is None:
-        if credentials:
-            raise ValueError("Webhook credentials require an authentication scheme")
-        load_webhook_signing_config(required=True)
-        return
-    if not (is_auth_scheme(scheme, BEARER_AUTH_SCHEME) or is_auth_scheme(scheme, HMAC_AUTH_SCHEME)):
-        raise ValueError(f"Unsupported webhook authentication scheme: {scheme}")
-    if not credentials or len(credentials) < 32:
-        raise ValueError(f"{scheme} webhook authentication requires credentials of at least 32 characters")
-
-
-def validate_webhook_config_auth(config: Any) -> None:
-    """Validate a dict, Pydantic, or protobuf callback authentication block."""
-    authentication = (
-        config.get("authentication") if isinstance(config, Mapping) else getattr(config, "authentication", None)
-    )
-    if isinstance(authentication, Mapping):
-        schemes = authentication.get("schemes") or []
-        scheme = authentication.get("scheme") or (schemes[0] if schemes else None)
-        credentials = authentication.get("credentials")
-    else:
-        scheme = getattr(authentication, "scheme", None)
-        if not scheme:
-            schemes = getattr(authentication, "schemes", None)
-            scheme = schemes[0] if schemes else None
-        credentials = getattr(authentication, "credentials", None)
-    validate_webhook_auth_selector(scheme, credentials)
-
-
-def redact_webhook_url(url: str) -> str:
-    """Return only a callback's scheme and authority for safe operational logs."""
-    try:
-        parsed = urlparse(url)
-        if not parsed.scheme or not parsed.hostname:
-            return "<invalid-webhook-url>"
-        host = parsed.hostname
-        if ":" in host:
-            host = f"[{host}]"
-        port = f":{parsed.port}" if parsed.port is not None else ""
-        return f"{parsed.scheme.lower()}://{host.lower()}{port}/<redacted>"
-    except (TypeError, ValueError):
-        return "<invalid-webhook-url>"
-
-
-def describe_webhook_error(exc: BaseException) -> str:
-    """Return a URL- and credential-free network failure description."""
-    response = getattr(exc, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int):
-        return f"{type(exc).__name__} (HTTP {status_code})"
-    return type(exc).__name__
 
 
 WEBHOOK_DNS_TIMEOUT_SECONDS = 2.0
@@ -240,35 +165,6 @@ def post_webhook_status(
         response.close()
 
 
-def post_webhook_result(
-    session: requests.Session,
-    url: str,
-    *,
-    body: bytes,
-    headers: Mapping[str, str],
-    timeout: float,
-) -> WebhookHTTPResult:
-    """POST exact bytes and retain only safe retry-classification metadata."""
-    response = session.post(
-        url,
-        data=body,
-        headers={**headers, "Host": webhook_host_header(url)},
-        timeout=timeout,
-        allow_redirects=False,
-        stream=True,
-    )
-    try:
-        return WebhookHTTPResult(
-            status_code=response.status_code,
-            signature_error=is_signature_auth_failure(
-                response.status_code,
-                response.headers.get("WWW-Authenticate"),
-            ),
-        )
-    finally:
-        response.close()
-
-
 async def post_webhook_status_async(
     session: requests.Session,
     url: str,
@@ -288,30 +184,6 @@ async def post_webhook_status_async(
         async with asyncio.timeout(deadline_seconds):
             return await _ASYNC_WEBHOOK_DELIVERY_BULKHEAD.run(
                 post_webhook_status,
-                session,
-                url,
-                body=body,
-                headers=headers,
-                timeout=timeout,
-            )
-    except TimeoutError as exc:
-        raise requests.Timeout("Webhook delivery deadline exceeded") from exc
-
-
-async def post_webhook_result_async(
-    session: requests.Session,
-    url: str,
-    *,
-    body: bytes,
-    headers: Mapping[str, str],
-    timeout: float,
-    deadline_seconds: float = WEBHOOK_DELIVERY_DEADLINE_SECONDS,
-) -> WebhookHTTPResult:
-    """Async bounded counterpart to :func:`post_webhook_result`."""
-    try:
-        async with asyncio.timeout(deadline_seconds):
-            return await _ASYNC_WEBHOOK_DELIVERY_BULKHEAD.run(
-                post_webhook_result,
                 session,
                 url,
                 body=body,

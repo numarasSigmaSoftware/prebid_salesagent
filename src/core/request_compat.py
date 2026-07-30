@@ -32,8 +32,8 @@ ADCP_NEGOTIATION_FIELDS: frozenset[str] = frozenset({"adcp_version", "adcp_major
 # validator only to names it actually exposes; notably, ``list_tasks`` remains
 # MCP-only.  The 3.1 compatibility grace permits omission, while security-layer
 # envelope tolerance permits a supplied key even when the individual request
-# schema does not declare it. On standard reads the key is validated and
-# consumed by the shared durable replay boundary before business dispatch.
+# schema does not declare it.  On standard reads the key is
+# validated then ignored — it never reaches business logic or a replay cache.
 # Deliberate branch choice: read-tool-idempotency.yaml's omitted_key_grace says
 # sellers "SHOULD reject this omission but MAY accept it for compatibility";
 # this seller takes the MAY-accept branch during 3.1. Flippable when: the 3.2
@@ -53,7 +53,7 @@ STANDARD_ADCP_READ_TOOLS: frozenset[str] = frozenset(
 
 
 def validate_standard_read_idempotency_key(tool_name: str, params: dict[str, Any]) -> None:
-    """Validate a supplied read key as protocol-envelope metadata.
+    """Validate a supplied read key as inert protocol metadata.
 
     Omission is accepted for the pinned 3.1 compatibility grace.  Presence is
     shape-checked before any transport strips undeclared envelope fields;
@@ -273,7 +273,7 @@ def _strip_fields(
 # MCP/A2A call site so a field-drop event correlates by ONE label regardless
 # of transport or which specific envelope field(s) were involved — an
 # operator grepping/alerting on one label must see every occurrence. An
-# An earlier revision hardcoded a read-idempotency label at one A2A call
+# earlier revision hardcoded ``"inert read idempotency"`` at one A2A call
 # site instead of reusing DROPPED_FIELDS_UNDECLARED_ENVELOPE, splitting one
 # semantic event (an envelope field the tool doesn't declare, dropped before
 # dispatch) across two labels depending on which transport handled it.
@@ -303,7 +303,7 @@ def strip_undeclared_envelope_fields(
     does not would otherwise reject it under FastMCP's strict per-tool
     arg-validation. Strip only the undeclared ones, in all environments. When
     ``known_params`` is None (schema lookup failed) strip nothing — the
-    production fallback handles it.
+    production fallback handles it. See #1512.
 
     Returns:
         Tuple of (params without the undeclared envelope fields, sorted removed
@@ -321,7 +321,7 @@ def strip_negotiation_fields(params: dict[str, Any]) -> tuple[dict[str, Any], li
     client for version negotiation. They are protocol envelope, not tool
     parameters, so FastMCP's strict per-tool arg-validation rejects them and
     makes the agent uncallable by conformant SDK clients. Strip them in all
-    environments before dispatch.
+    environments before dispatch. See #1512.
 
     Returns:
         Tuple of (params without negotiation fields, sorted list of removed keys).

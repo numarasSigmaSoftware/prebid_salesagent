@@ -2,29 +2,21 @@
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from adcp import PushNotificationConfig
 from adcp.types import ContextObject, CreativeAction, CreativeAsset
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from src.core.auth import require_identity, require_principal_id, require_tenant
-from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
-from src.core.database.repositories.uow import CreativeUoW, IdempotencyUoW
+from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPError
 from src.core.helpers import log_tool_activity
-from src.core.idempotency_canonical import canonical_payload_hash
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
 from src.core.schemas._base import validate_idempotency_key_shape
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
-from src.services.idempotency_replay import (
-    complete_idempotent,
-    mark_idempotent_replay,
-    release_reservation_on_error,
-    reserve_idempotent,
-)
 
 from ._assignments import _process_assignments
 from ._processing import _create_new_creative, _failed_sync_result, _update_existing_creative
@@ -32,62 +24,6 @@ from ._validation import _get_field, _validate_creative_input, check_provenance_
 from ._workflow import _audit_log_sync, _create_sync_workflow_steps, _send_creative_notifications
 
 logger = logging.getLogger(__name__)
-
-
-# Scope component of the idempotency cache key (see IdempotencyAttempt.tool_name).
-_SYNC_CREATIVES_TOOL_NAME = "sync_creatives"
-
-
-def _decode_sync_creatives_replay(
-    envelope: dict[str, Any],
-    *,
-    context: ContextObject | dict | None = None,
-) -> SyncCreativesResponse | None:
-    """Reconstruct a cached sync_creatives success, marked replayed.
-
-    Mirrors ``accounts._decode_sync_accounts_replay``: the cache stores
-    ``{"status": ..., "response": <SyncCreativesResponse dump>}``. Returns
-    ``None`` when the stored envelope no longer validates (schema drift inside
-    the TTL window) so the caller treats it as a miss and re-executes.
-    """
-    try:
-        response = SyncCreativesResponse.model_validate(envelope["response"])
-    except (KeyError, TypeError, ValidationError):
-        logger.warning("Cached sync_creatives envelope failed validation - treating as a miss", exc_info=True)
-        return None
-    return mark_idempotent_replay(response, context=context)
-
-
-def _sync_creatives_request_hash(
-    creatives: Sequence[Any],
-    assignments: dict | None,
-    creative_ids: list[str] | None,
-    delete_missing: bool,
-    validation_mode: str,
-    push_notification_config: PushNotificationConfig | dict | None,
-) -> str:
-    """Canonical hash of the mutating sync_creatives inputs (replay vs conflict key).
-
-    Covers the fields that determine the side effect - the creative payloads, the
-    assignment map, the scoping filter, delete_missing, the validation mode, and
-    the push callback (a changed callback is a different canonical request, matching
-    sync_accounts and the SDK canonicalizer, which excludes only nested
-    authentication.credentials). ``dry_run`` is excluded because a preview never
-    reserves, and ``context`` is app-level metadata, not part of the operation.
-    """
-
-    def _jsonable(value: Any) -> Any:
-        return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
-
-    payload = {
-        "creatives": [_jsonable(c) for c in creatives],
-        "assignments": assignments,
-        "creative_ids": creative_ids,
-        "delete_missing": delete_missing,
-        "validation_mode": validation_mode,
-        "push_notification_config": _jsonable(push_notification_config),
-    }
-    return canonical_payload_hash(payload)
 
 
 def _append_warning(result: SyncCreativeResult, warning: str) -> None:
@@ -98,60 +34,6 @@ def _append_warning(result: SyncCreativeResult, warning: str) -> None:
     before appending rather than assuming a list is present.
     """
     result.warnings = (result.warnings or []) + [warning]
-
-
-def _send_deferred_notifications(
-    notifications: list[dict[str, Any]],
-    tenant: dict[str, Any],
-    principal_id: str,
-) -> None:
-    """Send best-effort notifications only after the protocol result is durable."""
-    for notification in notifications:
-        try:
-            _send_creative_notifications(
-                creatives_needing_approval=notification["creatives_needing_approval"],
-                tenant=tenant,
-                approval_mode=notification["approval_mode"],
-                principal_id=principal_id,
-            )
-        except Exception:
-            logger.warning("Creative approval notification failed after durable completion", exc_info=True)
-
-
-def _run_deferred_observability(actions: list[Callable[[], None]]) -> None:
-    """Run non-protocol audit/activity effects after the cached success commits."""
-    for action in actions:
-        try:
-            action()
-        except Exception:
-            logger.warning("Creative sync observability failed after durable completion", exc_info=True)
-
-
-def _sync_creatives_core_kwargs(
-    creatives: Sequence[CreativeAsset | BaseModel | dict[str, Any]],
-    assignments: dict | None,
-    creative_ids: list[str] | None,
-    delete_missing: bool,
-    dry_run: bool,
-    validation_mode: str,
-    push_notification_config: PushNotificationConfig | dict | None,
-    context: ContextObject | dict | None,
-    idempotency_key: str | None,
-    identity: ResolvedIdentity | None,
-) -> dict[str, Any]:
-    """One mapping for the wrapper→impl and impl→worker seams."""
-    return {
-        "creatives": creatives,
-        "assignments": assignments,
-        "creative_ids": creative_ids,
-        "delete_missing": delete_missing,
-        "dry_run": dry_run,
-        "validation_mode": validation_mode,
-        "push_notification_config": push_notification_config,
-        "context": context,
-        "idempotency_key": idempotency_key,
-        "identity": identity,
-    }
 
 
 def _sync_creatives_impl(
@@ -165,94 +47,6 @@ def _sync_creatives_impl(
     context: ContextObject | dict | None = None,
     idempotency_key: str | None = None,
     identity: ResolvedIdentity | None = None,
-    raw_wire_payload: dict[str, Any] | None = None,
-) -> SyncCreativesResponse:
-    """Reserve, execute, and durably complete one mutating creative sync."""
-    validate_idempotency_key_shape(idempotency_key)
-    principal_id = require_principal_id(identity, context=context)
-    resolved_identity = require_identity(identity, context=context)
-    tenant = require_tenant(resolved_identity, context=context)
-
-    reservation_attempt_id: str | None = None
-    if idempotency_key and not dry_run:
-        reservation = reserve_idempotent(
-            IdempotencyUoW,
-            tenant["tenant_id"],
-            principal_id=principal_id,
-            account_id=resolved_identity.account_id,
-            tool_name=_SYNC_CREATIVES_TOOL_NAME,
-            idempotency_key=idempotency_key,
-            request_hash=(
-                canonical_payload_hash(raw_wire_payload)
-                if raw_wire_payload is not None
-                else _sync_creatives_request_hash(
-                    creatives,
-                    assignments,
-                    creative_ids,
-                    delete_missing,
-                    validation_mode,
-                    push_notification_config,
-                )
-            ),
-            lease=DEFAULT_IN_FLIGHT_LEASE,
-            decode=lambda envelope: _decode_sync_creatives_replay(envelope, context=context),
-            enforce_ceiling=True,
-        )
-        if reservation.replay is not None:
-            from src.core.idempotency_logging import redact_idempotency_key
-
-            logger.info(
-                "Idempotency replay: returning cached sync_creatives success for key %s",
-                redact_idempotency_key(idempotency_key),
-            )
-            return reservation.replay
-        reservation_attempt_id = reservation.attempt_id
-
-    with release_reservation_on_error(IdempotencyUoW, tenant["tenant_id"], reservation_attempt_id):
-        deferred_notifications: list[dict[str, Any]] = []
-        deferred_observability: list[Callable[[], None]] = []
-        with CreativeUoW(tenant["tenant_id"]) as orchestration_uow:
-            response = _sync_creatives_work(
-                **_sync_creatives_core_kwargs(
-                    creatives,
-                    assignments,
-                    creative_ids,
-                    delete_missing,
-                    dry_run,
-                    validation_mode,
-                    push_notification_config,
-                    context,
-                    idempotency_key,
-                    resolved_identity,
-                ),
-                deferred_notifications=deferred_notifications,
-                deferred_observability=deferred_observability,
-            )
-            if reservation_attempt_id is not None:
-                complete_idempotent(
-                    orchestration_uow,
-                    attempt_id=reservation_attempt_id,
-                    response_model=response,
-                    protocol_status="completed",
-                )
-        _run_deferred_observability(deferred_observability)
-        _send_deferred_notifications(deferred_notifications, tenant, principal_id)
-        return response
-
-
-def _sync_creatives_work(
-    creatives: Sequence[CreativeAsset | BaseModel | dict[str, Any]],
-    assignments: dict | None = None,
-    creative_ids: list[str] | None = None,
-    delete_missing: bool = False,
-    dry_run: bool = False,
-    validation_mode: str = "strict",
-    push_notification_config: PushNotificationConfig | dict | None = None,
-    context: ContextObject | dict | None = None,
-    idempotency_key: str | None = None,
-    identity: ResolvedIdentity | None = None,
-    deferred_notifications: list[dict[str, Any]] | None = None,
-    deferred_observability: list[Callable[[], None]] | None = None,
 ) -> SyncCreativesResponse:
     """Sync creative assets to centralized library (AdCP v2.5 spec compliant endpoint).
 
@@ -274,8 +68,9 @@ def _sync_creatives_work(
         validation_mode: Validation strictness (strict or lenient)
         push_notification_config: Push notification config for status updates (AdCP spec, optional)
         context: Application level context per adcp spec
-        idempotency_key: Required on protocol requests and reserved by the
-            public implementation wrapper before this worker is invoked.
+        idempotency_key: Required on protocol requests. Capabilities advertise
+            idempotency support, but dedupe is implemented on create_media_buy
+            today, so a retry here is accepted and re-executed.
         identity: ResolvedIdentity with principal/tenant info (transport-agnostic)
 
     Returns:
@@ -448,8 +243,6 @@ def _sync_creatives_work(
                             all_formats=all_formats,
                             registry=registry,
                             principal_id=principal_id,
-                            idempotency_key=idempotency_key,
-                            account_id=identity.account_id if identity is not None else None,
                         )
 
                         # Handle failed updates
@@ -510,8 +303,6 @@ def _sync_creatives_work(
                             all_formats=all_formats,
                             registry=registry,
                             principal_id=principal_id,
-                            idempotency_key=idempotency_key,
-                            account_id=identity.account_id if identity is not None else None,
                         )
 
                         # Handle failed creates
@@ -626,48 +417,33 @@ def _sync_creatives_work(
             push_notification_config=push_notification_config,
             context=context,
             identity=identity,
-            idempotency_key=idempotency_key,
         )
-        if deferred_notifications is not None:
-            deferred_notifications.append(
-                {
-                    "creatives_needing_approval": list(creatives_needing_approval),
-                    "approval_mode": approval_mode,
-                }
-            )
-        else:
-            try:
-                _send_creative_notifications(
-                    creatives_needing_approval=creatives_needing_approval,
-                    tenant=tenant,
-                    approval_mode=approval_mode,
-                    principal_id=principal_id,
-                )
-            except Exception:
-                logger.warning("Creative approval notification failed after durable workflow creation", exc_info=True)
-
-    def record_observability() -> None:
-        _audit_log_sync(
-            tenant=tenant,
-            principal_id=principal_id,
-            synced_creatives=synced_creatives,
-            failed_creatives=failed_creatives,
-            assignment_list=assignment_list,
-            creative_ids=creative_ids,
-            dry_run=dry_run,
-            created_count=created_count,
-            updated_count=updated_count,
-            unchanged_count=unchanged_count,
-            failed_count=failed_count,
+        _send_creative_notifications(
             creatives_needing_approval=creatives_needing_approval,
+            tenant=tenant,
+            approval_mode=approval_mode,
+            principal_id=principal_id,
         )
-        if identity is not None:
-            log_tool_activity(identity, "sync_creatives", start_time)
 
-    if deferred_observability is None:
-        record_observability()
-    else:
-        deferred_observability.append(record_observability)
+    # Audit logging
+    _audit_log_sync(
+        tenant=tenant,
+        principal_id=principal_id,
+        synced_creatives=synced_creatives,
+        failed_creatives=failed_creatives,
+        assignment_list=assignment_list,
+        creative_ids=creative_ids,
+        dry_run=dry_run,
+        created_count=created_count,
+        updated_count=updated_count,
+        unchanged_count=unchanged_count,
+        failed_count=failed_count,
+        creatives_needing_approval=creatives_needing_approval,
+    )
+
+    # Log activity
+    if identity is not None:
+        log_tool_activity(identity, "sync_creatives", start_time)
 
     # Build message
     message = f"Synced {created_count + updated_count} creatives"
@@ -690,10 +466,8 @@ def _sync_creatives_work(
         message += f", {len(creatives_needing_approval)} require approval"
 
     # Build AdCP-compliant response (per official spec)
-    response = SyncCreativesResponse(
+    return SyncCreativesResponse(
         creatives=results,
         dry_run=dry_run,
         context=context,
     )
-
-    return response

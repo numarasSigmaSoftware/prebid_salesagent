@@ -199,8 +199,10 @@ class TestAdCPReferenceImplementation:
             print(f"   ✓ Update status: {update_data.get('status', 'unknown')}")
             assert update_data.get("context") == {"e2e": "update_media_buy"}
 
-            # PHASE 6: webhook delivery is asserted independently below.
-            print("\n🔔 PHASE 6: webhook delivery → see test_update_media_buy_push_webhook_delivery")
+            # PHASE 6: webhook delivery is asserted by test_update_media_buy_push_webhook_delivery
+            # (xfail) — update_media_buy's notification is a pre-existing server bug, so this
+            # lifecycle covers the synchronous contract rather than swallow a missing webhook.
+            print("\n🔔 PHASE 6: webhook delivery → see test_update_media_buy_push_webhook_delivery (xfail)")
 
             print("\n📋 PHASE 7: List Creatives (verify final state)")
 
@@ -229,14 +231,26 @@ class TestAdCPReferenceImplementation:
             print("=" * 80)
 
     @pytest.mark.asyncio
-    async def test_synchronous_update_does_not_duplicate_push_webhook(
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Pre-existing server bug: update_media_buy's task-status push webhook is never "
+            "delivered. _send_push_notifications (src/core/context_manager.py) queries "
+            "object_workflow_mapping in a separate session before the update's UnitOfWork commits "
+            "that mapping, so it logs 'No object mappings found' and returns without POSTing (the "
+            "row IS written, visible post-request — a commit-ordering defect, not a missing row). "
+            "The create/auto-approve path was fixed by linking the mapping before the notification "
+            "fires; update_media_buy needs the same treatment. Remove this marker once it does."
+        ),
+    )
+    async def test_update_media_buy_push_webhook_delivery(
         self, docker_services_e2e, live_server, test_auth_token, auto_approval_adapter
     ):
-        """A completed update returned inline must not be duplicated as a push.
+        """update_media_buy must deliver a task-status push webhook to the configured URL.
 
         Uses the shared helper's default (reachable) callback host — not the lifecycle's
-        loopback-pinned fixture — so an accidental callback would be observable.
-        Discovers all ids from prior responses.
+        loopback-pinned fixture — so the webhook lands once the server links the mapping
+        before firing. Discovers all ids from prior responses.
         """
         with run_webhook_capture_server(WebhookReceiver, WebhookReceiver.received_webhooks) as webhook:
             async with make_mcp_client(live_server, token=test_auth_token) as client:
@@ -255,11 +269,26 @@ class TestAdCPReferenceImplementation:
                 media_buy_id = create_data.get("media_buy_id")
                 assert media_buy_id, f"create_media_buy must return media_buy_id; got: {create_data}"
 
-                # A synchronous terminal result is returned inline and must not
-                # be duplicated as an initial callback. The persisted callback
-                # registration is then reused by the consequential update below.
-                sleep(2)
-                assert webhook["received"] == []
+                # create_media_buy delivers its completion webhook and may re-deliver it, so drain to
+                # quiescence: wait for the first, then keep clearing until a quiet window passes with
+                # no new arrival. A single clear() leaves a late/duplicate create webhook to land in
+                # the update window below and falsely satisfy the assertion (intermittent XPASS).
+                deadline = 0.0
+                while deadline < 15.0 and not webhook["received"]:
+                    sleep(0.5)
+                    deadline += 0.5
+                assert webhook["received"], (
+                    "Expected the create-completion webhook to land (create delivery is fixed); "
+                    "none arrived, so the update delivery below cannot be isolated."
+                )
+                quiet = 0.0
+                while quiet < 4.0:
+                    sleep(0.5)
+                    quiet += 0.5
+                    if webhook["received"]:
+                        webhook["received"].clear()
+                        quiet = 0.0
+                webhook["received"].clear()
 
                 update_data = parse_tool_result(
                     await client.call_tool(
@@ -275,5 +304,16 @@ class TestAdCPReferenceImplementation:
                 )
                 assert update_data.get("media_buy_id") == media_buy_id
 
-                sleep(2)
-                assert webhook["received"] == []
+                waited = 0.0
+                while waited < 15.0 and not webhook["received"]:
+                    sleep(0.5)
+                    waited += 0.5
+
+                assert webhook["received"], (
+                    "Expected a task-status webhook within 15s of update_media_buy, got none "
+                    "(server did not deliver the update push notification)."
+                )
+                payload = webhook["received"][0]
+                assert isinstance(payload, dict) and payload, (
+                    f"Webhook payload must be a non-empty dict, got {payload!r}"
+                )

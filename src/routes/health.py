@@ -4,7 +4,6 @@ Extracted from src/core/main.py @mcp.custom_route handlers into
 standard FastAPI routes so they are served by the unified FastAPI app.
 """
 
-import asyncio
 import logging
 import os
 import secrets
@@ -47,14 +46,6 @@ class TestingAdCPVersionPolicy(SalesAgentBaseModel):
     lease_id: str = Field(min_length=16, max_length=128)
     supported_versions: list[str] = Field(min_length=1)
     build_version: str = Field(min_length=1, max_length=128)
-
-
-class TestingA2ATaskTransition(SalesAgentBaseModel):
-    """Authenticated test-only input for one real durable task transition."""
-
-    tenant_id: str = Field(min_length=1, max_length=50)
-    principal_id: str = Field(min_length=1, max_length=50)
-    response_data: dict[str, Any] = Field(default_factory=dict)
 
 
 def require_test_control(request: Request) -> None:
@@ -108,44 +99,6 @@ async def reset_testing_adcp_version_policy(lease_id: str) -> Response:
     if not _reset_testing_version_policy(lease_id=lease_id):
         raise HTTPException(status_code=409, detail="The active version-policy test lease has a different owner")
     return Response(status_code=204)
-
-
-@debug_router.post(
-    "/_internal/testing/a2a-tasks/{task_id}/complete",
-    dependencies=[Depends(require_test_control)],
-    include_in_schema=False,
-)
-async def complete_testing_a2a_task(task_id: str, transition: TestingA2ATaskTransition) -> dict[str, Any]:
-    """Drive a live submitted task through its committed notification outbox."""
-    from src.core.context_manager import publish_workflow_notifications
-    from src.core.database.repositories.a2a_task import A2ATaskRepository
-    from src.core.database.repositories.workflow import WorkflowRepository
-
-    with get_db_session() as db:
-        task = A2ATaskRepository(db, transition.tenant_id).get_owned(task_id, transition.principal_id)
-        if task is None or task.workflow_step_id is None:
-            raise HTTPException(status_code=404, detail="Task not found")
-        step_id = task.workflow_step_id
-        workflow_repo = WorkflowRepository(db, transition.tenant_id)
-        step = workflow_repo.transition_status(
-            step_id,
-            status="completed",
-            allowed_from={"submitted", "requires_approval", "input-required"},
-            response_data=transition.response_data,
-        )
-        if step is None:
-            raise HTTPException(status_code=409, detail="Task is no longer actionable")
-        db.commit()
-
-    published = await asyncio.to_thread(
-        publish_workflow_notifications,
-        step_id,
-        "completed",
-        transition.tenant_id,
-    )
-    if not published:
-        raise HTTPException(status_code=502, detail="Task transition was durable but callback publication failed")
-    return {"task_id": task_id, "workflow_step_id": step_id, "published": True}
 
 
 @router.get("/health")

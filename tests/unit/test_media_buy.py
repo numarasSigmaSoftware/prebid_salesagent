@@ -79,8 +79,8 @@ def _make_request(**overrides) -> CreateMediaBuyRequest:
         "start_time": _future(1),
         "end_time": _future(8),
         "packages": [{"product_id": "prod_1", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
-        # Required by AdCP 3.1.1. Most tests in this module call internal worker
-        # seams directly; dedicated replay suites cover the protocol reservation.
+        # Required by AdCP 3.1.1. The key is inert while the seller advertises
+        # idempotency unsupported; mocked UoWs need no cache/probe setup.
         "idempotency_key": "unit-test-default-key-0001",
     }
     defaults.update(overrides)
@@ -323,8 +323,9 @@ class TestCreateMediaBuyResponseShapes:
     def test_result_serializes_replayed_marker_when_set(self):
         """The schema-compatible marker serializes when parsing external data.
 
-        Fresh production responses omit the false marker, while replayed
-        responses serialize it as true for shared clients.
+        Production create responses keep it false while this seller advertises
+        idempotency unsupported; the wrapper still accepts/serializes the AdCP
+        field so shared clients can round-trip the envelope type.
         """
         success = _make_success(media_buy_id="mb_1")
 
@@ -413,9 +414,6 @@ class TestCreateMediaBuyValidation:
         mock_media_buys = MagicMock()
         mock_media_buys.get_by_principal.return_value = []
         mock_uow.media_buys = mock_media_buys
-        mock_uow.products.list_by_ids.return_value = []
-        mock_uow.currency_limits.get_for_currency.return_value = None
-        mock_uow.adapter_configs.find_by_tenant.return_value = None
         _stub_idempotency_probe_miss(mock_uow)
 
         with (
@@ -494,9 +492,6 @@ class TestCreateMediaBuyValidation:
         mock_media_buys = MagicMock()
         mock_media_buys.get_by_principal.return_value = []
         mock_uow.media_buys = mock_media_buys
-        mock_uow.products.list_by_ids.return_value = [product]
-        mock_uow.currency_limits.get_for_currency.return_value = cl
-        mock_uow.adapter_configs.find_by_tenant.return_value = None
         _stub_idempotency_probe_miss(mock_uow)
 
         with (
@@ -1338,7 +1333,6 @@ def _stub_idempotency_probe_miss(mock_uow) -> None:
     tests that build their own UoW double.
     """
     mock_uow.idempotency_attempts.find_by_key.return_value = None
-    mock_uow.idempotency_attempts.find_including_expired.return_value = None
     mock_uow.idempotency_attempts.count_inserts_since.return_value = (0, None)
     mock_uow.idempotency_attempts.count_active.return_value = (0, None)
 
@@ -1369,7 +1363,7 @@ class TestCreateMediaBuyAdapterInteraction:
 
         with patch("src.core.tools.media_buy_create.get_adapter", return_value=mock_adapter):
             result = _execute_adapter_media_buy_creation(
-                request=_make_request().model_copy(update={"idempotency_key": None}),
+                request=_make_request(),
                 packages=[],
                 start_time=datetime.now(UTC),
                 end_time=datetime.now(UTC) + timedelta(days=7),
@@ -1400,7 +1394,7 @@ class TestCreateMediaBuyAdapterInteraction:
         with patch("src.core.tools.media_buy_create.get_adapter", return_value=mock_adapter):
             with pytest.raises(RuntimeError, match="GAM API timeout"):
                 _execute_adapter_media_buy_creation(
-                    request=_make_request().model_copy(update={"idempotency_key": None}),
+                    request=_make_request(),
                     packages=[],
                     start_time=datetime.now(UTC),
                     end_time=datetime.now(UTC) + timedelta(days=7),
@@ -1502,9 +1496,6 @@ class TestCreateMediaBuyAdapterInteraction:
         mock_uow.__exit__ = MagicMock(return_value=None)
         mock_uow.session = mock_session
         mock_uow.media_buys.get_by_principal.return_value = []
-        mock_uow.products.list_by_ids.return_value = [mock_db_product]
-        mock_uow.currency_limits.get_for_currency.return_value = mock_currency_limit
-        mock_uow.adapter_configs.find_by_tenant.return_value = None
         _stub_idempotency_probe_miss(mock_uow)
 
         with (
@@ -1550,8 +1541,8 @@ class TestUpdateMediaBuySchemaCompliance:
         req = UpdateMediaBuyRequest(media_buy_id="mb_1", packages=[])
         assert req.media_buy_id == "mb_1"
 
-    def test_build_update_request_accepts_valid_revision_and_rejects_malformed_values(self):
-        """The shared boundary normalizes valid revisions and rejects malformed values.
+    def test_build_update_request_classifies_supplied_revision_by_value(self):
+        """A supplied `revision` is rejected fail-loud, with the wire code matching its VALUE.
 
         _build_update_request is the single boundary every transport (MCP/A2A/REST)
         routes through. Classifying on numeric value (not Python type) keeps
@@ -1561,14 +1552,29 @@ class TestUpdateMediaBuySchemaCompliance:
         ``UpdateMediaBuyRequest.model_dump()``, so no conformant client ever
         sends null, and ``{type: integer, minimum: 1}`` rejects it like 0/"5"/7.5.
         """
-        from src.core.exceptions import AdCPInvalidRequestError
+        from src.core.exceptions import AdCPCapabilityNotSupportedError, AdCPInvalidRequestError
         from src.core.tools.media_buy_update import _build_update_request
 
+        # A schema-valid revision (>= 1) — as int OR integer-valued float —
+        # names an unimplemented field: UNSUPPORTED_FEATURE (the pinned enum's
+        # "a requested feature or field is not supported by this seller").
+        # Each branch pins the WIRE code, not just the class: swapping either
+        # raise to a parent class keeps isinstance true while the emitted code
+        # flips through ERROR_CODE_MAPPING, and the buyer sees the difference.
         for valid in (5, 7.0):
-            req = _build_update_request(
-                media_buy_id="mb_1", paused=True, idempotency_key=_UPDATE_IDEMPOTENCY_KEY, revision=valid
+            with pytest.raises(AdCPCapabilityNotSupportedError) as exc_info:
+                _build_update_request(
+                    media_buy_id="mb_1", paused=True, idempotency_key=_UPDATE_IDEMPOTENCY_KEY, revision=valid
+                )
+            assert exc_info.value.error_code == "UNSUPPORTED_FEATURE", (
+                f"revision={valid!r} is schema-valid but unimplemented, so the wire code must be "
+                f"UNSUPPORTED_FEATURE; got {exc_info.value.error_code!r}"
             )
-            assert req.revision == int(valid)
+            assert exc_info.value.field == "revision", (
+                "both revision branches must name the same offending field — a buyer reading "
+                "errors[0].field cannot get 'revision' for a malformed value and null for a "
+                f"valid-but-unsupported one; got field={exc_info.value.field!r}"
+            )
         # Schema-invalid spellings (below minimum:1, non-integer, string) stay
         # INVALID_REQUEST — matching BR-UC-003's below_min / wrong_type rows.
         for invalid in (0, -3, 7.5, "5"):
@@ -3655,27 +3661,22 @@ class TestDeliveryImplDateRange:
             assert rp["end"].month == 3
             assert rp["end"].day == 31
 
-    def test_omitted_date_range_uses_campaign_lifetime(self):
-        """UC-004-DR02: omitted dates use campaign lifetime.
+    def test_default_date_range_30_days(self):
+        """UC-004-DR02: omitted dates default to last 30 days.
 
-        Spec: AdCP 3.1.1 get-media-buy-delivery-request.json
+        Spec: UNSPECIFIED (implementation-defined default date range)
         Priority: P1
         Type: unit
         Source: UC-004 main flow
         """
-        identity = _make_identity(testing_context=AdCPTestContext(dry_run=True))
+        identity = _make_identity()
         adapter_mock = MagicMock()
-        media_buy = _mock_media_buy(
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 6, 30),
-        )
-        media_buy.status = "completed"
 
         _PATCH = "src.core.tools.media_buy_delivery"
         with (
             patch("src.core.auth.get_principal_object") as mock_principal,
             patch(f"{_PATCH}.get_adapter", return_value=adapter_mock),
-            patch(f"{_PATCH}._get_target_media_buys", return_value=[("mb_1", media_buy)]),
+            patch(f"{_PATCH}._get_target_media_buys", return_value=[]),
             patch(f"{_PATCH}._get_pricing_options", return_value={}),
             patch(f"{_PATCH}.MediaBuyUoW") as mock_uow_cls,
         ):
@@ -3693,8 +3694,12 @@ class TestDeliveryImplDateRange:
             assert isinstance(resp, GetMediaBuyDeliveryResponse)
             dumped = resp.model_dump()
             rp = dumped["reporting_period"]
-            assert rp["start"] == datetime(2024, 1, 1, tzinfo=UTC)
-            assert rp["end"] == datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=UTC)
+            # Default is last 30 days: end ~= now, start ~= 30 days ago
+
+            end_dt = rp["end"]
+            start_dt = rp["start"]
+            delta = end_dt - start_dt
+            assert 29 <= delta.days <= 31  # ~30 days
 
     def test_start_after_end_returns_error(self):
         """UC-004-DR03: start >= end raises AdCPValidationError.

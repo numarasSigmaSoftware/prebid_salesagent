@@ -51,7 +51,6 @@ class GAMOrdersManager:
         currency: str = "USD",
         applied_team_ids: list[str] | None = None,
         po_number: str | None = None,
-        external_order_id: int | None = None,
     ) -> str:
         """Create a new GAM order.
 
@@ -63,7 +62,6 @@ class GAMOrdersManager:
             currency: Currency code for budget (ISO 4217, default: USD)
             applied_team_ids: Optional list of team IDs to apply
             po_number: Optional PO number
-            external_order_id: Deterministic seller request marker for exact lookup
 
         Returns:
             Created order ID as string
@@ -80,7 +78,7 @@ class GAMOrdersManager:
             )
 
         # Create Order object
-        order: dict[str, Any] = {
+        order = {
             "name": order_name,
             "advertiserId": self.advertiser_id,
             "traffickerId": self.trafficker_id,
@@ -103,8 +101,6 @@ class GAMOrdersManager:
         # Add PO number if provided
         if po_number:
             order["poNumber"] = po_number
-        if external_order_id is not None:
-            order["externalOrderId"] = external_order_id
 
         # Add team IDs if configured
         if applied_team_ids:
@@ -126,36 +122,6 @@ class GAMOrdersManager:
                 return order_id
             else:
                 raise Exception("Failed to create order - no orders returned")
-
-    @timeout(seconds=30)
-    def find_order_by_external_id(self, external_order_id: int) -> dict[str, Any] | None:
-        """Return the exact GAM order carrying ``externalOrderId``, if any."""
-        if self.dry_run:
-            return None
-        order_service = self.client_manager.get_service("OrderService")
-        statement_builder = ad_manager.StatementBuilder()
-        statement_builder.Where("externalOrderId = :externalOrderId")
-        statement_builder.WithBindVariable("externalOrderId", external_order_id)
-        result = order_service.getOrdersByStatement(statement_builder.ToStatement())
-        orders = result.get("results", []) if result else []
-        if len(orders) > 1:
-            raise RuntimeError("GAM externalOrderId is not unique")
-        return orders[0] if orders else None
-
-    @timeout(seconds=30)
-    def find_order_by_operation_marker(self, operation_marker: str) -> dict[str, Any] | None:
-        """Return the order whose suffix carries the full deterministic marker."""
-        if self.dry_run:
-            return None
-        order_service = self.client_manager.get_service("OrderService")
-        statement_builder = ad_manager.StatementBuilder()
-        statement_builder.Where("name LIKE :operationMarker")
-        statement_builder.WithBindVariable("operationMarker", f"%[{operation_marker}]")
-        result = order_service.getOrdersByStatement(statement_builder.ToStatement())
-        orders = result.get("results", []) if result else []
-        if len(orders) > 1:
-            raise RuntimeError("GAM operation marker is not unique")
-        return orders[0] if orders else None
 
     @timeout(seconds=30)  # 30 seconds timeout for status check
     def get_order_status(self, order_id: str) -> str:

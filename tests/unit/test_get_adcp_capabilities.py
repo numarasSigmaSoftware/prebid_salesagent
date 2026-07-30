@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types import GetAdcpCapabilitiesResponse
+from adcp.types.generated_poc.enums.specialism import AdcpSpecialism
 from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     SupportedProtocol,
 )
@@ -170,13 +171,18 @@ class TestGetAdcpCapabilitiesImpl:
         assert response.adcp.major_versions[0].root == 3
         assert SupportedProtocol.media_buy in response.supported_protocols
         # `supported` is one agent-wide claim, not per-tool: only
-        # Every advertised mutation now reserves and replays idempotency keys,
-        # so the seller-wide binary capability must expose the enforced windows.
-        assert response.adcp.idempotency.supported is True
-        assert response.adcp.idempotency.replay_ttl_seconds == 86_400
-        assert response.adcp.idempotency.in_flight_max_seconds == 300
-        # No specialism is claimed until its complete AAO bundle passes.
-        assert response.specialisms == []
+        # create_media_buy deduplicates today, while update_media_buy/
+        # sync_accounts/sync_creatives validate-and-reexecute. False is the
+        # accurate blanket declaration under the binary discriminated union.
+        assert response.adcp.idempotency.supported is False
+        assert not hasattr(response.adcp.idempotency, "replay_ttl_seconds"), (
+            "IdempotencyUnsupported must not carry replay_ttl_seconds — the discriminated "
+            "union forbids it ('they have no meaning without replay support')"
+        )
+        # Specialism declaration activates storyboard scenarios bundled under
+        # sales-non-guaranteed (inventory_list_*, delivery_reporting, etc.).
+        assert response.specialisms is not None
+        assert AdcpSpecialism.sales_non_guaranteed in response.specialisms
 
     def test_impl_returns_valid_adcp_response(self):
         """Test that impl response can be serialized to valid JSON."""
@@ -195,7 +201,7 @@ class TestGetAdcpCapabilitiesImpl:
         assert "supported_protocols" in data
         assert data["supported_protocols"] == ["media_buy"]
         assert "specialisms" in data
-        assert data["specialisms"] == []
+        assert data["specialisms"] == ["sales-non-guaranteed"]
 
     def test_impl_echoes_request_context_minimal_path(self):
         """Capabilities echoes the buyer's request context unchanged (#1512).
@@ -412,11 +418,11 @@ class TestGetAdcpCapabilitiesWithTenant:
                 assert response.adcp.major_versions[0].root == 3
                 assert SupportedProtocol.media_buy in response.supported_protocols
                 # Full response carries the same seller-wide replay posture.
-                assert response.adcp.idempotency.supported is True
-                assert response.adcp.idempotency.replay_ttl_seconds == 86_400
-                assert response.adcp.idempotency.in_flight_max_seconds == 300
+                assert response.adcp.idempotency.supported is False
+                assert not hasattr(response.adcp.idempotency, "replay_ttl_seconds")
                 # Specialism declaration must be consistent across minimal and full paths.
-                assert response.specialisms == []
+                assert response.specialisms is not None
+                assert AdcpSpecialism.sales_non_guaranteed in response.specialisms
 
                 # Should have media_buy capabilities with portfolio
                 assert response.media_buy is not None
@@ -507,10 +513,6 @@ class TestGetAdcpCapabilitiesWithTenant:
                         # Should have geo_postal_areas with us_zip
                         assert targeting.geo_postal_areas is not None
                         assert targeting.geo_postal_areas.us_zip is True
-                        methods = response.media_buy.reporting_delivery_methods or []
-                        assert ("webhook" in methods) is bool(
-                            response.webhook_signing and response.webhook_signing.supported
-                        )
         finally:
             current_tenant.set(None)
 
@@ -677,8 +679,10 @@ class TestChannelMapping:
 class TestGracefulDegradation:
     """Test graceful degradation when adapter or DB raises exceptions."""
 
-    def test_adapter_exception_does_not_advertise_unsafe_media_buy(self):
-        """An unavailable configured adapter cannot make a media-buy commitment."""
+    def test_adapter_exception_falls_back_to_display(self):
+        """Adapter exception during channel detection falls back to display channel."""
+        from adcp.types.generated_poc.enums.channels import MediaChannel
+
         from src.core.tools.capabilities import _get_adcp_capabilities_impl
 
         identity = _make_capabilities_identity()
@@ -698,8 +702,9 @@ class TestGracefulDegradation:
         ):
             response = _get_adcp_capabilities_impl(None, identity)
 
-        assert response.media_buy is None
-        assert response.supported_protocols == [SupportedProtocol.creative]
+        # Should still succeed with display as default
+        assert response.media_buy is not None
+        assert MediaChannel.display in response.media_buy.portfolio.primary_channels
 
     def test_db_exception_uses_placeholder_domain(self):
         """Database exception during publisher domain query uses placeholder domain."""

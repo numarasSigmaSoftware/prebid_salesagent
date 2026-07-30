@@ -14,15 +14,13 @@ from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import RawIdempotencyKey
 from src.core.schemas._base import require_idempotency_key
-from src.core.security.webhook_http import validate_webhook_config_auth
 from src.core.tool_context import ToolContext
-from src.core.transport_helpers import get_mcp_raw_wire_payload
 from src.core.webhook_validator import (
     require_valid_callback_config_urls,
     validated_callback_url_scope,
 )
 
-from ._sync import _sync_creatives_core_kwargs, _sync_creatives_impl
+from ._sync import _sync_creatives_impl
 
 
 def _validate_sync_creatives_boundary(
@@ -31,8 +29,6 @@ def _validate_sync_creatives_boundary(
 ) -> None:
     """Apply shared protocol and callback guards before entering the impl."""
     require_idempotency_key(idempotency_key)
-    if push_notification_config is not None:
-        validate_webhook_config_auth(push_notification_config)
     require_valid_callback_config_urls(
         push_notification_config=push_notification_config,
     )
@@ -67,8 +63,9 @@ async def sync_creatives(
         validation_mode: Validation strictness (strict or lenient)
         push_notification_config: Push notification config for async notifications (AdCP spec, optional)
         context: Application level context per adcp spec
-        idempotency_key: Required client-generated request key. Repeated
-            canonical requests replay the stored sync response.
+        idempotency_key: Required client-generated request key. This seller
+            advertises idempotency support; dedupe is implemented on
+            create_media_buy today, so a retry here re-executes.
         ctx: FastMCP context (automatically provided)
 
     Returns:
@@ -83,7 +80,6 @@ async def sync_creatives(
     ):
         _validate_sync_creatives_boundary(idempotency_key, push_notification_config)
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
 
     # Resolve account at transport boundary (before _impl)
     from src.core.transport_helpers import enrich_identity_with_account
@@ -104,7 +100,6 @@ async def sync_creatives(
         context=context,
         idempotency_key=idempotency_key,
         identity=identity,
-        raw_wire_payload=raw_wire_payload,
     )
     return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
 
@@ -124,7 +119,6 @@ def sync_creatives_raw(
     idempotency_key: str | None = None,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
-    raw_wire_payload: dict[str, Any] | None = None,
 ):
     """Sync creative assets to the centralized creative library (raw function for A2A server use).
 
@@ -140,8 +134,8 @@ def sync_creatives_raw(
         push_notification_config: Push notification config for status updates
         context: Application level context per adcp spec
         idempotency_key: Required client-generated request key. This seller
-            durably replays completed sync_creatives requests and rejects
-            concurrent duplicates with IDEMPOTENCY_IN_FLIGHT.
+            advertises idempotency support; dedupe is implemented on
+            create_media_buy today, so a retry here re-executes.
         ctx: FastMCP context (automatically provided)
         identity: ResolvedIdentity (transport-agnostic, preferred over ctx)
 
@@ -160,17 +154,14 @@ def sync_creatives_raw(
     identity = enrich_identity_with_account(identity, account)
 
     return _sync_creatives_impl(
-        **_sync_creatives_core_kwargs(
-            creatives=creatives,
-            assignments=assignments,
-            creative_ids=creative_ids,
-            delete_missing=delete_missing,
-            dry_run=dry_run,
-            validation_mode=validation_mode,
-            push_notification_config=push_notification_config,
-            context=context,
-            idempotency_key=idempotency_key,
-            identity=identity,
-        ),
-        raw_wire_payload=raw_wire_payload,
+        creatives=creatives,
+        assignments=assignments,
+        creative_ids=creative_ids,
+        delete_missing=delete_missing,
+        dry_run=dry_run,
+        validation_mode=validation_mode,
+        push_notification_config=push_notification_config,
+        context=context,
+        idempotency_key=idempotency_key,
+        identity=identity,
     )

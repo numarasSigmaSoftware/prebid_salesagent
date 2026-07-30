@@ -16,7 +16,7 @@ import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database.models import MediaBuy, MediaPackage
@@ -62,28 +62,6 @@ class MediaBuyRepository:
                 MediaBuy.media_buy_id == media_buy_id,
             )
         ).first()
-
-    def get_by_id_for_update(self, media_buy_id: str) -> MediaBuy | None:
-        """Lock and return a media buy for an atomic state/revision update."""
-        return self._session.scalars(
-            select(MediaBuy)
-            .where(
-                MediaBuy.tenant_id == self._tenant_id,
-                MediaBuy.media_buy_id == media_buy_id,
-            )
-            .with_for_update()
-        ).first()
-
-    def set_revision(self, media_buy_id: str, revision: int) -> None:
-        """Persist a revision on the already locked tenant-scoped row."""
-        self._session.execute(
-            update(MediaBuy)
-            .where(
-                MediaBuy.tenant_id == self._tenant_id,
-                MediaBuy.media_buy_id == media_buy_id,
-            )
-            .values(revision=revision)
-        )
 
     def get_by_id_or_raise(
         self, media_buy_id: str, *, context: ContextObject | dict[str, Any] | None = None

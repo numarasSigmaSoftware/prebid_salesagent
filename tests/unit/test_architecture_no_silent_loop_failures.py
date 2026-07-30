@@ -47,6 +47,8 @@ SCAN_DIRS = [REPO_ROOT / "src/core/tools"]
 SILENT_LOOP_HANDLER_ALLOWLIST: set[tuple[str, str]] = {
     # FIXME(#1566): unparseable Broadstreet template dropped from formats silently
     ("src/core/tools/creative_formats.py", "_list_creative_formats_impl"),
+    # FIXME(#1566): creative-association failure logged only, absent from response
+    ("src/core/tools/media_buy_create.py", "_create_media_buy_impl"),
 }
 
 FIX_HINT = (

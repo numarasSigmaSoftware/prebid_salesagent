@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -35,12 +36,12 @@ from adcp.types import PackageRequest as AdcpPackageRequest
 from adcp.types.aliases import Package as ResponsePackage
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 
 from src.core.application_context import dump_adcp_response
 from src.core.database.repositories.creative import CreativeRepository
-from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE, DEFAULT_REPLAY_TTL
+from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
 from src.core.exceptions import (
     AdCPAdapterError,
     AdCPAuthorizationError,
@@ -50,6 +51,7 @@ from src.core.exceptions import (
     AdCPCreativeRejectedError,
     AdCPError,
     AdCPFormatNotFoundError,
+    AdCPIdempotencyConflictError,
     AdCPIdempotencyExpiredError,
     AdCPInvalidRequestError,
     AdCPProductNotFoundError,
@@ -58,7 +60,6 @@ from src.core.exceptions import (
 )
 from src.core.helpers import enum_value
 from src.core.idempotency_canonical import canonical_payload_hash, canonical_request_hash
-from src.core.security.webhook_http import validate_webhook_config_auth
 from src.core.webhook_validator import (
     require_valid_callback_config_urls,
     validated_callback_url_scope,
@@ -114,10 +115,14 @@ from src.core.auth import (
     resolve_principal_or_raise,
 )
 from src.core.context_manager import get_context_manager
+from src.core.database.models import AdapterConfig, CurrencyLimit, MediaBuy
 from src.core.database.models import Creative as DBCreative
 from src.core.database.models import CreativeAssignment as DBAssignment
-from src.core.database.models import MediaBuy
 from src.core.database.models import MediaPackage as DBMediaPackage
+from src.core.database.models import Principal as ModelPrincipal
+from src.core.database.models import Product as ModelProduct
+from src.core.database.models import Product as ProductModel
+from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
 from src.core.helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
@@ -126,7 +131,6 @@ from src.core.helpers.creative_helpers import (
     extract_media_url_and_dimensions,
     process_and_upload_package_creatives,
 )
-from src.core.idempotency_logging import redact_idempotency_key
 from src.core.logging_config import log_safe
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import to_brand_reference, to_context_object, to_reporting_webhook
@@ -138,7 +142,6 @@ from src.core.schemas import (
     CreateMediaBuySubmitted,
     CreateMediaBuySuccess,
     CreativeApprovalStatus,
-    Error,
     FormatId,
     MediaPackage,
     Package,
@@ -165,17 +168,7 @@ from src.core.tools.financial_validation import (
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
 from src.services.activity_feed import activity_feed
-from src.services.downstream_reconciliation import (
-    execute_reconciled_media_buy_create,
-    plan_reconciled_media_buy_create,
-    planned_claim_release_callback,
-)
 from src.services.gam_product_config_service import GAMProductConfigService
-from src.services.idempotency_replay import (
-    complete_idempotent,
-    release_reservation_on_error,
-    reserve_idempotent,
-)
 from src.services.setup_checklist_service import SetupIncompleteError, validate_setup_complete
 from src.services.slack_notifier import get_slack_notifier
 from src.services.targeting_capabilities import (
@@ -185,10 +178,6 @@ from src.services.targeting_capabilities import (
     validate_overlay_targeting,
     validate_property_targeting_allowed,
     validate_unknown_targeting_fields,
-)
-
-_CREATE_MEDIA_BUY_ADAPTER_RESPONSE: TypeAdapter[schemas.CreateMediaBuyResponse] = TypeAdapter(
-    schemas.CreateMediaBuyResponse
 )
 
 # --- Helper Functions ---
@@ -551,12 +540,7 @@ def _pre_validate_package_creatives(
         # Validation failed - creative validation errors already logged
         # Update workflow step as failed and re-raise (only if step exists - not created in dry_run mode)
         if step:
-            ctx_manager.update_workflow_step(
-                step.step_id,
-                status="failed",
-                error_message="Creative validation failed",
-                notify=False,
-            )
+            ctx_manager.update_workflow_step(step.step_id, status="failed", error_message="Creative validation failed")
         raise
 
 
@@ -569,8 +553,6 @@ def _execute_adapter_media_buy_creation(
     principal: Principal,
     testing_ctx: TestingContext | None = None,
     tenant: Any = None,
-    identity: ResolvedIdentity | None = None,
-    downstream_request_hash: str | None = None,
 ) -> schemas.CreateMediaBuyResponse:
     """Execute adapter's create_media_buy call.
 
@@ -596,38 +578,26 @@ def _execute_adapter_media_buy_creation(
     dry_run = testing_ctx.dry_run if testing_ctx else False
     adapter = get_adapter(principal, dry_run=dry_run, testing_context=testing_ctx, tenant=tenant)
 
-    def invoke() -> schemas.CreateMediaBuyResponse:
-        return adapter.create_media_buy(request, packages, start_time, end_time, package_pricing_info)
-
     # Call adapter with detailed error logging
     try:
-        if request.idempotency_key and not dry_run and adapter.requires_downstream_reconciliation:
-            if identity is None:
-                tenant_id = tenant.get("tenant_id") if isinstance(tenant, dict) else getattr(tenant, "tenant_id", None)
-                identity = ResolvedIdentity(
-                    principal_id=principal.principal_id,
-                    tenant_id=tenant_id,
-                    tenant=tenant,
-                    account_id=getattr(request.account, "account_id", None),
-                )
-            response = execute_reconciled_media_buy_create(
-                adapter=adapter,
-                identity=identity,
-                idempotency_key=request.idempotency_key,
-                request_hash=downstream_request_hash or canonical_request_hash(request),
-                response_decoder=_CREATE_MEDIA_BUY_ADAPTER_RESPONSE.validate_python,
-                work=invoke,
-                is_applied=lambda result: not isinstance(result, CreateMediaBuyError),
-                continuation_metadata={"package_pricing_info": package_pricing_info},
-            )
-            recovered_pricing = getattr(response, "_package_pricing_info", None)
-            if isinstance(recovered_pricing, dict):
-                package_pricing_info.clear()
-                package_pricing_info.update(recovered_pricing)
-        else:
-            response = invoke()
+        response = adapter.create_media_buy(request, packages, start_time, end_time, package_pricing_info)
 
-        _log_adapter_create_response(response)
+        # Log based on response type
+        if isinstance(response, CreateMediaBuyError):
+            error_count = len(response.errors) if response.errors else 0
+            logger.error(f"[ADAPTER] create_media_buy returned error response: {error_count} error(s)")
+            if response.errors:
+                for err in response.errors:
+                    logger.error(f"[ADAPTER]   Error: {err.code} - {err.message}")
+        else:
+            logger.info(
+                f"[ADAPTER] create_media_buy succeeded: {response.media_buy_id} "
+                f"with {len(response.packages) if response.packages else 0} packages"
+            )
+            if response.packages:
+                for i, pkg in enumerate(response.packages):
+                    # response.packages are now always Package objects
+                    logger.info(f"[ADAPTER] Response package {i}: {pkg.package_id}")
         return response
     except Exception as adapter_error:
         import traceback
@@ -635,20 +605,6 @@ def _execute_adapter_media_buy_creation(
         error_traceback = traceback.format_exc()
         logger.error(f"[ADAPTER] create_media_buy failed:\n{error_traceback}")
         raise
-
-
-def _log_adapter_create_response(response: schemas.CreateMediaBuyResponse) -> None:
-    """Log adapter create results without inflating orchestration complexity."""
-    if isinstance(response, CreateMediaBuyError):
-        errors = response.errors or []
-        logger.error(f"[ADAPTER] create_media_buy returned error response: {len(errors)} error(s)")
-        for err in errors:
-            logger.error(f"[ADAPTER]   Error: {err.code} - {err.message}")
-        return
-    packages = response.packages or []
-    logger.info(f"[ADAPTER] create_media_buy succeeded: {response.media_buy_id} with {len(packages)} packages")
-    for index, package in enumerate(packages):
-        logger.info(f"[ADAPTER] Response package {index}: {package.package_id}")
 
 
 def _persist_adapter_package_ids(
@@ -777,12 +733,7 @@ def _build_adapter_asset_from_creative(
     return asset, None
 
 
-def execute_approved_media_buy(
-    media_buy_id: str,
-    tenant_id: str,
-    *,
-    raise_retryable: bool = False,
-) -> tuple[bool, str | None]:
+def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
     """Execute adapter creation for a manually approved media buy.
 
     This function is called after a media buy has been manually approved
@@ -809,6 +760,7 @@ def execute_approved_media_buy(
 
     # Set tenant context (required for adapter helpers to work)
     from src.core.config_loader import set_current_tenant
+    from src.core.database.models import Tenant
 
     try:
         # Load tenant and set context — single UoW for all reads
@@ -816,21 +768,20 @@ def execute_approved_media_buy(
             # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
             assert uow.session is not None
             session = uow.session
+            stmt_tenant = select(Tenant).filter_by(tenant_id=tenant_id)
+            tenant_obj = session.scalars(stmt_tenant).first()
 
-            # Carry only the transport-neutral scalar snapshot beyond this
-            # UoW. Passing an ORM Tenant to the adapter after commit leaves an
-            # expired, detached instance and can also write NULL relationship
-            # keys if a caller later reattaches it.
-            from src.core.config_loader import get_tenant_by_id
-
-            tenant_config = get_tenant_by_id(tenant_id)
-            if not tenant_config:
+            if not tenant_obj:
                 error_msg = f"Tenant {tenant_id} not found"
                 logger.error(f"[APPROVAL] {error_msg}")
                 return False, error_msg
 
             # Set tenant ContextVar via standard config_loader boundary
-            set_current_tenant(tenant_config)
+            from src.core.config_loader import get_tenant_by_id
+
+            tenant_config = get_tenant_by_id(tenant_id)
+            if tenant_config:
+                set_current_tenant(tenant_config)
             logger.info(f"[APPROVAL] Set tenant context: {tenant_id}")
 
             # Load media buy
@@ -1114,7 +1065,7 @@ def execute_approved_media_buy(
             package_pricing_info,
             principal,
             testing_ctx,
-            tenant=tenant_config,
+            tenant=tenant_obj,
         )
 
         # Check if adapter returned an error response
@@ -1230,7 +1181,7 @@ def execute_approved_media_buy(
                     logger.info(f"[APPROVAL] Uploading {len(assets)} creatives to adapter")
 
                     # Get adapter and upload creatives
-                    adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_config)
+                    adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
 
                     # Call adapter's add_creative_assets method
                     # For GAM, the media_buy_id is the GAM order ID
@@ -1281,7 +1232,7 @@ def execute_approved_media_buy(
         # 2. Creatives may have been uploaded after the initial approval attempt
         logger.info(f"[APPROVAL] Attempting to approve order {response.media_buy_id} in GAM")
         try:
-            adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_config)
+            adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
             if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                 approval_success = adapter.orders_manager.approve_order(response.media_buy_id)
                 if approval_success:
@@ -1313,8 +1264,6 @@ def execute_approved_media_buy(
         return True, None
 
     except Exception as e:
-        if raise_retryable and isinstance(e, AdCPServiceUnavailableError):
-            raise
         import traceback
 
         error_traceback = traceback.format_exc()
@@ -1733,7 +1682,7 @@ def _raise_degraded_replay_outcome(
         existing = uow.media_buys.find_by_idempotency_key(idempotency_key, principal_id, account_id=account_id)
         if existing is None:
             raise AdCPValidationError(
-                f"Idempotency key {redact_idempotency_key(idempotency_key)} not found after race resolution",
+                f"Idempotency key {idempotency_key} not found after race resolution",
                 recovery="terminal",
             )
 
@@ -1766,9 +1715,7 @@ def _raise_degraded_replay_outcome(
         # Rule 5: same key + different canonical payload conflicts even on the
         # degraded path — never resolve a request to a buy it does not describe.
         # Legacy rows without a stored hash carry no conflict signal.
-        from src.services.idempotency_replay import raise_on_payload_conflict
-
-        raise_on_payload_conflict(existing.payload_hash, request_hash)
+        _raise_on_payload_conflict(existing.payload_hash, request_hash)
 
     raise AdCPServiceUnavailableError(
         "the verbatim replay for this idempotency_key is not yet available — "
@@ -1777,11 +1724,19 @@ def _raise_degraded_replay_outcome(
     )
 
 
-def _replay_cached_success(
-    envelope: dict[str, Any],
-    *,
-    context: ContextObject | dict | None = None,
-) -> CreateMediaBuyResult | None:
+def _raise_on_payload_conflict(stored_hash: str | None, request_hash: str | None) -> None:
+    """Raise IDEMPOTENCY_CONFLICT when the same key carries a different canonical payload.
+
+    Applied at both lookup points — the probe and the post-race recovery — so a
+    conflicting duplicate can never be resolved to someone else's response.
+    Production writes always store a hash (``record_success`` requires it); a row
+    without one carries no conflict signal, so it never conflicts (legacy tolerance).
+    """
+    if stored_hash is not None and stored_hash != request_hash:
+        raise AdCPIdempotencyConflictError("idempotency_key was reused with a different request payload")
+
+
+def _replay_cached_success(envelope: dict[str, Any]) -> CreateMediaBuyResult | None:
     """Reconstruct a cached success from the verbatim idempotency cache, marked replayed.
 
     The cache stores ``{"status": <protocol task status>, "response": <CreateMediaBuySuccess
@@ -1807,10 +1762,7 @@ def _replay_cached_success(
     except (KeyError, TypeError, ValidationError):
         logger.warning("Cached idempotency envelope failed validation — treating as a miss", exc_info=True)
         return None
-    from src.services.idempotency_replay import mark_idempotent_replay
-
-    result = CreateMediaBuyResult(response=response, status=protocol_status)
-    return mark_idempotent_replay(result, context=context)
+    return CreateMediaBuyResult(response=response, status=protocol_status, replayed=True)
 
 
 def _lookup_cached_replay(
@@ -1820,7 +1772,6 @@ def _lookup_cached_replay(
     account_id: str | None,
     idempotency_key: str,
     request_hash: str | None,
-    context: ContextObject | dict | None,
     enforce_ceiling: bool = False,
 ) -> CreateMediaBuyResult | None:
     """Probe the verbatim success cache: conflict-check the stored hash, then replay.
@@ -1838,19 +1789,26 @@ def _lookup_cached_replay(
     """
     # Lazy: tests patch src.core.database.repositories.MediaBuyUoW; the call-time import binds the patched object.
     from src.core.database.repositories import MediaBuyUoW
-    from src.services.idempotency_replay import lookup_cached_replay
 
-    return lookup_cached_replay(
-        MediaBuyUoW,
-        tenant_id,
-        principal_id=principal_id,
-        account_id=account_id,
-        tool_name="create_media_buy",
-        idempotency_key=idempotency_key,
-        request_hash=request_hash,
-        decode=lambda envelope: _replay_cached_success(envelope, context=context),
-        enforce_ceiling=enforce_ceiling,
-    )
+    with MediaBuyUoW(tenant_id) as uow:
+        assert uow.idempotency_attempts is not None
+        cached = uow.idempotency_attempts.find_by_key(
+            principal_id=principal_id,
+            account_id=account_id,
+            idempotency_key=idempotency_key,
+        )
+        if cached is None:
+            if enforce_ceiling:
+                from src.services.idempotency_policy import enforce_insert_ceiling
+
+                enforce_insert_ceiling(
+                    uow.idempotency_attempts,
+                    principal_id=principal_id,
+                    account_id=account_id,
+                )
+            return None
+        _raise_on_payload_conflict(cached.payload_hash, request_hash)
+        return _replay_cached_success(cached.response_envelope)
 
 
 # Fraction of successful keyed creates that run storage reclamation. Eviction
@@ -1949,14 +1907,14 @@ def _cache_and_return(
     except IntegrityError:
         logger.info(
             "Idempotency cache race for key %s (tenant %s, principal %s) — winner already stored",
-            redact_idempotency_key(req.idempotency_key),
+            req.idempotency_key,
             identity.tenant_id,
             identity.principal_id,
         )
     except Exception:
         logger.warning(
             "Best-effort idempotency cache write failed for key %s (tenant %s, principal %s)",
-            redact_idempotency_key(req.idempotency_key),
+            req.idempotency_key,
             identity.tenant_id,
             identity.principal_id,
             exc_info=True,
@@ -1967,115 +1925,6 @@ def _cache_and_return(
     return result
 
 
-def _complete_create_and_return(
-    result: CreateMediaBuyResult,
-    req: CreateMediaBuyRequest,
-    identity: ResolvedIdentity,
-    request_hash: str | None,
-    reservation_attempt_id: str | None,
-) -> CreateMediaBuyResult:
-    """Durably complete a reserved create, with legacy caching for direct callers."""
-    if reservation_attempt_id is None:
-        return _cache_and_return(result, req, identity, request_hash)
-    assert identity.tenant_id is not None
-    from src.core.database.repositories import MediaBuyUoW
-
-    with MediaBuyUoW(identity.tenant_id) as uow:
-        complete_idempotent(
-            uow,
-            attempt_id=reservation_attempt_id,
-            response_model=result.response,
-            protocol_status=result.status,
-        )
-    return result
-
-
-def _register_media_buy_push_callback(
-    *,
-    tenant_id: str,
-    principal_id: str,
-    media_buy_id: str | None,
-    session_id: str,
-    push_notification_config: dict[str, Any] | None,
-    context: ContextObject | None,
-) -> None:
-    """Persist the callback only after its originating media buy exists."""
-    if not push_notification_config:
-        return
-    validate_webhook_config_auth(push_notification_config)
-    url = push_notification_config.get("url")
-    if not url:
-        return
-    authentication = push_notification_config.get("authentication") or {}
-    schemes = authentication.get("schemes", [])
-    auth_type = schemes[0] if schemes else None
-    credentials = authentication.get("credentials")
-    from src.core.database.repositories.push_notification_config import task_push_config_id
-
-    config_id = task_push_config_id(
-        tenant_id,
-        principal_id,
-        session_id,
-        push_notification_config.get("id"),
-    )
-    application_context = context.model_dump(mode="json") if context is not None else None
-
-    from src.core.database.repositories import MediaBuyUoW
-
-    with MediaBuyUoW(tenant_id) as pnc_uow:
-        assert pnc_uow.push_notification_configs is not None
-        _, created = pnc_uow.push_notification_configs.upsert(
-            config_id=config_id,
-            principal_id=principal_id,
-            session_id=session_id,
-            media_buy_id=media_buy_id,
-            url=str(url),
-            operation_id=push_notification_config.get("operation_id"),
-            token=push_notification_config.get("token"),
-            application_context=application_context,
-            authentication_type=auth_type,
-            authentication_token=credentials,
-            validation_token=None,
-        )
-    logger.info(
-        "[MCP/A2A] Push notification config %s for media buy %s",
-        "created" if created else "updated",
-        media_buy_id or session_id,
-    )
-
-
-def _validate_reporting_webhook_products(
-    reporting_webhook: Any,
-    products: list[Any],
-    *,
-    context: ContextObject | None,
-) -> None:
-    """Require every selected product to honor the requested reporting contract."""
-    if reporting_webhook is None:
-        return
-    frequency = str(reporting_webhook.reporting_frequency)
-    requested_metrics = {str(metric) for metric in reporting_webhook.requested_metrics or []}
-    for product in products:
-        capabilities = product.reporting_capabilities or {}
-        supported_frequencies = {str(value) for value in capabilities.get("available_reporting_frequencies", [])}
-        if not capabilities.get("supports_webhooks") or frequency not in supported_frequencies:
-            raise AdCPCapabilityNotSupportedError(
-                f"Product '{product.product_id}' does not support {frequency} reporting webhooks",
-                field="reporting_webhook.reporting_frequency",
-                suggestion="Choose a frequency supported by every selected product, or omit reporting_webhook.",
-                context=context,
-            )
-        unavailable_metrics = requested_metrics - {str(value) for value in capabilities.get("available_metrics", [])}
-        if unavailable_metrics:
-            raise AdCPCapabilityNotSupportedError(
-                f"Product '{product.product_id}' cannot report requested metrics: "
-                f"{', '.join(sorted(unavailable_metrics))}",
-                field="reporting_webhook.requested_metrics",
-                suggestion="Request only metrics present in every selected product's reporting_capabilities.",
-                context=context,
-            )
-
-
 def _replay_after_race(
     tenant_id: str,
     *,
@@ -2083,7 +1932,6 @@ def _replay_after_race(
     principal_id: str,
     account_id: str | None,
     request_hash: str | None,
-    context: ContextObject | dict | None,
 ) -> CreateMediaBuyResult:
     """Resolve an idempotency-race loser to the winner's verbatim cached success.
 
@@ -2100,7 +1948,6 @@ def _replay_after_race(
         account_id=account_id,
         idempotency_key=idempotency_key,
         request_hash=request_hash,
-        context=context,
     )
     if replay is not None:
         return replay
@@ -2143,7 +1990,6 @@ def _resolve_idempotency_race_or_raise(
     principal_id: str,
     account_id: str | None,
     request_hash: str | None,
-    context: ContextObject | dict | None,
     media_buy_id: str | None = None,
 ) -> CreateMediaBuyResult:
     """Shared handler for the unique-index ``IntegrityError`` on both booking paths.
@@ -2161,7 +2007,7 @@ def _resolve_idempotency_race_or_raise(
         "Idempotency race: another request won the commit for key %s%s. "
         "Resolving via the winner's cached response (fail-closed transient if not "
         "yet visible). An orphan adapter-side order may exist.",
-        redact_idempotency_key(idempotency_key),
+        idempotency_key,
         f" ({media_buy_id})" if media_buy_id else "",
     )
     return _replay_after_race(
@@ -2171,7 +2017,6 @@ def _resolve_idempotency_race_or_raise(
         principal_id=principal_id,
         account_id=account_id,
         request_hash=request_hash,
-        context=context,
     )
 
 
@@ -2181,112 +2026,6 @@ async def _create_media_buy_impl(
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
     raw_wire_payload: dict[str, Any] | None = None,
-) -> CreateMediaBuyResult:
-    """Reserve a keyed wire request before any create side effect."""
-    resolved_identity = require_identity(identity, context=req.context)
-    if req.paused is True:
-        raise AdCPCapabilityNotSupportedError(
-            "Creating a media buy in a paused state is not supported.",
-            suggestion="Create the media buy, then call update_media_buy with paused=true.",
-            context=req.context,
-        )
-    principal_id = require_principal_id(resolved_identity, context=req.context)
-    tenant = require_tenant(resolved_identity, context=req.context)
-    testing_ctx = resolved_identity.testing_context or AdCPTestContext()
-    if push_notification_config is not None:
-        try:
-            validate_webhook_config_auth(push_notification_config)
-        except ValueError as exc:
-            raise AdCPValidationError(
-                str(exc),
-                suggestion="Configure a supported callback authentication mode before creating the media buy.",
-                context=req.context,
-            ) from exc
-
-    if raw_wire_payload is None or not req.idempotency_key or testing_ctx.dry_run:
-        return await _create_media_buy_work(
-            req=req,
-            push_notification_config=push_notification_config,
-            identity=resolved_identity,
-            context_id=context_id,
-            raw_wire_payload=raw_wire_payload,
-        )
-
-    principal = resolve_principal_or_raise(
-        principal_id,
-        tenant_id=resolved_identity.tenant_id,
-        context=req.context,
-    )
-    request_hash = canonical_payload_hash(raw_wire_payload)
-    adapter = get_adapter(
-        principal,
-        dry_run=False,
-        testing_context=testing_ctx,
-        tenant=tenant,
-    )
-    from src.core.database.repositories import MediaBuyUoW
-
-    def plan_downstream_claim(uow: Any) -> None:
-        plan_reconciled_media_buy_create(
-            uow=uow,
-            adapter=adapter,
-            identity=resolved_identity,
-            idempotency_key=req.idempotency_key,
-            request_hash=request_hash,
-        )
-
-    reservation = reserve_idempotent(
-        MediaBuyUoW,
-        tenant["tenant_id"],
-        principal_id=principal_id,
-        account_id=resolved_identity.account_id,
-        tool_name=_IDEMPOTENCY_TOOL_NAME,
-        idempotency_key=req.idempotency_key,
-        request_hash=request_hash,
-        lease=DEFAULT_IN_FLIGHT_LEASE,
-        decode=lambda envelope: _replay_cached_success(envelope, context=req.context),
-        enforce_ceiling=True,
-        on_reserved=plan_downstream_claim if adapter.requires_downstream_reconciliation else None,
-    )
-    if reservation.replay is not None:
-        return reservation.replay
-    assert reservation.attempt_id is not None
-
-    release_claims = (
-        planned_claim_release_callback(
-            identity=resolved_identity,
-            idempotency_key=req.idempotency_key,
-        )
-        if adapter.requires_downstream_reconciliation
-        else None
-    )
-    with release_reservation_on_error(
-        MediaBuyUoW,
-        tenant["tenant_id"],
-        reservation.attempt_id,
-        on_release=release_claims,
-    ):
-        # Own one transaction across every nested repository/UoW used by the
-        # create worker and the final idempotency completion. Nested UoWs borrow
-        # this scoped session and flush without committing it.
-        with MediaBuyUoW(tenant["tenant_id"]):
-            return await _create_media_buy_work(
-                req=req,
-                push_notification_config=push_notification_config,
-                identity=resolved_identity,
-                context_id=context_id,
-                raw_wire_payload=raw_wire_payload,
-                reservation_attempt_id=reservation.attempt_id,
-            )
-
-
-async def _create_media_buy_work(
-    req: CreateMediaBuyRequest,
-    push_notification_config: dict[str, Any] | None = None,
-    identity: ResolvedIdentity | None = None,
-    context_id: str | None = None,
-    raw_wire_payload: dict[str, Any] | None = None,
-    reservation_attempt_id: str | None = None,
 ) -> CreateMediaBuyResult:
     """Create a media buy with the specified parameters.
 
@@ -2305,16 +2044,15 @@ async def _create_media_buy_work(
     """
     request_start_time = time.time()
 
-    # The current scheduler implements daily reporting only. Never silently
-    # coerce an explicitly requested hourly/monthly cadence.
+    # Warn if unsupported reporting_webhook frequency is requested
     if req.reporting_webhook:
         raw_freq = str(getattr(req.reporting_webhook, "reporting_frequency", None) or "daily").lower()
         if raw_freq != "daily":
-            raise AdCPCapabilityNotSupportedError(
-                f"reporting_frequency '{raw_freq}' is not supported; this seller supports daily reporting only",
-                field="reporting_webhook.reporting_frequency",
-                suggestion="Set reporting_webhook.reporting_frequency to 'daily'.",
-                context=req.context,
+            logger.warning(
+                "CreateMediaBuy requested reporting webhook frequency '%s', "
+                "but only 'daily' frequency is currently supported. "
+                "Hourly and monthly reporting will be ignored until implemented.",
+                raw_freq,
             )
 
     # Extract testing context first
@@ -2357,21 +2095,17 @@ async def _create_media_buy_work(
         request_hash = (
             canonical_payload_hash(raw_wire_payload) if raw_wire_payload is not None else canonical_request_hash(req)
         )
-    if req.idempotency_key and reservation_attempt_id is None:
+    if req.idempotency_key:
         replay = _lookup_cached_replay(
             tenant["tenant_id"],
             principal_id=principal_id,
             account_id=identity.account_id,
             idempotency_key=req.idempotency_key,
             request_hash=request_hash,
-            context=req.context,
             enforce_ceiling=True,
         )
         if replay is not None:
-            logger.info(
-                "Idempotency replay: returning cached success for key %s",
-                redact_idempotency_key(req.idempotency_key),
-            )
+            logger.info("Idempotency replay: returning cached success for key %s", req.idempotency_key)
             return replay
         # Miss or unusable cached envelope — proceed as a fresh execution; the
         # MediaBuy backstop resolves any resulting duplicate to the degraded path.
@@ -2388,11 +2122,7 @@ async def _create_media_buy_work(
         if not persistent_ctx:
             # Check if we have an existing context ID
             if ctx_id:
-                persistent_ctx = ctx_manager.get_context(
-                    ctx_id,
-                    tenant_id=tenant["tenant_id"],
-                    principal_id=principal_id,
-                )
+                persistent_ctx = ctx_manager.get_context(ctx_id)
 
             # Create new context if needed (principal already validated above)
             if not persistent_ctx:
@@ -2413,6 +2143,63 @@ async def _create_media_buy_work(
             request_data=req,
             request_metadata=workflow_metadata,
         )
+
+        # Register push notification config if provided (MCP/A2A protocol support)
+        # Skip for dry_run mode (no database writes)
+        if push_notification_config:
+            # Lazy: tests patch src.core.database.repositories.MediaBuyUoW; the call-time import binds the patched object (hoisting would bind the unpatched one at module load).
+            from src.core.database.repositories import MediaBuyUoW
+
+            logger.info(f"[MCP/A2A] Registering push notification config from request: {push_notification_config}")
+
+            # Extract config details
+            url = push_notification_config.get("url")
+            authentication = push_notification_config.get("authentication", {})
+
+            if url:
+                # Extract authentication details (A2A format: schemes + credentials)
+                schemes = authentication.get("schemes", []) if authentication else []
+                auth_type = schemes[0] if schemes else None
+                credentials = authentication.get("credentials") if authentication else None
+
+                # Generate config ID
+                config_id = push_notification_config.get("id") or f"pnc_{uuid.uuid4().hex[:16]}"
+
+                # Save to database
+                with MediaBuyUoW(tenant["tenant_id"]) as pnc_uow:
+                    # FIXME(salesagent-9f2): push notification config should use a repository
+                    assert pnc_uow.session is not None
+                    db = pnc_uow.session
+                    # Check if config already exists
+                    stmt = select(DBPushNotificationConfig).filter_by(
+                        id=config_id, tenant_id=tenant["tenant_id"], principal_id=principal_id
+                    )
+                    existing_config = db.scalars(stmt).first()
+
+                    if existing_config:
+                        # Update existing
+                        existing_config.url = url
+                        existing_config.authentication_type = auth_type
+                        existing_config.authentication_token = credentials
+                        # updated_at automatically updated via onupdate=func.now()
+                        existing_config.is_active = True
+                    else:
+                        # Create new
+                        new_config = DBPushNotificationConfig(
+                            id=config_id,
+                            tenant_id=tenant["tenant_id"],
+                            principal_id=principal_id,
+                            url=url,
+                            authentication_type=auth_type,
+                            authentication_token=credentials,
+                            is_active=True,
+                        )
+                        db.add(new_config)
+
+                    # UoW auto-commits on clean exit
+                    logger.info(
+                        f"[MCP/A2A] Push notification config {'updated' if existing_config else 'created'}: {config_id}"
+                    )
 
     try:
         # Validate input parameters
@@ -2528,10 +2315,16 @@ async def _create_media_buy_work(
 
         # Get products first to determine currency from pricing options
         with MediaBuyUoW(tenant["tenant_id"]) as validation_uow:
-            assert validation_uow.products is not None
-            assert validation_uow.currency_limits is not None
-            assert validation_uow.adapter_configs is not None
-            products = validation_uow.products.list_by_ids(product_ids)
+            # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
+            assert validation_uow.session is not None
+            session = validation_uow.session
+            # Get products from database
+            products_stmt = (
+                select(ProductModel)
+                .where(ProductModel.tenant_id == tenant["tenant_id"], ProductModel.product_id.in_(product_ids))
+                .options(selectinload(ProductModel.pricing_options))
+            )
+            products = session.scalars(products_stmt).all()
 
             # Build product lookup map
             product_map = {p.product_id: p for p in products}
@@ -2545,12 +2338,6 @@ async def _create_media_buy_work(
                     suggestion="Check available products with get_products.",
                     field=package_field_path("product_id"),
                 )
-
-            _validate_reporting_webhook_products(
-                req.reporting_webhook,
-                products,
-                context=req.context,
-            )
 
             # AdCP spec (core/targeting.json): "Sellers SHOULD return a validation
             # error if the product has property_targeting_allowed: false."
@@ -2645,7 +2432,10 @@ async def _create_media_buy_work(
                 request_currency = "USD"
 
             # Get currency limits for this tenant and currency
-            currency_limit = validation_uow.currency_limits.get_for_currency(request_currency)
+            currency_stmt = select(CurrencyLimit).where(
+                CurrencyLimit.tenant_id == tenant["tenant_id"], CurrencyLimit.currency_code == request_currency
+            )
+            currency_limit = session.scalars(currency_stmt).first()
 
             # Check if tenant supports this currency
             if not currency_limit:
@@ -2659,7 +2449,8 @@ async def _create_media_buy_work(
 
             # Check if currency is supported by GAM network (if GAM is configured)
             # GAM only accepts: primary currency OR enabled secondary currencies
-            adapter_config = validation_uow.adapter_configs.find_by_tenant()
+            adapter_config_stmt = select(AdapterConfig).where(AdapterConfig.tenant_id == tenant["tenant_id"])
+            adapter_config = session.scalars(adapter_config_stmt).first()
             if adapter_config and adapter_config.gam_network_currency:
                 # Build list of supported currencies: primary + any secondary
                 supported_currencies = {adapter_config.gam_network_currency}
@@ -2918,12 +2709,7 @@ async def _create_media_buy_work(
             except AdCPError as e:
                 # Update workflow step on failure (only if step exists)
                 if step:
-                    ctx_manager.update_workflow_step(
-                        step.step_id,
-                        status="failed",
-                        error_message=str(e),
-                        notify=False,
-                    )
+                    ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=str(e))
                 raise
 
         # Get the appropriate adapter with testing context
@@ -2969,7 +2755,6 @@ async def _create_media_buy_work(
                 step.step_id,
                 status="requires_approval",
                 add_comment={"user": "system", "comment": "Manual approval required for media buy creation"},
-                notify=False,
             )
 
             # Workflow step already created above - no need for separate task
@@ -3110,7 +2895,6 @@ async def _create_media_buy_work(
                     principal_id=principal.principal_id,
                     account_id=identity.account_id,
                     request_hash=request_hash,
-                    context=req.context,
                     media_buy_id=media_buy_id,
                 )
 
@@ -3325,21 +3109,7 @@ async def _create_media_buy_work(
             # Submitted task envelope (spec 3.1.1): media_buy_status/packages land on
             # the task's completion artifact, not this response — main's media_buy_status
             # addition to the old Success envelope is subsumed by the Submitted variant.
-            _register_media_buy_push_callback(
-                tenant_id=tenant["tenant_id"],
-                principal_id=principal_id,
-                media_buy_id=media_buy_id,
-                session_id=step.context_id,
-                push_notification_config=push_notification_config,
-                context=req.context,
-            )
-            return _complete_create_and_return(
-                _submitted_approval_result(step, req, adapter),
-                req,
-                identity,
-                request_hash,
-                reservation_attempt_id,
-            )
+            return _cache_and_return(_submitted_approval_result(step, req, adapter), req, identity, request_hash)
 
         # Get products for the media buy to check product-level auto-creation settings
         # Lazy: tests patch src.core.tools.products.get_product_catalog; the call-time import binds the patched object.
@@ -3348,7 +3118,6 @@ async def _create_media_buy_work(
         catalog = get_product_catalog(tenant_id=identity.tenant_id)
         product_ids = req.get_product_ids()
         products_in_buy = [p for p in catalog if p.product_id in product_ids]
-        schema_product_map = {product.product_id: product for product in products_in_buy}
 
         # Validate and auto-generate GAM implementation_config for each product if needed
         if adapter.__class__.__name__ == "GoogleAdManager":
@@ -3378,10 +3147,13 @@ async def _create_media_buy_work(
 
                     # Persist the auto-generated config to database
                     with MediaBuyUoW(tenant["tenant_id"]) as gam_uow:
-                        assert gam_uow.products is not None
-                        if gam_uow.products.set_implementation_config(
-                            schema_product.product_id, schema_product.implementation_config
-                        ):
+                        # FIXME(salesagent-9f2): product update should use ProductRepository
+                        assert gam_uow.session is not None
+                        product_stmt = select(ModelProduct).filter_by(product_id=schema_product.product_id)
+                        db_product = gam_uow.session.scalars(product_stmt).first()
+                        if db_product:
+                            db_product.implementation_config = schema_product.implementation_config
+                            # UoW auto-commits on clean exit
                             logger.info(f"Saved auto-generated GAM config for product {schema_product.product_id}")
 
                 # Validate the config (whether existing or auto-generated)
@@ -3415,7 +3187,7 @@ async def _create_media_buy_work(
             # Type narrowing: step and persistent_ctx exist in non-dry_run mode
             assert step is not None and persistent_ctx is not None
             # Update existing workflow step to require approval
-            ctx_manager.update_workflow_step(step.step_id, status="requires_approval", notify=False)
+            ctx_manager.update_workflow_step(step.step_id, status="requires_approval")
 
             # Workflow step already created above - no need for separate task
             # Generate permanent media buy ID (not "pending_xxx")
@@ -3467,28 +3239,7 @@ async def _create_media_buy_work(
 
             # Submitted task envelope (spec 3.1.1) — see note on the manual-approval
             # branch above; main's media_buy_status addition is likewise subsumed.
-            _register_media_buy_push_callback(
-                tenant_id=tenant["tenant_id"],
-                principal_id=principal_id,
-                media_buy_id=None,
-                session_id=step.context_id,
-                push_notification_config=push_notification_config,
-                context=req.context,
-            )
-            ctx_manager.link_workflow_to_object(
-                step_id=step.step_id,
-                object_type="media_buy",
-                object_id=media_buy_id,
-                action="create",
-                tenant_id=tenant["tenant_id"],
-            )
-            return _complete_create_and_return(
-                _submitted_approval_result(step, req, adapter),
-                req,
-                identity,
-                request_hash,
-                reservation_attempt_id,
-            )
+            return _cache_and_return(_submitted_approval_result(step, req, adapter), req, identity, request_hash)
 
         # Continue with synchronized media buy creation
 
@@ -3785,10 +3536,7 @@ async def _create_media_buy_work(
             logger.error(f"[PRE-VALIDATE] Adapter validation failed: {pre_creation_errors}")
             if step:
                 ctx_manager.update_workflow_step(
-                    step.step_id,
-                    status="failed",
-                    error_message="Adapter validation failed",
-                    notify=False,
+                    step.step_id, status="failed", error_message="Adapter validation failed"
                 )
             raise AdCPValidationError(
                 "; ".join(pre_creation_errors),
@@ -3835,16 +3583,7 @@ async def _create_media_buy_work(
         # This uses the same function as manual approval to ensure consistency across adapters
         try:
             response = _execute_adapter_media_buy_creation(
-                req,
-                packages,
-                start_time,
-                end_time,
-                package_pricing_info,
-                principal,
-                testing_ctx,
-                tenant=tenant,
-                identity=identity,
-                downstream_request_hash=request_hash,
+                req, packages, start_time, end_time, package_pricing_info, principal, testing_ctx, tenant=tenant
             )
         except Exception as adapter_error:
             raise
@@ -3934,7 +3673,6 @@ async def _create_media_buy_work(
                 principal_id=principal_id,
                 account_id=identity.account_id,
                 request_hash=request_hash,
-                context=req.context,
                 media_buy_id=response.media_buy_id,
             )
 
@@ -4035,8 +3773,6 @@ async def _create_media_buy_work(
                 else:
                     logger.info("[DEBUG] Adapter returned no media_buy_id — skipping ID persistence")
 
-        response_advisories = property_list_unsupported_advisories(req.packages, adapter) or []
-
         # Handle creative_ids in packages if provided (immediate association)
         if req.packages:
             with MediaBuyUoW(tenant["tenant_id"]) as creative_uow:
@@ -4067,12 +3803,7 @@ async def _create_media_buy_work(
                     if missing_ids:
                         error_msg = f"Creative IDs not found: {', '.join(sorted(missing_ids))}"
                         logger.error(error_msg)
-                        ctx_manager.update_workflow_step(
-                            step.step_id,
-                            status="failed",
-                            error_message=error_msg,
-                            notify=False,
-                        )
+                        ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=error_msg)
                         # FIXME(#1598): CREATIVE_REJECTED here vs the pinned enum's
                         # CREATIVE_NOT_FOUND uniformity MUST — deferred pending
                         # upstream reconciliation.
@@ -4097,11 +3828,14 @@ async def _create_media_buy_work(
                     for package in req.packages:
                         pkg_cids = _get_creative_ids(package)
                         if pkg_cids and package.product_id:
-                            # Use the transport-neutral catalog snapshot here.
-                            # ``product_map`` contains ORM rows owned by the
-                            # earlier validation UoW and must not cross that
-                            # transaction/session boundary.
-                            product_format_check = schema_product_map.get(package.product_id)
+                            # Load product to check supported formats
+                            product_format_check_stmt = select(ModelProduct).where(
+                                ModelProduct.tenant_id == tenant["tenant_id"],
+                                ModelProduct.product_id == package.product_id,
+                            )
+                            product_format_check: ModelProduct | None = session.scalars(
+                                product_format_check_stmt
+                            ).first()
 
                             if product_format_check:
                                 # Validate each creative against this product
@@ -4129,10 +3863,7 @@ async def _create_media_buy_work(
                                                 },
                                             )
                                             ctx_manager.update_workflow_step(
-                                                step.step_id,
-                                                status="failed",
-                                                error_message=format_error,
-                                                notify=False,
+                                                step.step_id, status="failed", error_message=format_error
                                             )
                                             # A creative whose format is not accepted by the product is a
                                             # rejected creative (CREATIVE_REJECTED), not a generic request
@@ -4291,34 +4022,13 @@ async def _create_media_buy_work(
                                         logger.info(
                                             f"  ✗ Failed to associate creative {result['creative_id']}: {result.get('error', 'Unknown error')}"
                                         )
-                                        response_advisories.append(
-                                            Error(  # structural-guard: non-fatal per-creative advisory on success
-                                                code="SERVICE_UNAVAILABLE",
-                                                message=(
-                                                    f"Creative {result['creative_id']} could not be associated "
-                                                    f"with line item {result['line_item_id']}."
-                                                ),
-                                                suggestion=(
-                                                    "Retry sync_creatives for this media buy after checking the "
-                                                    "creative and line-item state in the ad server."
-                                                ),
-                                            )
-                                        )
                             except Exception as e:
+                                # FIXME(#1566): silent per-item failure — association failure
+                                # is logged only; the response carries no signal that creatives
+                                # were not attached. Allowlisted in
+                                # test_architecture_no_silent_loop_failures.py.
                                 logger.error(
                                     f"Failed to associate creatives with line item {platform_line_item_id}: {e}"
-                                )
-                                response_advisories.append(
-                                    Error(  # structural-guard: non-fatal association advisory on success
-                                        code="SERVICE_UNAVAILABLE",
-                                        message=(
-                                            f"Creatives could not be associated with line item {platform_line_item_id}."
-                                        ),
-                                        suggestion=(
-                                            "Retry sync_creatives for this media buy after checking the "
-                                            "creative and line-item state in the ad server."
-                                        ),
-                                    )
                                 )
                         elif platform_creative_ids:
                             logger.warning(
@@ -4405,7 +4115,7 @@ async def _create_media_buy_work(
             valid_actions=valid_actions_for_status(media_buy_status),
             creative_deadline=getattr(response, "creative_deadline", None),
             context=req.context,
-            errors=response_advisories or None,
+            errors=property_list_unsupported_advisories(req.packages, adapter),
         )
 
         # Log activity
@@ -4416,11 +4126,15 @@ async def _create_media_buy_work(
         # Also log specific media buy activity
         try:
             principal_name = "Unknown"
-            from src.core.database.repositories import WorkflowUoW
-
-            with WorkflowUoW(tenant["tenant_id"]) as log_uow:
-                assert log_uow.workflows is not None
-                principal_name = log_uow.workflows.get_principal_name(principal_id) or principal_name
+            with MediaBuyUoW(tenant["tenant_id"]) as log_uow:
+                # FIXME(salesagent-9f2): principal lookup should use a repository method
+                assert log_uow.session is not None
+                principal_stmt = select(ModelPrincipal).filter_by(
+                    principal_id=principal_id, tenant_id=tenant["tenant_id"]
+                )
+                principal_db = log_uow.session.scalars(principal_stmt).first()
+                if principal_db:
+                    principal_name = principal_db.name
 
             # Calculate duration using new datetime fields (resolved from 'asap' if needed)
             duration_days = (end_time_val - start_time_val).days + 1
@@ -4453,9 +4167,8 @@ async def _create_media_buy_work(
         if hooks_result.media_buy_id_override:
             modified_response = adcp_response.model_copy(update={"media_buy_id": hooks_result.media_buy_id_override})
 
-        # The terminal workflow transition and its durable notification need an
-        # object mapping. Persist it before completing the step so recovery and
-        # callbacks can correlate this exact media buy.
+        # Link workflow step to media buy so _send_push_notifications can find the webhook URL.
+        # This MUST happen before update_workflow_step() which triggers _send_push_notifications.
         ctx_manager.link_workflow_to_object(
             step_id=step.step_id,
             object_type="media_buy",
@@ -4464,19 +4177,22 @@ async def _create_media_buy_work(
             tenant_id=tenant["tenant_id"],
         )
 
-        # Inline terminal completion must not emit a task-status webhook. Task
-        # callbacks are registered only by the submitted branches above.
-        ctx_manager.update_workflow_step(step.step_id, status="completed", notify=False)
+        # Mark workflow step as completed on success (triggers _send_push_notifications)
+        ctx_manager.update_workflow_step(step.step_id, status="completed")
 
         # Send Slack notification for successful media buy creation
         try:
             # Get principal name for notification (reuse from activity logging above)
             principal_name = "Unknown"
-            from src.core.database.repositories import WorkflowUoW
-
-            with WorkflowUoW(tenant["tenant_id"]) as slack_uow:
-                assert slack_uow.workflows is not None
-                principal_name = slack_uow.workflows.get_principal_name(principal_id) or principal_name
+            with MediaBuyUoW(tenant["tenant_id"]) as slack_uow:
+                # FIXME(salesagent-9f2): principal lookup should use a repository method
+                assert slack_uow.session is not None
+                principal_stmt2 = select(ModelPrincipal).filter_by(
+                    principal_id=principal_id, tenant_id=tenant["tenant_id"]
+                )
+                principal_db = slack_uow.session.scalars(principal_stmt2).first()
+                if principal_db:
+                    principal_name = principal_db.name
 
             # Build notifier config from tenant fields
             notifier_config = {
@@ -4535,13 +4251,7 @@ async def _create_media_buy_work(
         )
 
         _buy_result = CreateMediaBuyResult(response=modified_response, status=AdcpTaskStatus.completed.value)
-        return _complete_create_and_return(
-            _buy_result,
-            req,
-            identity,
-            request_hash,
-            reservation_attempt_id,
-        )
+        return _cache_and_return(_buy_result, req, identity, request_hash)
 
     except AdCPError as adcp_err:
         # Re-raise transport-agnostic errors (CREATIVE_UPLOAD_FAILED, etc.) without wrapping.
@@ -4716,8 +4426,8 @@ async def create_media_buy(
         bool | None,
         Field(
             description=(
-                "AdCP 3.1.1 pause-on-create request. paused=true is currently rejected with "
-                "UNSUPPORTED_FEATURE; create first, then call update_media_buy to pause."
+                "Accepted for AdCP 3.1.1 compatibility; pause-on-create is NOT yet honored — "
+                "the buy delivers as if paused=false. Tracked in #1619."
             )
         ),
     ] = None,
@@ -4781,11 +4491,11 @@ async def create_media_buy(
     # idempotency payload-hash input — the request as the buyer sent it.
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
-    from src.core.transport_helpers import enrich_identity_with_account, get_mcp_raw_wire_payload
-
-    raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
+    raw_wire_payload = (await ctx.get_state("raw_wire_payload")) if isinstance(ctx, Context) else None
 
     # Resolve account at transport boundary (before _impl)
+    from src.core.transport_helpers import enrich_identity_with_account
+
     identity = enrich_identity_with_account(identity, req.account)
 
     # Serialize PushNotificationConfig model to dict for _impl (which accepts dict|None).
@@ -4817,7 +4527,7 @@ async def create_media_buy_raw(
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
     account: AccountReference | None = None,  # A2A/REST send dicts; coerced by CreateMediaBuyRequest
     idempotency_key: str | None = None,
-    paused: bool | None = None,  # paused=true is explicitly rejected until provider-safe support exists
+    paused: bool | None = None,  # AdCP 3.1.1 compatibility; pause-on-create NOT yet honored (tracked in #1619)
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
     raw_wire_payload: dict[str, Any] | None = None,

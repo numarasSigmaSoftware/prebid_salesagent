@@ -102,15 +102,12 @@ is not presented as an upstream conformance requirement.
 
 Authoritative sources:
 
-- `dist/docs/3.1.0/building/by-layer/L1/security.mdx`, section
-  **Request Safety / Idempotency**, normative seller rules 1–10
 - `dist/schemas/3.1.1/account/sync-accounts-request.json`
 - `dist/schemas/3.1.1/creative/sync-creatives-request.json`
 - `dist/schemas/3.1.1/media-buy/create-media-buy-request.json`
 - `dist/schemas/3.1.1/media-buy/update-media-buy-request.json`
 - `dist/schemas/3.1.1/protocol/get-adcp-capabilities-response.json`
 - `dist/compliance/3.1.1/universal/read-tool-idempotency.yaml`
-- `dist/compliance/3.1.1/universal/idempotency.yaml`
 - `dist/docs/3.1.0/protocol/get_adcp_capabilities.mdx`, section
   **adcp / idempotency**
 
@@ -139,108 +136,85 @@ actually exposes; `list_tasks` remains intentionally MCP-only as documented in
 it is a local, ungraded consistency rule using the same 16–255 character
 constraint.
 
-## Pause-on-create compatibility
+### Idempotency capability contradiction — neither value is fully truthful (open, #1607)
 
-Authoritative source: `dist/schemas/3.1.1/media-buy/create-media-buy-request.json`,
-property `paused`. The field is accepted by the request schema, but no 3.1.1
-compliance storyboard grades provider-side pause-on-create behavior. Until every
-advertised adapter can create a campaign paused without an unreconciled second
-mutation, this seller rejects `paused=true` with `UNSUPPORTED_FEATURE` and
-an actionable `update_media_buy` suggestion instead of silently ignoring it.
-`paused=false` remains the ordinary create behavior. This is an ungraded,
-capability-truthfulness policy.
+The agent-wide capability block models `idempotency.supported` as ONE
+discriminated-union boolean covering every mutating tool at once. This
+agent's real behavior does not fit that shape: `create_media_buy` deduplicates
+(verbatim replay of the stored success; a same-key different-payload retry
+rejects with `IDEMPOTENCY_CONFLICT`; a retry past the replay window raises
+`IDEMPOTENCY_EXPIRED`), while the other twelve `require_idempotency_key(` call
+sites — including the spend-affecting `update_media_buy`, plus
+`sync_accounts` and `sync_creatives` — VALIDATE and accept the key but perform
+no cache read, so a retried request re-executes.
 
-## Webhook timing and lifetime delivery
+Neither discriminant value is truthful for this mix:
 
-Authoritative sources:
+- `supported: true` claims every mutating call is safe to retry blind — false
+  for twelve of thirteen call sites, and the hazard the spec names for that
+  gap is buyer double-spend/double-sync on a retried mutation. This is what an
+  earlier revision of this PR advertised.
+- `supported: false` claims (per `IdempotencyUnsupported`'s own schema text)
+  that "sending a key is a no-op ... the seller will NOT return
+  IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
+  double-process" — false for `create_media_buy` specifically, which still
+  deduplicates, still conflicts, still expires.
 
-- `dist/docs/3.1.0/building/by-layer/L1/webhooks.mdx`, section
-  **When webhooks fire**: callbacks report changes after the initial response;
-  a synchronous terminal response does not synthesize a duplicate callback.
-- `dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json`,
-  `start_date`/`end_date`: omitting both requests campaign-lifetime data.
+The current code declares `false`. That is a deliberate choice of the
+NARROWER defect, not a resolved, truthful one: `create_media_buy` behaving
+BETTER than advertised (a buyer might not realize a retry is safe and send an
+unnecessary natural-key check) is a materially smaller hazard than the other
+twelve behaving WORSE than advertised (a buyer trusting `true` and retrying
+blind causes a real double-spend). Resolving this for real requires either (a)
+extending genuine replay/conflict/expired handling to every mutating tool,
+then flipping to `true`, or (b) removing `create_media_buy`'s dedup so `false`
+becomes wire-accurate — (a) is a substantial feature build with real
+regression risk on spend-affecting `update_media_buy`; (b) is an active
+regression of a working duplicate-booking safety net. Both are deliberately
+deferred, tracked at #1607 — this is an open contradiction, not a closed one,
+and should not be read as fixed by the choice of `false` alone.
 
-Native A2A registrations are persisted with the initial task but first emit only
-after a later durable transition. Omitted delivery dates derive the selected
-campaigns' inclusive flight lifetime rather than a rolling 30-day window.
+Grading status:
 
-### Durable universal replay and failure release
+- `dist/compliance/3.1.1/universal/idempotency.yaml` contains a `missing_key`
+  phase and the replay, changed-payload conflict, fresh-key, and concurrent
+  first-insert-wins checks.
+- That storyboard validates replay behavior for sellers declaring
+  `supported: true`. Its capability check explicitly treats `supported: false`
+  as a valid, advisory declaration for which replay-window phases are not
+  applicable; the published file notes that a complete storyboard precondition
+  gate is still pending runner support. Under the current `false` declaration,
+  a future runner implementing that precondition gate will skip grading
+  `create_media_buy`'s real replay behavior — an accepted cost of choosing the
+  narrower defect over the false blanket promise.
 
-The agent-wide capability now declares `supported: true`,
-`replay_ttl_seconds: 86400`, and `in_flight_max_seconds: 300`.
+`create_media_buy`'s own implementation, independent of what the capability
+block advertises: a repeated `idempotency_key` replays the stored success
+verbatim (`replayed: true`); a same-key different-canonical-payload request
+rejects with `IDEMPOTENCY_CONFLICT`; errors are never cached (a retry after an
+error re-executes); the `media_buys` unique index remains the dup-booking
+backstop with a fail-closed degraded path; the per-scope insert ceiling guards
+admission. On registered standard reads, omission is accepted under the 3.1
+grace and a valid supplied key is validated inert metadata — that read-side
+behavior is unaffected by this section and not part of the contradiction.
 
-- Every supplied read key on every transport-exposed standard read is reserved
-  before execution, stores the canonical typed response durably, and returns
-  that immutable response with `replayed: true`. Read-key omission remains
-  accepted only under the explicit 3.1.x grace. Anonymous public reads use
-  `principal_id=NULL` inside the resolved tenant/account scope.
-- `create_media_buy`, `update_media_buy`, `sync_accounts`, and
-  `sync_creatives` reserve the
-  `(tenant, principal, account, idempotency_key)` tuple before work begins.
-- A live identical retry returns `IDEMPOTENCY_IN_FLIGHT`; a changed canonical
-  payload or cross-tool reuse returns `IDEMPOTENCY_CONFLICT`; a completed
-  identical retry returns the immutable original response with
-  `replayed: true`.
-- Reservation takeover rotates the attempt ID as a fencing token, so a stale
-  worker cannot complete or release its successor's claim.
-- Every execution or completion failure releases the attempt, as required by
-  rules 3 and 9. Consequential downstream evidence is stored in an independent
-  claim row, so releasing the buyer-facing attempt never erases the fact that a
-  provider invocation may have occurred.
-- Read and write insertion/active ceilings are counted independently. The
-  legacy single-budget environment settings remain fallbacks for deployments
-  that have not set the split controls.
+The `dist/compliance/3.1.1/universal/idempotency.yaml` replay / changed-payload
+conflict / fresh-key phases grade against this seller's live create behavior
+regardless of what the capability block currently declares (see "Generated
+UC-002 status" below — the scenario dispatches a real `create_media_buy` call
+and does not read the capabilities response).
 
-The canonical hash is computed from the pre-normalization wire payload on MCP,
-A2A, and REST. Per-scope admission limits apply before inserting a new
-reservation. Context is excluded from the canonical hash but is overlaid from
-the current request on replay, preserving the buyer-opaque echo contract
-without mutating the cached payload.
-
-### Rule 10 downstream reconciliation runbook
-
-Rule 10 is reviewer-graded by the pinned spec. This implementation uses
-write-claim-before-invoke:
-
-1. The idempotency reservation and deterministic downstream-operation claim are
-   committed together.
-2. A PostgreSQL advisory transaction lock serializes the complete
-   reconcile/CAS/provider-call sequence for the deterministic downstream
-   request ID. A tenant-scoped compare-and-swap then moves a claim from
-   `planned` or `not_applied` to `invoked`; only the fenced worker may call.
-3. The seller-derived `downstream_request_id` is exposed to the adapter. The
-   buyer's raw key is never forwarded or logged.
-4. On retry, `APPLIED` reconstructs the stored/provider response,
-   `NOT_APPLIED` permits exactly one invocation using the same request ID, and
-   `UNKNOWN` is persisted and fails closed without another mutation.
-
-Provider behavior:
-
-- **GAM:** create orders carry the complete deterministic request ID in a
-  queryable order-name suffix (plus a 31-bit `externalOrderId` compatibility
-  marker); reconciliation queries the full suffix. Absence proves
-  `NOT_APPLIED`. Presence proves that the order was accepted but cannot prove
-  that every line item completed, so it remains `UNKNOWN` and fails closed.
-  Update actions lack a safe per-operation marker and are rejected before
-  provider invocation while idempotency reconciliation is required.
-- **Mock:** the deterministic request ID is the exact operation key and maps to
-  the recorded typed result, so all three outcomes are testable without
-  inference.
-- **Broadstreet and Kevel:** their documented APIs do not expose a native
-  idempotency key or exact queryable operation marker for these calls. Keyed
-  consequential mutations are rejected before provider invocation.
-- **Triton:** the official API exposes external IDs, but this repository's
-  current legacy endpoint contract does not yet use that API shape. Until that
-  adapter is migrated, keyed consequential mutations are rejected before
-  provider invocation.
-- **Xandr:** explicitly unsupported before invocation because the adapter has
-  no implemented exact reconciliation contract.
-
-This runbook deliberately does not infer causation from a provider resource
-whose current status or budget happens to match the requested value. That
-"best-effort response inspection" is the third pattern rule 10 expressly
-forbids. The cost of unavailable provider markers is a transient fail-closed
-result requiring operator reconciliation, never a duplicate provider mutation.
+The concurrent-first-insert-wins phase grades what the BUYER observes — one
+`media_buy_id` across both responses — and that holds: the unique index makes
+the second insert lose and the loser never returns a second buy. It is NOT full
+rule-9 conformance. Rule 9 requires the canonical hash on an in-flight claim row
+written BEFORE the downstream invoke ("write-claim-before-invoke"), and this
+seller writes the hash on the committed `MediaBuy`, so the adapter call at
+`media_buy_create.py` runs before the duplicate is detected. A concurrent
+same-key retry can therefore book a second ad-server order whose orphan the
+code notes at the degraded-replay site. The claim row is the reservation
+subsystem, tracked separately; the gap is stated here rather than implied to be
+covered.
 
 ### Generated UC-002 status
 
@@ -257,11 +231,12 @@ declarative `<256 chars>` token, which the bound Given step expands to exactly
 modes, records provenance, and fails if the target ID disappears; unit coverage
 grades both compiler paths.
 
-The remaining upstream phases stay visible in the generated feature while
-transport-level and repository tests grade in-flight tracking, canonical
-comparison, replay-window behavior, and fenced lease takeover directly. The
-local applicability guard pins the live `supported: true` discriminant to the
-advertised replay and in-flight windows.
+The upstream supported-true phases this seller does NOT yet implement
+(in-flight tracking, expired-window, canonical-comparison, conflict-details)
+remain visible in the generated feature but unwired — tracked for the
+reservation-subsystem rebuild (#1683). The local applicability guard asserts
+the live `supported: true` discriminant matches the enforced replay window and
+that the unimplemented phases stay visible-not-claimed.
 
 ## Update-media-buy revision
 
@@ -279,12 +254,10 @@ published under `dist/compliance/3.1.1`; this repository's BR-UC-003 scenarios
 are local schema-derived coverage, not a claim that the upstream compliance
 runner grades this behavior.
 
-Decision for this PR: each media-buy row persists a revision beginning at 1.
-The update transaction locks the tenant-scoped row, compares a supplied
-revision before any provider mutation, returns `CONFLICT` with the current
-revision on mismatch, and increments exactly once when an update is durably
-applied. Omission retains last-write-wins compatibility and successful updates
-still advance the stored revision.
+Decision for this PR: the seller does not yet implement the required atomic
+comparison. Every transport must preserve field presence and route any supplied
+`revision` to the shared fail-loud guard, which rejects the request without
+applying the update.
 
 Omission remains valid and proceeds. Explicit JSON `null` is REJECTED as
 schema-invalid (`INVALID_REQUEST`) — it is not treated as a spelling of
@@ -300,7 +273,9 @@ serializes null." That premise is false: at the pinned adcp 6.6.0,
 rather than serializing it as `null`, so no conformant client emits `null` in
 the first place, and there is no compatibility reason to accept it. `null`
 therefore falls through to the same `INVALID_REQUEST` branch as `0` / `"7"` /
-`7.5`, consistently across MCP, A2A, and REST.
+`7.5`, consistently across MCP, A2A, and REST. This is a safety posture that
+prevents an unprotected lost update; it is an explicit implementation gap, not
+a claim of full revision conformance.
 
 ## Push-notification and reporting webhook delivery
 
@@ -316,11 +291,10 @@ Authoritative sources:
 
 Those sources define the buyer-facing configuration/payload and signed-webhook
 contract. The published webhook-emission storyboard grades emission and the
-normative signing contract. When the optional legacy authentication selector is
-absent, delivery now uses the SDK's `adcp/webhook-signing/v1` RFC 9421 signer
-with `ADCP_WEBHOOK_SIGNING_JWK`; missing or incorrectly scoped key material
-fails closed instead of silently emitting an unsigned callback. Explicit
-Bearer and legacy HMAC selectors retain their pinned precedence.
+normative signing contract. This implementation still lacks the signing-key
+infrastructure needed to claim RFC 9421 default-signing conformance; the legacy
+authentication/signing paths covered here are therefore not represented as
+full conformance to that portion of the storyboard.
 
 The following changes are **local security hardening, ungraded by the AdCP
 3.1.1 storyboard**: require HTTPS outside the explicit private-test opt-in,

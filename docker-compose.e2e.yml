@@ -63,12 +63,6 @@ services:
       # alias `tests` (ADCP_WEBHOOK_HOST). No real deployment sets this, so staging/dev
       # still block private/internal callback targets (#1512).
       ADCP_ALLOW_PRIVATE_WEBHOOKS: "true"
-      # Deterministic test-only RFC 9421 signing identity. Reference E2E cases
-      # exercise the default signed-webhook profile without relying on developer
-      # secrets; the public discovery URLs need only be stable HTTPS identifiers.
-      ADCP_WEBHOOK_SIGNING_JWK: '{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"test-webhook-key","adcp_use":"webhook-signing","x":"5Qf3mMHaJKHetXrZqdAmlBB4Ffl57bIVDPIpXq7af1Y","d":"YWqyo5OwoIkkbZtBwueWQkwjeR-GUoZk7hO9dM64rdI"}'
-      ADCP_WEBHOOK_SIGNING_JWKS_URI: "https://sales-agent.example.com/.well-known/jwks.json"
-      ADCP_BRAND_JSON_URL: "https://sales-agent.example.com/.well-known/brand.json"
       # Per-run secret for narrowly scoped live-server test controls. Empty in
       # normal compose usage, which keeps those controls undiscoverable.
       ADCP_TEST_CONTROL_TOKEN: ${ADCP_TEST_CONTROL_TOKEN:-}

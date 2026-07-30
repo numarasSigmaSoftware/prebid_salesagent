@@ -2,15 +2,9 @@
 
 from typing import Any
 
-import pytest
 from adcp.types import ContextObject
 
-from src.core.application_context import (
-    dump_adcp_response,
-    serialize_application_context,
-    validate_application_context,
-)
-from src.core.exceptions import AdCPValidationError, build_two_layer_error_envelope
+from src.core.application_context import dump_adcp_response, serialize_application_context
 from src.core.schemas._base import CreateMediaBuyResult, CreateMediaBuySuccess
 from src.core.schemas.product import GetProductsResponse
 
@@ -46,45 +40,16 @@ def test_plain_context_is_detached_recursively() -> None:
     assert serialized == {"nested": {"value": None}}
 
 
-def test_cyclic_context_is_rejected_and_safe_serialization_drops_it() -> None:
-    raw: dict[str, Any] = {}
-    raw["self"] = raw
-
-    with pytest.raises(AdCPValidationError, match="acyclic"):
-        validate_application_context(raw)
-
-    assert serialize_application_context(raw) is None
-
-
-def test_cyclic_sequence_is_rejected_and_error_dump_cannot_hang() -> None:
-    sequence: list[Any] = []
-    sequence.append(sequence)
-    raw = {"sequence": sequence}
-
-    with pytest.raises(AdCPValidationError, match="acyclic"):
-        validate_application_context(raw)
-
-    assert serialize_application_context(raw) is None
-    assert dump_adcp_response(raw) == {}
-    error = AdCPValidationError("invalid request", field="context", context=raw)
-    envelope = build_two_layer_error_envelope(error)
-    assert "context" not in envelope
-    assert envelope["adcp_error"]["code"] == "VALIDATION_ERROR"
-    assert envelope["errors"][0]["code"] == "VALIDATION_ERROR"
-
-
-def test_shared_noncyclic_container_is_copied_per_occurrence() -> None:
-    shared = {"value": 1}
-    raw = {"left": shared, "right": shared}
-
-    serialized = serialize_application_context(raw)
-
-    assert serialized == raw
-    assert serialized["left"] is not serialized["right"]
-
-
 def test_deeply_nested_plain_context_survives_intact() -> None:
-    """The low-level iterative copier itself remains recursion-independent."""
+    """No depth ceiling: ``core/context.json`` sets none, so none is enforced.
+
+    ``copy.deepcopy`` exhausts CPython's call stack around 500 levels — an
+    earlier version of this function used it and silently dropped context past
+    a 100-level bound, violating the normative echo contract for perfectly
+    schema-valid input. The iterative detach in ``_detach`` has no such limit:
+    a context nested 5,000 objects deep — an order of magnitude past both the
+    old bound and the recursion ceiling it was avoiding — is echoed exactly.
+    """
     raw = _nested_context(5000)
 
     assert serialize_application_context(raw) == raw
@@ -100,10 +65,6 @@ def test_deeply_nested_typed_context_survives_intact() -> None:
     context = ContextObject.model_validate(raw)
 
     assert serialize_application_context(context) == raw
-
-
-def test_application_context_accepts_deep_schema_valid_opaque_data() -> None:
-    validate_application_context(_nested_context(5000))
 
 
 def test_response_dump_restores_lossless_context_and_omits_absence() -> None:

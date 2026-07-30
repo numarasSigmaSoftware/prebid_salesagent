@@ -246,35 +246,31 @@ class DeliveryRepository:
         completed_at: datetime | None = None,
         next_retry_at: datetime | None = None,
     ) -> WebhookDeliveryLog:
-        """Create or update a delivery row without erasing claim identity."""
-        log_entry = self._session.get(WebhookDeliveryLog, log_id)
-        if not isinstance(log_entry, WebhookDeliveryLog):
-            log_entry = None
-        if log_entry is None:
-            log_entry = WebhookDeliveryLog(
-                id=log_id,
-                tenant_id=self._tenant_id,
-                principal_id=principal_id,
-                media_buy_id=media_buy_id,
-                webhook_url=webhook_url,
-                task_type=task_type,
-                status=status,
-            )
-            self._session.add(log_entry)
-        elif log_entry.tenant_id != self._tenant_id:
-            raise ValueError("Webhook delivery log belongs to a different tenant")
+        """Create or update a webhook delivery log entry.
 
-        # Preserve logical_event_key on claimed rows. It is the durable retry
-        # identity and must never be nulled by a delivery-attempt update.
-        log_entry.status = status
-        log_entry.attempt_count = attempt_count
-        log_entry.sequence_number = sequence_number
-        log_entry.notification_type = notification_type
-        log_entry.http_status_code = http_status_code
-        log_entry.error_message = error_message
-        log_entry.payload_size_bytes = payload_size_bytes
-        log_entry.response_time_ms = response_time_ms
-        log_entry.completed_at = completed_at
-        log_entry.next_retry_at = next_retry_at
+        Uses session.merge() to handle upsert semantics (the protocol webhook
+        service updates the same log entry across retry attempts).
+
+        Does NOT commit — the caller handles that.
+        """
+        log_entry = WebhookDeliveryLog(
+            id=log_id,
+            tenant_id=self._tenant_id,
+            principal_id=principal_id,
+            media_buy_id=media_buy_id,
+            webhook_url=webhook_url,
+            task_type=task_type,
+            status=status,
+            attempt_count=attempt_count,
+            sequence_number=sequence_number,
+            notification_type=notification_type,
+            http_status_code=http_status_code,
+            error_message=error_message,
+            payload_size_bytes=payload_size_bytes,
+            response_time_ms=response_time_ms,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+        )
+        self._session.merge(log_entry)
         self._session.flush()
         return log_entry

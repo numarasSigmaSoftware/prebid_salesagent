@@ -128,9 +128,6 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         _default_mb = MagicMock()
         _default_mb.status = "active"
         self._uow_instance.media_buys.get_by_id.return_value = _default_mb
-        self._uow_instance.media_buys.get_by_id_for_update.side_effect = lambda media_buy_id: (
-            self._uow_instance.media_buys.get_by_id(media_buy_id)
-        )
 
         # The *_or_raise repository helpers delegate to the plain getters and raise
         # the typed not-found when absent. Wiring the mock the same way lets tests

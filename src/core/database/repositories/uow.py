@@ -33,25 +33,15 @@ from typing import Any, Self
 
 from sqlalchemy.orm import Session
 
-from src.core.database.database_session import (
-    enter_uow_context,
-    exit_uow_context,
-    get_db_session,
-    get_independent_db_session,
-    uow_context_active,
-)
-from src.core.database.repositories.a2a_task import A2ATaskRepository
+from src.core.database.database_session import get_db_session
 from src.core.database.repositories.account import AccountRepository
-from src.core.database.repositories.adapter_config import AdapterConfigRepository
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
-from src.core.database.repositories.downstream_mutation_claim import DownstreamMutationClaimRepository
 from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
-from src.core.database.repositories.webhook_delivery_log import WebhookDeliveryLogRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 
 logger = logging.getLogger(__name__)
@@ -72,13 +62,10 @@ class BaseUoW:
         tenant_id: Tenant scope for all repository queries.
     """
 
-    def __init__(self, tenant_id: str, *, independent: bool = False) -> None:
+    def __init__(self, tenant_id: str) -> None:
         self._tenant_id = tenant_id
-        self._independent = independent
         self._session_cm: Any = None
         self._session: Session | None = None
-        self._owns_transaction = False
-        self._uow_context_token: Any = None
 
     @property
     def session(self) -> Session | None:
@@ -100,11 +87,8 @@ class BaseUoW:
         self._session = value
 
     def __enter__(self) -> Self:
-        session_context = get_independent_db_session if self._independent else get_db_session
-        self._owns_transaction = self._independent or not uow_context_active()
-        self._session_cm = session_context()
+        self._session_cm = get_db_session()
         self._session = self._session_cm.__enter__()
-        self._uow_context_token = enter_uow_context()
         self._init_repos()
         return self
 
@@ -117,20 +101,14 @@ class BaseUoW:
         assert self._session is not None
         assert self._session_cm is not None
         try:
-            if exc_type is None and self._owns_transaction:
+            if exc_type is None:
                 self._session.commit()
         finally:
             # Always close the session CM and clear references, even if
             # commit() raises.  Without this, the get_db_session() generator
             # is left suspended, leaking the session and DB connection.
-            try:
-                self._session_cm.__exit__(exc_type, exc_val, exc_tb)
-            finally:
-                assert self._uow_context_token is not None
-                exit_uow_context(self._uow_context_token)
-                self._uow_context_token = None
+            self._session_cm.__exit__(exc_type, exc_val, exc_tb)
             self._session = None
-            self._owns_transaction = False
             self._clear_repos()
 
     def _init_repos(self) -> None:
@@ -156,10 +134,7 @@ class MediaBuyUoW(BaseUoW):
     products: ProductRepository | None
     creatives: CreativeRepository | None
     currency_limits: CurrencyLimitRepository | None
-    adapter_configs: AdapterConfigRepository | None
-    push_notification_configs: PushNotificationConfigRepository | None
     idempotency_attempts: IdempotencyAttemptRepository | None
-    downstream_mutation_claims: DownstreamMutationClaimRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
@@ -167,20 +142,14 @@ class MediaBuyUoW(BaseUoW):
         self.products = ProductRepository(self._session, self._tenant_id)
         self.creatives = CreativeRepository(self._session, self._tenant_id)
         self.currency_limits = CurrencyLimitRepository(self._session, self._tenant_id)
-        self.adapter_configs = AdapterConfigRepository(self._session, self._tenant_id)
-        self.push_notification_configs = PushNotificationConfigRepository(self._session, self._tenant_id)
         self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
-        self.downstream_mutation_claims = DownstreamMutationClaimRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.media_buys = None
         self.products = None
         self.creatives = None
         self.currency_limits = None
-        self.adapter_configs = None
-        self.push_notification_configs = None
         self.idempotency_attempts = None
-        self.downstream_mutation_claims = None
 
 
 class ProductUoW(BaseUoW):
@@ -201,25 +170,6 @@ class ProductUoW(BaseUoW):
 
     def _clear_repos(self) -> None:
         self.products = None
-
-
-class A2ATaskUoW(BaseUoW):
-    """Unit of work for durable native A2A task state."""
-
-    tasks: A2ATaskRepository | None
-    push_notification_configs: PushNotificationConfigRepository | None
-    workflows: WorkflowRepository | None
-
-    def _init_repos(self) -> None:
-        assert self._session is not None
-        self.tasks = A2ATaskRepository(self._session, self._tenant_id)
-        self.push_notification_configs = PushNotificationConfigRepository(self._session, self._tenant_id)
-        self.workflows = WorkflowRepository(self._session, self._tenant_id)
-
-    def _clear_repos(self) -> None:
-        self.tasks = None
-        self.push_notification_configs = None
-        self.workflows = None
 
 
 class WorkflowUoW(BaseUoW):
@@ -275,16 +225,13 @@ class AccountUoW(BaseUoW):
     """
 
     accounts: AccountRepository | None
-    idempotency_attempts: IdempotencyAttemptRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.accounts = AccountRepository(self._session, self._tenant_id)
-        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.accounts = None
-        self.idempotency_attempts = None
 
 
 class PushNotificationConfigUoW(BaseUoW):
@@ -308,38 +255,6 @@ class PushNotificationConfigUoW(BaseUoW):
         self.push_notification_configs = None
 
 
-class WebhookDeliveryUoW(BaseUoW):
-    """Atomic reporting-channel lookup and durable event claim."""
-
-    media_buys: MediaBuyRepository | None
-    webhook_delivery_logs: WebhookDeliveryLogRepository | None
-
-    def _init_repos(self) -> None:
-        assert self._session is not None
-        self.media_buys = MediaBuyRepository(self._session, self._tenant_id)
-        self.webhook_delivery_logs = WebhookDeliveryLogRepository(self._session, self._tenant_id)
-
-    def _clear_repos(self) -> None:
-        self.media_buys = None
-        self.webhook_delivery_logs = None
-
-
-class IdempotencyUoW(BaseUoW):
-    """Short transaction containing only the tenant-scoped replay repository."""
-
-    idempotency_attempts: IdempotencyAttemptRepository | None
-    downstream_mutation_claims: DownstreamMutationClaimRepository | None
-
-    def _init_repos(self) -> None:
-        assert self._session is not None
-        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
-        self.downstream_mutation_claims = DownstreamMutationClaimRepository(self._session, self._tenant_id)
-
-    def _clear_repos(self) -> None:
-        self.idempotency_attempts = None
-        self.downstream_mutation_claims = None
-
-
 class CreativeUoW(BaseUoW):
     """Unit of Work for Creative operations.
 
@@ -352,18 +267,15 @@ class CreativeUoW(BaseUoW):
 
     creatives: CreativeRepository | None
     assignments: CreativeAssignmentRepository | None
-    idempotency_attempts: IdempotencyAttemptRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.creatives = CreativeRepository(self._session, self._tenant_id)
         self.assignments = CreativeAssignmentRepository(self._session, self._tenant_id)
-        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.creatives = None
         self.assignments = None
-        self.idempotency_attempts = None
 
 
 class AdminCreativeUoW(BaseUoW):
@@ -388,7 +300,6 @@ class AdminCreativeUoW(BaseUoW):
     products: ProductRepository | None
     workflows: WorkflowRepository | None
     tenant_config: TenantConfigRepository | None
-    idempotency_attempts: IdempotencyAttemptRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
@@ -398,7 +309,6 @@ class AdminCreativeUoW(BaseUoW):
         self.products = ProductRepository(self._session, self._tenant_id)
         self.workflows = WorkflowRepository(self._session, self._tenant_id)
         self.tenant_config = TenantConfigRepository(self._session, self._tenant_id)
-        self.idempotency_attempts = IdempotencyAttemptRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.creatives = None
@@ -407,4 +317,3 @@ class AdminCreativeUoW(BaseUoW):
         self.products = None
         self.workflows = None
         self.tenant_config = None
-        self.idempotency_attempts = None

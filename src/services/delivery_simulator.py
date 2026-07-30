@@ -340,7 +340,7 @@ class DeliverySimulator:
                 if progress_ratio >= 1.0:
                     status = "completed"
                 else:
-                    status = "active"
+                    status = "delivering"
 
                 # Send delivery update webhook
                 webhook_delivery_service.send_delivery_webhook(

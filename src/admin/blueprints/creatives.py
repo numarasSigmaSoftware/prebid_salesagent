@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from a2a.types import Task, TaskStatusUpdateEvent
@@ -45,12 +45,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 from src.admin.utils import echo_context, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.repositories.uow import AdminCreativeUoW
-from src.core.exceptions import AdCPServiceUnavailableError
 from src.core.tools.media_buy_create import execute_approved_media_buy, push_creative_to_existing_buy
-from src.services.creative_unblock_recovery import (
-    compute_unblocked_media_buy_status,
-    finalize_creative_unblock_workflow,
-)
 
 # Note: CreativeFormat table was dropped in migration f2addf453200
 # All format-related routes have been removed
@@ -82,6 +77,31 @@ def _cleanup_completed_tasks():
         for task_id in completed_tasks:
             del _ai_review_tasks[task_id]
             logger.debug(f"Cleaned up completed AI review task: {task_id}")
+
+
+def _compute_media_buy_status_from_flight_dates(media_buy) -> str:
+    """Compute status based on flight dates: 'active' if within window, else 'scheduled'."""
+    now = datetime.now(UTC)
+
+    start_time = None
+    if media_buy.start_time:
+        raw_start = media_buy.start_time
+        start_time = raw_start.replace(tzinfo=UTC) if raw_start.tzinfo is None else raw_start.astimezone(UTC)
+    elif media_buy.start_date:
+        start_time = datetime.combine(media_buy.start_date, datetime.min.time()).replace(tzinfo=UTC)
+
+    end_time = None
+    if media_buy.end_time:
+        raw_end = media_buy.end_time
+        end_time = raw_end.replace(tzinfo=UTC) if raw_end.tzinfo is None else raw_end.astimezone(UTC)
+    elif media_buy.end_date:
+        end_time = datetime.combine(media_buy.end_date, datetime.max.time()).replace(tzinfo=UTC)
+
+    # If start time passed and end time not passed, set to active
+    if start_time and end_time and now >= start_time and now <= end_time:
+        return "active"
+
+    return "scheduled"
 
 
 async def _call_webhook_for_creative_status(
@@ -564,7 +584,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             # Check if this creative approval unblocks any media buys
             assignments = uow.assignments.get_by_creative(creative_id)
             # Snapshot IDs as plain strings — ORM objects expire on session close (#1038)
-            assignment_buy_ids = sorted({a.media_buy_id for a in assignments})
+            assignment_buy_ids = [a.media_buy_id for a in assignments]
 
             logger.info(
                 f"[CREATIVE APPROVAL] Creative {creative_id} approved, checking {len(assignments)} media buy assignments"
@@ -572,52 +592,15 @@ def approve_creative(tenant_id, creative_id, **kwargs):
 
             # Snapshot buy statuses here to avoid a second UoW after commit
             assignment_buy_statuses: dict[str, str] = {}
-            for media_buy_id in assignment_buy_ids:
-                # Serialize the last-approved-creative check per media buy.
-                media_buy = uow.media_buys.get_by_id_for_update(media_buy_id)
+            for assignment in assignments:
+                media_buy_id = assignment.media_buy_id
+                media_buy = uow.media_buys.get_by_id(media_buy_id)
 
                 if not media_buy:
                     continue
 
                 assignment_buy_statuses[media_buy_id] = media_buy.status
                 logger.info(f"[CREATIVE APPROVAL] Media buy {media_buy_id} status: {media_buy.status}")
-
-                any_workflow_mapping = uow.workflows.get_latest_mapping_for_object(
-                    "media_buy",
-                    media_buy_id,
-                )
-                workflow_step = uow.workflows.get_actionable_step_for_object_for_update(
-                    "media_buy",
-                    media_buy_id,
-                    tool_name="create_media_buy",
-                    statuses={"input-required"},
-                    recover_processing_before=datetime.now(UTC) - timedelta(minutes=5),
-                )
-
-                # A prior worker may have completed provider/local persistence
-                # but crashed before terminalizing the leased workflow.
-                if media_buy.status not in {"pending_creatives", "draft"}:
-                    if workflow_step is not None and workflow_step.status == "processing":
-                        claimed = uow.workflows.transition_status(
-                            workflow_step.step_id,
-                            status="processing",
-                            allowed_from={"processing"},
-                        )
-                        if claimed is not None:
-                            media_buy_actions.append(
-                                {
-                                    "media_buy_id": media_buy_id,
-                                    "workflow_step_id": claimed.step_id,
-                                    "lease_started_at": claimed.processing_started_at,
-                                    "provider_already_applied": media_buy.status in {"active", "completed"},
-                                    "terminal_error": (
-                                        None
-                                        if media_buy.status in {"active", "completed"}
-                                        else f"Media buy entered non-success status '{media_buy.status}' during recovery"
-                                    ),
-                                }
-                            )
-                    continue
 
                 if media_buy.status in {"pending_creatives", "draft"}:
                     # Get all creative assignments for this media buy
@@ -635,32 +618,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     )
 
                     if not unapproved_creatives:
-                        if workflow_step is not None:
-                            claimed = uow.workflows.transition_status(
-                                workflow_step.step_id,
-                                status="processing",
-                                allowed_from={workflow_step.status},
-                            )
-                            if claimed is not None:
-                                media_buy_actions.append(
-                                    {
-                                        "media_buy_id": media_buy_id,
-                                        "workflow_step_id": claimed.step_id,
-                                        "lease_started_at": claimed.processing_started_at,
-                                        "provider_already_applied": False,
-                                        "terminal_error": None,
-                                    }
-                                )
-                        elif any_workflow_mapping is None:
-                            media_buy_actions.append(
-                                {
-                                    "media_buy_id": media_buy_id,
-                                    "workflow_step_id": None,
-                                    "lease_started_at": None,
-                                    "provider_already_applied": False,
-                                    "terminal_error": None,
-                                }
-                            )
+                        media_buy_actions.append({"media_buy_id": media_buy_id})
                     else:
                         logger.info(
                             f"[CREATIVE APPROVAL] Media buy {media_buy_id} still waiting for {len(unapproved_creatives)} creatives: {unapproved_creatives}"
@@ -684,44 +642,20 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
             )
 
-            if action["terminal_error"] is not None:
-                success, error_msg = False, action["terminal_error"]
-            elif action["provider_already_applied"]:
-                success, error_msg = True, None
-            else:
-                try:
-                    success, error_msg = execute_approved_media_buy(
-                        action["media_buy_id"],
-                        tenant_id,
-                        raise_retryable=True,
-                    )
-                except AdCPServiceUnavailableError:
-                    logger.warning(
-                        "[CREATIVE APPROVAL] Provider outcome remains ambiguous for %s; retaining processing lease",
-                        action["media_buy_id"],
-                        exc_info=True,
-                    )
-                    continue
-            workflow_step_id = action["workflow_step_id"]
+            success, error_msg = execute_approved_media_buy(action["media_buy_id"], tenant_id)
 
-            if workflow_step_id:
-                finalize_creative_unblock_workflow(
-                    tenant_id=tenant_id,
-                    step_id=workflow_step_id,
-                    media_buy_id=action["media_buy_id"],
-                    lease_started_at=action["lease_started_at"],
-                    success=success,
-                    error_message=error_msg,
-                )
-            elif success:
+            if success:
+                # Update media buy status in a separate UoW
                 with AdminCreativeUoW(tenant_id) as uow2:
                     assert uow2.media_buys is not None
-                    media_buy = uow2.media_buys.get_by_id(action["media_buy_id"])
-                    if media_buy:
-                        media_buy.status = compute_unblocked_media_buy_status(media_buy)
-                        media_buy.approved_at = datetime.now(UTC)
-                        media_buy.approved_by = "system"
-            if success:
+                    mb = uow2.media_buys.get_by_id(action["media_buy_id"])
+                    if mb:
+                        new_status = _compute_media_buy_status_from_flight_dates(mb)
+                        mb.status = new_status
+                        mb.approved_at = datetime.now(UTC)
+                        mb.approved_by = "system"
+                    # auto-commits
+
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
             else:
                 logger.error(f"[CREATIVE APPROVAL] Adapter creation failed for {action['media_buy_id']}: {error_msg}")

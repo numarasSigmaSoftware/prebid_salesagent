@@ -23,8 +23,4 @@ class PushNotificationConfigFactory(factory.alchemy.SQLAlchemyModelFactory):
     tenant_id = LazyAttribute(lambda o: o.tenant.tenant_id)
     principal_id = LazyAttribute(lambda o: o.principal.principal_id)
     url = factory.LazyFunction(lambda: "https://example.com/webhook")
-    media_buy_id = None
-    operation_id = None
-    token = None
-    application_context = None
     is_active = True

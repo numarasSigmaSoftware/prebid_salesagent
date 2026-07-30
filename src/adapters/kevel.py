@@ -5,13 +5,7 @@ from typing import Any
 
 import requests
 
-from src.adapters.base import (
-    AdServerAdapter,
-    CreativeEngineAdapter,
-    DownstreamMutation,
-    ReconciliationOutcome,
-    ReconciliationResult,
-)
+from src.adapters.base import AdServerAdapter, CreativeEngineAdapter
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.core.exceptions import (
     AdCPAdapterError,
@@ -27,16 +21,6 @@ class Kevel(AdServerAdapter):
     """
 
     adapter_name = "kevel"
-    supports_media_buy_create_reconciliation = False
-    supports_media_buy_update_reconciliation = False
-
-    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Fail closed until a complete marked campaign/flight set is provable."""
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
-
-    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Fail closed because value equality is not operation identity."""
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 
     # Kevel specializes in social and retail_media
     # V3 channel names: native → social, retail → retail_media

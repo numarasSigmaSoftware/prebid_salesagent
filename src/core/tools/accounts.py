@@ -28,17 +28,15 @@ from adcp.types.generated_poc.account.sync_accounts_request import (
 )
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
-from pydantic import Field, ValidationError
+from pydantic import Field
 
 from src.core.application_context import dump_adcp_response
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_identity, require_principal_id, require_tenant
 from src.core.database.models import Account as DBAccount
-from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
 from src.core.database.repositories.uow import AccountUoW
 from src.core.exceptions import AdCPValidationError
 from src.core.helpers import enum_value
-from src.core.idempotency_canonical import canonical_payload_hash, canonical_request_hash
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import RawIdempotencyKey
 from src.core.schemas.account import (
@@ -50,13 +48,7 @@ from src.core.schemas.account import (
     SyncResponseAccount,
 )
 from src.core.tool_context import ToolContext
-from src.core.transport_helpers import get_mcp_raw_wire_payload, resolve_identity_from_context
-from src.services.idempotency_replay import (
-    complete_idempotent,
-    mark_idempotent_replay,
-    release_reservation_on_error,
-    reserve_idempotent,
-)
+from src.core.transport_helpers import resolve_identity_from_context
 
 logger = logging.getLogger(__name__)
 
@@ -460,7 +452,6 @@ def _extract_natural_key(entry: Any) -> tuple[str, str | None, str, bool | None]
 async def _sync_accounts_impl(
     req: SyncAccountsRequest | None = None,
     identity: ResolvedIdentity | None = None,
-    raw_wire_payload: dict[str, Any] | None = None,
 ) -> SyncAccountsResponse:
     """Sync accounts by natural key — upsert, delete_missing, dry_run.
 
@@ -494,39 +485,14 @@ async def _sync_accounts_impl(
     # Validate non-empty accounts array
     if not req.accounts:
         raise AdCPValidationError("accounts array must not be empty — at least one account is required.")
-    # The pinned 3.1 contract requires a full brand/operator/billing entry.
-    # Validate every entry before an idempotency admission lock or row insert.
-    for entry in req.accounts:
-        _extract_natural_key(entry)
     dry_run = bool(req.dry_run)
     delete_missing = bool(req.delete_missing)
-
-    reservation_attempt_id: str | None = None
-    if req.idempotency_key and not dry_run:
-        request_hash = (
-            canonical_payload_hash(raw_wire_payload) if raw_wire_payload is not None else canonical_request_hash(req)
-        )
-        reservation = reserve_idempotent(
-            AccountUoW,
-            tenant_id,
-            principal_id=principal_id,
-            account_id=identity.account_id,
-            tool_name="sync_accounts",
-            idempotency_key=req.idempotency_key,
-            request_hash=request_hash,
-            lease=DEFAULT_IN_FLIGHT_LEASE,
-            decode=lambda envelope: _decode_sync_accounts_replay(envelope, context=req.context),
-            enforce_ceiling=True,
-        )
-        if reservation.replay is not None:
-            return reservation.replay
-        reservation_attempt_id = reservation.attempt_id
 
     results: list[SyncResponseAccount] = []
     # Track natural keys in the payload for delete_missing
     seen_account_ids: set[str] = set()
 
-    with release_reservation_on_error(AccountUoW, tenant_id, reservation_attempt_id), AccountUoW(tenant_id) as uow:
+    with AccountUoW(tenant_id) as uow:
         assert uow.accounts is not None
         repo = uow.accounts
 
@@ -704,19 +670,6 @@ async def _sync_accounts_impl(
                         )
                     )
 
-        response = SyncAccountsResponse(
-            accounts=results,
-            dry_run=dry_run if dry_run else None,
-            context=req.context,
-        )
-        if reservation_attempt_id is not None:
-            complete_idempotent(
-                uow,
-                attempt_id=reservation_attempt_id,
-                response_model=response,
-                protocol_status="completed",
-            )
-
     # Audit log
     audit_logger = get_audit_logger("sync_accounts", tenant_id)
     action_counts: dict[str, int] = {}
@@ -725,21 +678,11 @@ async def _sync_accounts_impl(
         action_counts[act] = action_counts.get(act, 0) + 1
     audit_logger.log_info(f"sync_accounts completed: {action_counts} (dry_run={dry_run}, principal={principal_id})")
 
-    return response
-
-
-def _decode_sync_accounts_replay(
-    envelope: dict[str, Any],
-    *,
-    context: ContextObject | dict | None = None,
-) -> SyncAccountsResponse | None:
-    """Reconstruct one cached success and mark the returned envelope as replayed."""
-    try:
-        response = SyncAccountsResponse.model_validate(envelope["response"])
-    except (KeyError, TypeError, ValidationError):
-        logger.warning("Cached sync_accounts envelope failed validation", exc_info=True)
-        return None
-    return mark_idempotent_replay(response, context=context)
+    return SyncAccountsResponse(
+        accounts=results,
+        dry_run=dry_run if dry_run else None,
+        context=req.context,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +711,9 @@ async def sync_accounts(
         dry_run: Preview changes without persisting.
         context: Application-level context per AdCP spec.
         idempotency_key: Required client-generated key. This seller advertises
-        idempotency support; an identical retry replays the original success.
+            idempotency support, but replay is implemented on create_media_buy
+            today, so a retry here re-executes rather than replaying the first
+            result. Extending dedupe to this tool is tracked separately.
         ctx: FastMCP context for authentication.
 
     Returns:
@@ -785,8 +730,7 @@ async def sync_accounts(
         idempotency_key=idempotency_key,
     )
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
-    response = await _sync_accounts_impl(req, identity, raw_wire_payload=raw_wire_payload)
+    response = await _sync_accounts_impl(req, identity)
 
     return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
 
@@ -800,7 +744,6 @@ async def sync_accounts_raw(
     req: SyncAccountsRequest | None = None,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
-    raw_wire_payload: dict[str, Any] | None = None,
 ) -> SyncAccountsResponse:
     """Sync accounts by natural key (raw function for A2A).
 
@@ -814,4 +757,4 @@ async def sync_accounts_raw(
     """
     if identity is None:
         identity = resolve_identity_from_context(ctx, require_valid_token=True)
-    return await _sync_accounts_impl(req, identity, raw_wire_payload=raw_wire_payload)
+    return await _sync_accounts_impl(req, identity)

@@ -319,13 +319,6 @@ def init_db_ci():
                     "targeting_template": {"geo": ["US"], "device_type": "any"},
                     "delivery_type": "guaranteed",
                     "pricing": {"model": "cpm", "rate": 15.0, "is_fixed": True},
-                    "reporting_capabilities": {
-                        "available_reporting_frequencies": ["daily"],
-                        "expected_delay_minutes": 0,
-                        "timezone": "UTC",
-                        "supports_webhooks": True,
-                        "available_metrics": ["impressions", "clicks", "spend"],
-                    },
                 },
                 {
                     "product_id": "prod_video_premium",
@@ -338,13 +331,6 @@ def init_db_ci():
                     "targeting_template": {"geo": ["US"], "device_type": "any"},
                     "delivery_type": "guaranteed",
                     "pricing": {"model": "cpm", "rate": 25.0, "is_fixed": True},
-                    "reporting_capabilities": {
-                        "available_reporting_frequencies": ["daily"],
-                        "expected_delay_minutes": 0,
-                        "timezone": "UTC",
-                        "supports_webhooks": True,
-                        "available_metrics": ["impressions", "completed_views", "spend"],
-                    },
                 },
             ]
 
@@ -370,7 +356,6 @@ def init_db_ci():
                         countries=None,
                         implementation_config=None,
                         properties=None,  # Using property_tags instead
-                        reporting_capabilities=p["reporting_capabilities"],
                     )
                     session.add(product)
                     print(f"  ✓ Created product: {p['name']} (property_tags=['all_inventory'])")

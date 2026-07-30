@@ -13,7 +13,7 @@ import pytest
 
 from tests.factories import PricingOptionFactory, ProductFactory, TenantFactory
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_field, assert_envelope_shape
+from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -55,7 +55,7 @@ class TestMcpDevMode:
                 recovery="correctable",
                 message_substr="Unexpected keyword argument",
             )
-            assert_envelope_field(result.wire_error_envelope, "nonsense_field")
+            assert result.wire_error_envelope["errors"][0]["field"] == "nonsense_field"
 
     def test_deprecated_field_translated_even_in_dev(self, integration_db):
         """Deprecated field translation works in dev mode (always active)."""

@@ -18,7 +18,6 @@ from typing import Any
 import requests
 
 from src.core.database.database_session import get_db_session
-from src.core.security.webhook_http import is_signature_auth_failure
 from src.core.webhook_authenticator import WebhookAuthenticator
 from src.core.webhook_validator import WebhookURLValidator
 
@@ -125,30 +124,6 @@ def deliver_webhook_with_retry(delivery: WebhookDelivery) -> tuple[bool, dict[st
             object_id=delivery.object_id,
         )
 
-    def terminal_client_failure(error_msg: str) -> tuple[bool, dict[str, Any]]:
-        """Persist and return one terminal client-auth/request failure."""
-        if delivery.tenant_id and delivery.event_type:
-            _update_delivery_record(
-                delivery_id=delivery_id,
-                tenant_id=delivery.tenant_id,
-                status="failed",
-                attempts=attempts,
-                response_code=response_code,
-                last_error=error_msg,
-            )
-            webhook_delivery_total.labels(
-                tenant_id=delivery.tenant_id,
-                event_type=delivery.event_type,
-                status="client_error",
-            ).inc()
-        return False, {
-            "delivery_id": delivery_id,
-            "status": "failed",
-            "attempts": attempts,
-            "response_code": response_code,
-            "error": error_msg,
-        }
-
     for attempt in range(delivery.max_retries):
         attempts += 1
         attempt_start = time.time()
@@ -200,31 +175,39 @@ def deliver_webhook_with_retry(delivery: WebhookDelivery) -> tuple[bool, dict[st
                     "duration": total_duration,
                 }
 
-            # AdCP persistent-webhook 401 is transient: credentials may be
-            # refreshed by the receiver, so retain the standard retry schedule.
-            if response_code == 401 and is_signature_auth_failure(
-                response_code,
-                response.headers.get("WWW-Authenticate"),
-            ):
-                error_msg = "Webhook signature authentication rejected"
-                logger.warning("[Webhook Delivery] Signature-specific HTTP 401 is terminal")
-                return terminal_client_failure(error_msg)
-
-            if response_code == 401:
-                last_error = f"Transient authentication error 401: {response.text[:200]}"
-                logger.warning("[Webhook Delivery] HTTP 401 is transient; will retry")
-
-            # Other client errors (4xx): Don't retry.
-            if 400 <= response_code < 500 and response_code != 401:
+            # Client errors (4xx): Don't retry
+            if 400 <= response_code < 500:
                 error_msg = f"Client error {response_code}: {response.text[:200]}"
                 logger.warning(f"[Webhook Delivery] Client error, will NOT retry: {error_msg}")
                 last_error = error_msg
 
-                # A persistent 403 is blocked until credentials are reconfigured.
-                if response_code == 403 and delivery.tenant_id:
+                # Auth failures (401/403): block until credentials reconfigured
+                if response_code in (401, 403) and delivery.tenant_id:
                     _set_auth_blocked(delivery.tenant_id, delivery.webhook_url)
 
-                return terminal_client_failure(error_msg)
+                # Update database record
+                if delivery.tenant_id and delivery.event_type:
+                    _update_delivery_record(
+                        delivery_id=delivery_id,
+                        tenant_id=delivery.tenant_id,
+                        status="failed",
+                        attempts=attempts,
+                        response_code=response_code,
+                        last_error=error_msg,
+                    )
+
+                    # Record client error metrics
+                    webhook_delivery_total.labels(
+                        tenant_id=delivery.tenant_id, event_type=delivery.event_type, status="client_error"
+                    ).inc()
+
+                return False, {
+                    "delivery_id": delivery_id,
+                    "status": "failed",
+                    "attempts": attempts,
+                    "response_code": response_code,
+                    "error": error_msg,
+                }
 
             # Server errors (5xx): Retry
             if response_code >= 500:

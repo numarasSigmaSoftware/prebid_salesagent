@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 if TYPE_CHECKING:
@@ -150,34 +149,6 @@ class AdapterCapabilities:
     supports_realtime_reporting: bool = False  # Supports real-time delivery reporting
 
 
-class ReconciliationOutcome(StrEnum):
-    """What an adapter can prove about a previously claimed mutation."""
-
-    APPLIED = "applied"
-    NOT_APPLIED = "not_applied"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True)
-class DownstreamMutation:
-    """Stable description used to reconcile a provider-side media-buy change."""
-
-    downstream_request_id: str
-    media_buy_id: str
-    action: str
-    package_id: str | None
-    budget: int | None
-    implementation_date: datetime | None = None
-
-
-@dataclass(frozen=True)
-class ReconciliationResult:
-    """Adapter reconciliation outcome and optional reconstructed wire result."""
-
-    outcome: ReconciliationOutcome
-    response: BaseModel | None = None
-
-
 class BaseConnectionConfig(BaseModel):
     """Base schema for adapter connection configuration."""
 
@@ -209,12 +180,6 @@ class AdServerAdapter(ABC):
     # Default advertising channels supported by this adapter
     # Subclasses should override with their supported channels
     default_channels: list[str] = []
-    # Local adapters that do not cross a service boundary may opt out. External
-    # adapters keep this true and must implement an exact provider operation-ID
-    # contract before enabling either reconciliation capability below.
-    requires_downstream_reconciliation: bool = True
-    supports_media_buy_create_reconciliation: bool = False
-    supports_media_buy_update_reconciliation: bool = False
 
     # Default delivery measurement provider for products created by this adapter.
     # Per AdCP spec, delivery_measurement is REQUIRED on all products.
@@ -243,7 +208,6 @@ class AdServerAdapter(ABC):
                 "tenant_id is required for adapter initialization. All tenant-scoped operations need a valid tenant_id."
             )
         self.config = config
-        self._downstream_mutation: DownstreamMutation | None = None
         self.principal = principal
         self.principal_id = principal.principal_id  # For backward compatibility
         self.dry_run = dry_run
@@ -266,16 +230,6 @@ class AdServerAdapter(ABC):
         self.manual_approval_operations = set(
             config.get("manual_approval_operations", ["create_media_buy", "update_media_buy", "add_creative_assets"])
         )
-
-    def prepare_downstream_mutation(self, mutation: DownstreamMutation) -> None:
-        """Expose the deterministic request identifier to the next provider call.
-
-        External adapters should attach ``mutation.downstream_request_id`` to a
-        provider-native idempotency/resource field when one exists. The
-        descriptor is request-local because adapters are constructed per tool
-        invocation.
-        """
-        self._downstream_mutation = mutation
 
     def _require_config(self, value: _ConfigT | None, *, field: str, message: str | None = None) -> _ConfigT:
         """Return ``value`` when present; otherwise raise ``AdCPConfigurationError``.
@@ -531,22 +485,6 @@ class AdServerAdapter(ABC):
     ) -> UpdateMediaBuyResponse:
         """Updates a media buy with a specific action."""
         pass
-
-    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Prove whether a previously claimed update landed.
-
-        Adapters must override this when their provider exposes a stable
-        operation/resource lookup. The safe default is fail-closed.
-        """
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
-
-    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Prove whether a previously claimed create landed.
-
-        The safe default is UNKNOWN: never infer causation from a coincidentally
-        matching resource.
-        """
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 
     def get_config_ui_endpoint(self) -> str | None:
         """

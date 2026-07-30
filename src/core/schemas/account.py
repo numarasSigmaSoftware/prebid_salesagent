@@ -24,12 +24,7 @@ from adcp.types.generated_poc.core.brand_ref import BrandReference as LibraryBra
 from pydantic import ConfigDict
 
 from src.core.config import get_pydantic_extra_mode
-from src.core.schemas._base import (
-    NestedModelSerializerMixin,
-    ReplayableResponseMixin,
-    SalesAgentBaseModel,
-    apply_replay_marker,
-)
+from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
 
 # ---------------------------------------------------------------------------
 # Core domain Account (used in ListAccountsResponse.accounts)
@@ -89,7 +84,7 @@ class SyncAccountsRequest(LibrarySyncAccountsRequest):
 # ---------------------------------------------------------------------------
 
 
-class ListAccountsResponse(ReplayableResponseMixin, NestedModelSerializerMixin, LibraryListAccountsResponse):
+class ListAccountsResponse(NestedModelSerializerMixin, LibraryListAccountsResponse):
     """Extends library ListAccountsResponse.
 
     Library provides: accounts, errors, pagination, context, ext.
@@ -161,12 +156,6 @@ class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSucces
     dry_run: bool | None = None
     context: LibraryContextObject | dict[str, Any] | None = None
     ext: dict[str, Any] | None = None
-    replayed: bool = False
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Emit the protocol replay marker only for a genuine cache hit."""
-        result = super().model_dump(**kwargs)
-        return apply_replay_marker(result, self.replayed)
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

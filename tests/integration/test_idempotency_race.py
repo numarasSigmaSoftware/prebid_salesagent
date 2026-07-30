@@ -283,7 +283,6 @@ class TestRaceLoserPayloadRules:
                 principal_id=principal_id,
                 account_id=None,
                 request_hash="loser-different-hash",
-                context=None,
             )
 
         assert exc_info.value.error_code == "IDEMPOTENCY_CONFLICT"
@@ -335,7 +334,6 @@ class TestRaceLoserPayloadRules:
                 principal_id=principal_id,
                 account_id=None,
                 request_hash="same-hash",
-                context=None,
             )
 
         assert exc_info.value.error_code == "SERVICE_UNAVAILABLE"
@@ -398,9 +396,9 @@ class TestRaceSeamThroughEntrypoint:
             tenant_id = env._tenant_id
             principal_id = env._principal_id
 
-        # The response cache row is gone, but the independent downstream claim
-        # survives. The retry must fail closed before another provider mutation.
-        assert calls_after == calls_before, "the durable provider claim must prevent blind re-execution"
+        # The probe missed (row gone) → full re-execution → backstop fired →
+        # the except-branch failed closed instead of fabricating a body.
+        assert calls_after == calls_before + 1, "the retry must re-execute (probe miss), not replay"
         assert exc_info.value.error_code == "SERVICE_UNAVAILABLE"
         assert exc_info.value.recovery == "transient"
 
@@ -566,7 +564,6 @@ class TestDegradedExpiryAnchoring:
                 principal_id=principal_id,
                 account_id=None,
                 request_hash="store-hash",
-                context=None,
             )
 
         assert exc_info.value.error_code == "IDEMPOTENCY_EXPIRED"

@@ -364,11 +364,6 @@ def test_environment(monkeypatch, request):
     monkeypatch.setenv("GOOGLE_CLIENT_ID", os.environ.get("GOOGLE_CLIENT_ID", "test_client_id"))
     monkeypatch.setenv("GOOGLE_CLIENT_SECRET", os.environ.get("GOOGLE_CLIENT_SECRET", "test_client_secret"))
     monkeypatch.setenv("SUPER_ADMIN_EMAILS", os.environ.get("SUPER_ADMIN_EMAILS", "test@example.com"))
-    from tests.helpers.webhook_signing import webhook_signing_jwk_json
-
-    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWK", webhook_signing_jwk_json())
-    monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWKS_URI", "https://seller.example/.well-known/jwks.json")
-    monkeypatch.setenv("ADCP_BRAND_JSON_URL", "https://seller.example/.well-known/brand.json")
 
     yield
 

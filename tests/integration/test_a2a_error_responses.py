@@ -388,15 +388,7 @@ class TestA2AErrorPropagation:
             "Supply a publicly routable HTTPS callback URL without embedded credentials."
         )
         assert "169.254.169.254" not in wire_error["message"], "metadata address leaked into buyer error"
-        from src.core.database.repositories import PushNotificationConfigUoW
-
-        with PushNotificationConfigUoW(test_tenant["tenant_id"]) as uow:
-            assert uow.push_notification_configs is not None
-            stored = uow.push_notification_configs.list_active_for_task(
-                principal_id=test_principal["principal_id"],
-                task_id=result.id,
-            )
-        assert stored == [], "a rejected callback must never be stored"
+        assert handler._task_push_configs == {}, "a rejected callback must never be stored"
 
     async def test_create_media_buy_success_has_no_errors_field(self, handler, test_tenant, test_principal):
         """Test that successful responses don't have errors field (or it's None/empty)."""

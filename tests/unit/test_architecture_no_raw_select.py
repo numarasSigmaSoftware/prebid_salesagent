@@ -281,6 +281,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/core/config_loader.py", "get_tenant_by_virtual_host"),
     ("src/core/context_manager.py", "_send_push_notifications"),
     ("src/core/context_manager.py", "add_message"),
+    ("src/core/context_manager.py", "get_context"),
     ("src/core/context_manager.py", "get_context_status"),
     ("src/core/context_manager.py", "get_contexts_for_principal"),
     ("src/core/context_manager.py", "get_object_lifecycle"),
@@ -300,6 +301,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/core/tenant_status.py", "get_tenant_status"),
     ("src/core/tenant_status.py", "is_tenant_ad_server_configured"),
     # ── Core tools ──
+    ("src/core/tools/media_buy_create.py", "_create_media_buy_impl"),
     ("src/core/tools/media_buy_create.py", "execute_approved_media_buy"),
     ("src/core/tools/media_buy_list.py", "_fetch_creative_approvals"),
     # ── Routes ──
@@ -323,6 +325,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/services/background_sync_service.py", "_update_sync_progress"),
     ("src/services/background_sync_service.py", "start_inventory_sync_background"),
     ("src/services/delivery_simulator.py", "restart_active_simulations"),
+    ("src/services/delivery_webhook_scheduler.py", "_send_report_for_media_buy"),
     ("src/services/dynamic_pricing_service.py", "_calculate_product_pricing"),
     ("src/services/dynamic_products.py", "archive_expired_variants"),
     ("src/services/dynamic_products.py", "generate_variants_for_brief"),

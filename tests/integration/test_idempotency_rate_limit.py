@@ -8,9 +8,7 @@ expires. Replays and conflicts insert nothing and are never rate-limited.
 """
 
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier
 
 import pytest
 
@@ -105,45 +103,6 @@ class TestInsertCeilingRepository:
                 principal_id=principal_id,
                 ceiling=1,
             )
-
-    def test_concurrent_distinct_keys_cannot_both_cross_ceiling(self, integration_db):
-        from src.core.database.repositories.uow import IdempotencyUoW
-        from src.core.exceptions import AdCPRateLimitError
-
-        tenant_id = f"rlrace_t_{uuid.uuid4().hex[:6]}"
-        principal_id = f"p_{uuid.uuid4().hex[:8]}"
-        seed_principal(tenant_id, principal_id)
-        start = Barrier(2)
-
-        def reserve(key: str) -> str:
-            start.wait()
-            try:
-                with IdempotencyUoW(tenant_id) as uow:
-                    assert uow.idempotency_attempts is not None
-                    enforce_insert_ceiling(
-                        uow.idempotency_attempts,
-                        principal_id=principal_id,
-                        ceiling=1,
-                        rate_ceiling=100,
-                        operation_class="read",
-                    )
-                    uow.idempotency_attempts.reserve(
-                        principal_id=principal_id,
-                        account_id=None,
-                        tool_name="get_products",
-                        idempotency_key=key,
-                        payload_hash=key,
-                        lease=timedelta(minutes=5),
-                        operation_class="read",
-                    )
-                return "reserved"
-            except AdCPRateLimitError:
-                return "rate_limited"
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            outcomes = list(pool.map(reserve, ("race-key-one-0001", "race-key-two-0002")))
-
-        assert sorted(outcomes) == ["rate_limited", "reserved"]
 
 
 class TestInsertRateWindow:

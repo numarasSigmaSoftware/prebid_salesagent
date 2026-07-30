@@ -215,13 +215,13 @@ class TestCircuitBreakerHalfOpenProbe:
 
 
 class TestExtG07WebhookAuthFailureRecovery:
-    """Auth failure recovery distinguishes transient 401 from terminal 403.
+    """Auth failure recovery: buyer must reconfigure credentials after 401/403.
 
     Covers: UC-004-EXT-G-07
     """
 
-    def test_transient_401_retries_before_credentials_are_reconfigured(self):
-        """Ordinary 401 retries; later credential reconfiguration can recover.
+    def test_auth_failure_blocks_delivery_until_credentials_reconfigured(self):
+        """401/403 webhook failure should block delivery until credentials are reconfigured.
 
         Covers: UC-004-EXT-G-07
         """
@@ -243,8 +243,8 @@ class TestExtG07WebhookAuthFailureRecovery:
         assert success is False
         assert result["status"] == "failed"
         assert result["response_code"] == 401
-        assert result["attempts"] == 3
-        assert "Transient authentication error 401" in result["error"]
+        assert result["attempts"] == 1
+        assert "Client error 401" in result["error"]
 
         # --- Step 2: Circuit breaker opens after auth failures ---
         with CircuitBreakerEnv() as env:
@@ -270,8 +270,8 @@ class TestExtG07WebhookAuthFailureRecovery:
         assert success_after is True
         assert result_after["status"] == "delivered"
 
-    def test_ordinary_401_retries_with_backoff(self):
-        """An ordinary 401 follows the transient retry schedule.
+    def test_401_causes_immediate_failure_no_retry(self):
+        """401 auth error is treated as 4xx client error: no retry.
 
         Covers: UC-004-EXT-G-07
         """
@@ -289,9 +289,9 @@ class TestExtG07WebhookAuthFailureRecovery:
 
             assert success is False
             assert result["response_code"] == 401
-            assert result["attempts"] == 3
+            assert result["attempts"] == 1
             assert result["status"] == "failed"
-            assert env.mock["post"].call_count == 3
+            env.mock["post"].assert_called_once()
 
     def test_403_causes_immediate_failure_no_retry(self):
         """403 forbidden error is treated as 4xx client error: no retry.
@@ -406,8 +406,9 @@ class TestWebhookFailureNoSyncError:
 
             assert result is False
 
-    def test_failed_delivery_keeps_deterministic_event_identity(self):
-        """Retries preserve event identity so persisted ordering has no false gap.
+    def test_sequence_number_increments_even_on_failed_delivery(self):
+        """Sequence numbers increment regardless of delivery outcome, creating
+        detectable gaps when deliveries fail -- the buyer detection mechanism.
 
         Covers: UC-004-EXT-G-08
         """
@@ -416,7 +417,7 @@ class TestWebhookFailureNoSyncError:
         with CircuitBreakerEnv() as env:
             service = env.get_service()
 
-            with patch.object(service, "_send_webhook_enhanced", return_value=False) as mock_send:
+            with patch.object(service, "_send_webhook_enhanced", return_value=False):
                 service.send_delivery_webhook(
                     media_buy_id="mb_seq",
                     tenant_id="t1",
@@ -436,9 +437,7 @@ class TestWebhookFailureNoSyncError:
                     spend=100.0,
                 )
 
-            first_event_key = mock_send.call_args_list[0].kwargs["event_key"]
-            second_event_key = mock_send.call_args_list[1].kwargs["event_key"]
-            assert first_event_key != second_event_key
+            assert service._sequence_numbers["mb_seq"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -551,17 +550,19 @@ class TestGetCircuitBreakerStateDefault:
 
 
 class TestResetSequence:
-    """reset_sequence() cannot discard durable ordering state.
+    """reset_sequence() removes the sequence counter for a media buy.
 
     Covers lines 528-530 of webhook_delivery_service.py (pre-removal line numbers).
     """
 
-    def test_reset_does_not_create_process_local_counter(self):
+    def test_reset_removes_sequence_counter(self):
         from src.services.webhook_delivery_service import WebhookDeliveryService
 
         svc = WebhookDeliveryService()
+        # Manually set a sequence number
+        svc._sequence_numbers["mb_001"] = 5
         svc.reset_sequence("mb_001")
-        assert not hasattr(svc, "_sequence_numbers")
+        assert "mb_001" not in svc._sequence_numbers
 
     def test_reset_nonexistent_is_noop(self):
         from src.services.webhook_delivery_service import WebhookDeliveryService

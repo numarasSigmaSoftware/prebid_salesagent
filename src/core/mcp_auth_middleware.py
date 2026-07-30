@@ -46,7 +46,7 @@ class MCPAuthMiddleware(Middleware):
         require_auth = tool_name not in AUTH_OPTIONAL_TOOLS
         application_context = (context.message.arguments or {}).get("context")
 
-        # AUTH before VERSION (cross-transport parity). resolve_identity
+        # AUTH before VERSION (cross-transport parity, #1546). resolve_identity
         # raises for an INVALID token; a MISSING token returns a principal-less
         # identity, so reject that here too — otherwise an auth-required tool
         # falls through to RequestCompatMiddleware's version check and a bad pin

@@ -43,20 +43,6 @@ def session_returning(mappings, context, webhooks) -> MagicMock:
     scalars_context.first.return_value = context
     scalars_webhooks = MagicMock()
     scalars_webhooks.all.return_value = webhooks
-    registered = webhooks[0] if webhooks else None
-    if registered is not None:
-        defaults = {
-            "url": "https://buyer.example/webhook",
-            "authentication_type": None,
-            "authentication_token": None,
-            "operation_id": None,
-            "token": None,
-            "application_context": None,
-        }
-        for name, value in defaults.items():
-            if not hasattr(registered, name):
-                setattr(registered, name, value)
-    scalars_webhooks.first.return_value = registered
 
     session = MagicMock()
     session.scalars.side_effect = [scalars_mapping, scalars_context, scalars_webhooks]

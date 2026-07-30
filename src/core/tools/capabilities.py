@@ -8,9 +8,8 @@ This module follows the MCP/A2A shared implementation pattern from CLAUDE.md.
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
 
-from adcp.types import ContextObject, GetAdcpCapabilitiesRequest
+from adcp.types import ContextObject, GetAdcpCapabilitiesRequest, GetAdcpCapabilitiesResponse
 from adcp.types.generated_poc.core.media_buy_features import MediaBuyFeatures
 from adcp.types.generated_poc.core.postal_area_support import (
     PostalAreaSupport,  # adcp 6.6: standalone GeoPostalAreas removed; capabilities use PostalAreaSupport
@@ -19,11 +18,8 @@ from adcp.types.generated_poc.enums.channels import MediaChannel
 from adcp.types.generated_poc.enums.specialism import AdcpSpecialism
 from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     Adcp,
-    Algorithm,
     Execution,
     GeoMetros,
-    Identity,
-    KeyOrigins,
     MajorVersion,
     MediaBuy,
     Portfolio,
@@ -32,9 +28,8 @@ from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     SupportedVersion,
     # FIXME(#1388): Targeting has a local subclass; import from src.core.schemas (Pattern #7/#4).
     Targeting,
-    WebhookSigning,
 )
-from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import Idempotency as IdempotencySupported
+from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import Idempotency3 as IdempotencyUnsupported
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 
@@ -47,16 +42,13 @@ from fastmcp.tools.tool import ToolResult
 from src.core import adcp_version
 from src.core.application_context import dump_adcp_response
 from src.core.auth import get_principal_object, require_identity
-from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
 from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.helpers import enum_value
 from src.core.helpers.activity_helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schemas import GetAdcpCapabilitiesResponse
 from src.core.tool_context import ToolContext
 from src.core.validation_helpers import adcp_validation_boundary
-from src.core.webhook_signing_config import WebhookSigningConfigurationError, load_webhook_signing_config
 from src.services.targeting_capabilities import supports_property_list_filtering
 
 logger = logging.getLogger(__name__)
@@ -92,13 +84,7 @@ def _requested_protocol_domains(req: GetAdcpCapabilitiesRequest | None) -> set[s
     return {enum_value(p) for p in requested}
 
 
-# Specialisms are trust-bearing AAO compliance claims. The implementation
-# supports the media-buy baseline but does not yet implement every required
-# sales-non-guaranteed tool/scenario (notably sync_governance), so it must not
-# advertise that bundle.
-_DEFAULT_SPECIALISMS: tuple[AdcpSpecialism, ...] = ()
-IN_FLIGHT_MAX_SECONDS = 300
-assert IN_FLIGHT_MAX_SECONDS <= int(DEFAULT_REPLAY_TTL.total_seconds())
+_DEFAULT_SPECIALISMS: tuple[AdcpSpecialism, ...] = (AdcpSpecialism.sales_non_guaranteed,)
 
 
 def _build_capabilities_request(
@@ -137,37 +123,40 @@ def _build_adcp_block() -> Adcp:
         # semver: the schema types it ``string`` and marks it optional, so an
         # absent advisory field is conformant where a null would not be.
         **adcp_version.advisory_build_version_field(),
-        idempotency=IdempotencySupported(
-            supported=True,
-            replay_ttl_seconds=int(DEFAULT_REPLAY_TTL.total_seconds()),
-            in_flight_max_seconds=IN_FLIGHT_MAX_SECONDS,
-        ),
+        # FIXME(#1607): the schema models `supported` as ONE agent-wide binary
+        # claim, but this agent's real behavior is genuinely mixed — neither
+        # value is fully truthful, and `false` below is the lesser-wrong
+        # choice, not a resolved one. `IdempotencyUnsupported`'s own semantics
+        # ("sending a key is a no-op ... the seller will NOT return
+        # IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
+        # double-process") are FALSE for create_media_buy specifically: it
+        # still deduplicates a repeated key (verbatim replay of the stored
+        # success), still raises IDEMPOTENCY_CONFLICT on a same-key
+        # different-payload retry, and still raises IDEMPOTENCY_EXPIRED past
+        # the replay window. Every OTHER mutating tool (update_media_buy,
+        # sync_accounts, sync_creatives) validates and accepts the key but
+        # performs no cache read, so a retry re-executes and can double-spend
+        # or double-sync — which is what `supported=true` would have falsely
+        # promised was safe, for twelve of thirteen call sites. `false` was
+        # chosen as the narrower defect (create_media_buy behaving BETTER
+        # than advertised is safer than the other twelve behaving WORSE than
+        # advertised), not as a truthful declaration. Resolving this for real
+        # means either extending genuine replay/conflict/expired handling to
+        # every mutating tool (then flipping to true) or removing
+        # create_media_buy's dedup so false becomes wire-accurate — both are
+        # deliberately deferred: the first is a substantial feature build with
+        # real regression risk on spend-affecting update_media_buy, the second
+        # is an active regression of a working duplicate-booking safety net.
+        # Do not treat this line as closed by future drive-by cleanup without
+        # picking one of those two.
+        # The SDK generates the discriminated union as two classes named
+        # ``Idempotency`` (supported=True) and ``Idempotency3`` (supported=False)
+        # — the numeric suffix is a codegen artifact of the schema's own
+        # generation note ("code generators produce two named types
+        # (IdempotencySupported, IdempotencyUnsupported)"), imported here under
+        # a readable alias since the generated name carries no meaning.
+        idempotency=IdempotencyUnsupported(supported=False),
     )
-
-
-def _webhook_signing_posture() -> dict[str, Any]:
-    """Describe the deployable RFC 9421 key and its published trust root."""
-    try:
-        config = load_webhook_signing_config()
-    except WebhookSigningConfigurationError as exc:
-        logger.error("Invalid default webhook-signing configuration: %s", exc)
-        config = None
-    return {
-        "webhook_signing": WebhookSigning(
-            supported=config is not None,
-            profile="adcp/webhook-signing/v1" if config is not None else None,
-            algorithms=[Algorithm(config.algorithm)] if config is not None else None,
-            legacy_hmac_fallback=True,
-        ),
-        "identity": (
-            Identity(
-                brand_json_url=config.brand_json_url,
-                key_origins=KeyOrigins(webhook_signing=config.jwks_origin),
-            )
-            if config is not None
-            else None
-        ),
-    }
 
 
 # Mapping from adapter channel names to MediaChannel enum values
@@ -230,7 +219,6 @@ def _get_adcp_capabilities_impl(
     supported_protocols = list(_DEFAULT_PROTOCOLS)
     requested_domains = _requested_protocol_domains(req)
     media_buy_requested = requested_domains is None or enum_value(SupportedProtocol.media_buy) in requested_domains
-    signing_posture = _webhook_signing_posture()
     specialisms = list(_DEFAULT_SPECIALISMS) if media_buy_requested else []
 
     if not tenant:
@@ -240,7 +228,6 @@ def _get_adcp_capabilities_impl(
             supported_protocols=supported_protocols,
             specialisms=specialisms,
             context=request_context,
-            **signing_posture,
         )
 
     # If we got here, tenant is truthy, which means identity was not None on line 84
@@ -252,10 +239,20 @@ def _get_adcp_capabilities_impl(
     # Log activity
     log_tool_activity(identity, "get_adcp_capabilities")
 
+    # media_buy is the only domain with detailed capabilities today; if the buyer
+    # filtered it out there is nothing further to compute or return.
+    if not media_buy_requested:
+        return GetAdcpCapabilitiesResponse(
+            adcp=_build_adcp_block(),
+            supported_protocols=supported_protocols,
+            specialisms=specialisms,
+            last_updated=datetime.now(UTC),
+            context=request_context,
+        )
+
     # Get adapter to determine channels and capabilities
     primary_channels: list[MediaChannel] = []
     adapter = None
-    principal = None
     try:
         # Get the Principal object to pass to adapter
         principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
@@ -268,27 +265,6 @@ def _get_adcp_capabilities_impl(
                         primary_channels.append(CHANNEL_MAPPING[channel_name.lower()])
     except Exception as e:
         logger.warning(f"Could not get adapter channels: {e}")
-
-    media_buy_safe = principal is None or bool(
-        adapter is not None
-        and getattr(adapter, "supports_media_buy_create_reconciliation", True)
-        and getattr(adapter, "supports_media_buy_update_reconciliation", True)
-    )
-    if not media_buy_safe:
-        supported_protocols = [SupportedProtocol.creative]
-        specialisms = []
-
-    # Do not expose media-buy details or commitments for an adapter that cannot
-    # safely reconcile keyed consequential retries.
-    if not media_buy_requested or not media_buy_safe:
-        return GetAdcpCapabilitiesResponse(
-            adcp=_build_adcp_block(),
-            supported_protocols=supported_protocols,
-            specialisms=specialisms,
-            last_updated=datetime.now(UTC),
-            context=request_context,
-            **signing_posture,
-        )
 
     # Default to display if we couldn't determine from adapter
     if not primary_channels:
@@ -411,18 +387,23 @@ def _get_adcp_capabilities_impl(
     )
 
     # Build media_buy capabilities
-    media_buy_kwargs: dict[str, Any] = {}
-    if signing_posture["webhook_signing"].supported:
-        media_buy_kwargs["reporting_delivery_methods"] = ["webhook"]
     media_buy = MediaBuy(
         portfolio=portfolio,
         features=features,
         execution=execution,
-        **media_buy_kwargs,
     )
 
-    # Build response. Specialism bundles remain empty until every required
-    # tool and graded scenario for a bundle passes.
+    # Build response
+    # specialisms declaration activates the storyboard scenarios bundled under
+    # `sales-non-guaranteed` (`inventory_list_targeting`, `inventory_list_no_match`,
+    # `delivery_reporting`, `pending_creatives_to_start`, `invalid_transitions`).
+    # The runner gates scenarios by specialism, not by `supported_protocols` alone.
+    #
+    # We declare the specialism even though `pending_creatives_to_start` and
+    # `invalid_transitions` are not yet fully green. Storyboard compliance runs
+    # are advisory — no required CI job executes them — so those scenario
+    # failures don't block merge, and the public declaration forces
+    # prioritization of the remaining gaps instead of hiding them.
     response = GetAdcpCapabilitiesResponse(
         adcp=_build_adcp_block(),
         supported_protocols=supported_protocols,
@@ -430,7 +411,6 @@ def _get_adcp_capabilities_impl(
         media_buy=media_buy,
         last_updated=datetime.now(UTC),
         context=request_context,
-        **signing_posture,
     )
 
     return response

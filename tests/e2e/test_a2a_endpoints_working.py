@@ -307,13 +307,17 @@ class TestA2ARequestHandler:
         "request_cls, method_name",
         [(GetTaskRequest, "on_get_task"), (CancelTaskRequest, "on_cancel_task")],
     )
-    async def test_unknown_task_id_raises_task_not_found(self, request_cls, method_name, mocker):
+    async def test_unknown_task_id_raises_task_not_found(self, request_cls, method_name):
         """An unknown task id raises TaskNotFoundError, not the generic internal
-        error a bare None return produces.
+        error a bare None return produces — cancel is the same not-found condition
+        as get, and both route through the shared ``_get_task_or_raise``.
 
-        The current implementation resolves identity first and performs a
-        tenant/principal-scoped durable lookup. Stub those boundaries so this
-        remains a fast handler contract test without opening a database.
+        Fast smoke check on the raise only. It does NOT prove the wire code: the
+        exception carries no code, and the client actually sees -32603 — see
+        ``_get_task_or_raise`` (src/a2a_server/adcp_a2a_server.py) and #1670 for
+        why, plus the xfail'd live-server test in TestA2AServerIntegration that
+        grades the code on the wire. Assert on str(exc), not exc.code — there is
+        none.
 
         Parametrized over both entry points so the shared assertion cannot drift
         between two byte-identical copies.
@@ -323,21 +327,6 @@ class TestA2ARequestHandler:
         alone would let ``data={"task_id": ...}`` be deleted with the suite still
         green, since the id appears in the message either way.
         """
-        identity = MagicMock(tenant_id="tenant-1", principal_id="principal-1")
-        mocker.patch.object(self.handler, "_resolve_a2a_identity", return_value=identity)
-        if method_name == "on_get_task":
-            mocker.patch.object(
-                self.handler,
-                "_require_owned_task",
-                side_effect=TaskNotFoundError(
-                    message="Task not found: task_does_not_exist",
-                    data={"task_id": "task_does_not_exist"},
-                ),
-            )
-        else:
-            uow = mocker.patch("src.a2a_server.adcp_a2a_server.A2ATaskUoW").return_value.__enter__.return_value
-            uow.tasks.get_owned_for_update.return_value = None
-
         with pytest.raises(TaskNotFoundError) as exc:
             await getattr(self.handler, method_name)(request_cls(id="task_does_not_exist"), MagicMock())
         assert "task_does_not_exist" in str(exc.value)  # the requested id is surfaced

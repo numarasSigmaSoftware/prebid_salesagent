@@ -11,25 +11,12 @@ This would have caught the core_get_signals_tool.fn() bug.
 import inspect
 import os
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 # Add parent directories to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-
-@pytest.mark.asyncio
-async def test_a2a_accepts_deep_acyclic_context_before_iterative_wire_capture():
-    from src.a2a_server.adcp_a2a_server import _validate_a2a_application_context
-
-    deep = cursor = {}
-    for _ in range(65):
-        cursor["nested"] = {}
-        cursor = cursor["nested"]
-
-    with patch("src.a2a_server.adcp_a2a_server.record_boundary_error_for_identity"):
-        _validate_a2a_application_context("get_products", {"brief": "ads", "context": deep}, None)
 
 
 class TestCoreToolImports:

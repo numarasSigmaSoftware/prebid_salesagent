@@ -17,15 +17,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from src.adapters.base import (
-    AdapterCapabilities,
-    AdServerAdapter,
-    CreativeEngineAdapter,
-    DownstreamMutation,
-    ReconciliationOutcome,
-    ReconciliationResult,
-    TargetingCapabilities,
-)
+from src.adapters.base import AdapterCapabilities, AdServerAdapter, CreativeEngineAdapter, TargetingCapabilities
 from src.adapters.broadstreet.client import BroadstreetClient
 from src.adapters.broadstreet.config_schema import parse_implementation_config
 from src.adapters.broadstreet.managers import (
@@ -70,16 +62,6 @@ class BroadstreetAdapter(AdServerAdapter):
     """
 
     adapter_name = "broadstreet"
-    supports_media_buy_create_reconciliation = False
-    supports_media_buy_update_reconciliation = False
-
-    def reconcile_media_buy_create(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Fail closed until Broadstreet exposes an exact operation marker."""
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
-
-    def reconcile_media_buy_update(self, mutation: DownstreamMutation) -> ReconciliationResult:
-        """Fail closed because mutable provider state cannot prove causation."""
-        return ReconciliationResult(ReconciliationOutcome.UNKNOWN)
 
     # Broadstreet specializes in display advertising
     default_channels = ["display"]

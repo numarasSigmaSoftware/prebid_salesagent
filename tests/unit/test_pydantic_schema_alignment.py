@@ -29,7 +29,6 @@ from src.core.exceptions import AdCPInvalidRequestError
 from src.core.schemas import (
     CreateMediaBuyRequest,
     CreateMediaBuySuccess,
-    GetAdcpCapabilitiesResponse,
     GetMediaBuyDeliveryRequest,
     GetProductsRequest,
     GetProductsResponse,
@@ -757,18 +756,6 @@ class _RegistryRow:
 # GetMediaBuysResponse, GetAllMediaBuyDelivery, Adapter*) are not spec-grounded
 # success arms and are excluded.
 _RESPONSE_MODEL_REGISTRY: list[_RegistryRow] = [
-    _RegistryRow(
-        schema_ref="/schemas/protocol/get-adcp-capabilities-response.json",
-        selector="supported_protocols",
-        model=GetAdcpCapabilitiesResponse,
-        sample_override={
-            "adcp": {
-                "major_versions": [3],
-                "idempotency": {"supported": True, "replay_ttl_seconds": 86400},
-            },
-            "supported_protocols": ["creative"],
-        },
-    ),
     _RegistryRow(
         schema_ref="/schemas/media-buy/get-products-response.json",
         selector="products",

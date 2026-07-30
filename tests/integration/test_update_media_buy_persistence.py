@@ -20,8 +20,7 @@ from src.core.database.models import (
 from src.core.database.models import (
     Principal as ModelPrincipal,
 )
-from src.core.database.repositories.uow import MediaBuyUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPConflictError, AdCPMediaBuyNotFoundError
+from src.core.exceptions import AdCPAuthenticationError, AdCPMediaBuyNotFoundError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import UpdateMediaBuyRequest, UpdateMediaBuyResponse, UpdateMediaBuyResult
 from src.core.tools.media_buy_update import _update_media_buy_impl
@@ -149,7 +148,6 @@ def test_update_media_buy_with_database_persisted_buy(test_tenant_setup):
     # Test: Call update_media_buy (should not raise "Media buy not found")
     req = UpdateMediaBuyRequest(
         media_buy_id=media_buy_id,
-        revision=1,
     )
     result = _update_media_buy_impl(req=req, identity=identity)
 
@@ -158,18 +156,6 @@ def test_update_media_buy_with_database_persisted_buy(test_tenant_setup):
     response = result.response  # _impl returns UpdateMediaBuyResult; domain response is on .response
     assert isinstance(response, UpdateMediaBuyResponse)
     assert response.media_buy_id == media_buy_id
-    assert response.revision == 2
-    with MediaBuyUoW(tenant_id) as uow:
-        persisted = uow.media_buys.get_by_id(media_buy_id)
-        assert persisted is not None
-        assert persisted.revision == 2
-
-    with pytest.raises(AdCPConflictError) as exc_info:
-        _update_media_buy_impl(req=req, identity=identity)
-    assert exc_info.value.details == {
-        "requested_revision": 1,
-        "current_revision": 2,
-    }
 
 
 @pytest.mark.requires_db

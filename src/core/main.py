@@ -194,6 +194,11 @@ creative_assignments_v2: dict[str, CreativeAssignment] = {}  # assignment_id -> 
 
 # Import audit logger for later use
 
+# Import context manager for workflow steps
+from src.core.context_manager import ContextManager
+
+context_mgr = ContextManager()
+
 # --- Adapter Configuration ---
 # Get adapter from config, fallback to mock
 SELECTED_ADAPTER = ((config.get("ad_server", {}).get("adapter") or "mock") if config else "mock").lower()

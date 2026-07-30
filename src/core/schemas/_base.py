@@ -35,7 +35,6 @@ from adcp.types import Format as LibraryFormat
 
 # Import types from stable API (per adcp 2.7.0+)
 from adcp.types import FormatId as LibraryFormatId
-from adcp.types import GetAdcpCapabilitiesResponse as LibraryGetAdcpCapabilitiesResponse
 from adcp.types import PackageRequest as LibraryPackageRequest
 
 # Import types from stable API (per adcp 2.9.0+ - all types now in stable)
@@ -260,16 +259,6 @@ class SalesAgentBaseModel(LibraryAdCPBaseModel):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
 
-class ReplayableResponseMixin:
-    """Typed, true-only replay metadata shared by idempotent read responses."""
-
-    replayed: bool = Field(default=False, exclude_if=lambda value: not value)
-
-
-class GetAdcpCapabilitiesResponse(ReplayableResponseMixin, LibraryGetAdcpCapabilitiesResponse):
-    """Extends the library capabilities response with standard replay metadata."""
-
-
 def _mirror_media_buy_status(model: Any) -> Any:
     """Backfill the deprecated body-level ``status`` from the domain ``media_buy_status``.
 
@@ -465,14 +454,6 @@ class CreateMediaBuySubmitted(AdCPCreateMediaBuySubmitted):
 CreateMediaBuyResponse = CreateMediaBuySuccess | CreateMediaBuyError
 
 
-def apply_replay_marker(result: dict[str, Any], replayed: bool) -> dict[str, Any]:
-    """Make ``replayed`` a true-only wire marker from one shared implementation."""
-    result.pop("replayed", None)
-    if replayed:
-        result["replayed"] = True
-    return result
-
-
 class TaskResultEnvelope(SalesAgentBaseModel):
     """DRY base for protocol-status-wrapping result types.
 
@@ -482,13 +463,12 @@ class TaskResultEnvelope(SalesAgentBaseModel):
     """
 
     status: str
-    replayed: bool = False
 
     @model_serializer(mode="wrap")
     def _serialize(self, serializer, info):
         result = self.response.model_dump(mode=info.mode, context=info.context)
         result["status"] = self.status
-        return apply_replay_marker(result, self.replayed)
+        return result
 
 
 class CreateMediaBuyResult(TaskResultEnvelope):
@@ -508,6 +488,20 @@ class CreateMediaBuyResult(TaskResultEnvelope):
     # OR submitted — the replay test asserts True on a submitted replay). Injected
     # at response time, never stored in the cached body; omitted when False on
     # EVERY variant so fresh responses are byte-identical across variants.
+    replayed: bool = False
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, serializer, info):
+        result = self.response.model_dump(mode=info.mode, context=info.context)
+        result["status"] = self.status
+        # The adcp 6.6 submitted base declares replayed=False as a FIELD, so it
+        # rides response.model_dump(); strip it — the wrapper is the marker's
+        # single source (PR #1567 round-3).
+        result.pop("replayed", None)
+        if self.replayed:
+            result["replayed"] = True
+        return result
+
     def __iter__(self):
         """Support tuple unpacking: response, status = result."""
         return iter((self.response, self.status))
@@ -559,8 +553,8 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     # adcp 6.6 (spec 3.1.1) made status/revision required on the update success envelope.
     # Invariant for a synchronous applied update, so declare spec-correct defaults here
     # rather than threading identical literals through every constructor (see the twin
-    # note on CreateMediaBuySuccess). The update implementation replaces the
-    # default with the atomically incremented persisted media-buy revision.
+    # note on CreateMediaBuySuccess). revision defaults to 1; real per-buy revision
+    # tracking is separate media-buy lifecycle work.
     status: Literal["completed"] = "completed"
     revision: int = 1
 
@@ -1980,7 +1974,7 @@ RawIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic ne
     ),
 ]
 
-# Read requests accept the same raw key shape as 3.1 envelope metadata,
+# Read requests accept the same raw key shape as inert 3.1 envelope metadata,
 # but omission remains valid during the 3.1 grace window.  Keep the annotation
 # non-nullable in generated schemas while ``SkipValidation`` preserves an
 # explicit JSON null until the shared ingress validator can reject it with the
@@ -1988,7 +1982,7 @@ RawIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic ne
 RawOptionalIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic need runtime Annotated metadata
     SkipValidation[str],
     Field(
-        description="Optional replay key (AdCP 3.1.1, 16-255 characters when supplied).",
+        description="Optional inert request key (AdCP 3.1.1, 16-255 characters when supplied).",
         json_schema_extra={
             "minLength": _IDEMPOTENCY_KEY_MIN,
             "maxLength": _IDEMPOTENCY_KEY_MAX,
@@ -1997,13 +1991,18 @@ RawOptionalIdempotencyKey: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pyd
     ),
 ]
 
-# Preserve the raw wire value (including explicit JSON null) until the shared
-# update boundary can classify it consistently across MCP, A2A (whose Struct
-# decoder represents JSON integers as floats), and REST.
+# ``revision`` is intentionally unsupported by this seller until optimistic
+# concurrency can be honored atomically.  Keep the raw wire value (including
+# explicit JSON null) intact until the shared update boundary can reject every
+# supplied value with the same fail-loud error.  ``SkipValidation`` does not
+# weaken discovery: MCP/OpenAPI still advertise the pinned integer/minimum-one
+# input shape, never null.
 RawUnsupportedRevision: TypeAlias = Annotated[  # noqa: UP040 — FastAPI/Pydantic need runtime Annotated metadata
     SkipValidation[int],
     Field(
-        description="Current media-buy revision used as an optimistic-concurrency precondition.",
+        description="Optimistic-concurrency revision. Not supported by this seller; rejected if supplied.",
+        # Discovery constraint only. Runtime values deliberately stay raw so
+        # explicit null and wrong types reach the shared unsupported guard.
         json_schema_extra={"minimum": 1},
     ),
 ]
@@ -2059,9 +2058,9 @@ def require_idempotency_key(key: str | None) -> None:
     """Enforce the spec-required idempotency key at a transport boundary.
 
     AdCP 3.1.1 requires the field on every mutating task request. Requiredness
-    and shape are separate checks from replay behavior: this seller advertises
-    mutation-wide idempotency support and every mutation still rejects a
-    missing key before attempting reservation or work.
+    and shape are separate from the capability's replay guarantee: this seller
+    advertises idempotency support, and the tools that do not yet deduplicate
+    still MUST reject a missing key.
     """
     if key is None:
         from src.core.exceptions import missing_idempotency_key_error
@@ -2846,7 +2845,7 @@ class GetMediaBuysRequest(SalesAgentBaseModel):
     context: ContextObject | None = Field(default=None, description="Application-level context")
 
 
-class GetMediaBuysResponse(ReplayableResponseMixin, NestedModelSerializerMixin, SalesAgentBaseModel):
+class GetMediaBuysResponse(NestedModelSerializerMixin, SalesAgentBaseModel):
     """Response from get_media_buys.
 
     Matches the adcp 3.6.0 GetMediaBuysResponse spec.

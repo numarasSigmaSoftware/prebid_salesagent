@@ -20,7 +20,6 @@ from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import (
     FormatId,
     NestedModelSerializerMixin,
-    ReplayableResponseMixin,
     SalesAgentBaseModel,
     _upgrade_legacy_format_ids,
 )
@@ -261,7 +260,7 @@ class GetProductsRequest(LibraryGetProductsRequest):
     )
 
 
-class GetProductsResponse(ReplayableResponseMixin, NestedModelSerializerMixin, LibraryGetProductsResponse):
+class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse):
     """Extends library GetProductsResponse - all fields inherited from AdCP spec.
 
     Per AdCP PR #113, this response contains ONLY domain data.

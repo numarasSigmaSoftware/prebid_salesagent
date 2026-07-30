@@ -30,11 +30,6 @@ _MOCK_IDENTITY = ResolvedIdentity(
 )
 
 
-async def _execute_read_without_cache(**kwargs):
-    """Unit-test seam: exercise the route work without opening a real DB."""
-    return await kwargs["work"]()
-
-
 # ---------------------------------------------------------------------------
 # Discovery endpoints (auth-optional)
 # ---------------------------------------------------------------------------
@@ -79,17 +74,10 @@ class TestCapabilitiesProtocolsQuery:
         assert response.status_code == 400
         assert_envelope_shape(response.json(), "VALIDATION_ERROR", recovery="correctable")
 
-    def test_valid_idempotency_key_reaches_replay_service(self):
-        with patch(
-            "src.routes.api_v1._execute_rest_read",
-            new_callable=AsyncMock,
-            side_effect=_execute_read_without_cache,
-        ) as execute_read:
-            response = client.get("/api/v1/capabilities?idempotency_key=valid-read-key-0001")
-
+    def test_valid_idempotency_key_is_inert(self):
+        response = client.get("/api/v1/capabilities?idempotency_key=valid-read-key-0001")
         assert response.status_code == 200
         assert response.json()["supported_protocols"] == ["media_buy"]
-        assert execute_read.await_args.kwargs["idempotency_key"] == "valid-read-key-0001"
 
     def test_malformed_idempotency_key_is_validation_error(self):
         response = client.get("/api/v1/capabilities?idempotency_key=short")
@@ -101,15 +89,42 @@ class TestCapabilitiesProtocolsQuery:
             message_substr="idempotency_key is too short",
         )
 
-    def test_deeply_nested_context_is_accepted_without_an_arbitrary_depth_limit(self):
+    def test_deeply_nested_context_on_a_successful_response_is_echoed_on_the_real_wire(self):
+        """Real-transport sibling of the unit-level dump_adcp_response oracle.
+
+        dump_adcp_response() used to call the whole response model's
+        model_dump() before its own safe iterative context serialization ran,
+        so a SUCCESSFUL response with a pathologically deep context crashed
+        just as hard as an error response did. GET's query string can't carry
+        a payload this size (a real HTTP URL-length limit, unrelated to this
+        fix), so this drives a POST body instead — get_products' real
+        apply_version_compat -> dump_adcp_response call chain, with only the
+        DB-bound impl mocked, so the actual wire serialization path is
+        exercised end to end.
+        """
+        from adcp.types import ContextObject
+
+        from src.core.schemas.product import GetProductsResponse
+
+        # 500 levels: comfortably past the old 100-level bound this fix
+        # removed, and within FastAPI's own jsonable_encoder ceiling (a
+        # SEPARATE, framework-level pure-Python-recursion limit around
+        # ~900-1000 levels, independent of this module — tracked separately,
+        # not this fix's concern).
         deep = cursor = {}
-        for _ in range(65):
+        for _ in range(500):
             cursor["nested"] = {}
             cursor = cursor["nested"]
 
-        from src.core.application_context_values import validate_context_value
+        with patch("src.core.tools.products._get_products_impl") as mock_core:
+            mock_core.return_value = GetProductsResponse(products=[], context=ContextObject.model_validate(deep))
+            response = client.post(
+                "/api/v1/products",
+                json={"brief": "ads", "adcp_version": "3.1"},
+            )
 
-        assert validate_context_value(deep) is None
+        assert response.status_code == 200, response.text
+        assert response.json()["context"] == deep
 
 
 _STANDARD_READ_REST_CASES = (
@@ -187,11 +202,6 @@ class TestStandardReadIdempotencyRestBoundary:
                 "src.routes.api_v1.validate_standard_read_idempotency_key",
                 wraps=real_validator,
             ) as validate_key,
-            patch(
-                "src.routes.api_v1._execute_rest_read",
-                new_callable=AsyncMock,
-                side_effect=_execute_read_without_cache,
-            ) as execute_read,
         ):
             mock_core.return_value = {}
             response = client.post(url, json={**body, **key_fields}, headers=headers)
@@ -199,10 +209,8 @@ class TestStandardReadIdempotencyRestBoundary:
         assert response.status_code == 200, response.text
         if key_fields:
             validate_key.assert_called_once_with(tool_name, key_fields)
-            assert execute_read.await_args.kwargs["idempotency_key"] == key_fields["idempotency_key"]
         else:
             validate_key.assert_not_called()
-            assert execute_read.await_args.kwargs["idempotency_key"] is None
 
     @pytest.mark.parametrize(
         ("tool_name", "url", "body", "core_target", "auth_required"),
@@ -301,33 +309,6 @@ class TestCreateMediaBuyEndpoint:
             json={"packages": []},
         )
         assert response.status_code == 401
-
-    @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
-    def test_pause_on_create_is_explicitly_unsupported(self, mock_resolve):
-        response = client.post(
-            "/api/v1/media-buys",
-            json={
-                "brand": {"domain": "testbrand.com"},
-                "packages": [],
-                "start_time": "2026-01-01T00:00:00Z",
-                "end_time": "2026-02-01T00:00:00Z",
-                "idempotency_key": "pause-create-rest-0001",
-                "paused": True,
-                "context": {"test_case": "pause-on-create"},
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        assert response.status_code == 422
-        assert_envelope_shape(
-            response.json(),
-            "UNSUPPORTED_FEATURE",
-            recovery="correctable",
-        )
-        expected_suggestion = "Create the media buy, then call update_media_buy with paused=true."
-        assert response.json()["adcp_error"]["suggestion"] == expected_suggestion
-        assert response.json()["errors"][0]["suggestion"] == expected_suggestion
-        assert response.json()["context"] == {"test_case": "pause-on-create"}
 
 
 # ---------------------------------------------------------------------------

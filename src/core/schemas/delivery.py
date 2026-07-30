@@ -29,7 +29,7 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
 from pydantic import ConfigDict, Field
 
 from src.core.config import get_pydantic_extra_mode
-from src.core.schemas._base import NestedModelSerializerMixin, ReplayableResponseMixin, SalesAgentBaseModel
+from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
 
 # ---------------------------------------------------------------------------
 # Simple enum / leaf types
@@ -307,11 +307,7 @@ class AggregatedTotals(LibraryAggregatedTotals):
 # ---------------------------------------------------------------------------
 
 
-class GetMediaBuyDeliveryResponse(
-    ReplayableResponseMixin,
-    NestedModelSerializerMixin,
-    LibraryGetMediaBuyDeliveryResponse,
-):
+class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuyDeliveryResponse):
     """Extends library GetMediaBuyDeliveryResponse with local overrides.
 
     Library provides: reporting_period, currency, errors, context, ext,

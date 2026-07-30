@@ -86,6 +86,7 @@ class TestExecuteApprovedStatusUpdate:
         (True, None) but never updates the status field.
         """
         # -- Arrange --
+        tenant = _make_mock_tenant()
         media_buy = _make_mock_media_buy()
         db_package = _make_mock_package()
         product = _make_mock_product()
@@ -106,7 +107,7 @@ class TestExecuteApprovedStatusUpdate:
         mock_adapter.orders_manager = None
 
         # Set up four UoW instances the function opens:
-        # 1. Load media_buy, packages, products (tenant is a scalar snapshot)
+        # 1. Load tenant, media_buy, packages, products
         # 2. Persist platform_order_id after adapter success
         # 3. Handle creative uploads
         # 4. Update media buy status to 'active' (the fix)
@@ -114,8 +115,9 @@ class TestExecuteApprovedStatusUpdate:
         mock_session_2 = MagicMock()
         mock_session_3 = MagicMock()
 
-        # Session 1 scalars: media_buy, packages, product
+        # Session 1 scalars: tenant, media_buy, packages, product
         session_1_scalars = [
+            MagicMock(first=MagicMock(return_value=tenant)),
             MagicMock(first=MagicMock(return_value=media_buy)),
             MagicMock(all=MagicMock(return_value=[db_package])),
             MagicMock(first=MagicMock(return_value=product)),

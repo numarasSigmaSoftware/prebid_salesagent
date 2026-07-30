@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,10 +21,10 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_request import (
     ReportingDimensions,
 )
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from src.core.adcp_version import validate_adcp_version_pins
-from src.core.application_context import dump_adcp_response, validate_application_context
+from src.core.application_context import dump_adcp_response
 from src.core.auth_context import require_auth, resolve_auth
 from src.core.exceptions import AdCPValidationError
 from src.core.request_compat import ADCP_NEGOTIATION_FIELDS, validate_standard_read_idempotency_key
@@ -57,7 +57,6 @@ from src.core.tools.creatives import sync_wrappers as creatives_sync_module
 from src.core.validation_helpers import adcp_validation_boundary
 from src.core.version_compat import apply_version_compat
 from src.core.webhook_validator import validated_callback_url_scope
-from src.services.idempotency_replay import execute_idempotent_read
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +195,6 @@ async def _validate_version_pins(request: Request) -> str | None:
             body = None  # malformed/empty JSON is reported by the endpoint's body parsing
         if isinstance(body, dict):
             pins = _merge_rest_version_pins(query_pins, body)
-    validate_application_context(pins.get("context"))
     validate_adcp_version_pins(pins)
     return _effective_compat_version(pins)
 
@@ -221,7 +219,7 @@ async def _version_after_resolve(request: Request, _identity=resolve_auth) -> st
 async def _version_after_require(request: Request, _identity=require_auth) -> str | None:
     """Version negotiation AFTER auth ENFORCEMENT (auth-required routes).
 
-    AUTH before VERSION: ``require_auth`` is a sub-dependency, so an
+    AUTH before VERSION (#1546): ``require_auth`` is a sub-dependency, so an
     unauthenticated caller is rejected with AUTH_REQUIRED before the version
     check runs — you don't disclose ``supported_versions`` (a VERSION_UNSUPPORTED
     body) to a caller who hasn't authenticated. Parity with the MCP auth
@@ -268,7 +266,7 @@ class _VersionedBody(SalesAgentBaseModel):
     ``adcp_major_version`` is the deprecated integer pin; it is declared (not
     read by handlers) so the strict dev-mode base (``extra="forbid"``) does not
     reject a buyer that sends it — negotiation itself reads the RAW body in
-    ``_validate_version_pins`` before Pydantic parsing.
+    ``_validate_version_pins`` before Pydantic parsing (#1546).
     """
 
     # None, not "1.0.0". This default is PUBLISHED in the OpenAPI schema, and
@@ -298,32 +296,12 @@ def _validate_rest_read_idempotency(tool_name: str, body: _VersionedBody) -> Non
         validate_standard_read_idempotency_key(tool_name, {"idempotency_key": body.idempotency_key})
 
 
-async def _execute_rest_read[T: BaseModel | dict[str, Any]](
-    *,
-    tool_name: str,
-    idempotency_key: str | None,
-    identity: ResolvedIdentity | None,
-    raw_wire_payload: dict[str, Any],
-    response_type: type[T] | None,
-    work: Callable[[], Awaitable[T]],
-) -> T:
-    """Run a REST read through the transport-independent replay service."""
-    return await execute_idempotent_read(
-        tool_name=tool_name,
-        idempotency_key=idempotency_key,
-        identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=response_type,
-        work=work,
-    )
-
-
 class GetProductsBody(_VersionedBody):
     brief: str = ""
     # dict BrandReference or string domain/URL shorthand (#1324)
     brand: dict[str, Any] | str | None = None
     filters: dict[str, Any] | None = None
-    context: dict[str, Any] | None = None  # AdCP application context, echoed on the response
+    context: dict[str, Any] | None = None  # adcp application-level context, echoed on the response (#1512)
 
 
 class CreateMediaBuyBody(_VersionedBody):
@@ -344,8 +322,8 @@ class CreateMediaBuyBody(_VersionedBody):
     # generic INVALID_REQUEST before require_idempotency_key can emit the same
     # VALIDATION_ERROR used by MCP and A2A.
     idempotency_key: RawIdempotencyKey
-    # AdCP 3.1.1 compatibility; the shared implementation explicitly rejects
-    # paused=true until provider-safe pause-on-create is implemented.
+    # AdCP 3.1.1 create-in-paused-state. Declared but NOT forwarded to the raw wrapper
+    # below, and not honored by _impl even if it were — see #1619.
     paused: bool | None = None
 
 
@@ -468,26 +446,11 @@ class SyncAccountsBody(_VersionedBody):
     push_notification_config: dict[str, Any] | None = None
     # Declared so the body model never drops a REST buyer's key (forbidden as an
     # undeclared extra in dev, silently ignored in prod) — REST must preserve it
-    # like the MCP/A2A siblings do, not be the transport that loses it.
+    # like the MCP/A2A siblings do (#1512), not be the transport that loses it.
     # Preserve the raw JSON type for cross-transport validation parity, while
     # leaving the field required in OpenAPI.
     idempotency_key: RawIdempotencyKey
     context: dict[str, Any] | None = None
-
-
-async def _raw_json_body(request: Request) -> dict[str, Any]:
-    """Return the pre-normalization JSON object used for idempotency hashing."""
-    raw = getattr(request.state, "raw_wire_payload", None)
-    try:
-        payload = json.loads(raw) if raw is not None else await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        logger.debug("REST raw-wire capture unavailable; body validation will reject")
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-# Module-level singleton, matching require_auth (ruff B008 forbids Depends() in defaults).
-raw_json_body = Depends(_raw_json_body)
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +463,6 @@ async def get_products(
     body: GetProductsBody,
     identity: ResolvedIdentity | None = resolve_auth,
     negotiated_version: str | None = Depends(_version_after_resolve),
-    raw_wire_payload: dict[str, Any] = raw_json_body,
 ):
     """Get available products matching the brief (auth-optional discovery skill).
 
@@ -515,27 +477,16 @@ async def get_products(
             filters=body.filters,
             # Forward the buyer's application context so _get_products_impl echoes it
             # back unchanged on the response — REST was the only transport missing this
-            # (MCP/A2A already forward it and the implementation already echoes it).
+            # (MCP/A2A already forward it, the impl already echoes it) (#1512).
             context=body.context,
         )
-
-    async def load_products():
-        return await products_module._get_products_impl(req, identity)
-
-    response = await _execute_rest_read(
-        tool_name="get_products",
-        idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
-        identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=products_module.GetProductsResponse,
-        work=load_products,
-    )
+    response = await products_module._get_products_impl(req, identity)
     # Gate response compatibility on the release the buyer actually negotiated
     # (query or body, adcp_version or adcp_major_version), returned by the
     # _version_after_resolve dependency. Falling back to body.adcp_version alone
     # (default "1.0.0") made a v3 query pin or a major-only pin silently serve the
     # legacy v2 shape (is_fixed / rate), while an unpinned client still gets the v2
-    # default via the legacy fallback. Injecting the dependency runs
+    # default via the fallback (#1512/#1546 review). Injecting the dependency runs
     # the same VERSION_UNSUPPORTED validation the sibling routes' bare
     # dependencies=[...] form does; route handlers must not take a raw Request
     # (structural guard), so the value is threaded via the dependency return.
@@ -601,7 +552,8 @@ async def get_capabilities(
       VALIDATION_ERROR (raised in ``get_adcp_capabilities_raw``'s validation
       boundary when the request model rejects the enum value).
     * ``idempotency_key`` — optional 3.1 read-envelope metadata. A supplied
-      value receives durable replay and conflict semantics.
+      value is shape-validated, then ignored: read tasks have no side effect to
+      deduplicate, so the key is envelope metadata only.
     """
     if idempotency_key is not None:
         validate_standard_read_idempotency_key(
@@ -610,36 +562,14 @@ async def get_capabilities(
         )
     with adcp_validation_boundary(context="get_capabilities request"):
         context_obj = to_context_object(_decode_rest_query_context(context))
-    parsed_protocols = _parse_protocols_query(protocols)
-
-    async def load_capabilities():
-        return await capabilities_module.get_adcp_capabilities_raw(
-            identity=identity,
-            context=context_obj,
-            protocols=parsed_protocols,
-        )
-
-    response = await _execute_rest_read(
-        tool_name="get_adcp_capabilities",
-        idempotency_key=idempotency_key,
-        identity=identity,
-        raw_wire_payload={
-            **({"context": context} if context is not None else {}),
-            **({"protocols": protocols} if protocols is not None else {}),
-            **({"idempotency_key": idempotency_key} if idempotency_key is not None else {}),
-        },
-        response_type=capabilities_module.GetAdcpCapabilitiesResponse,
-        work=load_capabilities,
+    response = await capabilities_module.get_adcp_capabilities_raw(
+        identity=identity, context=context_obj, protocols=_parse_protocols_query(protocols)
     )
     return dump_adcp_response(response)
 
 
 @router.post("/creative-formats", dependencies=[Depends(_version_after_resolve)])
-async def list_creative_formats(
-    body: ListCreativeFormatsBody,
-    identity: ResolvedIdentity | None = resolve_auth,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-):
+async def list_creative_formats(body: ListCreativeFormatsBody, identity: ResolvedIdentity | None = resolve_auth):
     """List available creative formats (auth-optional discovery skill)."""
     from src.core.schemas import ListCreativeFormatsRequest
 
@@ -648,17 +578,7 @@ async def list_creative_formats(
     with adcp_validation_boundary(context="list_creative_formats request"):
         req = ListCreativeFormatsRequest(**body_fields) if body_fields else None
 
-    async def load_formats():
-        return creative_formats_module.list_creative_formats_raw(req=req, identity=identity)
-
-    response = await _execute_rest_read(
-        tool_name="list_creative_formats",
-        idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
-        identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=creative_formats_module.ListCreativeFormatsResponse,
-        work=load_formats,
-    )
+    response = creative_formats_module.list_creative_formats_raw(req=req, identity=identity)
     return dump_adcp_response(response)
 
 
@@ -682,6 +602,37 @@ async def list_authorized_properties(
 # ---------------------------------------------------------------------------
 # Auth-required endpoints
 # ---------------------------------------------------------------------------
+
+
+async def _raw_json_body(request: Request) -> dict[str, Any]:
+    """The HTTP body as sent on the wire — the idempotency payload-hash input.
+
+    A dependency rather than a route ``request`` parameter, so route signatures
+    stay Depends-only (the rest-depends-auth guard). Prefers the pre-rewrite
+    bytes stashed by ``RestCompatMiddleware`` — when a deprecated-field
+    translation fires, ``request.json()`` would observe the NORMALIZED body,
+    not the bytes the buyer sent, and seller-side compat-table changes would
+    flip honest retries into conflicts mid-TTL. Starlette caches the body, so
+    the fallback read does not consume it before model parsing.
+
+    Never raises. A dependency that throws is resolved BEFORE the route's body
+    model, so a decode error here would surface as a bare ``VALIDATION_ERROR``
+    carrying the json module's own message instead of the typed
+    ``INVALID_REQUEST`` + suggestion the body model produces. An undecodable
+    body is not a hash input either — body validation rejects the request, so
+    the route never runs and this ``{}`` never reaches the idempotency hash.
+    """
+    raw = getattr(request.state, "raw_wire_payload", None)
+    try:
+        payload = json.loads(raw) if raw is not None else await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        logger.debug("REST raw-wire capture unavailable; body validation will reject", exc_info=True)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# Module-level singleton, matching require_auth (ruff B008 forbids Depends() in defaults).
+raw_json_body = Depends(_raw_json_body)
 
 
 @router.post("/media-buys", dependencies=[Depends(_version_after_require)])
@@ -720,7 +671,6 @@ async def create_media_buy(
         context=context,
         ext=body.ext,
         idempotency_key=body.idempotency_key,
-        paused=body.paused,
         identity=identity,
         raw_wire_payload=raw_wire_payload,
     )
@@ -728,12 +678,7 @@ async def create_media_buy(
 
 
 @router.put("/media-buys/{media_buy_id}", dependencies=[Depends(_version_after_require)])
-async def update_media_buy(
-    media_buy_id: str,
-    body: UpdateMediaBuyBody,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-    identity: ResolvedIdentity = require_auth,
-):
+async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity: ResolvedIdentity = require_auth):
     """Update an existing media buy (auth required)."""
     # Same context string as _build_update_request's boundary, so a malformed
     # object rejects with an identical message prefix wherever it validates.
@@ -770,17 +715,12 @@ async def update_media_buy(
             idempotency_key=body.idempotency_key,
             revision=body.revision,
             identity=identity,
-            raw_wire_payload=raw_wire_payload,
         )
     return dump_adcp_response(response)
 
 
 @router.post("/media-buys/delivery", dependencies=[Depends(_version_after_require)])
-async def get_media_buy_delivery(
-    body: GetMediaBuyDeliveryBody,
-    identity: ResolvedIdentity = require_auth,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-):
+async def get_media_buy_delivery(body: GetMediaBuyDeliveryBody, identity: ResolvedIdentity = require_auth):
     """Get delivery metrics for media buys (auth required)."""
     _validate_rest_read_idempotency("get_media_buy_delivery", body)
     if body.account is not None:
@@ -792,36 +732,22 @@ async def get_media_buy_delivery(
         assert enriched is not None  # identity is non-None (from require_auth)
         identity = enriched
 
-    async def load_delivery():
-        return media_buy_delivery_module.get_media_buy_delivery_raw(
-            media_buy_ids=body.media_buy_ids,
-            status_filter=body.status_filter,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            reporting_dimensions=body.reporting_dimensions,
-            attribution_window=body.attribution_window,
-            include_package_daily_breakdown=body.include_package_daily_breakdown,
-            context=to_context_object(body.context),
-            identity=identity,
-        )
-
-    response = await _execute_rest_read(
-        tool_name="get_media_buy_delivery",
-        idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
+    response = media_buy_delivery_module.get_media_buy_delivery_raw(
+        media_buy_ids=body.media_buy_ids,
+        status_filter=body.status_filter,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        reporting_dimensions=body.reporting_dimensions,
+        attribution_window=body.attribution_window,
+        include_package_daily_breakdown=body.include_package_daily_breakdown,
+        context=to_context_object(body.context),
         identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=media_buy_delivery_module.GetMediaBuyDeliveryResponse,
-        work=load_delivery,
     )
     return dump_adcp_response(response)
 
 
 @router.post("/creatives/sync", dependencies=[Depends(_version_after_require)])
-async def sync_creatives(
-    body: SyncCreativesBody,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-    identity: ResolvedIdentity = require_auth,
-):
+async def sync_creatives(body: SyncCreativesBody, identity: ResolvedIdentity = require_auth):
     """Sync creatives (auth required)."""
     # Coerce the raw account dict into an AccountReference so sync_creatives_raw
     # resolves it at the transport boundary (mirror create_media_buy / the sibling
@@ -849,54 +775,38 @@ async def sync_creatives(
             account=account_ref,
             idempotency_key=body.idempotency_key,
             identity=identity,
-            raw_wire_payload=raw_wire_payload,
         )
     return dump_adcp_response(response)
 
 
 @router.post("/creatives", dependencies=[Depends(_version_after_require)])
-async def list_creatives(
-    body: ListCreativesBody,
-    identity: ResolvedIdentity = require_auth,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-):
+async def list_creatives(body: ListCreativesBody, identity: ResolvedIdentity = require_auth):
     """List creatives (auth required)."""
     _validate_rest_read_idempotency("list_creatives", body)
     # Coerce the raw wire filters dict into a typed CreativeFilters here (#1493): the
     # merged list_creatives_raw expects a typed object (it calls .model_dump()), and
     # this is where an empty concept_ids etc. surfaces the VALIDATION_ERROR envelope.
     filters = coerce_creative_filters(body.filters)
-
-    async def load_creatives():
-        return creatives_listing_module.list_creatives_raw(
-            media_buy_id=body.media_buy_id,
-            media_buy_ids=body.media_buy_ids,
-            status=body.status,
-            format=body.format,
-            tags=body.tags,
-            created_after=body.created_after,
-            created_before=body.created_before,
-            search=body.search,
-            filters=filters,
-            fields=body.fields,
-            include_performance=body.include_performance,
-            include_assignments=body.include_assignments,
-            include_sub_assets=body.include_sub_assets,
-            page=body.page,
-            limit=body.limit,
-            sort_by=body.sort_by,
-            sort_order=body.sort_order,
-            context=to_context_object(body.context),
-            identity=identity,
-        )
-
-    response = await _execute_rest_read(
-        tool_name="list_creatives",
-        idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
+    response = creatives_listing_module.list_creatives_raw(
+        media_buy_id=body.media_buy_id,
+        media_buy_ids=body.media_buy_ids,
+        status=body.status,
+        format=body.format,
+        tags=body.tags,
+        created_after=body.created_after,
+        created_before=body.created_before,
+        search=body.search,
+        filters=filters,
+        fields=body.fields,
+        include_performance=body.include_performance,
+        include_assignments=body.include_assignments,
+        include_sub_assets=body.include_sub_assets,
+        page=body.page,
+        limit=body.limit,
+        sort_by=body.sort_by,
+        sort_order=body.sort_order,
+        context=to_context_object(body.context),
         identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=creatives_listing_module.ListCreativesResponse,
-        work=load_creatives,
     )
     return dump_adcp_response(response)
 
@@ -914,47 +824,24 @@ async def update_performance_index(body: UpdatePerformanceIndexBody, identity: R
 
 
 @router.post("/accounts", dependencies=[Depends(_version_after_require)])
-async def list_accounts(
-    body: ListAccountsBody,
-    identity: ResolvedIdentity = require_auth,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-):
+async def list_accounts(body: ListAccountsBody, identity: ResolvedIdentity = require_auth):
     """List accounts accessible to the authenticated agent (auth required)."""
     from src.core.schemas.account import ListAccountsRequest
 
     _validate_rest_read_idempotency("list_accounts", body)
     with adcp_validation_boundary(context="list_accounts request"):
         req = ListAccountsRequest(**body.model_dump(exclude_none=True, exclude=_READ_ENVELOPE_EXCLUDE))
-
-    async def load_accounts():
-        return accounts_module.list_accounts_raw(req=req, identity=identity)
-
-    response = await _execute_rest_read(
-        tool_name="list_accounts",
-        idempotency_key=body.idempotency_key if "idempotency_key" in body.model_fields_set else None,
-        identity=identity,
-        raw_wire_payload=raw_wire_payload,
-        response_type=accounts_module.ListAccountsResponse,
-        work=load_accounts,
-    )
+    response = accounts_module.list_accounts_raw(req=req, identity=identity)
     return dump_adcp_response(response)
 
 
 @router.post("/accounts/sync", dependencies=[Depends(_version_after_require)])
-async def sync_accounts(
-    body: SyncAccountsBody,
-    raw_wire_payload: dict[str, Any] = raw_json_body,
-    identity: ResolvedIdentity = require_auth,
-):
+async def sync_accounts(body: SyncAccountsBody, identity: ResolvedIdentity = require_auth):
     """Sync accounts by natural key (auth required)."""
     from src.core.schemas.account import SyncAccountsRequest
 
     require_idempotency_key(body.idempotency_key)
     with adcp_validation_boundary(context="sync_accounts request"):
         req = SyncAccountsRequest(**body.model_dump(exclude_none=True, exclude=ADCP_NEGOTIATION_FIELDS))
-    response = await accounts_module.sync_accounts_raw(
-        req=req,
-        identity=identity,
-        raw_wire_payload=raw_wire_payload,
-    )
+    response = await accounts_module.sync_accounts_raw(req=req, identity=identity)
     return dump_adcp_response(response)

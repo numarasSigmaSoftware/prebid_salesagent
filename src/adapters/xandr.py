@@ -204,8 +204,6 @@ logger = logging.getLogger(__name__)
 
 
 class XandrAdapter(AdServerAdapter):
-    supports_media_buy_update_reconciliation = False
-
     """Adapter for Microsoft Xandr (formerly AppNexus) platform."""
 
     def __init__(self, config: dict[str, Any], principal: Principal, tenant_id: str | None = None):

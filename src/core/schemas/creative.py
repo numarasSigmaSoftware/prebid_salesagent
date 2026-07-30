@@ -55,11 +55,9 @@ from src.core.schemas._base import (
     ApprovalStatus,
     FormatId,
     NestedModelSerializerMixin,
-    ReplayableResponseMixin,
     SalesAgentBaseModel,
     Targeting,
     _upgrade_legacy_format_ids,
-    apply_replay_marker,
 )
 
 
@@ -480,21 +478,12 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
     # (#1399 R3-F2).
     creatives: list[SyncCreativeResult]  # type: ignore[assignment]
 
-    # Spec idempotency replay marker (AdCP 3.1.1): top-level on the structured
-    # result, set True ONLY when this response is a verbatim replay of a
-    # previously cached success. Wrapper/impl-owned; emitted at response time,
-    # never stored in the cached body, and omitted when False so fresh responses
-    # stay byte-identical (mirrors SyncAccountsResponse.replayed).
-    replayed: bool = False
-
     def model_dump(self, **kwargs):
         """Override to call child model_dump() for nested SyncCreativeResult (Pattern #4)."""
         result = super().model_dump(**kwargs)
         if "creatives" in result and self.creatives:
             result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
-        # `replayed=False` rides the default dump; strip it so the marker is present
-        # ONLY on a genuine replay (this dump is its single source).
-        return apply_replay_marker(result, self.replayed)
+        return result
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
@@ -542,11 +531,7 @@ class ListCreativeFormatsRequest(LibraryListCreativeFormatsRequest):
         return _upgrade_legacy_format_ids(values)
 
 
-class ListCreativeFormatsResponse(
-    ReplayableResponseMixin,
-    NestedModelSerializerMixin,
-    LibraryListCreativeFormatsResponse,
-):
+class ListCreativeFormatsResponse(NestedModelSerializerMixin, LibraryListCreativeFormatsResponse):
     """Extends library ListCreativeFormatsResponse from AdCP spec.
 
     Inherits all AdCP-compliant fields from adcp library,
@@ -615,7 +600,7 @@ class Pagination(LibraryResponsePagination):
     pass  # Inherits all fields from library: cursor, has_more, total_count
 
 
-class ListCreativesResponse(ReplayableResponseMixin, NestedModelSerializerMixin, LibraryListCreativesResponse):
+class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResponse):
     """Extends library ListCreativesResponse with local subtypes.
 
     Library provides: context, creatives, ext, format_summary, pagination,

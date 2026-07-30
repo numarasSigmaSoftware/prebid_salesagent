@@ -1,11 +1,43 @@
-"""Capability + storyboard applicability guards for UC-002 idempotency.
+"""Capability + storyboard applicability guard for the UC-002 idempotency phases.
 
-The AdCP 3.1.1 capability is agent-wide, so ``supported=true`` is truthful
-only when every implemented mutation is replay-safe. The four implemented
-mutations now meet that bar: create has its media-buy uniqueness backstop,
-while update_media_buy, sync_accounts, and sync_creatives use durable
-first-insert-wins reservations with payload conflict checks and fenced
-completion.
+``idempotency.supported`` is ONE agent-wide claim, not per-tool
+(``get-adcp-capabilities-response.json`` v3.1.1 models it as a discriminated
+union on a single boolean). This agent's real behavior is genuinely mixed, and
+NEITHER value is fully truthful — see the FIXME(#1607) at
+``src/core/tools/capabilities.py``'s ``_build_adcp_block`` for the full
+account. In short: ``create_media_buy`` implements verbatim replay, still
+raises ``IDEMPOTENCY_CONFLICT`` on a same-key different-payload retry, and
+still raises ``IDEMPOTENCY_EXPIRED`` past the replay window — all three
+directly contradict ``IdempotencyUnsupported``'s own semantics ("sending a key
+is a no-op ... the seller will NOT return IDEMPOTENCY_CONFLICT or
+IDEMPOTENCY_EXPIRED"). The other twelve ``require_idempotency_key(`` call
+sites — including ``update_media_buy`` — validate and accept the key without
+deduplicating, which contradicts ``IdempotencySupported`` just as directly.
+``supported=false`` was chosen as the NARROWER defect (create_media_buy
+behaving better than advertised is safer than the other twelve behaving worse
+than advertised), not as a resolved, truthful declaration — the tests below
+assert what the wire currently carries, not that it is correct.
+
+This DOES cost real external conformance credit: the published storyboard
+(``dist/compliance/3.1.1/universal/idempotency.yaml``) grades its replay /
+changed-payload-conflict / fresh-key phases only for sellers declaring
+``supported: true``, and a future conformance runner implementing that
+precondition gate will skip grading create_media_buy's real replay behavior
+here. Resolving this for real means either extending genuine replay/conflict/
+expired handling to every mutating tool (then flipping to true) or removing
+create_media_buy's dedup so false becomes wire-accurate — both are tracked at
+#1607 and deliberately deferred, not attempted here.
+
+The generated UC-002 feature keeps the upstream replay scenario LIVE
+regardless: it drives a real ``create_media_buy`` call twice through
+``MediaBuyCreateEnv`` and grades the actual replay behavior directly (see
+``_UC002_IDEMPOTENCY_WIRED`` in ``tests/bdd/conftest.py``), not the
+capabilities declaration — so it stays a true claim about production
+independent of what this file pins for the capability block. The boundary
+outline uses the exact-length fixture token instead of a hand-counted
+literal, and the remaining supported=true phases production does not yet
+implement (in-flight tracking and its error-detail siblings) stay visible but
+unwired.
 """
 
 from pathlib import Path
@@ -37,13 +69,28 @@ REMAINING_UNWIRED_SCENARIOS = frozenset(
 )
 
 
-def test_advertised_idempotency_matches_mutation_wide_replay_support():
+def test_advertised_idempotency_is_the_narrower_defect_not_a_resolved_claim():
+    """Pin the current wire value; this is NOT an assertion that it is fully truthful.
+
+    An agent-wide ``supported=true`` was previously justified purely by
+    create_media_buy's real replay, while update_media_buy/sync_accounts/
+    sync_creatives silently re-execute a retried request — the worse defect
+    (double-spend risk across twelve sites), which is why this asserts
+    ``False``. But ``False`` is not truthful either: create_media_buy still
+    deduplicates, conflicts, and expires, directly contradicting
+    ``IdempotencyUnsupported``'s own semantics. Flip to ``True`` only
+    alongside evidence every ``require_idempotency_key(`` call site actually
+    deduplicates; flip the reasoning in this test's docstring the moment
+    EITHER remediation in the module docstring lands — do not let this
+    become the reference point for "the mismatch was fixed."
+    """
     current_tenant.set(None)
     capability = _get_adcp_capabilities_impl(None, None).adcp.idempotency
 
-    assert capability.supported is True
-    assert capability.replay_ttl_seconds == 86_400
-    assert capability.in_flight_max_seconds == 300
+    assert capability.supported is False
+    assert not hasattr(capability, "replay_ttl_seconds"), (
+        "IdempotencyUnsupported must not carry replay_ttl_seconds — the discriminated union forbids it"
+    )
 
 
 def test_generated_replay_scenario_is_live_and_boundary_fixture_durable():

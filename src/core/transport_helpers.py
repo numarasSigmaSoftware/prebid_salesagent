@@ -9,7 +9,7 @@ Each transport boundary calls one of these helpers before invoking _impl.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from adcp.types import AccountReference
@@ -22,20 +22,6 @@ from src.core.tenant_context import LazyTenantContext
 from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
-
-
-async def get_mcp_raw_wire_payload(ctx: Context | ToolContext | None) -> dict[str, Any] | None:
-    """Return the middleware-stashed MCP payload only when it is a wire dict.
-
-    Some direct wrapper callers provide lightweight ``Context`` mocks whose
-    ``get_state`` returns the same object for every key. Passing such an object
-    to canonicalization is both misleading and unsafe; an absent or invalid
-    state value must fall back to the typed request hash.
-    """
-    if not isinstance(ctx, Context):
-        return None
-    raw_wire_payload = await ctx.get_state("raw_wire_payload")
-    return raw_wire_payload if isinstance(raw_wire_payload, dict) else None
 
 
 def _make_lazy_tenant(tenant_id: str) -> LazyTenantContext:

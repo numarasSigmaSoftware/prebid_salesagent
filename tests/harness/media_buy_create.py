@@ -395,7 +395,7 @@ class MediaBuyCreateEnv(IntegrationEnv):
         ``CreateMediaBuyResult`` serializes flat: the response fields plus a
         top-level protocol ``status`` and schema-compatible optional ``replayed``
         marker. Both are popped back onto the wrapper; this seller leaves
-        ``replayed`` false because this is the first execution. The
+        ``replayed`` false because idempotency is advertised unsupported. The
         CreateMediaBuySuccess|CreateMediaBuyError|CreateMediaBuySubmitted union
         mirrors the production A2A discrimination (adcp_a2a_server.py): submitted
         first (status="submitted" + task_id, no media_buy_id — a submitted

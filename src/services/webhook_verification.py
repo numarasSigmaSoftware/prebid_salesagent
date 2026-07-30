@@ -44,7 +44,7 @@ class WebhookVerifier:
         Args:
             payload: Webhook payload (dict or JSON string)
             signature: HMAC signature from X-ADCP-Signature header
-            timestamp: Unix-seconds SDK timestamp (legacy ISO remains accepted)
+            timestamp: ISO format timestamp from X-ADCP-Timestamp header
 
         Returns:
             True if webhook is valid
@@ -64,18 +64,14 @@ class WebhookVerifier:
         """Verify timestamp is recent (within replay window).
 
         Args:
-            timestamp: Unix seconds or a legacy ISO timestamp
+            timestamp: ISO format timestamp
 
         Raises:
             WebhookVerificationError: If timestamp is too old or invalid
         """
         try:
-            webhook_time = (
-                datetime.fromtimestamp(int(timestamp), tz=UTC)
-                if timestamp.isdigit()
-                else datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            )
-        except (OverflowError, OSError, ValueError) as e:
+            webhook_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError as e:
             raise WebhookVerificationError(f"Invalid timestamp format: {e}")
 
         # Ensure timezone-aware
@@ -126,8 +122,7 @@ class WebhookVerifier:
         ).hexdigest()
 
         # Constant-time comparison to prevent timing attacks
-        canonical_signature = provided_signature.removeprefix("sha256=")
-        if not hmac.compare_digest(canonical_signature, expected_signature):
+        if not hmac.compare_digest(provided_signature, expected_signature):
             raise WebhookVerificationError("Signature verification failed")
 
     @staticmethod

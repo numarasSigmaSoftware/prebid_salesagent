@@ -17,117 +17,6 @@ from src.services.webhook_delivery_service import (
     CircuitState,
 )
 
-
-def _ensure_media_buy(
-    tenant,
-    principal,
-    media_buy_id: str,
-    *,
-    webhook_url: str | None = None,
-    authentication_scheme: str = "Bearer",
-    credentials: str = "integration-reporting-token-" + ("x" * 32),
-):
-    """Create the callback's owning media buy through the shared factory.
-
-    Reporting callbacks are configured exclusively on the media buy. Task
-    ``PushNotificationConfig`` rows are intentionally not consulted.
-    """
-    from tests.factories import MediaBuyFactory
-
-    raw_request = {"packages": [{"package_id": "pkg_001", "product_id": "prod_001"}]}
-    if webhook_url is not None:
-        raw_request["reporting_webhook"] = {
-            "url": webhook_url,
-            "reporting_frequency": "daily",
-            "authentication": {
-                "schemes": [authentication_scheme],
-                "credentials": credentials,
-            },
-        }
-    return MediaBuyFactory(
-        tenant=tenant,
-        principal=principal,
-        media_buy_id=media_buy_id,
-        raw_request=raw_request,
-    )
-
-
-@pytest.mark.requires_db
-def test_delivery_target_claim_is_media_buy_scoped_and_retry_stable(integration_db):
-    """Only the originating registration is claimed, with durable correlation."""
-    from src.core.database.repositories.uow import PushNotificationConfigUoW
-    from tests.factories import (
-        MediaBuyFactory,
-        PrincipalFactory,
-        PushNotificationConfigFactory,
-        TenantFactory,
-    )
-    from tests.harness import CircuitBreakerEnv
-
-    with CircuitBreakerEnv(tenant_id="correlation-tenant", principal_id="correlation-principal"):
-        tenant = TenantFactory(tenant_id="correlation-tenant")
-        principal = PrincipalFactory(tenant=tenant, principal_id="correlation-principal")
-        first_buy = MediaBuyFactory(
-            tenant=tenant,
-            principal=principal,
-            media_buy_id="correlation-buy-1",
-        )
-        second_buy = MediaBuyFactory(
-            tenant=tenant,
-            principal=principal,
-            media_buy_id="correlation-buy-2",
-        )
-        first_config = PushNotificationConfigFactory(
-            tenant=tenant,
-            principal=principal,
-            media_buy_id=first_buy.media_buy_id,
-            operation_id="operation-1",
-            token="token-1",
-            application_context={"trace_id": "trace-1"},
-            url="https://first.example.com/webhook",
-        )
-        PushNotificationConfigFactory(
-            tenant=tenant,
-            principal=principal,
-            media_buy_id=second_buy.media_buy_id,
-            operation_id="operation-2",
-            token="token-2",
-            application_context={"trace_id": "trace-2"},
-            url="https://second.example.com/webhook",
-        )
-
-        with PushNotificationConfigUoW(tenant.tenant_id) as uow:
-            assert uow.push_notification_configs is not None
-            first_claim = uow.push_notification_configs.claim_delivery_targets(
-                principal.principal_id,
-                first_buy.media_buy_id,
-                "event-1",
-            )
-
-        assert len(first_claim) == 1
-        assert first_claim[0].url == first_config.url
-        assert first_claim[0].operation_id == "operation-1"
-        assert first_claim[0].token == "token-1"
-        assert first_claim[0].application_context == {"trace_id": "trace-1"}
-        assert first_claim[0].sequence_number == 1
-
-        with PushNotificationConfigUoW(tenant.tenant_id) as uow:
-            assert uow.push_notification_configs is not None
-            retry_claim = uow.push_notification_configs.claim_delivery_targets(
-                principal.principal_id,
-                first_buy.media_buy_id,
-                "event-1",
-            )
-            next_claim = uow.push_notification_configs.claim_delivery_targets(
-                principal.principal_id,
-                first_buy.media_buy_id,
-                "event-2",
-            )
-
-        assert retry_claim[0].sequence_number == 1
-        assert next_claim[0].sequence_number == 2
-
-
 # ---------------------------------------------------------------------------
 # UC-004-EXT-G-03
 # ---------------------------------------------------------------------------
@@ -149,6 +38,7 @@ class TestCircuitBreakerServiceIntegration:
 
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -156,11 +46,10 @@ class TestCircuitBreakerServiceIntegration:
         with CircuitBreakerEnv() as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_circuit",
-                webhook_url="https://example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://example.com/webhook",
             )
 
             # Make HTTP fail to trip the circuit breaker
@@ -168,9 +57,9 @@ class TestCircuitBreakerServiceIntegration:
             service = env.get_service()
 
             start_time = datetime(2025, 6, 1, tzinfo=UTC)
-            for _ in range(5):
+            for i in range(5):
                 service.send_delivery_webhook(
-                    media_buy_id="mb_circuit",
+                    media_buy_id=f"mb_{i}",
                     tenant_id="t1",
                     principal_id="p1",
                     reporting_period_start=start_time,
@@ -187,7 +76,7 @@ class TestCircuitBreakerServiceIntegration:
             env.mock["client"].return_value.__enter__.return_value.post.reset_mock()
 
             result = service.send_delivery_webhook(
-                media_buy_id="mb_circuit",
+                media_buy_id="mb_suppressed",
                 tenant_id="t1",
                 principal_id="p1",
                 reporting_period_start=start_time,
@@ -298,18 +187,22 @@ class TestWebhookFailureNoSyncError:
 
 @pytest.mark.requires_db
 class TestSendWebhookEnhancedAuthBlockedSkip:
-    """Invalid reporting authentication is rejected before delivery.
+    """Auth-blocked PushNotificationConfig is skipped by _send_webhook_enhanced.
 
     Covers: UC-004-EXT-G-07
     """
 
     def test_auth_blocked_config_skipped_no_http_request(self, integration_db):
-        """A malformed persisted reporting credential fails closed without I/O.
+        """When PushNotificationConfig has auth_blocked_at set, _send_webhook_enhanced
+        skips it entirely and makes no HTTP request.
 
         Covers: UC-004-EXT-G-07
         """
+        from datetime import UTC, datetime
+
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -317,12 +210,11 @@ class TestSendWebhookEnhancedAuthBlockedSkip:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://blocked.example.com/webhook",
-                credentials="too-short",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://blocked.example.com/webhook",
+                auth_blocked_at=datetime(2025, 6, 1, tzinfo=UTC),
             )
 
             env.set_http_response(200)
@@ -348,7 +240,7 @@ class TestPersistedWebhookSsrfRevalidation:
 
         from src.core.security import url_validator, webhook_http
         from src.services.webhook_delivery_service import WebhookDeliveryService
-        from tests.factories import PrincipalFactory, TenantFactory
+        from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
         from tests.harness._base import BareIntegrationEnv
 
         dns_lookups: list[str] = []
@@ -370,7 +262,7 @@ class TestPersistedWebhookSsrfRevalidation:
         with BareIntegrationEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(tenant, principal, "mb_001", webhook_url=url)
+            PushNotificationConfigFactory(tenant=tenant, principal=principal, url=url)
             env.get_session()
 
             service = WebhookDeliveryService()
@@ -403,12 +295,13 @@ class TestSendWebhookEnhancedHmacSigning:
 
     def test_hmac_signature_header_present_when_secret_configured(self, integration_db):
         """When PushNotificationConfig has a strong webhook_secret (>=32 chars),
-        X-AdCP-Signature header is set on the outgoing request.
+        X-ADCP-Signature header is set on the outgoing request.
 
         Covers: UC-004-EXT-G-06
         """
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -416,13 +309,11 @@ class TestSendWebhookEnhancedHmacSigning:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://hmac.example.com/webhook",
-                authentication_scheme="HMAC-SHA256",
-                credentials="a" * 32,
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://hmac.example.com/webhook",
+                webhook_secret="a" * 32,  # Exactly 32 chars — meets minimum
             )
 
             env.set_http_response(200)
@@ -438,8 +329,8 @@ class TestSendWebhookEnhancedHmacSigning:
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             post_mock.assert_called_once()
             sent_headers = post_mock.call_args.kwargs["headers"]
-            assert "X-AdCP-Signature" in sent_headers
-            assert sent_headers["X-AdCP-Signature"].startswith("sha256=")
+            assert "X-ADCP-Signature" in sent_headers
+            assert len(sent_headers["X-ADCP-Signature"]) > 0
 
     def test_hmac_signature_valid_reproduces_from_payload(self, integration_db):
         """The HMAC signature can be reproduced using the same secret and payload.
@@ -448,9 +339,11 @@ class TestSendWebhookEnhancedHmacSigning:
         """
         import hashlib
         import hmac
+        import json
 
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -461,13 +354,11 @@ class TestSendWebhookEnhancedHmacSigning:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://hmac-verify.example.com/webhook",
-                authentication_scheme="HMAC-SHA256",
-                credentials=secret,
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://hmac-verify.example.com/webhook",
+                webhook_secret=secret,
             )
 
             env.set_http_response(200)
@@ -481,13 +372,13 @@ class TestSendWebhookEnhancedHmacSigning:
 
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             sent_headers = post_mock.call_args.kwargs["headers"]
-            sent_signature = sent_headers["X-AdCP-Signature"]
-            sent_timestamp = sent_headers["X-AdCP-Timestamp"]
+            sent_signature = sent_headers["X-ADCP-Signature"]
+            sent_timestamp = sent_headers["X-ADCP-Timestamp"]
 
-            # Reproduce the signature over the exact callback envelope bytes.
-            sent_body = post_mock.call_args.kwargs["body"]
-            message = sent_timestamp.encode("utf-8") + b"." + sent_body
-            expected = "sha256=" + hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+            # Reproduce the signature
+            payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            message = f"{sent_timestamp}.{payload_str}"
+            expected = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
             assert sent_signature == expected
 
@@ -524,21 +415,20 @@ class TestSendWebhookEnhancedBearerAuth:
         """
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
 
-        bearer_token = "my-secret-token-" + ("x" * 32)
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://bearer.example.com/webhook",
-                authentication_scheme=configured_scheme,
-                credentials=bearer_token,
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://bearer.example.com/webhook",
+                authentication_type=configured_scheme,
+                authentication_token="my-secret-token-xyz",
             )
 
             env.set_http_response(200)
@@ -554,7 +444,7 @@ class TestSendWebhookEnhancedBearerAuth:
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             post_mock.assert_called_once()
             sent_headers = post_mock.call_args.kwargs["headers"]
-            assert sent_headers["Authorization"] == f"Bearer {bearer_token}"
+            assert sent_headers["Authorization"] == "Bearer my-secret-token-xyz"
 
 
 # ---------------------------------------------------------------------------
@@ -577,10 +467,10 @@ class TestSendWebhookEnhancedHappyPath:
         """
         import json
         from unittest.mock import ANY
-        from uuid import UUID
 
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -588,11 +478,10 @@ class TestSendWebhookEnhancedHappyPath:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://happy.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://happy.example.com/webhook",
             )
 
             env.set_http_response(200)
@@ -614,18 +503,7 @@ class TestSendWebhookEnhancedHappyPath:
                 headers=ANY,
                 timeout=10.0,
             )
-            sent = json.loads(post_mock.call_args.kwargs["body"])
-            assert sent == {
-                "idempotency_key": sent["idempotency_key"],
-                "operation_id": f"reporting:{sent['idempotency_key']}",
-                "task_id": "delivery:mb_001",
-                "task_type": "media_buy_delivery",
-                "status": "completed",
-                "timestamp": sent["timestamp"],
-                "result": {**payload, "sequence_number": 1},
-            }
-            assert str(UUID(sent["idempotency_key"])) == sent["idempotency_key"]
-            assert sent["timestamp"].endswith("Z")
+            assert json.loads(post_mock.call_args.kwargs["body"]) == payload
 
     def test_no_configs_returns_false(self, integration_db):
         """When no PushNotificationConfig exists, _send_webhook_enhanced returns False.
@@ -674,6 +552,7 @@ class TestDeliverWithBackoffSuccess:
         """
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -681,11 +560,10 @@ class TestDeliverWithBackoffSuccess:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://success.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://success.example.com/webhook",
             )
 
             env.set_http_response(200)
@@ -726,6 +604,7 @@ class TestDeliverWithBackoffRetry:
         """
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -733,11 +612,10 @@ class TestDeliverWithBackoffRetry:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://failing.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://failing.example.com/webhook",
             )
 
             env.set_http_response(500)
@@ -786,6 +664,7 @@ class TestDeliverWithBackoffTimeout:
 
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -793,11 +672,10 @@ class TestDeliverWithBackoffTimeout:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_001",
-                webhook_url="https://timeout.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://timeout.example.com/webhook",
             )
 
             env.mock["client"].return_value.__enter__.return_value.post.side_effect = requests.Timeout(
@@ -846,6 +724,7 @@ class TestIsAdjustedNotificationType:
 
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -853,11 +732,10 @@ class TestIsAdjustedNotificationType:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_adj",
-                webhook_url="https://adjusted.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://adjusted.example.com/webhook",
             )
 
             env.set_http_response(200)
@@ -876,9 +754,8 @@ class TestIsAdjustedNotificationType:
             assert result is True
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             sent_payload = json.loads(post_mock.call_args.kwargs["body"])
-            assert sent_payload["result"]["notification_type"] == "adjusted"
-            assert sent_payload["result"]["media_buy_deliveries"][0]["is_adjusted"] is True
-            assert sent_payload["result"]["sequence_number"] == 1
+            assert sent_payload["notification_type"] == "adjusted"
+            assert sent_payload["is_adjusted"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +779,7 @@ class TestQueueFullDropsWebhook:
         from src.services.webhook_delivery_service import WebhookQueue
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -909,11 +787,10 @@ class TestQueueFullDropsWebhook:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_full",
-                webhook_url="https://full-queue.example.com/webhook",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://full-queue.example.com/webhook",
             )
 
             env.set_http_response(200)
@@ -942,18 +819,19 @@ class TestQueueFullDropsWebhook:
 
 @pytest.mark.requires_db
 class TestWeakSecretNoSignature:
-    """Weak webhook secrets fail closed before any outbound request.
+    """Weak webhook secret (< 32 chars) triggers warning, no signature added.
 
     Covers: line 463 of webhook_delivery_service.py
     """
 
-    def test_weak_secret_is_rejected_before_delivery(self, integration_db):
-        """A too-short HMAC secret cannot silently downgrade authentication.
+    def test_weak_secret_omits_signature_header(self, integration_db):
+        """When webhook_secret is too short, X-ADCP-Signature is not added.
 
         Covers: webhook_delivery_service.py line 463
         """
         from tests.factories import (
             PrincipalFactory,
+            PushNotificationConfigFactory,
             TenantFactory,
         )
         from tests.harness import CircuitBreakerEnv
@@ -961,13 +839,11 @@ class TestWeakSecretNoSignature:
         with CircuitBreakerEnv(tenant_id="t1", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="t1")
             principal = PrincipalFactory(tenant=tenant, principal_id="p1")
-            _ensure_media_buy(
-                tenant,
-                principal,
-                "mb_weak",
-                webhook_url="https://weak-secret.example.com/webhook",
-                authentication_scheme="HMAC-SHA256",
-                credentials="tooshort",
+            PushNotificationConfigFactory(
+                tenant=tenant,
+                principal=principal,
+                url="https://weak-secret.example.com/webhook",
+                webhook_secret="tooshort",  # < 32 chars
             )
 
             env.set_http_response(200)
@@ -979,9 +855,10 @@ class TestWeakSecretNoSignature:
                 delivery_payload={"test": "data"},
             )
 
-            assert result is False
+            assert result is True
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
-            post_mock.assert_not_called()
+            sent_headers = post_mock.call_args.kwargs["headers"]
+            assert "X-ADCP-Signature" not in sent_headers
 
 
 # ---------------------------------------------------------------------------

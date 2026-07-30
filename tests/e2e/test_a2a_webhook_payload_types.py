@@ -9,14 +9,12 @@ Per AdCP A2A spec (https://docs.adcontextprotocol.org/docs/protocols/a2a-guide#p
 This test validates that our A2A server sends the correct payload type based on status.
 """
 
-import os
 import uuid
 from time import sleep
 from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 
 from tests.e2e._webhook_capture import WebhookCaptureHandler, run_webhook_capture_server
 from tests.e2e.adcp_request_builder import (
@@ -25,7 +23,7 @@ from tests.e2e.adcp_request_builder import (
     get_test_date_range,
     parse_tool_result,
 )
-from tests.e2e.utils import live_db_env, make_mcp_client, set_live_adapter_behavior
+from tests.e2e.utils import make_mcp_client, set_live_adapter_behavior
 
 
 async def _discover_product_and_pricing(live_server: dict, test_auth_token: str) -> tuple[str, str]:
@@ -169,7 +167,7 @@ class TestA2AWebhookPayloadTypes:
     """Test A2A webhook payload type compliance with AdCP spec."""
 
     @pytest.mark.asyncio
-    async def test_synchronous_completed_response_sends_no_webhook(
+    async def test_completed_status_sends_task_payload(
         self,
         docker_services_e2e,
         live_server,
@@ -207,10 +205,7 @@ class TestA2AWebhookPayloadTypes:
             context_id=context_id,
             push_notification_config={
                 "url": webhook_capture_server["url"],
-                "authentication": {
-                    "schemes": ["Bearer"],
-                    "credentials": "test-webhook-token-that-is-at-least-32-chars",
-                },
+                "authentication": {"schemes": ["Bearer"], "credentials": "test-webhook-token"},
             },
         )
 
@@ -228,13 +223,51 @@ class TestA2AWebhookPayloadTypes:
             result = response.json()
             assert "error" not in result, f"A2A error: {result.get('error')}"
 
-        sleep(2)
-        assert webhook_capture_server["received"] == [], (
-            "A synchronous terminal response must not be duplicated as an initial webhook"
+        # Wait for webhook to be delivered
+        timeout_seconds = 15
+        poll_interval = 0.5
+        elapsed = 0
+
+        while elapsed < timeout_seconds and not webhook_capture_server["received"]:
+            sleep(poll_interval)
+            elapsed += poll_interval
+
+        # Verify webhook was received
+        received = webhook_capture_server["received"]
+        assert received, "Expected at least one webhook delivery"
+
+        # No received webhook may carry a snake_case wire violation (gh-#1299).
+        assert_no_classification_errors(received)
+
+        # The completed-status webhook MUST be present and MUST be a Task. No
+        # `if completed_webhooks:` guard — a missing or misclassified webhook is
+        # a failure, not a silent pass.
+        completed_webhooks = [w for w in received if w["status"] == "completed"]
+        assert completed_webhooks, (
+            f"Expected a 'completed' status webhook. Received statuses: {[w['status'] for w in received]}"
         )
 
+        webhook = completed_webhooks[0]
+        # Per AdCP spec: completed status should send Task (has 'id' field)
+        assert webhook["payload_type"] == "Task", (
+            f"Completed status should send Task payload, not {webhook['payload_type']}. "
+            f"Payload has 'id': {'id' in webhook['payload']}, 'taskId': {'taskId' in webhook['payload']}"
+        )
+
+        # Verify Task structure
+        payload = webhook["payload"]
+        assert "id" in payload, "Task payload must have 'id' field"
+        assert "status" in payload, "Task payload must have 'status' field"
+
+        # Per AdCP spec: completed status MUST have result in artifacts[0].parts[]
+        assert "artifacts" in payload, "Completed Task must have 'artifacts' field"
+        assert len(payload["artifacts"]) > 0, "Completed Task must have at least one artifact"
+        artifact = payload["artifacts"][0]
+        assert "parts" in artifact, "Artifact must have 'parts' field"
+        assert len(artifact["parts"]) > 0, "Artifact must have at least one part"
+
     @pytest.mark.asyncio
-    async def test_initial_submitted_is_not_webhooked_but_later_transition_is(
+    async def test_submitted_status_sends_task_status_update_event(
         self,
         docker_services_e2e,
         live_server,
@@ -267,6 +300,7 @@ class TestA2AWebhookPayloadTypes:
             pricing_option_id=pricing_option_id,
             context={"e2e": "webhook_submitted_test"},
         )
+
         # Send A2A create_media_buy message that triggers approval workflow
         message = build_a2a_message_send(
             skill="create_media_buy",
@@ -274,10 +308,7 @@ class TestA2AWebhookPayloadTypes:
             context_id=context_id,
             push_notification_config={
                 "url": webhook_capture_server["url"],
-                "authentication": {
-                    "schemes": ["Bearer"],
-                    "credentials": "test-webhook-token-that-is-at-least-32-chars",
-                },
+                "authentication": {"schemes": ["Bearer"], "credentials": "test-webhook-token"},
             },
         )
 
@@ -292,29 +323,6 @@ class TestA2AWebhookPayloadTypes:
 
             # Request should succeed (returns submitted status for async operations)
             assert response.status_code == 200, f"A2A request failed: {response.text}"
-            response_body = response.json()
-            task_id = response_body["result"]["id"]
-
-        # A submitted task is only an initial response; no publisher action means
-        # there is no later event to deliver. Drive an explicit live-server
-        # approval transition through its committed workflow/task outboxes.
-        from src.core.database.models import Tenant
-
-        with live_db_env(live_server) as env:
-            tenant_id = env.get_session().scalars(select(Tenant.tenant_id).filter_by(subdomain="ci-test")).one()
-        test_control_token = os.environ["ADCP_TEST_CONTROL_TOKEN"]
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            transition_response = await client.post(
-                f"{live_server['mcp']}/_internal/testing/a2a-tasks/{task_id}/complete",
-                headers={"x-adcp-test-control-token": test_control_token},
-                json={
-                    "tenant_id": tenant_id,
-                    "principal_id": "ci-test-principal",
-                    "response_data": {"status": "approved"},
-                },
-            )
-        assert transition_response.status_code == 200, transition_response.text
-        assert transition_response.json()["published"] is True
 
         # Wait for webhook to be delivered
         timeout_seconds = 15
@@ -327,7 +335,7 @@ class TestA2AWebhookPayloadTypes:
         # races against that ordering — poll until the submitted webhook is
         # actually captured (or timeout).
         while elapsed < timeout_seconds and not any(
-            w["status"] in {"completed", "failed", "rejected"} for w in webhook_capture_server["received"]
+            w["status"] == "submitted" for w in webhook_capture_server["received"]
         ):
             sleep(poll_interval)
             elapsed += poll_interval
@@ -338,21 +346,43 @@ class TestA2AWebhookPayloadTypes:
         # No received webhook may carry a snake_case wire violation (gh-#1299).
         assert_no_classification_errors(received)
 
-        assert not [w for w in received if w["status"] == "submitted"]
-        terminal = [w for w in received if w["status"] in {"completed", "failed", "rejected"}]
-        assert terminal, f"Expected a later terminal transition; got {[w['status'] for w in received]}"
-        assert terminal[0]["payload_type"] == "Task"
-        assert terminal[0]["payload"].get("artifacts")
+        # The submitted-status webhook MUST be present and MUST be a
+        # TaskStatusUpdateEvent. No `if submitted_webhooks:` guard — a missing or
+        # misclassified webhook is a failure, not a silent pass.
+        submitted_webhooks = [w for w in received if w["status"] == "submitted"]
+        assert submitted_webhooks, (
+            f"Expected a 'submitted' status webhook. Received statuses: {[w['status'] for w in received]}"
+        )
+
+        webhook = submitted_webhooks[0]
+        # Per AdCP spec: submitted status should send TaskStatusUpdateEvent (has 'taskId' field)
+        assert webhook["payload_type"] == "TaskStatusUpdateEvent", (
+            f"Submitted status should send TaskStatusUpdateEvent payload, not {webhook['payload_type']}. "
+            f"Payload has 'id': {'id' in webhook['payload']}, 'taskId': {'taskId' in webhook['payload']}"
+        )
+
+        # Verify TaskStatusUpdateEvent structure (camelCase per A2A wire contract)
+        payload = webhook["payload"]
+        assert "taskId" in payload, "TaskStatusUpdateEvent payload must have 'taskId' field"
+        assert "task_id" not in payload, "TaskStatusUpdateEvent must NOT use snake_case 'task_id'"
+        assert "status" in payload, "TaskStatusUpdateEvent payload must have 'status' field"
+        assert "state" in payload["status"], "TaskStatusUpdateEvent.status must have 'state' field"
 
     @pytest.mark.asyncio
-    async def test_synchronous_success_does_not_emit_initial_webhook(
+    async def test_webhook_payload_type_matches_status(
         self,
         docker_services_e2e,
         live_server,
         test_auth_token,
         webhook_capture_server,
     ):
-        """A terminal state returned inline is not repeated as a webhook."""
+        """
+        Test that all received webhooks use correct payload type for their status.
+
+        Per AdCP spec:
+        - Final states (completed, failed, canceled): Task
+        - Intermediate states (working, input-required, submitted): TaskStatusUpdateEvent
+        """
         # Enable auto-approval
         set_live_adapter_behavior(live_server, manual_approval_required=False)
 
@@ -387,22 +417,61 @@ class TestA2AWebhookPayloadTypes:
         async with httpx.AsyncClient(timeout=30.0) as client:
             await client.post(a2a_url, json=message, headers=headers)
 
-        sleep(2)
-        assert webhook_capture_server["received"] == []
+        # Wait for webhooks
+        timeout_seconds = 15
+        elapsed = 0
+
+        while elapsed < timeout_seconds and not webhook_capture_server["received"]:
+            sleep(0.5)
+            elapsed += 0.5
+
+        received = webhook_capture_server["received"]
+        assert received, "Expected at least one webhook delivery"
+
+        # No received webhook may carry a snake_case wire violation (gh-#1299).
+        assert_no_classification_errors(received)
+
+        # Define expected payload types per status
+        final_states = {"completed", "failed", "canceled"}
+        intermediate_states = {"working", "input-required", "submitted"}
+
+        # Every webhook with a known status must map to the spec-mandated payload
+        # type. A webhook whose status is neither final nor intermediate is itself
+        # a contract violation — it is asserted, not silently skipped.
+        asserted = 0
+        for webhook in received:
+            status = webhook["status"]
+            payload_type = webhook["payload_type"]
+
+            if status in final_states:
+                assert payload_type == "Task", f"Final state '{status}' should use Task payload, got {payload_type}"
+                asserted += 1
+            elif status in intermediate_states:
+                assert payload_type == "TaskStatusUpdateEvent", (
+                    f"Intermediate state '{status}' should use TaskStatusUpdateEvent payload, got {payload_type}"
+                )
+                asserted += 1
+            else:
+                raise AssertionError(
+                    f"Webhook has unrecognised status '{status}' (not a final or "
+                    f"intermediate A2A state). Payload keys: {sorted(webhook['payload'])}"
+                )
+
+        assert asserted > 0, "No webhook with a classifiable status was received"
 
 
 class TestWebhookPayloadStructure:
     """Test webhook payload structure compliance."""
 
     @pytest.mark.asyncio
-    async def test_synchronous_task_is_not_repeated_as_webhook(
+    async def test_task_payload_has_required_fields(
         self,
         docker_services_e2e,
         live_server,
         test_auth_token,
         webhook_capture_server,
     ):
-        """The complete Task returned inline is not pushed a second time."""
+        """Test that Task payload has all required A2A fields."""
         set_live_adapter_behavior(live_server, manual_approval_required=False)
 
         a2a_url = f"{live_server['a2a']}/a2a"
@@ -434,18 +503,49 @@ class TestWebhookPayloadStructure:
         async with httpx.AsyncClient(timeout=30.0) as client:
             await client.post(a2a_url, json=message, headers=headers)
 
-        sleep(2)
-        assert webhook_capture_server["received"] == []
+        # Wait for webhook
+        timeout_seconds = 15
+        elapsed = 0
+        while elapsed < timeout_seconds and not webhook_capture_server["received"]:
+            sleep(0.5)
+            elapsed += 0.5
+
+        received = webhook_capture_server["received"]
+        assert received, "Expected at least one webhook delivery"
+        assert_no_classification_errors(received)
+
+        task_webhooks = [w for w in received if w["payload_type"] == "Task"]
+        assert task_webhooks, (
+            f"Expected at least one Task webhook. Received payload types: {[w['payload_type'] for w in received]}"
+        )
+
+        for webhook in task_webhooks:
+            payload = webhook["payload"]
+
+            # Required Task fields per A2A spec
+            assert "id" in payload, "Task must have 'id' field"
+            assert "status" in payload, "Task must have 'status' field"
+
+            status = payload["status"]
+            assert "state" in status, "Task.status must have 'state' field"
+
+            # Per AdCP spec: completed/failed MUST have result in artifacts[0].parts[]
+            if status["state"] in ("completed", "failed"):
+                assert "artifacts" in payload, f"Task with status '{status['state']}' must have 'artifacts'"
+                assert isinstance(payload["artifacts"], list), "artifacts must be a list"
+                assert len(payload["artifacts"]) > 0, "artifacts must have at least one item"
+                assert "parts" in payload["artifacts"][0], "artifact must have 'parts'"
+                assert len(payload["artifacts"][0]["parts"]) > 0, "artifact.parts must have at least one part"
 
     @pytest.mark.asyncio
-    async def test_initial_submitted_state_is_not_pushed(
+    async def test_task_status_update_event_has_required_fields(
         self,
         docker_services_e2e,
         live_server,
         test_auth_token,
         webhook_capture_server,
     ):
-        """The initial submitted response is not emitted as a push event."""
+        """Test that TaskStatusUpdateEvent payload has all required A2A fields."""
         # Enable manual approval to get submitted status
         set_live_adapter_behavior(live_server, manual_approval_required=True)
 
@@ -481,8 +581,33 @@ class TestWebhookPayloadStructure:
         async with httpx.AsyncClient(timeout=30.0) as client:
             await client.post(a2a_url, json=message, headers=headers)
 
-        sleep(2)
-        assert webhook_capture_server["received"] == []
+        # Wait for webhook
+        timeout_seconds = 15
+        elapsed = 0
+        while elapsed < timeout_seconds and not webhook_capture_server["received"]:
+            sleep(0.5)
+            elapsed += 0.5
+
+        received = webhook_capture_server["received"]
+        assert received, "Expected at least one webhook delivery"
+        assert_no_classification_errors(received)
+
+        event_webhooks = [w for w in received if w["payload_type"] == "TaskStatusUpdateEvent"]
+        assert event_webhooks, (
+            f"Expected at least one TaskStatusUpdateEvent webhook. Received payload "
+            f"types: {[w['payload_type'] for w in received]}"
+        )
+
+        for webhook in event_webhooks:
+            payload = webhook["payload"]
+
+            # Required TaskStatusUpdateEvent fields per A2A spec (camelCase wire contract)
+            assert "taskId" in payload, "TaskStatusUpdateEvent must have 'taskId' field"
+            assert "task_id" not in payload, "TaskStatusUpdateEvent must NOT use snake_case 'task_id'"
+            assert "status" in payload, "TaskStatusUpdateEvent must have 'status' field"
+
+            status = payload["status"]
+            assert "state" in status, "TaskStatusUpdateEvent.status must have 'state' field"
 
 
 class TestProtocolWebhookWireFormat:
@@ -510,10 +635,6 @@ class TestProtocolWebhookWireFormat:
         target and no webhook is delivered.
         """
         monkeypatch.setenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", "true")
-        from tests.helpers.webhook_signing import webhook_signing_jwk_json
-
-        monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWK", webhook_signing_jwk_json())
-        monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWKS_URI", "https://seller.example/.well-known/jwks.json")
 
     def _send_and_capture(self, payload) -> dict[str, Any]:
         """Send `payload` via the real service and return the classified capture."""

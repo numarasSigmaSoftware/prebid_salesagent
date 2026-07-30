@@ -1,6 +1,6 @@
 """Wire matrix for create_media_buy idempotency: replay / conflict / missing-key per transport.
 
-AdCP 3.1.1 graded steps pinned at the real wire (not reconstructed exceptions):
+AdCP 3.0.1 graded steps pinned at the real wire (not reconstructed exceptions):
 
 - ``create_media_buy_replay``: an IDENTICAL retry returns the original response
   with top-level ``replayed: true``; the adapter is NOT re-invoked and no second
@@ -25,7 +25,7 @@ import pytest
 
 from tests.harness.media_buy_create import OMIT_IDEMPOTENCY_KEY, MediaBuyCreateEnv
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_field, assert_envelope_shape
+from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -248,7 +248,7 @@ class TestMissingKeyWireMatrix:
             recovery="correctable",
             message_substr="idempotency_key is required.",
         )
-        assert_envelope_field(envelope, "idempotency_key")
+        assert envelope["errors"][0].get("field") == "idempotency_key"
 
 
 class TestWireLevelHashInput:

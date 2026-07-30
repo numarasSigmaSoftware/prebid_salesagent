@@ -212,9 +212,8 @@ class TestDailyDeliveryWebhookFlow:
                 assert webhook_payload.get("status") == "completed", (
                     f"Expected status 'completed', got {webhook_payload.get('status')}"
                 )
-                expected_task_id = f"delivery:{media_buy_id}"
-                assert webhook_payload.get("task_id") == expected_task_id, (
-                    f"Expected task_id '{expected_task_id}', got {webhook_payload.get('task_id')}"
+                assert webhook_payload.get("task_id") == media_buy_id, (
+                    f"Expected task_id '{media_buy_id}', got {webhook_payload.get('task_id')}"
                 )
                 assert "timestamp" in webhook_payload, "Missing timestamp in webhook payload"
 

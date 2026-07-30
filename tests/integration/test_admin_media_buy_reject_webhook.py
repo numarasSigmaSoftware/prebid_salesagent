@@ -14,7 +14,7 @@ send_notification was awaited exactly once. Pre-fix the raw construction raises 
 send, so send_notification is never called — that is what this test detects.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -104,6 +104,13 @@ def make_pending_media_buy(integration_db):
                 "pricing_option_id": "cpm_usd_fixed",
             },
         )
+        PushNotificationConfigFactory(
+            tenant=tenant,
+            principal=principal,
+            url=WEBHOOK_URL,
+            is_active=True,
+        )
+
         # Tenant-scoped approval workflow step + object mapping (production API).
         request_data = {
             "push_notification_config": {"url": WEBHOOK_URL},
@@ -115,22 +122,6 @@ def make_pending_media_buy(integration_db):
         context = cm.create_context(
             tenant_id=tenant.tenant_id,
             principal_id=principal.principal_id,
-        )
-        from src.core.database.repositories.push_notification_config import task_push_config_id
-
-        PushNotificationConfigFactory(
-            id=task_push_config_id(
-                tenant.tenant_id,
-                principal.principal_id,
-                context.context_id,
-                None,
-            ),
-            tenant=tenant,
-            principal=principal,
-            media_buy_id=media_buy.media_buy_id,
-            session_id=context.context_id,
-            url=WEBHOOK_URL,
-            is_active=True,
         )
         cm.create_workflow_step(
             context_id=context.context_id,
@@ -189,7 +180,7 @@ def webhook_capture():
     mock_service.send_notification = AsyncMock(side_effect=_capture)
     captured["service"] = mock_service
     with patch(
-        "src.core.context_manager.get_protocol_webhook_service",
+        "src.admin.blueprints.operations.get_protocol_webhook_service",
         return_value=mock_service,
     ):
         yield captured
@@ -227,15 +218,21 @@ class TestAdminMediaBuyRejectWebhook:
         _post_approval_action(
             authenticated_admin_session, pending_reject_media_buy, {"action": "reject", "reason": "test"}
         )
-        payload = _webhook_body(webhook_capture)
-        config = webhook_capture["push_notification_config"]
-        assert config.media_buy_id == media_buy_id
-        assert webhook_capture["metadata"] == {
-            "task_type": "create_media_buy",
-            "tenant_id": tenant_id,
-            "principal_id": "reject_wh_principal",
-            "event_id": f"{payload['idempotency_key']}:{config.id}",
-        }
+        # The real guard: the webhook actually fired with the rejected media buy's envelope.
+        # Pre-fix, the raw-type construction raises before this call, so it is never made.
+        # metadata.task_type echoes the workflow step's tool_name ("create_media_buy").
+        webhook_capture["service"].send_notification.assert_called_once_with(
+            push_notification_config=ANY,
+            payload=ANY,
+            # Metadata carries the audit identifiers the webhook service logs
+            # (task_type/tenant_id/principal_id/media_buy_id — PR #1567 round-2 cleanup).
+            metadata={
+                "task_type": "create_media_buy",
+                "tenant_id": tenant_id,
+                "principal_id": "reject_wh_principal",
+                "media_buy_id": media_buy_id,
+            },
+        )
 
     def test_reject_webhook_does_not_embed_completed_success(
         self, authenticated_admin_session, pending_reject_media_buy, webhook_capture
@@ -329,46 +326,61 @@ class TestAdminMediaBuyRejectWebhook:
         assert embedded.get("context") is None, (
             f"approve webhook with no stored request context must not embed one, got {embedded.get('context')!r}"
         )
-        config = webhook_capture["push_notification_config"]
+        # Metadata now carries the audit identifiers the webhook service logs.
         assert webhook_capture["metadata"] == {
             "task_type": "create_media_buy",
             "tenant_id": tenant_id,
             "principal_id": "reject_wh_principal",
-            "event_id": f"{body['idempotency_key']}:{config.id}",
+            "media_buy_id": media_buy_id,
         }
 
-    def test_a2a_origin_reject_uses_registered_mcp_callback_envelope(
+    def test_a2a_reject_webhook_carries_policy_violation_task(
         self, authenticated_admin_session, make_pending_media_buy, webhook_capture
     ):
-        """A task-argument callback uses its registered MCP envelope.
+        """An A2A-originated reject fires a protobuf Task carrying POLICY_VIOLATION, not a Success.
 
-        Native A2A TaskPushNotificationConfig delivery is task-bound and tested
-        through the A2A lifecycle publisher. A callback embedded in the AdCP
-        tool request remains an MCP webhook even when the originating request
-        arrived over A2A.
+        Regression for PR #1567 round-3 (ChrisHuie review): the protocol=="a2a"
+        branch of the reject webhook (create_a2a_webhook_payload) had ZERO test
+        references — the reject fixture hardcoded protocol "mcp", so what this PR
+        changed inside that branch (the typed CreateMediaBuyError carrying the
+        wire code POLICY_VIOLATION) was unpinned on A2A. The A2A envelope framing
+        (protobuf Task with artifacts[].parts[].data) differs from the MCP
+        payload, so the passing MCP test does not cover it. Asserts on the actual
+        protobuf Task create_a2a_webhook_payload emits.
         """
+        from google.protobuf.json_format import MessageToDict
 
         ids = make_pending_media_buy(protocol="a2a")
 
         _post_approval_action(authenticated_admin_session, ids, {"action": "reject", "reason": "Budget too low"})
         assert "payload" in webhook_capture, "A2A reject route did not send a webhook payload"
-        body = _webhook_body(webhook_capture)
-        assert body["status"] == "rejected"
-        errors = body["result"]["errors"]
+        task = webhook_capture["payload"]
+        # Terminated statuses produce a protobuf a2a Task (create_a2a_webhook_payload contract).
+        body = MessageToDict(task, preserving_proto_field_name=True)
+
+        assert body.get("status", {}).get("state") == "TASK_STATE_REJECTED", (
+            f"A2A reject Task must carry the rejected state, got {body.get('status')!r}"
+        )
+        artifacts = body.get("artifacts") or []
+        assert artifacts, f"A2A reject Task must embed the result artifact, got {body!r}"
+        datas = [part.get("data", {}).get("data", part.get("data", {})) for part in artifacts[0].get("parts", [])]
+        result_data = next((d for d in datas if isinstance(d, dict) and "errors" in d), None)
+        assert result_data is not None, f"A2A reject artifact must carry the errors payload, got {artifacts!r}"
+        errors = result_data["errors"]
         assert errors and errors[0].get("code") == "POLICY_VIOLATION", (
-            f"A2A-origin callback leaked code {errors and errors[0].get('code')!r} — the wire code for a "
+            f"A2A reject artifact leaked code {errors and errors[0].get('code')!r} — the wire code for a "
             "seller rejection is POLICY_VIOLATION (same contract the MCP sibling pins)"
         )
         assert "Budget too low" in errors[0].get("message", ""), (
             "rejection reason must reach the buyer in the A2A error message"
         )
-        result_data = body["result"]
+        # A rejection must not embed a completed-Success shape in the artifact.
         assert result_data.get("status") != "completed", (
-            f"A2A-origin callback claims status={result_data.get('status')!r} — a rejection "
+            f"A2A reject artifact claims status={result_data.get('status')!r} — a rejection "
             "must not carry a completed-success envelope"
         )
         assert not result_data.get("confirmed_at"), (
-            "A2A-origin callback embeds confirmed_at — the buy was rejected, not confirmed"
+            "A2A reject artifact embeds confirmed_at — the buy was rejected, not confirmed"
         )
 
     def test_approve_webhook_echoes_buyer_request_context(

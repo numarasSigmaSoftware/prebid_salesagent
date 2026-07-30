@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import ValidationError
 
-from src.core.application_context_values import serialize_application_context
+from src.core.application_context import serialize_application_context
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 RecoveryHint = Literal["transient", "correctable", "terminal"]
-
 
 # ---------------------------------------------------------------------------
 # Error-code compliance: mapping non-standard codes to SDK equivalents
@@ -48,16 +47,6 @@ RecoveryHint = Literal["transient", "correctable", "terminal"]
 _SPEC_SUPPLEMENT_CODES: dict[str, dict[str, str]] = {
     "CREATIVE_NOT_FOUND": {"recovery": "correctable", "message": "Creative not found"},
     "CONFIGURATION_ERROR": {"recovery": "terminal", "message": "Configuration error"},
-    # IDEMPOTENCY_IN_FLIGHT is defined by the pinned 3.1 error-code enum
-    # (enums/error-code.json: recovery "transient") but the adcp 6.6 SDK
-    # ``STANDARD_ERROR_CODES`` helper table only carries IDEMPOTENCY_CONFLICT and
-    # IDEMPOTENCY_EXPIRED. Without this supplement ``to_wire_error_code`` would
-    # degrade the code to SERVICE_UNAVAILABLE — the SDK is a cross-check, not the
-    # authority, so we add the spec code here (like CREATIVE_NOT_FOUND above).
-    "IDEMPOTENCY_IN_FLIGHT": {
-        "recovery": "transient",
-        "message": "A prior request with the same idempotency_key is still being processed",
-    },
 }
 
 # The authoritative wire-code table: SDK baseline + pinned-spec supplement.
@@ -156,7 +145,7 @@ INTERNAL_CODES: frozenset[str] = frozenset(
 # VERSION_UNSUPPORTED and BILLING_NOT_SUPPORTED are pinned-spec codes missing
 # from the SDK constant (the spec is authoritative; see adcp-spec-version.md).
 # Auth failures use the canonical AUTH_REQUIRED (see AdCPAuthenticationError);
-# the former project-specific AUTH_TOKEN_INVALID was retired during
+# the former project-specific AUTH_TOKEN_INVALID was retired in the #1417
 # error-code reconciliation. The historical SPEC_CODES name is retained as the
 # public input to the error-code compliance guards. Both members pass through
 # translate_error_code() unchanged.
@@ -177,11 +166,6 @@ assert not _NON_STANDARD_TARGETS, f"ERROR_CODE_MAPPING contains non-standard tar
 # BILLING_NOT_SUPPORTED / VERSION_UNSUPPORTED through the helper would collapse a
 # legal spec code to SERVICE_UNAVAILABLE.
 _GUARANTEED_WIRE_CODES: frozenset[str] = frozenset(WIRE_STANDARD_CODES) | SPEC_CODES
-
-
-def is_guaranteed_wire_error_code(code: str) -> bool:
-    """Return whether ``code`` is legal on the pinned-spec wire."""
-    return code in _GUARANTEED_WIRE_CODES
 
 
 def translate_error_code(code: str) -> str:
@@ -902,40 +886,6 @@ class AdCPIdempotencyExpiredError(AdCPConflictError):
 
     _default_error_code: ClassVar[str] = "IDEMPOTENCY_EXPIRED"
     _default_recovery: ClassVar[RecoveryHint] = "correctable"
-
-
-class AdCPIdempotencyInFlightError(AdCPConflictError):
-    """A prior same-key request is still executing (409, IDEMPOTENCY_IN_FLIGHT).
-
-    Raised when a second request arrives with an idempotency_key whose
-    reservation row is ``in_flight`` (the first attempt has not yet produced a
-    cached response). Per the pinned 3.1 ``error-code.json`` enum, sellers MAY
-    return this instead of blocking the second caller until the first finishes —
-    useful when the first call invokes a slow downstream system. This server does
-    NOT block: it returns the typed error immediately with a
-    ``details.retry_after`` wait hint.
-
-    Recovery=transient (matches the enum): the buyer MUST wait ``retry_after``
-    seconds and retry with the SAME key — minting a fresh key would turn a safe
-    retry into a double-execution race. The ``retry_after`` seconds are ALSO
-    surfaced at the top-level ``retry_after`` envelope field for transports/SDKs
-    that read it there.
-    """
-
-    _default_error_code: ClassVar[str] = "IDEMPOTENCY_IN_FLIGHT"
-    _default_recovery: ClassVar[RecoveryHint] = "transient"
-    _default_suggestion: ClassVar[str | None] = (
-        "wait error.details.retry_after seconds and retry with the SAME idempotency_key — "
-        "MUST NOT mint a fresh key (turns a safe retry into a double-execution race)"
-    )
-
-    def __init__(self, message: str = "", *, retry_after: int, **kwargs: Any) -> None:
-        # The enum mandates error.details.retry_after (integer seconds); mirror it
-        # into details AND the top-level retry_after envelope field so both the
-        # spec-shaped consumer and generic transport readers see the wait hint.
-        details = dict(kwargs.pop("details", None) or {})
-        details.setdefault("retry_after", retry_after)
-        super().__init__(message, details=details, retry_after=retry_after, **kwargs)
 
 
 class AdCPCreativeRejectedError(AdCPError):

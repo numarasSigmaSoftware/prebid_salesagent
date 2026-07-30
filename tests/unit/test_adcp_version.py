@@ -615,9 +615,22 @@ class TestRESTVersionNegotiation:
         self._assert_version_unsupported(response)
         assert response.json()["context"] == request_context
 
-    def test_rest_deeply_nested_context_is_echoed_without_an_arbitrary_depth_limit(self):
+    def test_rest_deeply_nested_context_is_echoed_exactly_not_dropped(self):
+        """A pathologically nested context must not collapse the error, nor vanish from it.
+
+        The body-read echo hands the raw ``context`` to the error constructor,
+        which detaches it while the request is already failing. An earlier
+        recursive detach raised ``RecursionError`` inside the exception
+        handler (collapsing the response into a bare 500) and a subsequent fix
+        silently dropped anything past a 100-level bound instead — trading one
+        contract violation for another, since ``core/context.json`` sets no
+        depth ceiling and the echo contract requires accepted context to
+        survive unchanged. The iterative detach in
+        ``src.core.application_context`` has no such limit: a context nested
+        3,000 objects deep — thirty times the old bound — is echoed exactly.
+        """
         deep = cursor = {}
-        for _ in range(65):
+        for _ in range(3000):
             cursor["nested"] = {}
             cursor = cursor["nested"]
 

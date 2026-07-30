@@ -1,6 +1,5 @@
 """Workflow steps, notifications, and audit logging for creative sync."""
 
-import hashlib
 import logging
 from typing import Any
 
@@ -8,34 +7,12 @@ from adcp import PushNotificationConfig
 from adcp.types import ContextObject
 
 from src.core.audit_logger import get_audit_logger
-from src.core.database.models import Context as DBContext
 from src.core.database.repositories.uow import WorkflowUoW
 from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import CreativeStatusEnum
 
 logger = logging.getLogger(__name__)
-
-
-def _workflow_comment(creative_info: dict[str, Any], approval_mode: str) -> str:
-    status = creative_info.get("status", CreativeStatusEnum.pending_review.value)
-    label = f"Creative '{creative_info['name']}' (format: {creative_info['format']})"
-    if status == CreativeStatusEnum.rejected.value:
-        return f"{label} was rejected by AI review"
-    if status == CreativeStatusEnum.pending_review.value and approval_mode == "ai-powered":
-        return f"{label} requires human review per AI recommendation"
-    if status == CreativeStatusEnum.pending_review.value:
-        return f"{label} requires manual approval"
-    return f"{label} requires review"
-
-
-def _has_active_approval_workflow(uow: WorkflowUoW, creative_id: str) -> bool:
-    assert uow.workflows is not None
-    existing_mapping = uow.workflows.get_latest_mapping_for_object("creative", creative_id)
-    if existing_mapping is None or existing_mapping.action != "approval_required":
-        return False
-    existing_step = uow.workflows.get_step_by_id(existing_mapping.step_id)
-    return existing_step is not None and existing_step.status in {"requires_approval", "in_progress"}
 
 
 def _create_sync_workflow_steps(
@@ -46,7 +23,6 @@ def _create_sync_workflow_steps(
     push_notification_config: PushNotificationConfig | dict | None,
     context: ContextObject | dict | None,
     identity: ResolvedIdentity | None = None,
-    idempotency_key: str | None = None,
 ) -> None:
     """Create workflow steps for creatives requiring approval.
 
@@ -63,93 +39,78 @@ def _create_sync_workflow_steps(
 
     # Get or create persistent context for this operation
     # is_async=True because we're creating workflow steps that need tracking
-    operation_digest = None
-    persistent_ctx: DBContext | None
-    if idempotency_key:
-        operation_digest = hashlib.sha256(
-            "\0".join((tenant["tenant_id"], principal_id, idempotency_key, "sync_creatives")).encode()
-        ).hexdigest()
-        context_id = f"ctx_sync_{operation_digest[:24]}"
-        persistent_ctx = ctx_manager.get_context(
-            context_id,
-            tenant_id=tenant["tenant_id"],
-            principal_id=principal_id,
-        ) or ctx_manager.create_context(
-            tenant["tenant_id"],
-            principal_id,
-            context_id=context_id,
-        )
-    else:
-        persistent_ctx = ctx_manager.get_or_create_context(
-            principal_id=principal_id, tenant_id=tenant["tenant_id"], is_async=True
-        )
+    persistent_ctx = ctx_manager.get_or_create_context(
+        principal_id=principal_id, tenant_id=tenant["tenant_id"], is_async=True
+    )
 
     if persistent_ctx is None:
         raise AdCPAdapterError("Failed to create workflow context")
 
-    created_count = 0
-    for creative_info in creatives_needing_approval:
-        with WorkflowUoW(tenant["tenant_id"]) as uow:
-            assert uow.workflows is not None
-            if _has_active_approval_workflow(uow, creative_info["creative_id"]):
-                continue
+    with WorkflowUoW(tenant["tenant_id"]) as uow:
+        assert uow.workflows is not None
+        for creative_info in creatives_needing_approval:
+            # Build appropriate comment based on status
+            status = creative_info.get("status", CreativeStatusEnum.pending_review.value)
+            if status == CreativeStatusEnum.rejected.value:
+                comment = (
+                    f"Creative '{creative_info['name']}' (format: {creative_info['format']}) was rejected by AI review"
+                )
+            elif status == CreativeStatusEnum.pending_review.value:
+                if approval_mode == "ai-powered":
+                    comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires human review per AI recommendation"
+                else:
+                    comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires manual approval"
+            else:
+                comment = f"Creative '{creative_info['name']}' (format: {creative_info['format']}) requires review"
 
-        # Build appropriate comment based on status
-        status = creative_info.get("status", CreativeStatusEnum.pending_review.value)
-        comment = _workflow_comment(creative_info, approval_mode)
+            # Create workflow step for creative approval
+            # Serialize format to JSON-compatible form (FormatId is a Pydantic model)
+            from pydantic import BaseModel
 
-        # Create workflow step for creative approval
-        # Serialize format to JSON-compatible form (FormatId is a Pydantic model)
-        from pydantic import BaseModel
+            format_value = creative_info["format"]
+            if isinstance(format_value, BaseModel):
+                format_value = format_value.model_dump(mode="json")
 
-        format_value = creative_info["format"]
-        if isinstance(format_value, BaseModel):
-            format_value = format_value.model_dump(mode="json")
+            request_data_for_workflow = {
+                "creative_id": creative_info["creative_id"],
+                "format": format_value,
+                "name": creative_info["name"],
+                "status": status,
+                "approval_mode": approval_mode,
+            }
+            # Store push_notification_config if provided for async notification
+            # Engine's _pydantic_json_serializer handles Pydantic models in JSONB automatically
+            if push_notification_config:
+                request_data_for_workflow["push_notification_config"] = push_notification_config
 
-        request_data_for_workflow = {
-            "creative_id": creative_info["creative_id"],
-            "format": format_value,
-            "name": creative_info["name"],
-            "status": status,
-            "approval_mode": approval_mode,
-        }
-        # Store push_notification_config if provided for async notification
-        # Engine's _pydantic_json_serializer handles Pydantic models in JSONB automatically
-        if push_notification_config:
-            request_data_for_workflow["push_notification_config"] = push_notification_config
+            # Store context if provided (for echoing back in webhook)
+            if context:
+                request_data_for_workflow["context"] = context
 
-        # Store context if provided (for echoing back in webhook)
-        if context:
-            request_data_for_workflow["context"] = context
+            # Store protocol type for webhook payload creation
+            request_data_for_workflow["protocol"] = identity.protocol if identity else "mcp"
 
-        # Store protocol type for webhook payload creation
-        request_data_for_workflow["protocol"] = identity.protocol if identity else "mcp"
-        if idempotency_key:
-            request_data_for_workflow["idempotency_key"] = idempotency_key
+            step = ctx_manager.create_workflow_step(
+                context_id=persistent_ctx.context_id,
+                step_type="creative_approval",
+                owner="publisher",
+                status="requires_approval",
+                tool_name="sync_creatives",
+                request_data=request_data_for_workflow,
+                initial_comment=comment,
+            )
 
-        step_material = f"{operation_digest}:{creative_info['creative_id']}"
-        step_id = f"step_sync_{hashlib.sha256(step_material.encode()).hexdigest()[:24]}" if operation_digest else None
-        ctx_manager.create_workflow_step(
-            context_id=persistent_ctx.context_id,
-            tenant_id=tenant["tenant_id"],
-            step_type="creative_approval",
-            owner="publisher",
-            status="requires_approval",
-            tool_name="sync_creatives",
-            request_data=request_data_for_workflow,
-            initial_comment=comment,
-            step_id=step_id,
-            object_mappings=[
-                {
-                    "object_type": "creative",
-                    "object_id": creative_info["creative_id"],
-                    "action": "approval_required",
-                }
-            ],
-        )
-        created_count += 1
+            # Create ObjectWorkflowMapping to link creative to workflow step
+            # This is CRITICAL for webhook delivery when creative is approved
+            uow.workflows.add_mapping(
+                step_id=step.step_id,
+                object_type="creative",
+                object_id=creative_info["creative_id"],
+                action="approval_required",
+            )
 
-    logger.info("📋 Created %d workflow steps for creative approval", created_count)
+        # WorkflowUoW auto-commits on clean exit
+        logger.info(f"📋 Created {len(creatives_needing_approval)} workflow steps for creative approval")
 
 
 def _send_creative_notifications(

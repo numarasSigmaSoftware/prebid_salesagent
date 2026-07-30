@@ -64,6 +64,10 @@ class MCPContextWrapper:
     applied in main.py to avoid duplicate logging.
     """
 
+    def __init__(self):
+        """Initialize the context wrapper."""
+        self.context_manager = get_context_manager()
+
     def wrap_tool(self, tool_func: SyncMCPTool | AsyncMCPTool) -> Callable:
         """Wrap an MCP tool to automatically handle context.
 
@@ -212,8 +216,6 @@ class MCPContextWrapper:
             raise ValueError(
                 f"No tenant context available. Principal: {identity.principal_id}, Apx-Incoming-Host: {apx_host}"
             )
-        if not identity.principal_id:
-            raise ValueError(f"No principal available for authenticated MCP request. Apx-Incoming-Host: {apx_host}")
 
         # Set the tenant context in the ContextVar (resolve_identity sets it internally,
         # but we need it in this async context boundary too)
@@ -238,7 +240,7 @@ class MCPContextWrapper:
             if not context_id:
                 context_id = f"ctx_{uuid.uuid4().hex[:12]}"
 
-            persistent_context = get_context_manager().get_or_create_context(
+            persistent_context = self.context_manager.get_or_create_context(
                 tenant_id=identity.tenant_id,
                 principal_id=identity.principal_id,
                 context_id=context_id,

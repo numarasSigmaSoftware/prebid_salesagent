@@ -283,8 +283,6 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
     modules = sorted((root / "src" / "services").glob("*webhook*.py"))
     # Buyer log seams outside src/services that also call the scrubber.
     modules.append(root / "src" / "a2a_server" / "adcp_a2a_server.py")
-    modules.append(root / "src" / "services" / "a2a_task_lifecycle.py")
-    modules.append(root / "src" / "core" / "context_manager.py")
     modules.append(root / "src" / "core" / "webhook_validator.py")
     return [m for m in modules if m.exists()]
 

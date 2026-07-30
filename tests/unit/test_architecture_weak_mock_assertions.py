@@ -91,6 +91,7 @@ WEAK_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
         "test_hmac_signature_header_present_when_secret_configured",
     ),
     ("tests/integration/test_delivery_service_behavioral.py", "test_bearer_token_sent_in_authorization_header"),
+    ("tests/integration/test_delivery_webhooks_force.py", "test_trigger_report_for_media_buy_public_method"),
     ("tests/integration/test_gam_tenant_setup.py", "test_command_line_parsing_network_code_optional"),
     ("tests/integration/test_targeting_values_endpoint.py", "test_get_targeting_values_endpoint"),
 }
@@ -211,7 +212,9 @@ BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_creative_repository.py", "test_returns_matching_assignments"),
     ("tests/unit/test_creative_repository.py", "test_returns_matching_creative"),
     ("tests/unit/test_dashboard_service.py", "test_get_tenant_caches_result"),
+    ("tests/unit/test_delivery_service_behavioral.py", "test_401_causes_immediate_failure_no_retry"),
     ("tests/unit/test_delivery_service_behavioral.py", "test_403_causes_immediate_failure_no_retry"),
+    ("tests/unit/test_gam_update_media_buy.py", "test_update_package_budget_persists_to_database"),
     ("tests/unit/test_incremental_sync_stale_marking.py", "test_full_sync_should_call_mark_stale"),
     ("tests/unit/test_naming_agent.py", "test_generates_name_successfully"),
     ("tests/unit/test_no_model_dump_in_impl_fixes.py", "test_create_from_request_adds_to_session"),

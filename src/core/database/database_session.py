@@ -7,9 +7,8 @@ management across the entire application.
 
 import logging
 import os
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Module-level globals for lazy initialization
 _engine = None
-_coordination_engine = None
 _session_factory = None
 _scoped_session = None
 
@@ -32,65 +30,6 @@ _scoped_session = None
 _last_health_check: float = 0.0
 _health_check_interval = 60  # Check health every 60 seconds
 _is_healthy = True
-_session_context_depth: ContextVar[int] = ContextVar("database_session_context_depth", default=0)
-_uow_context_depth: ContextVar[int] = ContextVar("database_uow_context_depth", default=0)
-_AFTER_COMMIT_CALLBACKS = "salesagent_after_commit_callbacks"
-_ROOT_COMMIT_COMPLETED = "salesagent_root_commit_completed"
-
-
-def defer_until_after_commit(session: Session, callback: Callable[[], None]) -> None:
-    """Run a non-database side effect only after the owning transaction commits."""
-    session.info.setdefault(_AFTER_COMMIT_CALLBACKS, []).append(callback)
-
-
-@event.listens_for(Session, "after_commit")
-def _run_after_commit_callbacks(session: Session) -> None:
-    """Mark a root commit; callbacks run after its connection is returned."""
-    if session.in_nested_transaction():
-        return
-    session.info[_ROOT_COMMIT_COMPLETED] = True
-
-
-@event.listens_for(Session, "after_transaction_end")
-def _publish_after_root_transaction_end(session: Session, transaction: Any) -> None:
-    """Publish only after root commit has ended and released its connection."""
-    if transaction.parent is not None or not session.info.pop(_ROOT_COMMIT_COMPLETED, False):
-        return
-    callbacks = session.info.pop(_AFTER_COMMIT_CALLBACKS, [])
-    for callback in callbacks:
-        try:
-            callback()
-        except Exception:
-            logger.exception("Deferred post-commit callback failed")
-
-
-@event.listens_for(Session, "after_rollback")
-def _discard_after_commit_callbacks(session: Session) -> None:
-    """Discard effects only when the root transaction rolled back."""
-    if session.in_nested_transaction():
-        return
-    session.info.pop(_ROOT_COMMIT_COMPLETED, None)
-    session.info.pop(_AFTER_COMMIT_CALLBACKS, None)
-
-
-def scoped_session_context_active() -> bool:
-    """Return whether this execution context already owns a scoped DB session."""
-    return _session_context_depth.get() > 0
-
-
-def uow_context_active() -> bool:
-    """Return whether an outer unit of work owns the current transaction."""
-    return _uow_context_depth.get() > 0
-
-
-def enter_uow_context() -> Token[int]:
-    """Mark entry into a UoW without conflating it with raw session scopes."""
-    return _uow_context_depth.set(_uow_context_depth.get() + 1)
-
-
-def exit_uow_context(token: Token[int]) -> None:
-    """Restore the UoW nesting state established by :func:`enter_uow_context`."""
-    _uow_context_depth.reset(token)
 
 
 def _pydantic_json_serializer(obj: Any) -> str:
@@ -128,26 +67,6 @@ def _is_pgbouncer_connection(connection_string: str) -> bool:
         return ":6543" in connection_string
 
 
-def _coordination_connection_string(primary_connection_string: str) -> str:
-    """Resolve and validate a backend-session-affine coordination URL."""
-    configured = os.environ.get("COORDINATION_DATABASE_URL")
-    if configured is None:
-        if _is_pgbouncer_connection(primary_connection_string):
-            raise RuntimeError(
-                "COORDINATION_DATABASE_URL must point directly to PostgreSQL when DATABASE_URL uses PgBouncer; "
-                "session advisory locks are unsafe through transaction pooling"
-            )
-        return primary_connection_string
-    coordination_port = urlparse(configured).port
-    if coordination_port == 6543 or (
-        configured == primary_connection_string and _is_pgbouncer_connection(primary_connection_string)
-    ):
-        raise RuntimeError(
-            "COORDINATION_DATABASE_URL must bypass PgBouncer transaction pooling for session advisory locks"
-        )
-    return configured
-
-
 def get_engine():
     """Get or create the database engine (lazy initialization)."""
     global _engine, _session_factory, _scoped_session
@@ -176,10 +95,6 @@ def get_engine():
         # Detect PgBouncer usage (typically port 6543)
         # PgBouncer requires different pooling strategy since it manages connections
         is_pgbouncer = _is_pgbouncer_connection(connection_string)
-        if is_pgbouncer:
-            # Fail during application database initialization, not on the
-            # first buyer mutation that needs a provider-operation fence.
-            _coordination_connection_string(connection_string)
 
         if is_pgbouncer:
             logger.info("PgBouncer detected - using optimized connection pool settings")
@@ -221,7 +136,15 @@ def get_engine():
                 },
             )
 
-        _install_statement_timeout(_engine, query_timeout)
+        # Set statement_timeout after connection is established
+        # This works with both direct PostgreSQL and PgBouncer
+        # PgBouncer doesn't support startup parameters, so we must use SET command
+        @event.listens_for(_engine, "connect")
+        def set_statement_timeout(dbapi_conn, connection_record):
+            """Set statement_timeout on new connections."""
+            cursor = dbapi_conn.cursor()
+            cursor.execute(f"SET statement_timeout = '{query_timeout * 1000}'")
+            cursor.close()
 
         # Create session factory
         _session_factory = sessionmaker(bind=_engine)
@@ -230,51 +153,9 @@ def get_engine():
     return _engine
 
 
-def _install_statement_timeout(engine: Any, query_timeout: int) -> None:
-    """Apply the standard statement timeout to every connection in an engine."""
-
-    @event.listens_for(engine, "connect")
-    def set_statement_timeout(dbapi_conn, connection_record):
-        cursor = dbapi_conn.cursor()
-        cursor.execute(f"SET statement_timeout = '{query_timeout * 1000}'")
-        cursor.close()
-
-
-def get_coordination_engine():
-    """Return the pool dedicated to durable external-operation coordination.
-
-    Provider fences can be acquired while a domain UoW holds a connection.
-    Sharing the domain pool would permit pool-sized concurrent requests to
-    deadlock through hold-and-wait. A bounded independent pool breaks that
-    dependency while retaining backpressure.
-    """
-    global _coordination_engine
-
-    if _coordination_engine is None:
-        primary_connection_string = DatabaseConfig.get_connection_string()
-        connection_string = _coordination_connection_string(primary_connection_string)
-        query_timeout = int_env("DATABASE_QUERY_TIMEOUT", "30")
-        connect_timeout = int_env("DATABASE_CONNECT_TIMEOUT", "10")
-        pool_timeout = int_env("DATABASE_POOL_TIMEOUT", "30")
-        _coordination_engine = create_engine(
-            connection_string,
-            pool_size=int_env("DB_COORDINATION_POOL_SIZE", "2"),
-            max_overflow=int_env("DB_COORDINATION_MAX_OVERFLOW", "5"),
-            pool_timeout=pool_timeout,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-            echo=False,
-            json_serializer=_pydantic_json_serializer,
-            connect_args={"connect_timeout": connect_timeout},
-        )
-        _install_statement_timeout(_coordination_engine, query_timeout)
-
-    return _coordination_engine
-
-
 def reset_engine():
     """Reset engine for testing - closes existing connections and clears global state."""
-    global _coordination_engine, _engine, _session_factory, _scoped_session
+    global _engine, _session_factory, _scoped_session
 
     if _scoped_session is not None:
         _scoped_session.remove()
@@ -283,9 +164,6 @@ def reset_engine():
     if _engine is not None:
         _engine.dispose()
         _engine = None
-    if _coordination_engine is not None:
-        _coordination_engine.dispose()
-        _coordination_engine = None
 
     _session_factory = None
 
@@ -314,44 +192,6 @@ def get_scoped_session():
     # Calling get_engine() ensures all globals are initialized
     get_engine()
     return _scoped_session
-
-
-@contextmanager
-def get_independent_db_session() -> Generator[Session, None, None]:
-    """Yield a non-scoped session for an explicitly independent transaction.
-
-    This boundary is reserved for durable coordination records that must commit
-    before an external side effect while a caller-owned domain transaction is
-    still open. Unlike :func:`get_db_session`, it can never reuse and close the
-    thread's scoped session.
-    """
-    session = Session(bind=get_engine())
-    try:
-        yield session
-    except SQLAlchemyError:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-
-@contextmanager
-def get_coordination_db_session() -> Generator[Session, None, None]:
-    """Yield a backend-affine session for provider-operation fences.
-
-    Binding to one explicitly checked-out Connection is essential: a Session
-    bound only to an Engine may return its DBAPI connection after each commit,
-    invalidating session-level advisory-lock ownership.
-    """
-    with get_coordination_engine().connect() as connection:
-        session = Session(bind=connection)
-        try:
-            yield session
-        except SQLAlchemyError:
-            session.rollback()
-            raise
-        finally:
-            session.close()
 
 
 @contextmanager
@@ -384,30 +224,24 @@ def get_db_session() -> Generator[Session, None, None]:
 
     scoped = get_scoped_session()
     session = scoped()
-    depth = _session_context_depth.get()
-    depth_token = _session_context_depth.set(depth + 1)
     try:
         yield session
     except (OperationalError, DisconnectionError) as e:
         logger.error(f"Database connection error: {e}")
-        if depth == 0:
-            session.rollback()
-            # Remove session from registry to force reconnection
-            scoped.remove()
+        session.rollback()
+        # Remove session from registry to force reconnection
+        scoped.remove()
         # Mark as unhealthy for circuit breaker
         _is_healthy = False
         _last_health_check = time.time()
         raise
     except SQLAlchemyError as e:
         logger.error(f"Database error: {e}")
-        if depth == 0:
-            session.rollback()
+        session.rollback()
         raise
     finally:
-        _session_context_depth.reset(depth_token)
-        if depth == 0:
-            session.close()
-            scoped.remove()
+        session.close()
+        scoped.remove()
 
 
 def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (OperationalError, DisconnectionError)) -> Any:
@@ -463,14 +297,12 @@ class DatabaseManager:
 
     def __init__(self):
         self._session: Session | None = None
-        self._owns_session = False
 
     @property
     def session(self) -> Session:
         """Get or create a session."""
         if self._session is None:
             scoped = get_scoped_session()
-            self._owns_session = not uow_context_active()
             self._session = scoped()
         return self._session
 
@@ -478,28 +310,23 @@ class DatabaseManager:
         """Commit the current transaction."""
         if self._session:
             try:
-                if self._owns_session:
-                    self._session.commit()
-                else:
-                    self._session.flush()
+                self._session.commit()
             except SQLAlchemyError:
                 self.rollback()
                 raise
 
     def rollback(self):
         """Rollback the current transaction."""
-        if self._session and self._owns_session:
+        if self._session:
             self._session.rollback()
 
     def close(self):
         """Close and cleanup the session."""
-        if self._session and self._owns_session:
+        if self._session:
             self._session.close()
             scoped = get_scoped_session()
             scoped.remove()
-        if self._session:
             self._session = None
-            self._owns_session = False
 
     def __enter__(self):
         """Context manager entry."""

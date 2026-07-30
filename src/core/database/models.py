@@ -924,7 +924,6 @@ class MediaBuy(Base):
     is_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Canonical hash of the request as hashed by the idempotency probe (see
     # src.core.idempotency_canonical). raw_request is NOT canonicalizable —
     # it carries injected package_ids and alias-dependent field names — so the
@@ -1004,7 +1003,7 @@ class IdempotencyAttempt(Base):
     spec-defined scope tuples are implemented as written; extra dimensions may
     exist as columns but never in uniqueness/lookup semantics.)
 
-    AdCP 3.1.1 idempotency: retrying a keyed tool call with the same
+    AdCP 3.0.1 idempotency: retrying a mutating tool call with the same
     idempotency_key must return the ORIGINAL success response byte-for-byte
     (marked `replayed: true`), and errors are NEVER cached — a retry after an
     error re-executes. This table is the verbatim success cache: it stores the
@@ -1032,7 +1031,7 @@ class IdempotencyAttempt(Base):
     tenant_id: Mapped[str] = mapped_column(
         String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
     )
-    principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
     account_id: Mapped[str | None] = mapped_column(
         # String(100) matches accounts.account_id (and every other account_id
         # column) — the same logical value joins on the degraded-path lookup.
@@ -1045,26 +1044,7 @@ class IdempotencyAttempt(Base):
         nullable=False,
         comment="Tool that produced the cached success (observability only — NOT part of the unique scope)",
     )
-    operation_class: Mapped[str] = mapped_column(
-        String(8),
-        nullable=False,
-        server_default="write",
-        comment="Admission-control class: 'read' or 'write'",
-    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Two-phase reservation lifecycle: a row is INSERTed 'in_flight' (envelope
-    # NULL) in its own committed transaction BEFORE any side effect — the unique
-    # index makes that INSERT first-insert-wins — then flipped to 'completed'
-    # (envelope populated) in the SAME transaction as the guarded write. The read
-    # path (find_by_key) filters status='completed', so an in-flight reservation
-    # never replays; a handler failure releases (DELETEs) the row so errors are
-    # never cached.
-    status: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        server_default="completed",
-        comment="Reservation lifecycle: 'in_flight' (reserved, no response yet) or 'completed' (verbatim success cached)",
-    )
     payload_hash: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
@@ -1073,15 +1053,14 @@ class IdempotencyAttempt(Base):
     # Bare JSONType (no model=) is deliberate: the envelope must replay
     # byte-for-byte, and typed coercion on read could rewrite it. The
     # {"status", "response"} shape is written by
-    # IdempotencyAttemptRepository.complete and read by
+    # IdempotencyAttemptRepository.record_success and read by
     # _replay_cached_success — do not migrate to a typed model in a
     # "legacy JSONType" sweep without confirming coercion preserves
-    # verbatim fidelity. NULLABLE: an in-flight reservation has no response
-    # envelope yet; it is populated when the reservation flips to 'completed'.
-    response_envelope: Mapped[dict | None] = mapped_column(
+    # verbatim fidelity.
+    response_envelope: Mapped[dict] = mapped_column(
         JSONType,
-        nullable=True,
-        comment="Verbatim original success response envelope; NULL while in_flight, populated on completion; returned unchanged on replay (marked replayed=true)",
+        nullable=False,
+        comment="Verbatim original success response envelope; returned unchanged on replay (marked replayed=true)",
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -1090,7 +1069,6 @@ class IdempotencyAttempt(Base):
     tenant = relationship("Tenant")
 
     __table_args__ = (
-        CheckConstraint("operation_class IN ('read', 'write')", name="ck_idempotency_attempt_operation_class"),
         ForeignKeyConstraint(
             ["tenant_id", "principal_id"],
             ["principals.tenant_id", "principals.principal_id"],
@@ -1106,55 +1084,6 @@ class IdempotencyAttempt(Base):
             postgresql_nulls_not_distinct=True,
         ),
         Index("idx_idempotency_attempts_expires_at", "expires_at"),
-    )
-
-
-class DownstreamMutationClaim(Base):
-    """Durable reconciliation evidence for consequential provider mutations."""
-
-    __tablename__ = "downstream_mutation_claims"
-
-    claim_id: Mapped[str] = mapped_column(String(50), primary_key=True, default=lambda: str(uuid4()))
-    tenant_id: Mapped[str] = mapped_column(
-        String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
-    )
-    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)
-    operation_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    downstream_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="planned")
-    result_metadata: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('planned', 'invoked', 'applied', 'not_applied', 'unknown', 'expired')",
-            name="ck_downstream_mutation_claim_status",
-        ),
-        ForeignKeyConstraint(
-            ["tenant_id", "principal_id"],
-            ["principals.tenant_id", "principals.principal_id"],
-            ondelete="CASCADE",
-        ),
-        Index(
-            "idx_downstream_mutation_claims_scope",
-            "tenant_id",
-            "principal_id",
-            "account_id",
-            "idempotency_key",
-            "provider",
-            "operation_key",
-            unique=True,
-            postgresql_nulls_not_distinct=True,
-        ),
-        Index("idx_downstream_mutation_claims_expires_at", "expires_at"),
     )
 
 
@@ -1868,7 +1797,6 @@ class Context(Base):
         Index("idx_contexts_tenant", "tenant_id"),
         Index("idx_contexts_principal", "principal_id"),
         Index("idx_contexts_last_activity", "last_activity_at"),
-        UniqueConstraint("tenant_id", "context_id", name="uq_contexts_tenant_context"),
     )
 
 
@@ -1897,11 +1825,6 @@ class WorkflowStep(Base, JSONValidatorMixin):
     owner: Mapped[str] = mapped_column(String(20))  # principal, publisher, system
     assigned_to: Mapped[str | None] = mapped_column(String(255))  # Specific user/system if assigned
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notifications_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notification_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notification_claim_token: Mapped[str | None] = mapped_column(String(36))
-    notification_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
     transaction_details: Mapped[dict | None] = mapped_column(JSONType)  # Actual API calls made to GAM, etc.
@@ -1921,40 +1844,6 @@ class WorkflowStep(Base, JSONValidatorMixin):
         Index("idx_workflow_steps_owner", "owner"),
         Index("idx_workflow_steps_assigned", "assigned_to"),
         Index("idx_workflow_steps_created", "created_at"),
-        UniqueConstraint("context_id", "step_id", name="uq_workflow_steps_context_step"),
-    )
-
-
-class WorkflowNotificationEvent(Base, JSONValidatorMixin):
-    """Immutable occurrence-level outbox entry for a workflow transition."""
-
-    __tablename__ = "workflow_notification_events"
-
-    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    context_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    step_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    response_data: Mapped[dict | None] = mapped_column(JSONType)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claim_token: Mapped[str | None] = mapped_column(String(36))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["tenant_id", "context_id"],
-            ["contexts.tenant_id", "contexts.context_id"],
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["context_id", "step_id"],
-            ["workflow_steps.context_id", "workflow_steps.step_id"],
-            ondelete="CASCADE",
-        ),
-        Index("idx_workflow_notifications_pending", "tenant_id", "step_id", "delivered_at", "sequence"),
     )
 
 
@@ -2186,19 +2075,11 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
     tenant_id: Mapped[str] = mapped_column(String(50), nullable=False)
     principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    media_buy_id: Mapped[str | None] = mapped_column(
-        String(100), ForeignKey("media_buys.media_buy_id", ondelete="CASCADE"), nullable=True
-    )
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    operation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    token: Mapped[str | None] = mapped_column(Text, nullable=True)
-    application_context: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     authentication_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     authentication_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     webhook_secret: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    last_event_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    last_event_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -2222,12 +2103,6 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
         ),
         Index("idx_push_notification_configs_tenant", "tenant_id"),
         Index("idx_push_notification_configs_principal", "tenant_id", "principal_id"),
-        Index(
-            "idx_push_notification_configs_media_buy",
-            "tenant_id",
-            "principal_id",
-            "media_buy_id",
-        ),
     )
 
     def __repr__(self):
@@ -2247,76 +2122,6 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
             f"updated_at={self.updated_at}"
             f")>"
         )
-
-
-class A2ATaskRecord(Base, JSONValidatorMixin):
-    """Durable native A2A task state and workflow correlation."""
-
-    __tablename__ = "a2a_tasks"
-
-    task_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    context_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    workflow_step_id: Mapped[str | None] = mapped_column(
-        String(100), ForeignKey("workflow_steps.step_id", ondelete="SET NULL"), nullable=True
-    )
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    task_payload: Mapped[dict] = mapped_column(JSONType, nullable=False)
-    notification_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
-    last_notification_status: Mapped[str | None] = mapped_column(String(32))
-    last_notification_event_id: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-    __table_args__ = (
-        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
-        ForeignKeyConstraint(
-            ["tenant_id", "principal_id"],
-            ["principals.tenant_id", "principals.principal_id"],
-            ondelete="CASCADE",
-        ),
-        Index("idx_a2a_tasks_owner", "tenant_id", "principal_id"),
-        Index("uq_a2a_tasks_workflow_step", "workflow_step_id", unique=True),
-        UniqueConstraint("tenant_id", "task_id", name="uq_a2a_tasks_tenant_task"),
-    )
-
-
-class A2ATaskNotificationEvent(Base, JSONValidatorMixin):
-    """Durable, independently claimable native A2A task notification."""
-
-    __tablename__ = "a2a_task_notification_events"
-
-    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    task_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    task_payload: Mapped[dict] = mapped_column(JSONType, nullable=False)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claim_token: Mapped[str | None] = mapped_column(String(36))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-    __table_args__ = (
-        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
-        ForeignKeyConstraint(
-            ["tenant_id", "principal_id"],
-            ["principals.tenant_id", "principals.principal_id"],
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["tenant_id", "task_id"],
-            ["a2a_tasks.tenant_id", "a2a_tasks.task_id"],
-            ondelete="CASCADE",
-        ),
-        Index("idx_a2a_task_notifications_pending", "tenant_id", "delivered_at", "created_at"),
-    )
 
 
 class DeliverySimulationConfig(Base):
@@ -2422,12 +2227,6 @@ class WebhookDeliveryLog(Base):
     )
     webhook_url: Mapped[str] = mapped_column(String, nullable=False)
     task_type: Mapped[str] = mapped_column(String, nullable=False)  # "media_buy_delivery"
-    logical_event_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    event_payload: Mapped[dict | None] = mapped_column(
-        JSONType,
-        nullable=True,
-        comment="First-copy-wins exact wire payload reused for every retry of this logical event",
-    )
 
     # AdCP webhook metadata
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
@@ -2464,13 +2263,4 @@ class WebhookDeliveryLog(Base):
         Index("idx_webhook_log_tenant", "tenant_id"),
         Index("idx_webhook_log_status", "status"),
         Index("idx_webhook_log_created_at", "created_at"),
-        Index(
-            "uq_webhook_log_logical_event",
-            "tenant_id",
-            "principal_id",
-            "media_buy_id",
-            "webhook_url",
-            "logical_event_key",
-            unique=True,
-        ),
     )
