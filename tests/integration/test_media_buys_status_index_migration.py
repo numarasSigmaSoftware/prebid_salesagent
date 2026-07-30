@@ -47,24 +47,16 @@ def _index_validity(engine) -> bool | None:
     return None if row is None else bool(row[0])
 
 
-def _seed_invalid_leftover_index(engine) -> None:
-    """Build a normal, valid index under INDEX_NAME, then flip indisvalid to
-    false directly -- reproducing the catalog state a real interrupted
-    CONCURRENTLY build leaves behind (see module docstring for why this is
-    seeded directly rather than via a real interrupted build). Asserts the
-    seed actually produced that state before any caller trusts it.
-    """
+def _create_valid_index(engine) -> None:
+    """Build a normal, valid index under INDEX_NAME with no alembic
+    involvement at all -- the shared primitive every seed helper below
+    needs, so a test can plant a pre-existing index without going through
+    a real upgrade() call (which would advance alembic's tracked revision
+    and make a later "upgrade to the same target" a no-op -- see
+    test_upgrade_is_idempotent_against_an_already_valid_index)."""
     with engine.connect() as conn:
         conn = conn.execution_options(isolation_level="AUTOCOMMIT")
         conn.execute(text(f"CREATE INDEX CONCURRENTLY {INDEX_NAME} ON media_buys (status)"))
-        conn.execute(
-            text(
-                "UPDATE pg_index SET indisvalid = false "
-                "WHERE indexrelid = (SELECT oid FROM pg_class WHERE relname = :name)"
-            ),
-            {"name": INDEX_NAME},
-        )
-    assert _index_validity(engine) is False, "seed helper failed to produce an invalid leftover index"
 
 
 def _corrupt_existing_index_to_invalid(engine) -> None:
@@ -86,6 +78,29 @@ def _corrupt_existing_index_to_invalid(engine) -> None:
     assert _index_validity(engine) is False, "corruption helper failed to invalidate the index"
 
 
+def _seed_valid_index(engine) -> None:
+    """Build a normal, valid index under INDEX_NAME with alembic's tracked
+    revision left at PRE_INDEX_REV -- for testing upgrade()'s IF NOT EXISTS
+    behavior against a pre-existing valid index, without a real upgrade()
+    call reaching alembic's revision tracking first (see
+    test_upgrade_is_idempotent_against_an_already_valid_index for why that
+    matters). Asserts the seed actually produced a valid index.
+    """
+    _create_valid_index(engine)
+    assert _index_validity(engine) is True, "seed helper failed to produce a valid index"
+
+
+def _seed_invalid_leftover_index(engine) -> None:
+    """Build a normal, valid index under INDEX_NAME, then flip indisvalid to
+    false directly -- reproducing the catalog state a real interrupted
+    CONCURRENTLY build leaves behind (see module docstring for why this is
+    seeded directly rather than via a real interrupted build). Asserts the
+    seed actually produced that state before any caller trusts it.
+    """
+    _create_valid_index(engine)
+    _corrupt_existing_index_to_invalid(engine)
+
+
 @pytest.mark.requires_db
 class TestMediaBuysStatusIndexMigration:
     def test_upgrade_creates_valid_index_from_scratch(self, migration_db_fresh):
@@ -99,14 +114,26 @@ class TestMediaBuysStatusIndexMigration:
         assert _index_validity(engine) is True, "upgrade() must leave a valid index"
 
     def test_upgrade_is_idempotent_against_an_already_valid_index(self, migration_db_fresh):
-        """Re-running upgrade() (e.g. a redeploy re-applying the same head)
-        after it already succeeded must not raise and must leave the
-        existing valid index untouched (IF NOT EXISTS)."""
-        engine, db_url = migration_db_fresh
-        run_alembic_upgrade(db_url, INDEX_REV)
-        assert _index_validity(engine) is True
+        """upgrade()'s IF NOT EXISTS must not raise when the index already
+        exists and is valid -- e.g. a redeploy re-applying the same head
+        after another process already created it, or a prior partial run
+        that got as far as CREATE but not alembic's own version stamp.
 
-        run_alembic_upgrade(db_url, INDEX_REV)  # must not raise
+        Seeds the index directly at PRE_INDEX_REV rather than by calling
+        run_alembic_upgrade(db_url, INDEX_REV) twice: alembic's own version
+        tracking treats "upgrade to a revision already applied" as a no-op
+        and never re-invokes upgrade() at all, so calling it twice would
+        pass this test regardless of whether IF NOT EXISTS does anything --
+        confirmed by removing IF NOT EXISTS from the migration and seeing
+        the two-calls form of this test stay green. Seeding the index
+        directly, then upgrading for the FIRST time, actually exercises
+        upgrade()'s own guard against a pre-existing valid index.
+        """
+        engine, db_url = migration_db_fresh
+        run_alembic_upgrade(db_url, PRE_INDEX_REV)
+        _seed_valid_index(engine)
+
+        run_alembic_upgrade(db_url, INDEX_REV)  # must not raise against the pre-existing valid index
 
         assert _index_validity(engine) is True
 
