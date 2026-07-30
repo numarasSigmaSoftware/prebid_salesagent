@@ -226,11 +226,27 @@ def _enveloped_invalid_request(exc: AdCPError) -> InvalidRequestError:
     client detection order — so a protocol-level rejection can stay a JSON-RPC error AND still let
     a buyer branch on the AdCP code. "Stays on the JSON-RPC wire" and "carries the envelope in
     ``data``" are orthogonal; every AdCP-layer rejection routed through this helper does both.
-    Protocol-native JSON-RPC errors — ``UnsupportedOperationError`` (task listing/subscription,
-    the extended agent card) and ``TaskNotFoundError`` (an unknown/unowned task id on
-    tasks/get, tasks/cancel, and push-config lookups) — are correctly envelope-free: they
-    signal a transport-protocol condition with no corresponding AdCP wire code, not an escape
-    from this helper.
+    (On the v0.3 method aliases the compat adapter drops ``data`` regardless — see
+    ``_internal_error_for`` for the measurement and #1670.)
+
+    Twelve raises in this module deliberately BYPASS this helper and ship envelope-free,
+    because each signals a transport-protocol condition with no corresponding AdCP wire code.
+    All twelve, not the subset this docstring used to name:
+
+    - ``TaskNotFoundError`` × 4 — unknown/unowned task id on tasks/get, tasks/cancel and the
+      two push-config lookups.
+    - ``UnsupportedOperationError`` × 3 — task listing/subscription and the extended agent card.
+    - ``InvalidParamsError`` × 3 — a required JSON-RPC parameter is absent (``id``, ``url``).
+      Note this same TYPE also ships WITH an envelope when the rejection is AdCP-layer rather
+      than protocol-layer (the SSRF webhook-URL check routes through this helper), so the type
+      alone does not tell you the shape — the layer does.
+    - ``TaskNotCancelableError`` × 2 — a terminal task cannot be canceled.
+
+    Bypassing also skips ``record_boundary_error``, so none of the twelve produces a server
+    log, activity-feed row or audit row, where REST's ``_envelope_response`` records the
+    analogous not-found. That is deliberate for buyer-correctable protocol outcomes (an
+    unknown task id is not a seller-side incident) but it is a real observability gap for the
+    operator; widening it is tracked separately rather than folded in here.
 
     Both wire layers carry the SAME sanitized message — the JSON-RPC ``message`` is taken from the
     envelope — so ``error.message`` and ``error.data.adcp_error.message`` can never disagree.
@@ -328,8 +344,26 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     serializes it as a structured JSON-RPC error (the four
     ``on_*_task_push_notification_config`` methods, the durable ``on_get_task`` /
     ``on_cancel_task`` boundaries, and the untyped-crash branch of
-    ``on_message_send``, all raise through here). The two-layer envelope rides in the
-    error's ``data`` field (``error.data["adcp_error"]`` / ``error.data["errors"][0]``).
+    ``on_message_send``, all raise through here). The two-layer envelope is attached
+    as the error's ``data`` (``error.data["adcp_error"]`` / ``error.data["errors"][0]``).
+
+    WHETHER THE BUYER RECEIVES THAT ``data`` DEPENDS ON THE METHOD NAME THEY CALLED.
+    The app builds its A2A routes with ``enable_v0_3_compat=True`` (``src/app.py``), and
+    dispatch is selected by method name, so the v0.3 aliases reach
+    ``a2a/compat/v0_3/jsonrpc_adapter.py``. That adapter's ``handle_request`` has no
+    ``except A2AError`` arm — only ``except Exception -> CoreInternalError(message=str(e))``,
+    which takes no ``data`` — so on those names the error is REBUILT as ``-32603`` with
+    ``data: null`` and only the (already-sanitized) message survives. Measured on an auth
+    rejection: ``GetTask``/``CancelTask`` return ``-32600`` + envelope; ``tasks/get`` /
+    ``tasks/cancel`` return ``-32603`` + ``data: null``. The installed ``adcp`` client emits
+    the v0.3 names, so this is the common path, not a fringe one.
+
+    Nothing leaks — the flattened message is the scrubbed text — but the buyer loses the
+    machine-readable code they are told to branch on. Raising the typed error here is still
+    correct: it is what will surface the envelope once the compat adapter maps ``A2AError``.
+    Tracked in #1670; graded in both directions by ``_TASK_METHOD_DISPATCH`` in
+    ``tests/unit/test_a2a_transport_contract.py``, so the day that lands, this docstring
+    goes red with it.
     """
     adcp_error, envelope = _sanitized_envelope(exc)
     if isinstance(exc, AdCPError):

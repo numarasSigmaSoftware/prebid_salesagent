@@ -34,6 +34,28 @@ _TEST_IDENTITY = make_test_a2a_identity()
 _AUTH_MISSING_SUGGESTION = pinned_error_code_suggestion("AUTH_MISSING")
 _AUTH_INVALID_SUGGESTION = pinned_error_code_suggestion("AUTH_INVALID")
 
+# Task-management dispatch is selected by METHOD NAME, not by the version header: the app
+# builds its A2A routes with ``enable_v0_3_compat=True`` (src/app.py), so the v0.3 names
+# reach ``a2a/compat/v0_3/jsonrpc_adapter.py``. That adapter's ``handle_request`` has no
+# ``except A2AError`` arm — only ``except Exception -> CoreInternalError(message=str(e))``,
+# which takes no ``data``. So a raised ``InternalError(message=..., data=envelope)`` is
+# REBUILT without its envelope on that path.
+#
+# Both halves are graded because the v1.0 rows alone cannot see the gap, and the installed
+# adcp client emits the v0.3 names. Observed at this head, auth rejection on each:
+#     GetTask      v1.0 -> code -32600, data = two-layer envelope
+#     tasks/get    v0.3 -> code -32603, data = null
+#     CancelTask   v1.0 -> code -32600, data = two-layer envelope
+#     tasks/cancel v0.3 -> code -32603, data = null
+# Tracked as #1670. Raising the typed error is still correct — it is what will surface the
+# envelope once the compat adapter maps A2AError — so the fix is upstream, not here.
+_TASK_METHOD_DISPATCH = [
+    pytest.param("GetTask", "1.0", True, id="GetTask-v1.0"),
+    pytest.param("CancelTask", "1.0", True, id="CancelTask-v1.0"),
+    pytest.param("tasks/get", "0.3", False, id="tasks-get-v0.3-envelope-dropped"),
+    pytest.param("tasks/cancel", "0.3", False, id="tasks-cancel-v0.3-envelope-dropped"),
+]
+
 # ---------------------------------------------------------------------------
 # Explicit per-skill contract. Every registered skill MUST have an entry here
 # (asserted), and each entry is INDEPENDENTLY authored — NOT derived from the
@@ -300,23 +322,26 @@ class TestA2AAuthContract:
         ],
         ids=["missing-token", "malformed-authorization", "empty-bearer", "invalid-token"],
     )
-    @pytest.mark.parametrize("method", ["GetTask", "CancelTask"])
+    @pytest.mark.parametrize(("method", "version", "envelope_survives"), _TASK_METHOD_DISPATCH)
     def test_task_management_auth_errors_use_json_rpc_dispatcher(
         self,
         client,
         method,
+        version,
+        envelope_survives,
         headers,
         resolver_error,
         expected_code,
         expected_recovery,
         expected_suggestion,
     ):
-        """The real dispatcher must serialize task auth failures as JSON-RPC errors carrying the
-        full two-layer auth envelope in ``error.data`` — not just a bare message.
+        """The real dispatcher must serialize task auth failures as JSON-RPC errors, carrying the
+        full two-layer auth envelope in ``error.data`` on the v1.0 names — and NOT on their v0.3
+        aliases, which is graded here rather than assumed.
 
-        Drives the ACTUAL SDK ``JsonRpcDispatcher`` via a real HTTP POST (not a direct handler
-        call), so this catches regressions in dispatcher routing, request parsing, and response
-        serialization that a unit test calling the handler method directly cannot see.
+        Drives the ACTUAL SDK dispatcher via a real HTTP POST (not a direct handler call), so this
+        catches regressions in dispatcher routing, request parsing, and response serialization that
+        a unit test calling the handler method directly cannot see.
 
         The invalid-token case patches ``resolve_identity`` at its SOURCE module (not
         ``_resolve_a2a_identity`` itself) so the REAL ``_resolve_a2a_identity`` exception
@@ -325,6 +350,7 @@ class TestA2AAuthContract:
         ``InvalidRequestError`` side effect, which bypassed that enveloping entirely and made
         the invalid-token case silently untested for ``error.data``.
         """
+        headers = {**headers, "A2A-Version": version}
         payload = {"jsonrpc": "2.0", "id": "task-auth-request", "method": method, "params": {"id": "task_auth"}}
         resolver_patch = (
             patch(
@@ -349,9 +375,24 @@ class TestA2AAuthContract:
         assert body["jsonrpc"] == "2.0"
         assert body["id"] == "task-auth-request"
         assert "result" not in body
-        assert body["error"]["code"] == -32600
+        # Holds on BOTH paths: the message is the sanitized text and no task id rides along,
+        # so the compat flattening costs the machine-readable code, never disclosure.
         assert "auth" in body["error"]["message"].lower()
         assert "task_auth" not in json.dumps(body)
+
+        if not envelope_survives:
+            # v0.3 compat path (#1670): the adapter's bare `except Exception` rebuilds the error
+            # as CoreInternalError(message=str(e)), so the code becomes -32603 and `data` is gone.
+            # Asserted rather than skipped, so the day #1670 restores the mapping this row goes
+            # red and forces `_internal_error_for`'s docstring to be corrected with it.
+            assert body["error"]["code"] == -32603
+            assert body["error"].get("data") is None, (
+                f"{method} now carries error.data — the v0.3 compat adapter gained an A2AError "
+                f"mapping. Update this table and _internal_error_for's docstring together (#1670)."
+            )
+            return
+
+        assert body["error"]["code"] == -32600
         # The two-layer envelope must ALSO reach the real wire, not just a bare JSON-RPC message —
         # a buyer branches on error.data.adcp_error.code, and this is what previously required a
         # separate unit test calling the handler directly (which cannot prove the real dispatcher
@@ -854,3 +895,56 @@ class TestAgentCardContract:
         extensions = card.get("capabilities", {}).get("extensions", [])
         adcp_uris = [e.get("uri", "") for e in extensions]
         assert any("adcp-extension" in uri for uri in adcp_uris), "Agent card must have AdCP extension in capabilities"
+
+
+class TestEnvelopeFreeProtocolRaises:
+    """The envelope-free JSON-RPC raises stay enumerable, not just described.
+
+    ``_enveloped_invalid_request``'s docstring enumerates every raise in the A2A module
+    that deliberately ships WITHOUT the two-layer envelope, because each signals a
+    transport-protocol condition with no AdCP wire code. An enumeration in prose drifts
+    the moment someone adds a raise — an earlier version named 7 of the 12 and read as
+    complete, which is what made a reviewer check by hand.
+    """
+
+    # Type -> count, mirroring the docstring. Update BOTH together, deliberately: adding a
+    # protocol raise is a decision about whether the buyer gets an AdCP code, not a detail.
+    _EXPECTED_ENVELOPE_FREE_RAISES = {
+        "InvalidParamsError": 3,
+        "TaskNotCancelableError": 2,
+        "TaskNotFoundError": 4,
+        "UnsupportedOperationError": 3,
+    }
+
+    @staticmethod
+    def _raise_counts() -> dict[str, int]:
+        """Count `raise <A2AProtocolError>(...)` per type in the A2A server module."""
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src" / "a2a_server" / "adcp_a2a_server.py"
+        counts: dict[str, int] = {}
+        for node in ast.walk(ast.parse(src.read_text())):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            name = exc.id if isinstance(exc, ast.Name) else (exc.attr if isinstance(exc, ast.Attribute) else None)
+            if name in TestEnvelopeFreeProtocolRaises._EXPECTED_ENVELOPE_FREE_RAISES:
+                counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def test_docstring_enumeration_matches_the_code(self):
+        assert self._raise_counts() == self._EXPECTED_ENVELOPE_FREE_RAISES, (
+            "The envelope-free protocol raises changed. Update BOTH this table and the "
+            "enumeration in _enveloped_invalid_request's docstring — and decide whether the "
+            "new raise should carry an AdCP envelope instead of being protocol-native."
+        )
+
+    def test_detector_actually_counts(self):
+        """The count must come from the code, not from the expectation it is compared to."""
+        counts = self._raise_counts()
+        assert sum(counts.values()) == 12
+        assert set(counts) == set(self._EXPECTED_ENVELOPE_FREE_RAISES), (
+            "a declared type vanished from the module entirely — the equality above would "
+            "still fail, but this states which half moved"
+        )
