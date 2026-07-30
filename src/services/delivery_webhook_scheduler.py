@@ -130,7 +130,12 @@ class DeliveryWebhookScheduler:
 
                 for media_buy in media_buys:
                     try:
-                        # Check if this media buy has a reporting webhook configured
+                        # Check if this media buy has a reporting webhook configured.
+                        # NOT redundant with get_reportable_for_delivery's SQL
+                        # predicate: that predicate is JSON key-presence
+                        # (raw_request['reporting_webhook'] IS NOT NULL), a cheap
+                        # SQL-level pre-filter; this is Python truthiness, which
+                        # also excludes a present-but-null/false/{} value. Keep both.
                         raw_request = media_buy.raw_request or {}
                         reporting_webhook = raw_request.get("reporting_webhook")
 

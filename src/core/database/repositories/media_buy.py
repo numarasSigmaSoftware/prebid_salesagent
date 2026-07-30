@@ -678,15 +678,18 @@ class MediaBuyRepository:
         serving_statuses: list[str],
         terminal_statuses: list[str],
     ) -> list[MediaBuy]:
-        """Select serving buys and terminal buys whose final is still unsent.
+        """Select webhook-configured serving buys and terminal buys whose final is still unsent.
 
         Args:
             serving_statuses: PERSISTED statuses (``PERSISTED_STATUS_TO_CANONICAL`` keys)
-                that mean "still serving" — selected unbounded.
+                that mean "still serving" — selected while a reporting_webhook is
+                configured (not anti-joined: a serving buy has no "final" to have
+                already sent, so there is nothing to correlate against).
             terminal_statuses: PERSISTED completed/canceled/rejected statuses,
-                selected until a successful final delivery log exists. Both arms
-                take the persisted vocabulary because ``MediaBuy.status`` stores
-                a map key, never a canonical/wire value.
+                selected while a reporting_webhook is configured AND until a
+                successful final delivery log exists. Both arms take the persisted
+                vocabulary because ``MediaBuy.status`` stores a map key, never a
+                canonical/wire value.
 
         System-level cross-tenant query for the delivery webhook scheduler ONLY (the
         status scheduler keeps the unbounded ``get_all_by_statuses`` — its selection
@@ -697,6 +700,17 @@ class MediaBuyRepository:
         correlated lookup. ``final_webhook_claimed_at`` is deliberately not a
         selection predicate because stale-lease recovery requires claimed rows to
         remain selectable after a crashed send.
+
+        The reporting_webhook-configured requirement is a single top-level predicate
+        rather than duplicated into each arm of the OR below — the prior duplicated
+        form independently applied it only to the terminal arm, silently letting the
+        serving arm select and materialize every serving buy regardless of webhook
+        configuration. A single shared predicate can't drift out of sync with a new
+        arm the way a per-arm copy already did once. Callers still re-check
+        ``reporting_webhook`` truthiness in Python (see delivery_webhook_scheduler.py)
+        because this SQL predicate is JSON key-*presence*, not truthiness — a
+        reporting_webhook value of JSON null/false/{} is non-NULL here but still
+        falsy there.
         """
         # Same predicate DeliveryRepository.has_successful_final applies as a
         # pre-send skip — correlated here against the outer select(MediaBuy)
@@ -714,14 +728,11 @@ class MediaBuyRepository:
         return list(
             session.scalars(
                 select(MediaBuy).where(
+                    MediaBuy.raw_request["reporting_webhook"].is_not(None),
                     or_(
                         MediaBuy.status.in_(serving_statuses),
-                        (
-                            MediaBuy.status.in_(terminal_statuses)
-                            & MediaBuy.raw_request["reporting_webhook"].is_not(None)
-                            & ~successful_final_exists
-                        ),
-                    )
+                        MediaBuy.status.in_(terminal_statuses) & ~successful_final_exists,
+                    ),
                 )
             ).all()
         )
