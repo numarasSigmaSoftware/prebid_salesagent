@@ -7,9 +7,12 @@ and A2A set_push_notification_config handler.
 
 Wire-level VALIDATION_ERROR / recovery=correctable + suggestion for
 create_media_buy and sync_creatives is graded by transport-blind BDD scenarios
-(BR-UC-002-ext-webhook-ssrf, BR-UC-006-ext-webhook-ssrf). A2A-native push-config
-endpoints translate the same registration gate to InvalidParamsError with the
-AdCP VALIDATION_ERROR envelope in ``data`` — pinned below.
+(BR-UC-002-ext-webhook-ssrf, BR-UC-006-ext-webhook-ssrf). The A2A-native
+set_push_notification_config handler translates the callback-scope gate to
+InvalidParamsError with the AdCP VALIDATION_ERROR envelope in ``data`` — pinned
+below. A2A message/send rejection is the FAILED-Task contract graded by
+tests/unit/test_a2a_auth_optional.py and the raw-wire test in
+tests/integration/test_a2a_error_responses.py.
 """
 
 from __future__ import annotations
@@ -20,16 +23,11 @@ import pytest
 import requests
 from a2a.types import (
     InvalidParamsError,
-    Message,
-    Part,
-    Role,
-    SendMessageConfiguration,
-    SendMessageRequest,
     TaskPushNotificationConfig,
 )
 from adcp.types import ReportingWebhook
 
-from src.a2a_server.adcp_a2a_server import AdCPRequestHandler, _reject_unsafe_a2a_webhook_url
+from src.a2a_server.adcp_a2a_server import AdCPRequestHandler, _invalid_params_from_ssrf_error
 from src.core.database.models import PushNotificationConfig
 from src.core.exceptions import AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
@@ -42,6 +40,7 @@ from src.services.protocol_webhook_service import ProtocolWebhookService
 from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_media_buy_request_dict, valid_reporting_webhook
+from tests.helpers.protocol_webhook import assert_protocol_webhook_post
 
 _METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 
@@ -143,12 +142,11 @@ async def test_send_notification_posts_when_url_is_public() -> None:
         )
 
     assert sent is True
-    mock_post.assert_called_once_with(
-        "https://buyer.example.com/hooks/adcp",
-        json={"task_id": "t1", "status": "completed"},
-        headers={"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"},
-        timeout=10.0,
-        allow_redirects=False,
+    assert_protocol_webhook_post(
+        mock_post,
+        url="https://buyer.example.com/hooks/adcp",
+        body=b'{"task_id":"t1","status":"completed"}',
+        host="buyer.example.com",
     )
 
 
@@ -293,32 +291,22 @@ def test_sync_creatives_rejects_unsafe_push_config_url() -> None:
     assert exc_info.value.field == "push_notification_config.url"
 
 
-def test_reject_unsafe_a2a_webhook_url_rejects_metadata() -> None:
-    """A2A registration helper maps SSRF to InvalidParamsError + AdCP envelope in data."""
-    with pytest.raises(InvalidParamsError, match="Invalid push_notification_config.url") as exc_info:
-        _reject_unsafe_a2a_webhook_url(_METADATA_URL)
-    assert_envelope_shape(exc_info.value.data, "VALIDATION_ERROR", recovery="correctable")
-    assert exc_info.value.data["errors"][0].get("suggestion")
+def test_invalid_params_from_ssrf_error_wraps_adcp_envelope() -> None:
+    """The A2A SSRF wrapper maps the production callback rejection to InvalidParamsError + envelope.
 
+    Drives the REAL callback gate (a literal metadata IP needs no DNS) so the
+    wrapped message/suggestion are exactly what production emits, then pins the
+    two-layer envelope carried in ``data``.
+    """
+    from src.core.webhook_validator import require_valid_callback_config_urls
 
-@pytest.mark.asyncio
-async def test_a2a_message_send_rejects_unsafe_push_config_url() -> None:
-    """message/send must reject metadata URL before stash."""
-    handler = AdCPRequestHandler()
-    text_part = Part()
-    text_part.text = "list products"
-    message = Message(message_id="m-ssrf", role=Role.ROLE_USER, parts=[text_part])
-    push = TaskPushNotificationConfig(url=_METADATA_URL)
-    params = SendMessageRequest(
-        message=message,
-        configuration=SendMessageConfiguration(task_push_notification_config=push),
-    )
+    with pytest.raises(AdCPValidationError) as adcp_exc:
+        require_valid_callback_config_urls(push_notification_config={"url": _METADATA_URL})
 
-    with pytest.raises(InvalidParamsError, match="Invalid push_notification_config.url") as exc_info:
-        await handler.on_message_send(params, context=MagicMock())
-
-    assert_envelope_shape(exc_info.value.data, "VALIDATION_ERROR", recovery="correctable")
-    assert handler._task_push_configs == {}
+    err = _invalid_params_from_ssrf_error(adcp_exc.value)
+    assert isinstance(err, InvalidParamsError)
+    assert_envelope_shape(err.data, "VALIDATION_ERROR", recovery="correctable")
+    assert err.data["errors"][0].get("suggestion")
 
 
 @pytest.mark.asyncio
@@ -336,7 +324,9 @@ async def test_a2a_set_push_handler_rejects_metadata_url() -> None:
         patch.object(handler, "_resolve_a2a_identity", return_value=identity),
         patch.object(handler, "_make_tool_context", return_value=tool_context),
         patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW") as mock_uow,
-        pytest.raises(InvalidParamsError, match="Invalid push_notification_config.url") as exc_info,
+        pytest.raises(
+            InvalidParamsError, match="push_notification_config.url failed callback URL validation"
+        ) as exc_info,
     ):
         await handler.on_create_task_push_notification_config(params, context=MagicMock())
 

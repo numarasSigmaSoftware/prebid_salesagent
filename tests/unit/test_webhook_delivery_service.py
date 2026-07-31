@@ -330,7 +330,12 @@ def test_no_webhooks_configured(webhook_service, mock_db_session):
 
 
 def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_session, monkeypatch):
-    """Outbound SSRF gate must refuse cloud-metadata URLs before httpx POST."""
+    """Send-time SSRF gate must refuse cloud-metadata URLs before any POST.
+
+    Drives the REAL gate (a literal metadata IP needs no DNS): the delivery
+    worker must skip the POST entirely and record the failure on the
+    endpoint's circuit breaker.
+    """
     monkeypatch.delenv("ADCP_TESTING", raising=False)
     start_time = datetime.now(UTC)
 
@@ -342,7 +347,7 @@ def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_sess
     mock_config.webhook_secret = None
     mock_db_session.scalars.return_value.all.return_value = [mock_config]
 
-    with patch("src.services.webhook_delivery_service.httpx.Client") as mock_client:
+    with patch("src.services.webhook_delivery_service.post_webhook_status") as mock_post:
         result = webhook_service.send_delivery_webhook(
             media_buy_id="buy_ssrf",
             tenant_id="tenant1",
@@ -354,14 +359,14 @@ def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_sess
         )
 
     assert result is False
-    mock_client.assert_not_called()
+    mock_post.assert_not_called()
     endpoint_key = f"tenant1:{mock_config.url}"
     breaker = webhook_service._circuit_breakers[endpoint_key]
     assert breaker.failure_count == 1
 
 
-def test_deliver_disables_httpx_redirects(webhook_service, mock_db_session):
-    """httpx Client must disable redirects to prevent open-redirect SSRF."""
+def test_deliver_disables_redirects(webhook_service, mock_db_session):
+    """The outbound delivery POST must never follow redirects (open-redirect SSRF)."""
     start_time = datetime.now(UTC)
 
     mock_config = MagicMock()
@@ -372,17 +377,21 @@ def test_deliver_disables_httpx_redirects(webhook_service, mock_db_session):
     mock_config.webhook_secret = None
     mock_db_session.scalars.return_value.all.return_value = [mock_config]
 
+    captured: dict = {}
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+
+    def _fake_post(self, url, **kwargs):  # noqa: ANN001 - test stub
+        captured["kwargs"] = kwargs
+        return ok_resp
+
     with (
         patch(
             "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url",
             return_value=(True, ""),
         ),
-        patch("src.services.webhook_delivery_service.httpx.Client") as mock_client,
+        patch("requests.sessions.Session.post", _fake_post),
     ):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_client.return_value.__enter__.return_value.post.return_value = mock_response
-
         webhook_service.send_delivery_webhook(
             media_buy_id="buy_redir",
             tenant_id="tenant1",
@@ -393,4 +402,4 @@ def test_deliver_disables_httpx_redirects(webhook_service, mock_db_session):
             spend=100.0,
         )
 
-    mock_client.assert_called_with(timeout=10.0, follow_redirects=False)
+    assert captured["kwargs"]["allow_redirects"] is False

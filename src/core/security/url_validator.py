@@ -176,26 +176,17 @@ def resolve_and_validate_target(
             if mapped is not None:
                 ip = mapped
 
-            # Always-blocked tier (regardless of allow_private): metadata/link-local
-            # plus multicast (224.0.0.0/4 + ff00::/8), reserved, unspecified
-            # (0.0.0.0 / ::), and CGNAT — none is ever a legitimate webhook target.
-            # Checked before the private ranges because Python classifies
-            # link-local/CGNAT as private too. Loopback is EXCLUDED from the
-            # reserved check: IPv6 ``::1`` is classified is_reserved, but loopback
-            # is a private-tier concept (a trusted test/dev receiver reaches it via
-            # allow_private) — always-blocking it would break that opt-in.
-            if (
-                any(ip in network for network in METADATA_NETWORKS)
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_unspecified
-                or ip in CGNAT_NETWORK
-                or (ip.is_reserved and not ip.is_loopback)
-            ):
-                return None, f"URL resolves to a blocked (metadata/multicast/reserved/CGNAT) IP address: {ip}"
+            # Always-blocked tier (regardless of allow_private) — see
+            # _always_blocked_reason for the ranges and the loopback carve-out.
+            blocked_reason = _always_blocked_reason(ip)
+            if blocked_reason is not None:
+                return None, blocked_reason
 
             if not allow_private:
-                if any(ip in network for network in PRIVATE_NETWORKS) or ip.is_loopback or ip.is_private:
+                for network in PRIVATE_NETWORKS:
+                    if ip in network:
+                        return None, f"URL resolves to blocked IP range {network} (private/internal network)"
+                if ip.is_loopback or ip.is_private:
                     return None, f"URL resolves to private/internal IP address: {ip}"
 
         # Every record validated — pin to the first (a literal-IP host pins to itself).
@@ -203,6 +194,39 @@ def resolve_and_validate_target(
 
     except Exception as e:
         return None, f"Invalid URL: {e}"
+
+
+def _always_blocked_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Reason string when ``ip`` is in the always-blocked tier, else ``None``.
+
+    Always blocked regardless of ``allow_private``: metadata/link-local/NAT64
+    (METADATA_NETWORKS), multicast (224.0.0.0/4 + ff00::/8), unspecified
+    (0.0.0.0 / ::), CGNAT, and reserved — none is ever a legitimate webhook
+    target. Checked before the private ranges because Python classifies
+    link-local/CGNAT as private too. Loopback is EXCLUDED from the reserved
+    check: IPv6 ``::1`` is classified is_reserved, but loopback is a
+    private-tier concept (a trusted test/dev receiver reaches it via
+    ``allow_private``) — always-blocking it would break that opt-in.
+
+    The reason names the matched range: this string is a server-side/log
+    detail — the buyer-facing layer (webhook_validator) replaces it with a
+    generic rejection so it is not an SSRF oracle.
+    """
+    for network in METADATA_NETWORKS:
+        if ip in network:
+            return f"URL resolves to blocked IP range {network} (metadata/link-local network)"
+    if ip in CGNAT_NETWORK:
+        return f"URL resolves to blocked IP range {CGNAT_NETWORK} (carrier-grade NAT, RFC 6598)"
+    if ip.is_multicast:
+        multicast_net = "224.0.0.0/4" if ip.version == 4 else "ff00::/8"
+        return f"URL resolves to blocked IP range {multicast_net} (multicast)"
+    if ip.is_link_local:
+        return f"URL resolves to a blocked link-local IP address: {ip}"
+    if ip.is_unspecified:
+        return f"URL resolves to a blocked unspecified IP address: {ip}"
+    if ip.is_reserved and not ip.is_loopback:
+        return f"URL resolves to a blocked reserved IP address: {ip}"
+    return None
 
 
 def _resolve_ips(hostname: str) -> list[str]:

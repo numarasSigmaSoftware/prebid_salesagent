@@ -40,6 +40,7 @@ from src.core.security.webhook_http import (
     is_auth_scheme,
     post_webhook_status,
 )
+from src.core.webhook_validator import WebhookURLValidator
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +512,20 @@ class WebhookDeliveryService:
         config = webhook_data["config"]
         payload = webhook_data["payload"]
         timestamp = webhook_data["timestamp"].isoformat()
+
+        # Send-time SSRF gate before any POST — fails closed without DNS-dependent
+        # adapter internals and records the failure on the endpoint's circuit
+        # breaker. The pinned adapter re-validates at connect time on every retry
+        # (TOCTOU-proof); this gate is the cheap, patchable first line.
+        is_url_safe, ssrf_error = WebhookURLValidator.validate_outbound_webhook_url(config.url)
+        if not is_url_safe:
+            logger.warning(
+                "Webhook delivery to %s refused by send-time SSRF gate: %s",
+                scrub_control_chars(config.url),
+                scrub_control_chars(ssrf_error),
+            )
+            circuit_breaker.record_failure()
+            return False
         try:
             # ``allow_nan=False`` preserves the prior httpx ``json=`` behavior
             # and the JSON wire contract. Python's default would emit the invalid

@@ -91,6 +91,7 @@ def _allow_private_webhook_targets() -> bool:
     """
     return os.getenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in ("1", "true", "yes")
 
+
 # Fallback used when an action label is not a member of the SDK's closed
 # TaskType enum. create_mcp_webhook_payload() restricts task_type to that
 # enum and would otherwise reject the payload as schema-invalid.
