@@ -322,8 +322,8 @@ def reject_unsafe_outbound_webhook_url(
     log.error(
         "%s webhook URL failed SSRF validation (url=%s): %s",
         kind,
-        webhook_url_for_log(url),
-        error_msg,
+        scrub_control_chars(webhook_url_for_log(url)),
+        scrub_control_chars(error_msg),
     )
     return True, error_msg
 
