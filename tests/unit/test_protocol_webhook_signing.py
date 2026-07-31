@@ -30,6 +30,7 @@ def _default_webhook_signing_key(monkeypatch):
     monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWK", webhook_signing_jwk_json())
     monkeypatch.setenv("ADCP_WEBHOOK_SIGNING_JWKS_URI", "https://seller.example/.well-known/jwks.json")
 
+
 # This module grades signing/byte mechanics, not the SSRF gate — see the
 # shared fixture in tests/unit/conftest.py.
 pytestmark = pytest.mark.usefixtures("pass_send_time_ssrf_gate")

@@ -118,9 +118,6 @@ from src.core.database.models import Creative as DBCreative
 from src.core.database.models import CreativeAssignment as DBAssignment
 from src.core.database.models import MediaBuy
 from src.core.database.models import MediaPackage as DBMediaPackage
-from src.core.database.models import Principal as ModelPrincipal
-from src.core.database.models import Product as ModelProduct
-from src.core.database.models import Product as ProductModel
 from src.core.helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
@@ -167,7 +164,7 @@ from src.core.tools.financial_validation import (
 
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
-from src.core.webhook_validator import reject_unsafe_webhook_registration_url, webhook_url_for_log
+from src.core.webhook_validator import reject_unsafe_webhook_registration_url
 from src.services.activity_feed import activity_feed
 from src.services.downstream_reconciliation import (
     execute_reconciled_media_buy_create,
