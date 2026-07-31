@@ -40,7 +40,6 @@ from src.services.protocol_webhook_service import ProtocolWebhookService
 from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.helpers.adcp_factories import create_test_media_buy_request_dict, valid_reporting_webhook
-from tests.helpers.protocol_webhook import assert_protocol_webhook_post
 
 _METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 
@@ -142,12 +141,21 @@ async def test_send_notification_posts_when_url_is_public() -> None:
         )
 
     assert sent is True
-    assert_protocol_webhook_post(
-        mock_post,
-        url="https://buyer.example.com/hooks/adcp",
-        body=b'{"task_id":"t1","status":"completed"}',
-        host="buyer.example.com",
-    )
+    # Default RFC 9421 signing applies on this branch: assert the pinned
+    # transport shape plus the signature headers (matching
+    # test_protocol_webhook_signing.py's unauthenticated-profile contract).
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://buyer.example.com/hooks/adcp"
+    assert kwargs["data"] == b'{"task_id":"t1","status":"completed"}'
+    assert kwargs["timeout"] == 10.0
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["stream"] is True
+    headers = kwargs["headers"]
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Host"] == "buyer.example.com"
+    assert "Signature" in headers
+    assert "Signature-Input" in headers
+    assert "Content-Digest" in headers
 
 
 @pytest.mark.asyncio
