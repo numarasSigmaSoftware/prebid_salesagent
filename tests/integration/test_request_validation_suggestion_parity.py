@@ -445,6 +445,23 @@ class TestCreateMediaBuyRestWebhookSuggestionParity:
                 "Expected a non-empty TOP-LEVEL suggestion in the VALIDATION_ERROR "
                 f"wire envelope (error.json @v3.1-04f59d2d5), got: {envelope}"
             )
+            # Suggestion PRESENCE cannot prove the pre-validation ran. AdCPValidationError
+            # carries a class-level ``_default_suggestion`` (the canonical enumMetadata
+            # text), so every VALIDATION_ERROR has one whether the boundary ran or not —
+            # this assertion alone stayed green with the boundary removed. Pin what ONLY
+            # full-request pre-validation produces: the schema field path, and the
+            # structured message naming each missing sub-field.
+            wire_error = envelope["errors"][0]
+            assert wire_error.get("field"), (
+                f"the boundary attaches the failing schema path; without it the envelope carries no field: {envelope}"
+            )
+            assert "do not match the AdCP specification" in wire_error["message"], (
+                f"expected the boundary's structured multi-field validation message, got {wire_error['message']!r}"
+            )
+            assert "reporting_frequency" in wire_error["message"], (
+                "the message must name the missing sub-fields — the enumeration is what a "
+                f"boundary-less coercion cannot produce: {wire_error['message']!r}"
+            )
 
 
 @pytest.mark.requires_db
@@ -489,6 +506,24 @@ class TestCreateMediaBuyA2AWebhookSuggestionParity:
                 "VALIDATION_ERROR",
                 recovery="correctable",
                 require_suggestion=True,
+            )
+            # Suggestion PRESENCE cannot prove the pre-validation ran. AdCPValidationError
+            # carries a class-level ``_default_suggestion`` (the canonical enumMetadata
+            # text), so every VALIDATION_ERROR has one whether the boundary ran or not —
+            # this assertion alone stayed green with the boundary removed. Pin what ONLY
+            # full-request pre-validation produces: the schema field path, and the
+            # structured message naming each missing sub-field.
+            envelope = result.wire_error_envelope
+            wire_error = envelope["errors"][0]
+            assert wire_error.get("field"), (
+                f"the boundary attaches the failing schema path; without it the envelope carries no field: {envelope}"
+            )
+            assert "do not match the AdCP specification" in wire_error["message"], (
+                f"expected the boundary's structured multi-field validation message, got {wire_error['message']!r}"
+            )
+            assert "reporting_frequency" in wire_error["message"], (
+                "the message must name the missing sub-fields — the enumeration is what a "
+                f"boundary-less coercion cannot produce: {wire_error['message']!r}"
             )
 
 
