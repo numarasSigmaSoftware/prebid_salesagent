@@ -162,12 +162,15 @@ async def test_a2a_push_config_endpoint_rejects_before_uow(url: str):
         return_value=SimpleNamespace(tenant_id="callback-tenant", principal_id="callback-principal")
     )
     with patch("src.a2a_server.adcp_a2a_server.PushNotificationConfigUoW") as mock_uow:
-        with pytest.raises(InvalidParamsError, match="Invalid callback url"):
+        with pytest.raises(InvalidParamsError, match="failed callback URL validation") as exc_info:
             await handler.on_create_task_push_notification_config(
                 TaskPushNotificationConfig(url=url),
                 ServerCallContext(),
             )
 
+    # The rejection carries the two-layer AdCP envelope in ``data`` — the same
+    # enveloped path as the repository defense-in-depth gate.
+    assert_envelope_shape(exc_info.value.data, "VALIDATION_ERROR", recovery="correctable")
     mock_uow.assert_not_called()
 
 
