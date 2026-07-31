@@ -22,7 +22,7 @@ the human-readable half regressed, which no existing assertion covered.
 import ast
 from pathlib import Path
 
-from tests.unit._architecture_helpers import iter_call_expressions
+from tests.unit._architecture_helpers import assert_violations_match_allowlist, iter_call_expressions
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIR = REPO_ROOT / "src"
@@ -34,39 +34,93 @@ _TARGET_CLASSES = {"AdCPValidationError", "AdCPInvalidRequestError"}
 # Only add an entry if a literal message genuinely must be scrubbed, with the reason.
 KNOWN_VIOLATIONS: set[tuple[str, int]] = set()
 
+# The OTHER direction, and the one that can actually leak: an INTERPOLATED message that
+# opts in. Each entry is an assertion that a human traced every interpolated value to
+# something the buyer already has — their own request data or a sanitized projection —
+# and never to adapter, DB or seller internals. Keep this small; a new entry is a claim
+# about a specific f-string, not a place to park an unreviewed site.
+AUDITED_INTERPOLATED_OPT_INS: dict[tuple[str, int], str] = {
+    (
+        "src/core/tools/media_buy_create.py",
+        2544,
+    ): "interpolates the duplicate product_ids from the buyer's OWN packages[] — their data, echoed back",
+    (
+        "src/core/tools/media_buy_create.py",
+        2900,
+    ): "interpolates targeting-validator violations describing the buyer's OWN targeting_overlay",
+    (
+        "src/core/validation_helpers.py",
+        57,
+    ): "format_validation_error() — the sanitized Pydantic projection: field paths and error types, never raw msg/input/ctx",
+}
+
+
+def _message_expr(node: ast.Call) -> ast.expr | None:
+    """The expression supplying the error message, positional OR ``message=`` kwarg.
+
+    Reading only ``args[0]`` made the kwarg form invisible to this guard, so a site
+    written ``AdCPValidationError(message="...")`` was scanned by neither direction.
+    """
+    if node.args:
+        return node.args[0]
+    for kw in node.keywords:
+        if kw.arg == "message":
+            return kw.value
+    return None
+
 
 def _is_bare_string_literal_message(node: ast.Call) -> bool:
-    """True iff the call's first positional arg is a plain string constant.
+    """True iff the message expression is a plain string constant.
 
     An f-string is an ``ast.JoinedStr`` and a concatenation is an ``ast.BinOp``, so
     neither matches here — only a literal (including implicit adjacent-string
     concatenation, which the parser folds into one ``ast.Constant``).
     """
-    if not node.args:
-        return False
-    first = node.args[0]
-    return isinstance(first, ast.Constant) and isinstance(first.value, str)
+    expr = _message_expr(node)
+    return isinstance(expr, ast.Constant) and isinstance(expr.value, str)
 
 
-def _iter_unopted_literal_sites() -> list[tuple[str, int, str]]:
-    """Yield (relative_path, lineno, message_prefix) for each unopted literal site."""
-    violations: list[tuple[str, int, str]] = []
+def _iter_target_calls():
+    """Yield ``(relative_path, node)`` for every construction of a target class."""
     for path in sorted(SCAN_DIR.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:  # pragma: no cover - a syntax error fails elsewhere, loudly
             continue
+        rel = str(path.relative_to(REPO_ROOT))
         for cls_name in sorted(_TARGET_CLASSES):
+            # iter_call_expressions also matches attribute calls (mod.AdCP...);
+            # both forms are equally in scope for this guard.
             for node in iter_call_expressions(tree, cls_name):
-                # iter_call_expressions also matches attribute calls (mod.AdCP...);
-                # both forms are equally in scope for this guard.
-                if any(kw.arg == "_wire_safe_message" for kw in node.keywords):
-                    continue
-                if not _is_bare_string_literal_message(node):
-                    continue
-                rel = str(path.relative_to(REPO_ROOT))
-                violations.append((rel, node.lineno, node.args[0].value[:60]))
+                yield rel, node
+
+
+def _opts_in(node: ast.Call) -> bool:
+    return any(kw.arg == "_wire_safe_message" for kw in node.keywords)
+
+
+def _iter_unopted_literal_sites() -> list[tuple[str, int, str]]:
+    """Yield (relative_path, lineno, message_prefix) for each unopted literal site."""
+    violations: list[tuple[str, int, str]] = []
+    for rel, node in _iter_target_calls():
+        if _opts_in(node) or not _is_bare_string_literal_message(node):
+            continue
+        expr = _message_expr(node)
+        assert isinstance(expr, ast.Constant)
+        violations.append((rel, node.lineno, expr.value[:60]))
     return violations
+
+
+def _iter_unaudited_interpolated_opt_ins() -> list[tuple[str, int]]:
+    """Yield each INTERPOLATED message that opts in without an audit entry."""
+    return [
+        (rel, node.lineno)
+        for rel, node in _iter_target_calls()
+        if _opts_in(node)
+        and _message_expr(node) is not None
+        and not _is_bare_string_literal_message(node)
+        and (rel, node.lineno) not in AUDITED_INTERPOLATED_OPT_INS
+    ]
 
 
 def test_static_validation_messages_opt_in_to_the_wire():
@@ -86,6 +140,42 @@ def test_static_validation_messages_opt_in_to_the_wire():
     )
 
 
+def test_interpolated_opt_ins_match_the_audit_list_exactly():
+    """An INTERPOLATED message may reach the wire only with an audit entry, and every
+    audit entry must still point at one.
+
+    This is the direction that can actually leak, and the guard originally checked only
+    the other one. A bare literal interpolates nothing, so opting it in is safe by
+    construction; an f-string can carry whatever is in scope — an adapter response, a
+    connection string, another principal's data — and ``_wire_safe_message=True`` on it
+    is an unreviewed assertion that it does not.
+
+    Exact-match rather than one-directional, so both failure modes are caught by one
+    assertion:
+
+    * a NEW interpolated opt-in with no audit entry — trace every interpolated value to
+      buyer-supplied data or a sanitized projection before adding it;
+    * a STALE entry whose site was deleted, reworded to a literal, or had its opt-in
+      removed — a licence nobody is using, which left in place silently pre-approves
+      whatever later lands on that line.
+    """
+    live = {
+        (rel, node.lineno)
+        for rel, node in _iter_target_calls()
+        if _opts_in(node) and _message_expr(node) is not None and not _is_bare_string_literal_message(node)
+    }
+
+    assert_violations_match_allowlist(
+        live,
+        set(AUDITED_INTERPOLATED_OPT_INS),
+        fix_hint=(
+            "An f-string reaching the buyer wire can carry adapter/DB/seller internals. "
+            "Trace every interpolated value to the buyer's own request data or a sanitized "
+            "projection, then record that reason in AUDITED_INTERPOLATED_OPT_INS."
+        ),
+    )
+
+
 def test_guard_detects_a_bare_literal_site():
     """The detector itself must fire — otherwise the guard above passes vacuously.
 
@@ -102,3 +192,17 @@ def test_guard_detects_a_bare_literal_site():
     assert not any(kw.arg == "_wire_safe_message" for kw in caught.keywords)
     assert any(kw.arg == "_wire_safe_message" for kw in opted.keywords)
     assert not _is_bare_string_literal_message(interpolated)
+
+    # The kwarg form must be visible to both directions — reading only args[0] made
+    # `AdCPValidationError(message="...")` invisible to the guard entirely.
+    kwarg_literal = ast.parse('AdCPValidationError(message="media_buy_id is required")').body[0].value
+    kwarg_interpolated = ast.parse('AdCPValidationError(message=f"rejected {value}")').body[0].value
+    assert _is_bare_string_literal_message(kwarg_literal)
+    assert not _is_bare_string_literal_message(kwarg_interpolated)
+    assert _message_expr(kwarg_interpolated) is not None
+
+    # And the leak direction: an interpolated message WITH the opt-in is what the second
+    # detector must see. Detected structurally here; the scan applies the audit list.
+    interpolated_opt_in = ast.parse('AdCPValidationError(f"leaked {secret}", _wire_safe_message=True)').body[0].value
+    assert _opts_in(interpolated_opt_in)
+    assert not _is_bare_string_literal_message(interpolated_opt_in)
