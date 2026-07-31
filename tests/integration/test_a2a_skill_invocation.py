@@ -7,6 +7,7 @@ to ensure our A2A server properly handles the evolving AdCP spec.
 """
 
 import logging
+import threading
 import uuid
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -26,6 +27,7 @@ from a2a.types import (
     TaskStatus,
 )
 from adcp.types import AccountReference as LibraryAccountReference
+from sqlalchemy import text
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from tests.factories.creative_asset import build_assets, image_spec
@@ -604,11 +606,15 @@ class TestA2ASkillInvocation:
     ):
         """The terminal-transition policy is two-sided: whichever of a buyer
         cancel (WorkflowRepository.cancel_if_cancellable) and an approval
-        (WorkflowRepository.transition_if_nonterminal) COMMITS FIRST wins,
-        and the loser's conditional UPDATE refuses. Verified against REAL separate
-        PostgreSQL sessions (each WorkflowUoW is its own session, committing on __exit__)
-        in three interleavings, including a true TOCTOU overlap where the approval session
-        began before the cancel committed."""
+        (WorkflowRepository.transition_if_nonterminal) COMMITS FIRST wins, and the
+        loser's conditional UPDATE refuses.
+
+        Orderings 1 and 2 are sequential and grade the committed-first-wins rule from
+        each side. Ordering 3 is the only one that grades the CAS as a CAS — approval
+        reads, cancel commits, approval writes stale — and it needs two threads to do so,
+        because a nested WorkflowUoW shares one thread-local session and would silently
+        re-grade ordering 1. It asserts the two backend pids differ, so a future change
+        that collapses them fails loudly instead of quietly reducing coverage."""
         from datetime import UTC, datetime
 
         from src.core.database.repositories import WorkflowUoW
@@ -636,19 +642,59 @@ class TestA2ASkillInvocation:
             assert u_cancel2.workflows.cancel_if_cancellable(step2, completed_at=now) is False
         assert self._step_status(tenant_id, step2) == "completed"
 
-        # ── Ordering 3 (true TOCTOU overlap): approval session opens on a pending row,
-        #    cancel commits in between, approval writes with its STALE knowledge ──
+        # ── Ordering 3 (true TOCTOU overlap): approval reads a pending row, cancel
+        #    commits in between, approval then writes with its STALE knowledge ──
+        #
+        # Run in two THREADS. A nested ``WorkflowUoW`` does not give a second session:
+        # get_db_session resolves through a thread-local ``scoped_session``, so the inner
+        # UoW hands back the SAME Session object on the SAME backend pid, and its __exit__
+        # commits and closes the OUTER transaction. An earlier version of this ordering did
+        # exactly that, so it re-graded ordering 1 while its docstring claimed "REAL
+        # separate PostgreSQL sessions" and "a true TOCTOU overlap". Threads make the
+        # scoped_session hand out genuinely independent connections (verified below by
+        # asserting the two backend pids differ), and the barrier holds both transactions
+        # open at once so the approval's read provably precedes the cancel's commit.
         step3 = self._persist_a2a_step(tenant_id, principal_id, "task_race_3", None, status="requires_approval")
-        with WorkflowUoW(tenant_id) as u_approve3:
-            # Approval "reads" the pending step (stale snapshot), does not write yet.
-            assert u_approve3.workflows.get_by_step_id(step3).status == "requires_approval"
-            # A concurrent buyer cancel commits canceled in a SEPARATE session (inner UoW).
-            with WorkflowUoW(tenant_id) as u_cancel3:
-                assert u_cancel3.workflows.cancel_if_cancellable(step3, completed_at=now) is True
-            # Approval resumes and writes completed — the conditional UPDATE re-evaluates
-            # against the committed canceled row (READ COMMITTED) and matches zero rows.
-            refused3 = u_approve3.workflows.transition_if_nonterminal(step3, status="completed", completed_at=now)
-        assert refused3 is None, "approval must refuse after a cancel committed, even from a stale read (TOCTOU)"
+
+        read_done = threading.Barrier(2, timeout=30)
+        cancel_committed = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _approver() -> None:
+            with WorkflowUoW(tenant_id) as uow:
+                outcome["approve_pid"] = uow.session.execute(text("SELECT pg_backend_pid()")).scalar()
+                # Stale read: the row is still pending at this point.
+                outcome["read_status"] = uow.workflows.get_by_step_id(step3).status
+                read_done.wait()  # release the canceller only AFTER the stale read
+                assert cancel_committed.wait(timeout=30), "cancel thread never committed"
+                # Write with stale knowledge; the conditional UPDATE re-evaluates against
+                # the committed row (READ COMMITTED) and must match zero rows.
+                outcome["refused"] = uow.workflows.transition_if_nonterminal(
+                    step3, status="completed", completed_at=now
+                )
+
+        def _canceller() -> None:
+            read_done.wait()  # do not commit until the approver has read
+            with WorkflowUoW(tenant_id) as uow:
+                outcome["cancel_pid"] = uow.session.execute(text("SELECT pg_backend_pid()")).scalar()
+                outcome["canceled"] = uow.workflows.cancel_if_cancellable(step3, completed_at=now)
+            cancel_committed.set()  # set AFTER __exit__ commits
+
+        threads = [threading.Thread(target=_approver), threading.Thread(target=_canceller)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+            assert not thread.is_alive(), "race thread deadlocked"
+
+        assert outcome["approve_pid"] != outcome["cancel_pid"], (
+            f"both halves ran on the same PostgreSQL backend, so this did not race — pid={outcome['approve_pid']}"
+        )
+        assert outcome["read_status"] == "requires_approval", "the approval must read the PRE-cancel row"
+        assert outcome["canceled"] is True, "the buyer cancel must commit first"
+        assert outcome["refused"] is None, (
+            "approval must refuse after a cancel committed, even from a stale read (TOCTOU)"
+        )
         assert self._step_status(tenant_id, step3) == "canceled"
 
     def _step_response_data(self, tenant_id: str, step_id: str) -> dict[str, Any] | None:
