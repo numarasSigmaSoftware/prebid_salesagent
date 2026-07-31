@@ -50,6 +50,14 @@ _LEGACY_WEBHOOK_DELIVERY_BULKHEAD = SyncThreadPoolBulkhead(
 )
 
 
+class _AttemptOutcome(Enum):
+    """Classified result of one webhook POST attempt."""
+
+    DELIVERED = "delivered"  # 2xx — record success, stop
+    PERMANENT = "permanent"  # security refusal / non-retryable status — record failure, stop
+    RETRY = "retry"  # transient — try again within the attempt budget
+
+
 class CircuitState(Enum):
     """Circuit breaker states."""
 
@@ -488,6 +496,56 @@ class WebhookDeliveryService:
         logger.debug(f"Retrying webhook delivery after {delay:.2f}s (attempt {attempt + 1}/{max_retries})")
         time.sleep(delay)
 
+    def _refuse_unsafe_outbound_url(self, url: str, circuit_breaker: CircuitBreaker) -> bool:
+        """Return True when the send-time SSRF gate refuses ``url`` (skip delivery).
+
+        Fails closed before any POST without DNS-dependent adapter internals and
+        records the failure on the endpoint's circuit breaker. The pinned adapter
+        re-validates at connect time on every retry (TOCTOU-proof); this gate is
+        the cheap, patchable first line — the seam the harness's
+        ``set_url_invalid()``/``set_url_valid()`` drives.
+        """
+        is_url_safe, ssrf_error = WebhookURLValidator.validate_outbound_webhook_url(url)
+        if is_url_safe:
+            return False
+        logger.warning(
+            "Webhook delivery to %s refused by send-time SSRF gate: %s",
+            scrub_control_chars(url),
+            scrub_control_chars(ssrf_error),
+        )
+        circuit_breaker.record_failure()
+        return True
+
+    def _canonical_payload_bytes_or_fail(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        circuit_breaker: CircuitBreaker,
+    ) -> bytes | None:
+        """Serialize the payload to canonical signed bytes, or record a failure.
+
+        ``allow_nan=False`` preserves the prior httpx ``json=`` behavior and the
+        JSON wire contract. Python's default would emit the invalid JSON tokens
+        NaN/Infinity and then sign those malformed bytes. Returns ``None`` (with
+        the circuit breaker's failure recorded) when the payload is not valid
+        JSON.
+        """
+        try:
+            return json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            logger.error(
+                "Webhook payload is not valid JSON for %s: %s",
+                scrub_control_chars(url),
+                scrub_control_chars(str(exc)),
+            )
+            circuit_breaker.record_failure()
+            return None
+
     def _deliver_with_backoff(
         self,
         endpoint_key: str,
@@ -513,36 +571,10 @@ class WebhookDeliveryService:
         payload = webhook_data["payload"]
         timestamp = webhook_data["timestamp"].isoformat()
 
-        # Send-time SSRF gate before any POST — fails closed without DNS-dependent
-        # adapter internals and records the failure on the endpoint's circuit
-        # breaker. The pinned adapter re-validates at connect time on every retry
-        # (TOCTOU-proof); this gate is the cheap, patchable first line.
-        is_url_safe, ssrf_error = WebhookURLValidator.validate_outbound_webhook_url(config.url)
-        if not is_url_safe:
-            logger.warning(
-                "Webhook delivery to %s refused by send-time SSRF gate: %s",
-                scrub_control_chars(config.url),
-                scrub_control_chars(ssrf_error),
-            )
-            circuit_breaker.record_failure()
+        if self._refuse_unsafe_outbound_url(config.url, circuit_breaker):
             return False
-        try:
-            # ``allow_nan=False`` preserves the prior httpx ``json=`` behavior
-            # and the JSON wire contract. Python's default would emit the invalid
-            # JSON tokens NaN/Infinity and then sign those malformed bytes.
-            payload_bytes = json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            logger.error(
-                "Webhook payload is not valid JSON for %s: %s",
-                scrub_control_chars(config.url),
-                scrub_control_chars(str(exc)),
-            )
-            circuit_breaker.record_failure()
+        payload_bytes = self._canonical_payload_bytes_or_fail(config.url, payload, circuit_breaker)
+        if payload_bytes is None:
             return False
         headers = self._build_delivery_headers(config, payload_bytes, timestamp)
 
@@ -550,62 +582,84 @@ class WebhookDeliveryService:
         # adapter, so DNS is resolved, validated, and pinned again each time.
         with create_pinned_webhook_session() as session:
             for attempt in range(max_retries):
-                try:
-                    self._wait_before_retry(attempt, max_retries)
-
-                    status_code = post_webhook_status(
-                        session,
-                        config.url,
-                        body=payload_bytes,
-                        headers=headers,
-                        timeout=10.0,
-                    )
-                    if 200 <= status_code < 300:
-                        logger.debug(f"Webhook delivered to {scrub_control_chars(config.url)} (status: {status_code})")
-                        circuit_breaker.record_success()
-                        return True
-
-                    # Refused redirects and client errors are permanent for this
-                    # payload/configuration. Redirects are never followed.
-                    if 300 <= status_code < 500:
-                        logger.warning(
-                            f"Webhook delivery to {scrub_control_chars(config.url)} returned non-retryable status {status_code}"
-                        )
-                        circuit_breaker.record_failure()
-                        return False
-
-                    logger.warning(
-                        f"Webhook delivery to {scrub_control_chars(config.url)} returned status {status_code} "
-                        f"(attempt: {attempt + 1}/{max_retries})"
-                    )
-
-                except UnsafeWebhookTargetError as e:
-                    # DNS rebinding/private targets are permanent security failures,
-                    # not transient network errors. Never retry the unsafe URL.
-                    logger.warning(
-                        f"Webhook delivery to {scrub_control_chars(config.url)} refused: {scrub_control_chars(str(e))}"
-                    )
-                    break
-                except requests.Timeout:
-                    logger.warning(
-                        f"Webhook delivery to {scrub_control_chars(config.url)} timed out (attempt: {attempt + 1}/{max_retries})"
-                    )
-                except requests.RequestException as e:
-                    logger.warning(
-                        f"Webhook delivery to {scrub_control_chars(config.url)} failed: "
-                        f"{scrub_control_chars(str(e))} (attempt: {attempt + 1}/{max_retries})"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error delivering to {scrub_control_chars(config.url)}: "
-                        f"{scrub_control_chars(str(e))}",
-                        exc_info=True,
-                    )
+                self._wait_before_retry(attempt, max_retries)
+                outcome = self._attempt_delivery_once(
+                    session,
+                    config.url,
+                    payload_bytes=payload_bytes,
+                    headers=headers,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                )
+                if outcome is _AttemptOutcome.DELIVERED:
+                    circuit_breaker.record_success()
+                    return True
+                if outcome is _AttemptOutcome.PERMANENT:
                     break
 
-        # All retries failed
+        # Permanent refusal or all retries failed
         circuit_breaker.record_failure()
         return False
+
+    def _attempt_delivery_once(
+        self,
+        session: requests.Session,
+        url: str,
+        *,
+        payload_bytes: bytes,
+        headers: dict[str, str],
+        attempt: int,
+        max_retries: int,
+    ) -> "_AttemptOutcome":
+        """Run one pinned POST attempt and classify the result."""
+        try:
+            status_code = post_webhook_status(
+                session,
+                url,
+                body=payload_bytes,
+                headers=headers,
+                timeout=10.0,
+            )
+        except UnsafeWebhookTargetError as e:
+            # DNS rebinding/private targets are permanent security failures,
+            # not transient network errors. Never retry the unsafe URL.
+            logger.warning(f"Webhook delivery to {scrub_control_chars(url)} refused: {scrub_control_chars(str(e))}")
+            return _AttemptOutcome.PERMANENT
+        except requests.Timeout:
+            logger.warning(
+                f"Webhook delivery to {scrub_control_chars(url)} timed out (attempt: {attempt + 1}/{max_retries})"
+            )
+            return _AttemptOutcome.RETRY
+        except requests.RequestException as e:
+            logger.warning(
+                f"Webhook delivery to {scrub_control_chars(url)} failed: "
+                f"{scrub_control_chars(str(e))} (attempt: {attempt + 1}/{max_retries})"
+            )
+            return _AttemptOutcome.RETRY
+        except Exception as e:
+            logger.error(
+                f"Unexpected error delivering to {scrub_control_chars(url)}: {scrub_control_chars(str(e))}",
+                exc_info=True,
+            )
+            return _AttemptOutcome.PERMANENT
+
+        if 200 <= status_code < 300:
+            logger.debug(f"Webhook delivered to {scrub_control_chars(url)} (status: {status_code})")
+            return _AttemptOutcome.DELIVERED
+
+        # Refused redirects and client errors are permanent for this
+        # payload/configuration. Redirects are never followed.
+        if 300 <= status_code < 500:
+            logger.warning(
+                f"Webhook delivery to {scrub_control_chars(url)} returned non-retryable status {status_code}"
+            )
+            return _AttemptOutcome.PERMANENT
+
+        logger.warning(
+            f"Webhook delivery to {scrub_control_chars(url)} returned status {status_code} "
+            f"(attempt: {attempt + 1}/{max_retries})"
+        )
+        return _AttemptOutcome.RETRY
 
     def reset_sequence(self, media_buy_id: str):
         """Reset sequence number for a media buy.
