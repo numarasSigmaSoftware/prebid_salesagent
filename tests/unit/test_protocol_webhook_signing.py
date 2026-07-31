@@ -23,7 +23,6 @@ from adcp import create_mcp_webhook_payload
 from src.services.protocol_webhook_service import ProtocolWebhookService, _canonical_body_bytes
 from tests.helpers.protocol_webhook import assert_protocol_webhook_post
 
-
 # This module grades signing/byte mechanics, not the SSRF gate — see the
 # shared fixture in tests/unit/conftest.py.
 pytestmark = pytest.mark.usefixtures("pass_send_time_ssrf_gate")
