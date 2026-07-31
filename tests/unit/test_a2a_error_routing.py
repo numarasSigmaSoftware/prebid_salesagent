@@ -94,7 +94,10 @@ async def test_message_send_rejects_private_push_notification_url_before_storage
         configuration=SendMessageConfiguration(
             task_push_notification_config=TaskPushNotificationConfig(
                 id="pnc_private",
-                url="http://169.254.169.254/latest/meta-data",
+                # https:// on purpose: registration requires HTTPS unless the deployment
+                # declares ENVIRONMENT=development, so http:// is refused on the SCHEME
+                # before the host is examined — and the host verdict is this test's subject.
+                url="https://169.254.169.254/latest/meta-data",
             )
         ),
     )
@@ -124,7 +127,12 @@ async def test_standalone_push_config_rejects_private_url_before_repository_writ
         await handler.on_create_task_push_notification_config(
             TaskPushNotificationConfig(
                 id="pnc_private",
-                url="http://10.0.0.5/internal",
+                # https:// on purpose. Registration requires HTTPS unless the deployment
+                # declares ENVIRONMENT=development, so an http:// URL is refused on the
+                # SCHEME before the host is ever examined — and the subject of this test
+                # is the private-host verdict the regex above pins. Over https the
+                # reserved-range check is what produces the rejection.
+                url="https://10.0.0.5/internal",
             ),
             context=ctx,
         )

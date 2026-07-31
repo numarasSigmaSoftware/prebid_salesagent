@@ -86,6 +86,12 @@ services:
       ADCP_SALES_PORT: "8080"
       # Enable test login mode for development
       ADCP_AUTH_TEST_MODE: "true"
+      # Declare development EXPLICITLY. Security gates that relax for development fail
+      # closed on an absent or unrecognised value, so the relaxation has to be stated
+      # rather than inferred from omission — see
+      # WebhookURLValidator._require_https_for_callback, which requires HTTPS for AdCP
+      # callbacks unless this reads "development". docker-compose.e2e.yml already sets it.
+      ENVIRONMENT: development
       # Development settings (venv at /opt/venv in image — see Dockerfile UV_PROJECT_ENVIRONMENT)
       PYTHONPATH: "/app"
       PYTHONUNBUFFERED: "1"

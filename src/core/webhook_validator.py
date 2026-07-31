@@ -179,21 +179,35 @@ class WebhookURLValidator:
     def _require_https_for_callback() -> bool:
         """The ONE scheme rule for AdCP protocol callbacks — registration and delivery.
 
-        Both webhook gates read this, so they cannot disagree about the scheme the way
-        they previously did: registration used ``_require_https()`` while delivery keyed
-        on ``ENVIRONMENT == "development"``, and the two rules diverged in 7 of the 10
-        environment combinations, always register-permissive / deliver-strict. On the
-        default stack (``docker-compose.yml`` sets no ``ENVIRONMENT``) that meant an
-        ``http://`` reporting webhook registered with a success response and then
-        silently never delivered.
+        Require HTTPS unless the deployment says EXPLICITLY that it is development.
+        Both gates read this, so they cannot disagree about the scheme the way they
+        previously did (registration on ``_require_https()``, delivery on
+        ``ENVIRONMENT == "development"``), which on the default stack let an ``http://``
+        reporting webhook register with a success response and then silently never
+        deliver.
 
-        Keys on ``is_production()`` ALONE — deliberately NOT ``_strict_mode()``, whose
-        ``ADCP_TESTING`` term a deployment could flip. A testing flag must not be able to
-        downgrade a production deployment to plaintext: these callbacks carry notification
-        payloads and legacy Bearer credentials. This is the SCHEME axis of the same
-        single-definition fix ``_matches_development_test_host`` applies to the HOST axis.
+        Spec: ``dist/docs/3.1.1/building/by-layer/L1/security.mdx`` requires sellers to
+        "Reject non-HTTPS URLs in production" (§Counterparty-supplied URLs, item 1) and
+        to enforce "URL parsing, HTTPS, hostname normalization, and reserved-range
+        rejection **at write time**" — i.e. at registration, not only at delivery.
+
+        FAIL-SAFE ON UNKNOWN, which is the part two earlier versions of this rule got
+        wrong in opposite directions. Keying on ``is_production()`` (a literal ``==
+        "production"`` compare) made ``prod``, ``staging``, ``test`` and unset all
+        permissive — an ops team writing ``ENVIRONMENT=prod`` would have shipped plaintext
+        delivery of callbacks carrying Bearer credentials. Keying on ``_strict_mode()``
+        lets ``ADCP_TESTING`` downgrade a production deployment. Only an explicit
+        ``development`` relaxes this; anything unrecognised is strict, so a typo fails
+        closed rather than open.
+
+        The permissive case must therefore be DECLARED: ``docker-compose.e2e.yml`` sets
+        ``ENVIRONMENT: development`` already, and ``docker-compose.yml`` now does too. A
+        deployment that declares nothing gets HTTPS enforcement at BOTH gates, so the
+        buyer receives an explicit registration rejection instead of a silent delivery
+        failure. This is the SCHEME axis of the same single-definition fix
+        ``_matches_development_test_host`` applies to the HOST axis.
         """
-        return is_production()
+        return os.getenv("ENVIRONMENT", "").strip().lower() != "development"
 
     @classmethod
     def validate_webhook_url(cls, url: str) -> tuple[bool, str]:

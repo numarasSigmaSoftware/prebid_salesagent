@@ -1254,7 +1254,10 @@ class TestCreateMediaBuyImplAuth:
         ):
             await _create_media_buy_impl(
                 req,
-                push_notification_config={"url": "http://127.0.0.1/internal"},
+                # https:// on purpose: the registration gate now refuses http:// on the
+                # SCHEME before this path's host check runs, and the host check is what
+                # the patched validate_protocol_webhook_url below stands in for.
+                push_notification_config={"url": "https://127.0.0.1/internal"},
                 identity=identity,
             )
 
