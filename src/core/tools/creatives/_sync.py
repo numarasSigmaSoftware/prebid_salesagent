@@ -16,7 +16,7 @@ from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
-from src.core.webhook_validator import reject_unsafe_webhook_registration_url, webhook_url_for_log
+from src.core.webhook_validator import reject_unsafe_registration_source_url, webhook_url_for_log
 
 from ._assignments import _process_assignments
 from ._processing import _create_new_creative, _failed_sync_result, _update_existing_creative
@@ -94,23 +94,21 @@ def _sync_creatives_impl(
     tenant = require_tenant(identity, context=context)
 
     # Registration SSRF gate before any DB / workflow writes that stash the URL.
-    webhook_url = None
-    if push_notification_config:
-        if isinstance(push_notification_config, dict):
-            webhook_url = push_notification_config.get("url")
-        else:
-            webhook_url = str(push_notification_config.url) if push_notification_config.url else None
-        reject_unsafe_webhook_registration_url(
-            webhook_url,
-            field="push_notification_config.url",
-            context=context,
+    # Routed through the shared extractor rather than hand-rolling the
+    # dict-or-model branch here: that helper's whole purpose is being the one
+    # place the extract-then-validate pattern lives, and a second copy here
+    # falsified that claim. It returns the extracted URL for the log below.
+    webhook_url = reject_unsafe_registration_source_url(
+        push_notification_config,
+        field="push_notification_config.url",
+        context=context,
+    )
+    if webhook_url is not None and str(webhook_url).strip():
+        # Log scheme+host+path only — never credentials / full auth blob.
+        logger.info(
+            "[sync_creatives] Push notification webhook URL: %s",
+            webhook_url_for_log(str(webhook_url)),
         )
-        if webhook_url is not None and str(webhook_url).strip():
-            # Log scheme+host+path only — never credentials / full auth blob.
-            logger.info(
-                "[sync_creatives] Push notification webhook URL: %s",
-                webhook_url_for_log(str(webhook_url)),
-            )
 
     # Track actions per creative for AdCP-compliant response
 

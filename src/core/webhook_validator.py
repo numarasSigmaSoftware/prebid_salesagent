@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import urlparse
 
-from adcp.types import ContextObject, TaskType
+from adcp.types import ContextObject, PushNotificationConfig, ReportingWebhook, TaskType
 
 from src.core.config import is_production
 from src.core.exceptions import AdCPValidationError
@@ -35,6 +36,11 @@ WEBHOOK_SSRF_SUGGESTION_DEV = (
 # Log fallback when sanitize_webhook_url_for_log cannot parse scheme/host —
 # never fall back to the raw buyer URL (credentials / query).
 UNPARSEABLE_WEBHOOK_URL_FOR_LOG = "<unparseable-url>"
+
+# Stands in for a buyer hostname inside an SSRF reason string on its way to a
+# log. The hostname can itself be the credential (capability-style URLs), and
+# reasons like "Cannot resolve hostname: <host>" embed it verbatim.
+REDACTED_HOST_FOR_LOG = "<redacted-host>"
 
 
 def _adcp_testing() -> bool:
@@ -83,7 +89,15 @@ def webhook_ssrf_suggestion() -> str:
 
 
 def sanitize_webhook_url_for_log(url: str | None) -> str | None:
-    """Return ``scheme://host/path`` for logs — never credentials or query."""
+    """Return ``scheme://host/path`` for logs — never userinfo or query.
+
+    NOT credential-safe for capability-style delivery URLs, where the credential
+    IS the (sub)domain or the path (``https://tok-9fK2z8mQ.hooks.example.com/deliver``):
+    both survive this form. Callers that must be safe against that threat model
+    pass their own stronger sanitizer to ``reject_unsafe_outbound_webhook_url``
+    (see ``_redact_url_credentials`` in protocol_webhook_service, which replaces
+    host AND path with a keyed digest).
+    """
     if not url:
         return None
     parsed = urlparse(str(url))
@@ -122,31 +136,39 @@ def reject_unsafe_webhook_registration_url(
 
 
 def reject_unsafe_registration_source_url(
-    url_source: object,
+    url_source: ReportingWebhook | PushNotificationConfig | Mapping[str, Any] | None,
     *,
     field: str,
     context: ContextObject | dict[str, Any] | None = None,
-) -> None:
-    """Extract ``.url`` from a webhook-registration-shaped source and validate it.
+) -> str | None:
+    """Extract ``.url`` from a webhook-registration-shaped source, validate it, return it.
 
     ``url_source`` is whatever the caller has on hand for a ``reporting_webhook``
     or ``push_notification_config`` field — a typed adcp model (``.url``
-    attribute) on some paths, a raw dict (``["url"]``) on others. Single call
+    attribute) on some paths, a raw mapping (``["url"]``) on others. Single call
     site for the "extract url, stringify, validate" pattern repeated at every
-    registration point across create and update, on both fields, so drift
-    (someone forgets the URL check on a new field or a new call site) has one
-    place to be caught rather than N independently-copied bodies. A ``None``
-    source is a no-op, matching ``reject_unsafe_webhook_registration_url``'s
+    registration point across create, update, and creative sync, on both fields,
+    so drift (someone forgets the URL check on a new field or a new call site)
+    has one place to be caught rather than N independently-copied bodies. A
+    ``None`` source is a no-op, matching ``reject_unsafe_webhook_registration_url``'s
     own None-is-a-no-op contract.
+
+    The parameter names the concrete sources rather than ``object`` on purpose:
+    extraction falls back to ``None`` for anything lacking a ``url``, and a
+    ``None`` url is a documented no-op, so an ``object`` annotation let a wrong
+    argument silently SKIP this security gate with neither a type error nor a
+    runtime signal.
+
+    Returns the extracted URL (stringified; ``None`` when the source is ``None``
+    or carries no url) so a caller that must also log or persist it reuses this
+    one extraction rather than re-deriving it — see ``creatives/_sync.py``.
     """
     if url_source is None:
-        return
-    raw_url = url_source.get("url") if isinstance(url_source, dict) else getattr(url_source, "url", None)
-    reject_unsafe_webhook_registration_url(
-        str(raw_url) if raw_url is not None else None,
-        field=field,
-        context=context,
-    )
+        return None
+    raw_url = url_source.get("url") if isinstance(url_source, Mapping) else getattr(url_source, "url", None)
+    url = str(raw_url) if raw_url is not None else None
+    reject_unsafe_webhook_registration_url(url, field=field, context=context)
+    return url
 
 
 def reject_unsafe_outbound_webhook_url(
@@ -154,21 +176,39 @@ def reject_unsafe_outbound_webhook_url(
     *,
     log: logging.Logger,
     kind: str,
+    sanitize: Callable[[str], str] = webhook_url_for_log,
 ) -> tuple[bool, str]:
     """Send-time SSRF gate with standardized error logging.
 
     Returns ``(rejected, error_msg)``. On rejection, logs once with a shared
     message shape so protocol and application delivery paths cannot drift.
     Callers that maintain a circuit breaker should record failure locally.
+
+    ``sanitize`` renders the URL for the log line. It is a parameter because a
+    caller whose threat model treats the hostname itself as a credential (the
+    capability-style delivery URL case — see ``_redact_url_credentials`` in
+    protocol_webhook_service) must not have this failure path log the very
+    thing it redacts everywhere else. The rejection branch fires precisely for
+    hostile or misconfigured URLs, so it is the *last* place that should be
+    laxer than the success path.
+
+    ``error_msg`` is returned to the caller intact (it becomes the buyer-facing
+    validation message, and the buyer already knows their own URL) but is
+    scrubbed of the raw hostname before it reaches the log — several SSRF
+    reasons embed it verbatim (``Cannot resolve hostname: <host>``), which would
+    otherwise re-leak through the reason string whatever ``sanitize`` removed
+    from the url field.
     """
     is_valid, error_msg = WebhookURLValidator.validate_outbound_webhook_url(url)
     if is_valid:
         return False, ""
+    hostname = urlparse(str(url)).hostname
+    loggable_reason = error_msg.replace(hostname, REDACTED_HOST_FOR_LOG) if hostname else error_msg
     log.error(
         "%s webhook URL failed SSRF validation (url=%s): %s",
         kind,
-        webhook_url_for_log(url),
-        error_msg,
+        sanitize(url),
+        loggable_reason,
     )
     return True, error_msg
 
