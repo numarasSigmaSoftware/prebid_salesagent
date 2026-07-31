@@ -391,13 +391,9 @@ def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_sess
     monkeypatch.delenv("ADCP_TESTING", raising=False)
     start_time = datetime.now(UTC)
 
-    mock_config = MagicMock()
-    mock_config.url = "http://169.254.169.254/latest/meta-data/"
-    mock_config.authentication_type = None
-    mock_config.authentication_token = None
-    mock_config.validation_token = None
-    mock_config.webhook_secret = None
-    mock_db_session.scalars.return_value.all.return_value = [mock_config]
+    config = _callback_config("buy_ssrf")
+    config.url = "http://169.254.169.254/latest/meta-data/"
+    _configure_reporting(mock_db_session, config)
 
     with patch("src.services.webhook_delivery_service.post_webhook_status") as mock_post:
         result = webhook_service.send_delivery_webhook(
@@ -412,7 +408,7 @@ def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_sess
 
     assert result is False
     mock_post.assert_not_called()
-    endpoint_key = f"tenant1:{mock_config.url}"
+    endpoint_key = f"tenant1:{config.url}"
     breaker = webhook_service._circuit_breakers[endpoint_key]
     assert breaker.failure_count == 1
 
@@ -421,13 +417,8 @@ def test_deliver_disables_redirects(webhook_service, mock_db_session):
     """The outbound delivery POST must never follow redirects (open-redirect SSRF)."""
     start_time = datetime.now(UTC)
 
-    mock_config = MagicMock()
-    mock_config.url = "https://example.com/webhook"
-    mock_config.authentication_type = None
-    mock_config.authentication_token = None
-    mock_config.validation_token = None
-    mock_config.webhook_secret = None
-    mock_db_session.scalars.return_value.all.return_value = [mock_config]
+    config = _callback_config("buy_redir")
+    _configure_reporting(mock_db_session, config)
 
     captured: dict = {}
     ok_resp = MagicMock()
