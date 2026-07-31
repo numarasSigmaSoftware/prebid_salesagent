@@ -392,21 +392,10 @@ class TestPinnedOutboundClient:
     mocking only DNS resolution and pool creation.
     """
 
-    @pytest.fixture(autouse=True)
-    def _pass_send_time_ssrf_gate(self):
-        """Stub the DNS-backed send-time SSRF gate open for the fixture hostname.
-
-        These tests grade POST mechanics (pinning, redirects, Host header, retry
-        semantics) on ``buyer.example.com``, which does not resolve. The gate's
-        own reject behavior is graded separately in test_protocol_webhook_ssrf.py.
-        """
-        from unittest.mock import patch
-
-        with patch(
-            "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url",
-            return_value=(True, ""),
-        ):
-            yield
+    # These tests grade POST mechanics (pinning, redirects, Host header, retry
+    # semantics) on ``buyer.example.com``, which does not resolve — see the
+    # shared fixture in tests/unit/conftest.py.
+    pytestmark = pytest.mark.usefixtures("pass_send_time_ssrf_gate")
 
     def test_pinning_adapter_pins_socket_to_validated_ip_keeping_hostname_sni(self):
         """The socket connects to the validated IP while SNI + cert stay bound to the hostname."""

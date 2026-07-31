@@ -169,3 +169,20 @@ def make_users_test_client():
                 yield client, mock_session
 
     return _factory
+
+
+@pytest.fixture
+def pass_send_time_ssrf_gate():
+    """Stub the DNS-backed send-time SSRF gate open for fixture hostnames.
+
+    For modules that grade delivery mechanics (signing bytes, retry semantics,
+    pinning, redirects) rather than the gate itself: unit tests must not depend
+    on real DNS resolution of fixture hostnames like ``buyer.example``. The
+    gate's own behavior is graded in test_protocol_webhook_ssrf.py and
+    test_webhook_security.py.
+    """
+    with patch(
+        "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url",
+        return_value=(True, ""),
+    ):
+        yield

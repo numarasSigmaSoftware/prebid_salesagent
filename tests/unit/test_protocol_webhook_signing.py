@@ -24,19 +24,9 @@ from src.services.protocol_webhook_service import ProtocolWebhookService, _canon
 from tests.helpers.protocol_webhook import assert_protocol_webhook_post
 
 
-@pytest.fixture(autouse=True)
-def _pass_send_time_ssrf_gate():
-    """Stub the DNS-backed send-time SSRF gate open for fixture hostnames.
-
-    This module grades signing/byte mechanics, not the gate; unit tests must
-    not depend on real DNS resolution of fixture hostnames. The gate's own
-    behavior is graded in test_protocol_webhook_ssrf.py.
-    """
-    with patch(
-        "src.core.webhook_validator.WebhookURLValidator.validate_outbound_webhook_url",
-        return_value=(True, ""),
-    ):
-        yield
+# This module grades signing/byte mechanics, not the SSRF gate — see the
+# shared fixture in tests/unit/conftest.py.
+pytestmark = pytest.mark.usefixtures("pass_send_time_ssrf_gate")
 
 
 def _capture_service():

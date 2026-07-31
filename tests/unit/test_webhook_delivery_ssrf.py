@@ -12,6 +12,11 @@ from src.core.database.repositories.push_notification_config import PushNotifica
 from src.core.security.webhook_http import UnsafeWebhookTargetError, post_webhook_status, webhook_host_header
 from src.services.webhook_delivery_service import CircuitBreaker, WebhookDeliveryService, WebhookQueue
 
+# This module grades retry/pinning/signing mechanics on ``buyer.example`` (does
+# not resolve); the send-time gate is stubbed open — see tests/unit/conftest.py.
+# The gate's own reject branch is graded in test_webhook_delivery_service.py.
+pytestmark = pytest.mark.usefixtures("pass_send_time_ssrf_gate")
+
 
 def _queue_target(
     *,
