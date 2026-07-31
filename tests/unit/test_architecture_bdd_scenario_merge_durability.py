@@ -15,6 +15,22 @@ Two invariants:
      hand-added scenario that forgets to register here (or a stale registry
      entry) is caught, closing the "added a marked scenario, forgot to
      register it" gap that (1) alone cannot see.
+
+KNOWN GAP — this guard is blind to scenarios with NO ``@T-*`` id tag.
+``_marked_scenarios()`` filters on ``if sid:``, so an id-less scenario never
+enters the candidate universe at all. Nine such scenarios classify
+``LEGACY-DELETE`` right now (three in ``BR-UC-007-list-authorized-properties``,
+six in ``BR-UC-GET-PRODUCTS-inventory-profile``) while ``_untracked_scenarios()``
+returns ``[]``, and appending a synthetic id-less, marker-less, traceability-less
+scenario leaves this suite green. So invariant 2 holds only for scenarios that
+carry an id — a scenario missing its marker AND its id is exactly the case that
+vanishes silently, which is the failure this guard was written to prevent.
+
+Closing it means keying id-less scenarios by ``(feature, scenario.name)`` so they
+enter the universe, plus a negative self-test with an id-less fixture; the nine
+existing ones then need registering or marking, which is a separate decision.
+Tracked in #1810. Stated here rather than left implicit because a guard that
+reads as complete is worse than one that names its blind spot.
 """
 
 import re

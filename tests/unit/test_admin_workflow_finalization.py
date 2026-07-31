@@ -1029,29 +1029,51 @@ class TestWaitingForCreativesMessage:
         assert "GAM" not in message
 
     def test_no_route_reinlines_the_message(self):
-        """The wording lives in exactly one place.
+        """The wording lives in exactly one place — checked on the DISTINCTIVE clause.
 
         A route that re-inlines the sentence can drift again without any behavioural test
-        noticing, because no admin test drives either route into this branch today (that
-        coverage needs route-level fixtures neither blueprint has). This guard is what makes
-        the single-source property hold in the meantime.
+        noticing, so this guard carries the single-source property.
+
+        Fragment selection is the whole difficulty, and two earlier versions got it wrong
+        in opposite ways:
+
+        * the text AFTER "creative(s)" — "...before creating in the ad server" — which is
+          exactly the clause that HAD drifted to "...in GAM", so a re-inline of the
+          historical variant did not match and the guard passed. It caught only re-inlines
+          of the wording that was already correct.
+        * ``os.path.commonprefix`` of the two branches, which is "Media buy approved!" —
+          a generic salutation. A re-inline of the distinctive clause WITHOUT that opener
+          sails past it, and both mutations used to verify that version happened to include
+          the salutation, so it looked verified.
+
+        So match each branch on the clause that identifies it and is not shared with
+        anything else: the count-interpolated wait text, and the zero-assignment text. Both
+        are checked, because the guard exists to stop EITHER branch being re-inlined.
         """
         from src.admin.utils.approval import waiting_for_creatives_message
 
-        # Match on the part of the sentence that SURVIVES a drift, not the part that drifts.
-        # The earlier fragment was the text AFTER "creative(s)" — i.e. "...before creating in
-        # the ad server", exactly the clause that had already drifted to "...in GAM". A route
-        # re-inlining that historical variant therefore did not match and the guard passed:
-        # it caught only re-inlines of the wording that was already correct. The common prefix
-        # of the helper's two branches is what identifies the sentence under either wording,
-        # and it sits before the count interpolation so it holds for both branches.
-        fragment = os.path.commonprefix([waiting_for_creatives_message(0), waiting_for_creatives_message(2)]).strip()
-        assert len(fragment) >= 15, (
-            f"message shape changed — the two branches no longer share a distinctive prefix "
-            f"({fragment!r}); re-derive this guard's fragment rather than letting it match everything"
-        )
+        salutation = os.path.commonprefix([waiting_for_creatives_message(0), waiting_for_creatives_message(2)]).strip()
+        # Everything after the shared opener is what actually distinguishes each branch.
+        distinctive = [
+            waiting_for_creatives_message(0)[len(salutation) :].strip(),
+            waiting_for_creatives_message(2)[len(salutation) :].strip(),
+        ]
+        # The wait branch needs care: the count is interpolated (so the fragment must start
+        # after it) AND the trailing "before creating in the ad server" is the clause that
+        # HAS drifted (to "...in GAM"), so the fragment must end before it. What is left —
+        # "creative(s) to be approved" — is both distinctive and drift-stable. Taking the
+        # tail after "creative(s)" instead, as two earlier versions did, matches only the
+        # wording that is currently correct and lets a re-inline of the GAM variant pass.
+        wait = distinctive[1]
+        distinctive[1] = wait[wait.index("creative(s)") : wait.index("before")].strip()
+        for fragment in distinctive:
+            assert len(fragment) >= 25, (
+                f"message shape changed — {fragment!r} is too short to identify a branch. "
+                f"Re-derive this guard's fragments rather than letting them match broadly; a "
+                f"short fragment is how the salutation-only version passed."
+            )
 
-        offenders = _reinline_offenders(fragment)
+        offenders = sorted({site for fragment in distinctive for site in _reinline_offenders(fragment)})
 
         assert offenders == [], f"WAITING_FOR_CREATIVES wording re-inlined outside approval.py: {offenders}"
 
