@@ -310,6 +310,10 @@ class ProtocolWebhookService:
             push_notification_config.url,
             log=logger,
             kind="Protocol",
+            # Same redaction the success path and the durable log use: on this
+            # path the hostname can itself be the credential, so the rejection
+            # branch must not log it in the clear.
+            sanitize=_redact_url_credentials,
         )
         if rejected:
             return False
@@ -478,11 +482,20 @@ class ProtocolWebhookService:
             audit_logger = get_audit_logger("webhook", tenant_id)
             audit_logger.log_info(f"Sending {task_type} webhook for task {task_id} (sequence #{sequence_number})")
 
+        # Computed once, not per attempt: the redaction runs urlparse + get_config
+        # + an HMAC-SHA256, and `url` does not change across retries. Inlined in
+        # the log call below, all of that re-ran on every attempt, eagerly, even
+        # when the INFO line was never emitted.
+        redacted_url = _redact_url_credentials(url)
+
         for attempt in range(max_attempts):
             try:
                 logger.info(
-                    f"Sending webhook for task {task_id} to {_redact_url_credentials(url)} "
-                    f"(attempt {attempt + 1}/{max_attempts})"
+                    "Sending webhook for task %s to %s (attempt %s/%s)",
+                    task_id,
+                    redacted_url,
+                    attempt + 1,
+                    max_attempts,
                 )
 
                 def _post() -> requests.Response:
@@ -530,7 +543,7 @@ class ProtocolWebhookService:
 
                     return False
 
-                logger.info(f"Successfully sent webhook for task {task_id} (status: {response.status_code})")
+                logger.info("Successfully sent webhook for task %s (status: %s)", task_id, response.status_code)
 
                 self._write_delivery_log(
                     context=delivery_log_context,
@@ -644,7 +657,9 @@ class ProtocolWebhookService:
                     )
                     await asyncio.sleep(wait_seconds)
                 else:
-                    logger.error(f"Webhook failed for task {task_id} after {max_attempts} attempts: {error_message}")
+                    logger.error(
+                        "Webhook failed for task %s after %s attempts: %s", task_id, max_attempts, error_message
+                    )
 
                     self._write_delivery_log(
                         context=delivery_log_context,
@@ -663,7 +678,7 @@ class ProtocolWebhookService:
 
             except Exception as e:
                 error_message = _safe_delivery_error_message(url, reason=f"Unexpected error ({type(e).__name__})")
-                logger.error(f"Unexpected error sending webhook for task {task_id}: {error_message}")
+                logger.error("Unexpected error sending webhook for task %s: %s", task_id, error_message)
 
                 self._write_delivery_log(
                     context=delivery_log_context,

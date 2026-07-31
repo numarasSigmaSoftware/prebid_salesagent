@@ -1155,3 +1155,65 @@ class TestWebhookAuditHmacKeyIdFormatValidation:
         from src.core.config import AppConfig
 
         assert AppConfig().webhook_audit_hmac_key_id == "v1"
+
+
+class TestSsrfRejectionLogNeverLeaksCredentials:
+    """The SSRF-REJECTION branch must redact as hard as the success path.
+
+    ``reject_unsafe_outbound_webhook_url`` fires exactly for hostile or
+    misconfigured URLs, so it is the last place that should be laxer than the
+    paths around it -- yet it logged ``scheme://host/path`` plus the raw SSRF
+    reason while every other line in the same send path replaced host AND path
+    with a keyed digest. For a capability-style delivery URL the (sub)domain IS
+    the credential (see ``_redact_url_credentials``'s docstring), so that split
+    leaked the secret on precisely the failure path an attacker can provoke.
+
+    Two independent carriers are pinned here because closing only one still
+    leaks: the ``url=`` field (fixed by passing the caller's own sanitizer) and
+    the reason string, which embeds the hostname verbatim for the
+    ``Cannot resolve hostname: <host>`` class of failure.
+    """
+
+    # Lowercase: urlparse().hostname normalizes case, so this is the form that
+    # actually reaches a log line. Asserting on the mixed-case original would
+    # pass vacuously against an unredacted hostname.
+    CAPABILITY_SECRET = "tok-9fk2z8mqsecret"
+    CAPABILITY_URL = f"https://{CAPABILITY_SECRET}.hooks.example.com/deliver"
+
+    def _capture_rejection_log(self, caplog, **kwargs) -> str:
+        from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
+
+        logger = logging.getLogger(f"ssrf-rejection-probe-{id(self)}")
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            rejected, _error_msg = reject_unsafe_outbound_webhook_url(
+                self.CAPABILITY_URL, log=logger, kind="Probe", **kwargs
+            )
+        assert rejected, "fixture URL must actually be rejected, or this grades nothing"
+        assert caplog.text.strip(), "rejection must emit a log line, or the assertions below are vacuous"
+        return caplog.text.lower()
+
+    def test_reason_string_never_carries_the_raw_hostname(self, caplog):
+        """Shared by every caller, whatever sanitizer they pass: the SSRF reason
+        is scrubbed of the hostname before it reaches a log.
+
+        Deliberately scoped to the REASON, not the whole line -- under the
+        default sanitizer the ``url=`` field still renders scheme://host/path
+        (``webhook_url_for_log``'s documented form, unchanged here). Converging
+        the Application / OrderApproval senders onto a redacting sanitizer is
+        tracked separately; asserting the whole line here would fail for a
+        reason this test does not own.
+        """
+        from src.core.webhook_validator import REDACTED_HOST_FOR_LOG
+
+        text = self._capture_rejection_log(caplog)
+        assert f"cannot resolve hostname: {REDACTED_HOST_FOR_LOG.lower()}" in text
+        assert f"cannot resolve hostname: {self.CAPABILITY_SECRET}" not in text
+
+    def test_protocol_path_redacts_the_url_field_too(self, caplog):
+        """The Protocol sender passes its own redacting sanitizer, so neither
+        carrier survives -- this is the full close for capability-style URLs."""
+        from src.services.protocol_webhook_service import _redact_url_credentials
+
+        text = self._capture_rejection_log(caplog, sanitize=_redact_url_credentials)
+        assert self.CAPABILITY_SECRET not in text
+        assert "hooks.example.com" not in text, "host must not survive in the url= field either"
