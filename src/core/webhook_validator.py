@@ -176,7 +176,7 @@ class WebhookURLValidator:
         return _strict_mode()
 
     @staticmethod
-    def _require_https_for_callback() -> bool:
+    def _require_https_for_webhook() -> bool:
         """The ONE scheme rule for AdCP protocol callbacks — registration and delivery.
 
         Require HTTPS unless the deployment says EXPLICITLY that it is development.
@@ -275,7 +275,7 @@ class WebhookURLValidator:
         is_valid, error = check_url_ssrf(
             url,
             resolve_dns=False,
-            require_https=cls._require_https_for_callback(),
+            require_https=cls._require_https_for_webhook(),
         )
         is_valid, error = cls._maybe_allow_localhost(is_valid, error, allow_localhost=allow_localhost)
         if is_valid:
@@ -286,10 +286,24 @@ class WebhookURLValidator:
 
     @classmethod
     def validate_outbound_webhook_url(cls, url: str) -> tuple[bool, str]:
-        """Send-time SSRF gate (full DNS), with localhost allowance under ADCP_TESTING."""
-        if _adcp_testing():
-            return cls.validate_for_testing(url, allow_localhost=True)
-        return cls.validate_webhook_url(url)
+        """Send-time SSRF gate (full DNS) for APPLICATION webhook delivery.
+
+        Reads the same ``_require_https_for_webhook`` policy as the AdCP callback gates,
+        so the scheme decision is one rule across all three delivery sinks. It previously
+        short-circuited to ``validate_for_testing`` whenever ``ADCP_TESTING`` was set,
+        which dropped HTTPS enforcement entirely — including in production. That left the
+        "a testing flag must not downgrade a deployment" property holding at 1 of the 3
+        sinks that can deliver the SAME buyer URL with the SAME Bearer token
+        (``protocol_webhook_service`` had it; ``webhook_delivery_service`` and
+        ``order_approval_service``, both reaching here via
+        ``reject_unsafe_outbound_webhook_url``, did not).
+
+        ``ADCP_TESTING`` still governs the HOST axis — capture servers on localhost —
+        because that is what the flag is for. It no longer governs the SCHEME axis, which
+        is a deployment property.
+        """
+        is_valid, error = check_url_ssrf(url, require_https=cls._require_https_for_webhook())
+        return cls._maybe_allow_localhost(is_valid, error, allow_localhost=_adcp_testing())
 
     @classmethod
     def validate_protocol_webhook_url(cls, url: str) -> tuple[bool, str]:
@@ -301,13 +315,13 @@ class WebhookURLValidator:
         in development mode so delivery can be exercised without a public
         relay. Arbitrary private hosts are never enabled by this seam.
 
-        The HTTPS decision is ``_require_https_for_callback()``, shared with the
+        The HTTPS decision is ``_require_https_for_webhook()``, shared with the
         registration gate so the two cannot disagree about the SCHEME — exactly as
         ``_matches_development_test_host`` stops them disagreeing about the HOST.
         See that helper for the divergence this closed and for why the rule keys on
         ``is_production()`` rather than on ``_strict_mode()``.
         """
-        is_valid, error = check_url_ssrf(url, require_https=cls._require_https_for_callback())
+        is_valid, error = check_url_ssrf(url, require_https=cls._require_https_for_webhook())
         if is_valid:
             return True, ""
         # Same seam definition the registration gate uses — one source of truth, so

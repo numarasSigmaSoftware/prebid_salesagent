@@ -358,6 +358,49 @@ def test_callback_scheme_policy_per_environment(monkeypatch, environment, adcp_t
     )
 
 
+# The three sinks that can deliver the SAME buyer URL with the SAME Bearer token. They
+# reach different validators, which is exactly how the scheme policy drifted apart.
+_DELIVERY_SINKS = [
+    pytest.param("validate_protocol_webhook_url", id="adcp-callback-delivery"),
+    pytest.param("validate_webhook_url_registration", id="adcp-callback-registration"),
+    # webhook_delivery_service and order_approval_service both arrive here via
+    # reject_unsafe_outbound_webhook_url.
+    pytest.param("validate_outbound_webhook_url", id="application-delivery"),
+]
+
+
+@pytest.mark.parametrize("gate_name", _DELIVERY_SINKS)
+@pytest.mark.parametrize("environment", ["production", "prod", "staging", None], ids=lambda v: f"env-{v}")
+def test_adcp_testing_never_downgrades_a_non_development_deployment(monkeypatch, gate_name, environment) -> None:
+    """A testing flag must not relax the SCHEME on any delivery sink.
+
+    ``ADCP_TESTING`` exists to admit localhost capture servers — a HOST-axis allowance.
+    It used to also drop HTTPS enforcement entirely on ``validate_outbound_webhook_url``,
+    which short-circuited to ``validate_for_testing(require_https=False)`` whenever the
+    flag was set. Since a deployment can carry that flag, a production deployment could
+    ship plaintext delivery of callbacks carrying Bearer credentials.
+
+    The property held at ONE of these three sinks and not the other two, for the same
+    buyer URL — which is why this is parametrized over the sinks rather than asserted on
+    whichever one a given test happened to reach.
+    """
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    if environment is not None:
+        monkeypatch.setenv("ENVIRONMENT", environment)
+    monkeypatch.setenv("ADCP_TESTING", "true")
+    monkeypatch.delenv("ADCP_WEBHOOK_TEST_HOST", raising=False)
+
+    gate = getattr(WebhookURLValidator, gate_name)
+    with patch("src.core.security.url_validator.socket.gethostbyname", return_value="93.184.216.34"):
+        accepts_plaintext, _ = gate("http://buyer.example.com/adcp-callback")
+
+    assert not accepts_plaintext, (
+        f"{gate_name} accepted a plaintext callback with ENVIRONMENT={environment!r} because "
+        f"ADCP_TESTING was set. That flag governs the HOST axis (localhost capture servers), "
+        f"never the scheme — these callbacks carry notification payloads and Bearer tokens."
+    )
+
+
 @pytest.mark.parametrize("adcp_testing", [None, "true"], ids=["no-testing-flag", "testing-flag-set"])
 def test_production_rejects_plaintext_callbacks_at_both_gates(monkeypatch, adcp_testing) -> None:
     """Unifying the scheme policy must not weaken real production.
