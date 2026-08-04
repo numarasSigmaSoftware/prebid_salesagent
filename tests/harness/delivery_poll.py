@@ -57,6 +57,34 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
     def _configure_mocks(self) -> None:
         self._configure_adapter_mock()
 
+    def associate_buys_with_account(self, media_buy_ids: list[str], account_id: str) -> None:
+        """Point specific media buys at an account, for scenarios that learn the account late.
+
+        AdCP 3.1.1 defines get_media_buy_delivery's ``account`` as a FILTER, so a scenario
+        naming a valid account must own buys in it. Some suites create the buy before the
+        account value is known, hence this after-the-fact association.
+
+        Scoped to the ids passed in — never "every unassociated buy in the tenant" — and
+        raises when a named buy is absent, so a mis-seeded scenario fails on its own terms
+        rather than silently returning an empty delivery set.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+
+        session = self._session
+        if session is None:  # pragma: no cover - env misuse
+            raise RuntimeError("associate_buys_with_account requires an active env session")
+
+        repo = MediaBuyRepository(session, self._tenant_id)
+        for media_buy_id in media_buy_ids:
+            buy = repo.get_by_id(media_buy_id)
+            if buy is None:
+                raise AssertionError(
+                    f"cannot associate media buy {media_buy_id!r} with account {account_id!r}: "
+                    "the buy does not exist in this scenario's database"
+                )
+            buy.account_id = account_id
+        session.commit()
+
     def call_a2a(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
         """Call get_media_buy_delivery via real AdCPRequestHandler — full A2A pipeline."""
         return self._run_a2a_handler("get_media_buy_delivery", GetMediaBuyDeliveryResponse, **kwargs)

@@ -3007,6 +3007,10 @@ def _ensure_media_buy_in_db(
 
     MediaBuyFactory(**mb_kwargs)
 
+    # Record what THIS scenario created, so a later account association can be scoped to
+    # exactly these buys rather than sweeping every unassociated buy in the tenant.
+    ctx.setdefault("scenario_media_buy_ids", []).append(mb_id)
+
 
 def _parse_request_params(params_str: str) -> dict[str, Any]:
     """Parse request parameters from Gherkin table/string format.
@@ -3105,31 +3109,29 @@ _VALID_OPERATOR = "acme-corp.com"
 
 
 def _associate_scenario_buys_with(ctx: dict, account_id: str) -> None:
-    """Point this scenario's media buys at the account the request names.
+    """Point THIS scenario's buys at the account the request names.
 
-    The shared media-buy Given runs before the account value is known, so it creates
-    buys with account_id NULL. AdCP 3.1.1 defines ``account`` on
-    get_media_buy_delivery as a FILTER — "Filter delivery data to a specific account"
-    (dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json) — so an
-    unassociated buy is correctly excluded once scoping is enforced. A row the Examples
-    mark *valid* is meant to belong to that account; persist that intent here rather
-    than weakening the production filter.
+    The shared media-buy Given runs before the account value is known, so buys are created
+    with account_id NULL. AdCP 3.1.1 defines ``account`` on get_media_buy_delivery as a
+    FILTER ("Filter delivery data to a specific account" —
+    dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json), so an unassociated
+    buy is correctly excluded once scoping is enforced. A row the Examples mark *valid* is
+    meant to belong to that account; persist that intent rather than weakening the filter.
+
+    Delegates the mutation to the env so it goes through a repository and stays scoped to
+    the ids this scenario created — not every unassociated buy in the tenant.
     """
     env = ctx.get("env")
-    session = getattr(env, "_session", None)
-    tenant = ctx.get("db_tenant")
-    if session is None or tenant is None:
-        return
+    buy_ids = ctx.get("scenario_media_buy_ids") or []
+    if env is None or not buy_ids:
+        raise AssertionError(
+            "cannot associate scenario buys with "
+            f"{account_id!r}: env or scenario_media_buy_ids missing "
+            "(the media-buy Given must run first). Silently skipping would make the "
+            "delivery assertion fail for the wrong reason."
+        )
 
-    from sqlalchemy import select
-
-    from src.core.database.models import MediaBuy
-
-    buys = session.scalars(select(MediaBuy).filter_by(tenant_id=tenant.tenant_id)).all()
-    for buy in buys:
-        if buy.account_id is None:
-            buy.account_id = account_id
-    session.commit()
+    env.associate_buys_with_account(buy_ids, account_id)
 
 
 def _seed_valid_account_if_named(ctx: dict, value: str) -> None:

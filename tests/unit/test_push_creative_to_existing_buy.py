@@ -492,3 +492,63 @@ class TestPushCreativeToExistingBuy:
         _, assets_arg, *_ = call_args.args
         package_ids = {pa["package_id"] for pa in assets_arg[0]["package_assignments"]}
         assert package_ids == {"pkg_1", "pkg_2"}
+
+
+class TestSandboxAdapterSelection:
+    """Deferred creative push must derive sandbox mode from the buy's account.
+
+    This path runs after the request identity is gone, so nothing carries the mode for
+    it — the only correct source is the account owning the buy. Without these, a
+    regression passing sandbox=False would push a sandbox creative to a real ad server
+    with every existing test still green.
+    """
+
+    def _adapter_modes(self, *, account_sandbox: bool) -> list[bool]:
+        creative = _make_creative()
+        uow = _make_uow(
+            tenant=_make_tenant(),
+            creative=creative,
+            assignments=[_make_assignment()],
+            package=_make_package(),
+        )
+        # The buy and the account the deferred path resolves the mode from.
+        buy = MagicMock()
+        buy.account_id = "acc_1"
+        uow.media_buys.get_by_id.return_value = buy
+        account = MagicMock()
+        account.sandbox = account_sandbox
+        uow.accounts.get_by_id.return_value = account
+
+        mock_get_adapter = MagicMock(return_value=_make_adapter())
+
+        with (
+            patch(_UOW_PATCH, return_value=uow),
+            patch("src.core.config_loader.get_tenant_by_id", return_value=None),
+            patch("src.core.config_loader.set_current_tenant"),
+            patch(f"{_MODULE}.get_principal_object", return_value=MagicMock()),
+            patch(f"{_MODULE}.get_adapter", mock_get_adapter),
+            patch(
+                f"{_MODULE}.extract_media_url_and_dimensions", return_value=("https://ad.example.com/ad.jpg", 300, 250)
+            ),
+            patch(f"{_MODULE}.extract_click_url", return_value=None),
+            patch(f"{_MODULE}.extract_impression_tracker_url", return_value=None),
+        ):
+            _call()
+
+        return [c.kwargs["sandbox"] for c in mock_get_adapter.call_args_list]
+
+    def test_sandbox_buy_selects_sandbox_adapter(self):
+        modes = self._adapter_modes(account_sandbox=True)
+
+        assert modes, "no adapter was constructed — this assertion would be vacuous"
+        assert all(modes), (
+            f"creative push on a sandbox buy built a live adapter (modes={modes}); "
+            "the creative would be uploaded to the tenant's real ad server"
+        )
+
+    def test_live_buy_selects_live_adapter(self):
+        """Negative control — 'always sandbox' would silently stop real creative pushes."""
+        modes = self._adapter_modes(account_sandbox=False)
+
+        assert modes, "no adapter was constructed — this assertion would be vacuous"
+        assert not any(modes), f"expected the live adapter for a live account, got {modes}"

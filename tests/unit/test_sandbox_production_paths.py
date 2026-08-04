@@ -190,11 +190,18 @@ class TestUpdateMediaBuyPath:
         assert not any(modes), f"expected the live adapter for a live account, got {modes}"
 
 
-# Admin media-buy detail, approved-buy execution and deferred creative push are graded by
-# their derivation (account_is_sandbox / _buy_account_id) in the helper tests, but not yet
-# at their own adapter boundary — those paths have no harness env and cannot be reached
-# with ad-hoc mocks. Integration tests shaped like
-# tests/integration/test_sandbox_delivery_account_scoping.py are the way in.
+# Deferred creative push is graded at its own adapter boundary in
+# tests/unit/test_push_creative_to_existing_buy.py::TestSandboxAdapterSelection
+# (mutation-verified). Two paths remain graded only by their derivation:
+#
+#   - approved-buy execution (execute_approved_media_buy): an adapted copy of the working
+#     test in test_execute_approved_pending_review_filter.py still bails at
+#     "Failed to reconstruct package pkg_1" before reaching the create dispatch, so the
+#     fixture is not yet faithful enough to assert on. Not shipped rather than shipped red.
+#   - admin media-buy detail: read-only, and lowest risk of the set.
+#
+# Both need a fixture that reaches dispatch — either a faithful extension of that unit
+# template or an integration test shaped like test_sandbox_delivery_account_scoping.py.
 
 
 # Delivery account scoping (SA-006) is graded in
