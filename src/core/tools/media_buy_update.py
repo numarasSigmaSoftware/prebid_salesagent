@@ -74,6 +74,7 @@ from src.core.database.models import (
     Product as DBProduct,
 )
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.helpers.account_helpers import account_is_sandbox
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -409,6 +410,11 @@ def _update_media_buy_impl(
             # ``adcp.server.helpers.MEDIA_BUY_STATE_MACHINE`` for the source of truth.
             _current_mb = uow.media_buys.get_by_id(media_buy_id_to_use)
             _current_status = _current_mb.status if _current_mb else ""
+            # update_media_buy is addressed by media_buy_id and carries no account
+            # reference, so identity.sandbox is structurally False here. The mode must
+            # come from the buy being mutated, or a sandbox buy hits the live adapter.
+            assert uow.accounts is not None
+            _mb_sandbox = account_is_sandbox(uow.accounts, _current_mb.account_id if _current_mb else None)
             if is_terminal_status(_current_status):
                 raise AdCPGoneError(
                     f"Cannot update media buy in terminal state: {_current_status}",
@@ -476,7 +482,7 @@ def _update_media_buy_impl(
                 dry_run=testing_ctx.dry_run,
                 testing_context=testing_ctx,
                 tenant=tenant,
-                sandbox=identity.sandbox,
+                sandbox=_mb_sandbox,
             )
             today = req.today or date.today()
 

@@ -131,6 +131,7 @@ class MediaBuyUoW(BaseUoW):
     """
 
     media_buys: MediaBuyRepository | None
+    accounts: AccountRepository | None
     products: ProductRepository | None
     creatives: CreativeRepository | None
     currency_limits: CurrencyLimitRepository | None
@@ -139,6 +140,8 @@ class MediaBuyUoW(BaseUoW):
     def _init_repos(self) -> None:
         assert self._session is not None
         self.media_buys = MediaBuyRepository(self._session, self._tenant_id)
+        # Buy-keyed operations derive sandbox mode from the owning account.
+        self.accounts = AccountRepository(self._session, self._tenant_id)
         self.products = ProductRepository(self._session, self._tenant_id)
         self.creatives = CreativeRepository(self._session, self._tenant_id)
         self.currency_limits = CurrencyLimitRepository(self._session, self._tenant_id)
@@ -146,6 +149,7 @@ class MediaBuyUoW(BaseUoW):
 
     def _clear_repos(self) -> None:
         self.media_buys = None
+        self.accounts = None
         self.products = None
         self.creatives = None
         self.currency_limits = None

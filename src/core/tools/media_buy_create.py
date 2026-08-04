@@ -602,6 +602,13 @@ def _execute_adapter_media_buy_creation(
                 for i, pkg in enumerate(response.packages):
                     # response.packages are now always Package objects
                     logger.info(f"[ADAPTER] Response package {i}: {pkg.package_id}")
+            if sandbox:
+                # AdCP 3.1.1 sandbox.mdx: "Sellers SHOULD include `sandbox: true` in
+                # success responses when processing a sandbox account request." Set here
+                # rather than in the adapter: the mock adapter also serves tenants whose
+                # ad_server is literally "mock", which is NOT a sandbox account, so the
+                # adapter cannot distinguish the two. This funnel knows the account mode.
+                response.sandbox = True
         return response
     except Exception as adapter_error:
         import traceback

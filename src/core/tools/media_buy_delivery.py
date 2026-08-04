@@ -88,6 +88,7 @@ from src.core.database.models import MediaBuy, PricingOption
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.product import ProductRepository
+from src.core.helpers.account_helpers import account_is_sandbox
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -199,15 +200,22 @@ def _get_media_buy_delivery_impl(
     # Tenant is resolved at the transport boundary (resolve_identity_from_context)
     tenant = require_tenant(identity, context=req.context)
 
-    # Get the appropriate adapter
-    # Use testing_ctx.dry_run if in testing mode, otherwise False
-    adapter = get_adapter(
-        principal,
-        dry_run=testing_ctx.dry_run if testing_ctx else False,
-        testing_context=testing_ctx,
-        tenant=tenant,
-        sandbox=identity.sandbox,
-    )
+    # Adapters are chosen per buy, not per request: a delivery read can span sandbox and
+    # live buys at once, and identity.sandbox is structurally False when the request is
+    # addressed by media_buy_ids alone. One adapter is built per mode, lazily, so a
+    # single-mode request still constructs exactly one.
+    _adapters_by_mode: dict[bool, Any] = {}
+
+    def _adapter_for(is_sandbox: bool) -> Any:
+        if is_sandbox not in _adapters_by_mode:
+            _adapters_by_mode[is_sandbox] = get_adapter(
+                principal,
+                dry_run=testing_ctx.dry_run if testing_ctx else False,
+                testing_context=testing_ctx,
+                tenant=tenant,
+                sandbox=is_sandbox,
+            )
+        return _adapters_by_mode[is_sandbox]
 
     # Determine reporting period
     if req.start_date and req.end_date:
@@ -241,6 +249,14 @@ def _get_media_buy_delivery_impl(
         repo = uow.media_buys
 
         target_media_buys = _get_target_media_buys(req, principal_id, repo, reference_date, testing_ctx)
+
+        # Resolve sandbox mode for every targeted buy BEFORE any adapter is built, so an
+        # unresolved account raises here rather than being read through the live adapter.
+        assert uow.accounts is not None
+        sandbox_by_buy: dict[str, bool] = {
+            buy_id: account_is_sandbox(uow.accounts, getattr(buy, "account_id", None))
+            for buy_id, buy in target_media_buys
+        }
 
         # Diff requested IDs vs found IDs to report missing ones (salesagent-mexj)
         not_found_errors: list[Error] = []
@@ -333,7 +349,7 @@ def _get_media_buy_delivery_impl(
                     # Call adapter to get per-package delivery metrics
                     # Note: Mock adapter returns simulated data, GAM adapter returns real data from Reporting API
                     try:
-                        adapter_response = adapter.get_media_buy_delivery(
+                        adapter_response = _adapter_for(sandbox_by_buy[media_buy_id]).get_media_buy_delivery(
                             media_buy_id=media_buy_id,
                             date_range=reporting_period,
                             today=simulation_datetime,

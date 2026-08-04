@@ -8,7 +8,8 @@ beads: salesagent-8n4
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from collections.abc import Callable, Iterable
+from typing import Any, NamedTuple
 
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
@@ -102,16 +103,73 @@ def account_is_sandbox(repo: AccountRepository, account_id: str | None) -> bool:
     call sites already hold one, and a second connection inside the adapter-dispatch path
     would be both a wasted round-trip and a real-DB dependency in unit-tested code.
 
-    Fail-closed: an unknown or unresolvable account returns False (live). Sandbox mode
-    SUPPRESSES side effects, so the unsafe default would be claiming a suppression we
-    cannot substantiate; treating it as live leaves the operator's approval gate in
-    control. Callers that cannot tolerate a live dispatch must refuse instead.
+    Two "no account" cases, deliberately treated differently:
+
+    - ``account_id is None`` → False (live). Legacy buys predate account references; live
+      is their only meaningful mode, and the operator's approval gate stays in control.
+    - a non-null ``account_id`` that does not resolve → **raises**. Returning False there
+      would mean "use the real ad server" for a stale, corrupt, or wrongly-scoped
+      reference — fail-OPEN with respect to external side effects, which is the exact
+      failure this module exists to prevent. When the mode cannot be established, the
+      only safe answer is to refuse dispatch.
     """
     if not account_id:
         return False
 
     account = repo.get_by_id(account_id)
-    return bool(account.sandbox) if account is not None else False
+    if account is None:
+        raise AdCPAccountNotFoundError(
+            f"Account '{account_id}' referenced by this operation could not be resolved; "
+            "refusing to dispatch because sandbox mode cannot be established.",
+            suggestion="Verify the account still exists and is accessible to this tenant.",
+        )
+    return bool(account.sandbox)
+
+
+def media_buy_sandbox_mode(accounts: AccountRepository, media_buys: Any, media_buy_id: str) -> bool:
+    """Sandbox mode of the account owning a media buy, for single-buy operations.
+
+    Operations addressed only by ``media_buy_id`` (update, performance, single-buy
+    delivery) carry no account reference, so ``identity.sandbox`` is structurally False
+    for them. Deriving the mode from the *buy* is the only correct source; using the
+    identity would silently dispatch sandbox buys to the live adapter.
+
+    A buy that does not exist yields False (live) — the caller's own not-found handling
+    owns that case. A buy whose non-null account cannot be resolved raises, per
+    :func:`account_is_sandbox`.
+    """
+    buy = media_buys.get_by_id(media_buy_id)
+    return account_is_sandbox(accounts, buy.account_id if buy is not None else None)
+
+
+def partition_by_sandbox_mode[T](
+    accounts: AccountRepository,
+    items: Iterable[T],
+    account_id_of: Callable[[T], str | None],
+) -> tuple[list[T], list[T]]:
+    """Split items into ``(sandbox_items, live_items)`` by their account's mode.
+
+    Multi-buy operations (get_media_buys snapshots, get_media_buy_delivery) can span
+    both modes in a single response, which no identity-level boolean can represent.
+    Callers run each partition against its own adapter and merge the results by
+    ``media_buy_id``; an empty partition means its adapter is never constructed.
+
+    Resolution happens for every non-null account BEFORE either adapter call, so an
+    unresolved account raises rather than silently landing in the live partition.
+    Modes are cached per account id — a snapshot of 200 buys on one account costs one
+    lookup, not 200.
+    """
+    sandbox_items: list[T] = []
+    live_items: list[T] = []
+    mode_cache: dict[str | None, bool] = {}
+
+    for item in items:
+        account_id = account_id_of(item)
+        if account_id not in mode_cache:
+            mode_cache[account_id] = account_is_sandbox(accounts, account_id)
+        (sandbox_items if mode_cache[account_id] else live_items).append(item)
+
+    return sandbox_items, live_items
 
 
 def _check_account_status(account_id: str, status: str | None) -> None:

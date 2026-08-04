@@ -42,6 +42,9 @@ class _MediaBuyData:
     updated_at: datetime | None
     status: str | None
     is_paused: bool
+    # Owning account — needed to derive sandbox mode before any adapter dispatch.
+    # Nullable like the column: legacy buys predate account references and read as live.
+    account_id: str | None = None
 
 
 @dataclass
@@ -67,6 +70,7 @@ from src.core.exceptions import (
     AdCPCapabilityNotSupportedError,
     AdCPValidationError,
 )
+from src.core.helpers.account_helpers import partition_by_sandbox_mode
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.schemas import (
     ApprovalStatus,
@@ -154,29 +158,53 @@ def _get_media_buys_impl(
         # Resolve package configs for all media buys in one batch query
         packages_by_media_buy = _fetch_packages(all_media_buy_ids, uow)
 
+        # A snapshot request can span sandbox and live buys at once — a state no
+        # identity-level boolean can express. Partition by the owning account's mode
+        # while the accounts repo is still in scope; every non-null account resolves
+        # BEFORE any adapter call, so an unresolved one raises rather than silently
+        # landing in the live partition.
+        sandbox_buys: list[Any] = []
+        live_buys: list[Any] = list(target_media_buys)
+        if include_snapshot:
+            assert uow.accounts is not None
+            sandbox_buys, live_buys = partition_by_sandbox_mode(
+                uow.accounts, target_media_buys, lambda buy: buy.account_id
+            )
+
     # Get snapshots from adapter if requested
     snapshot_data: dict[str, dict[str, Snapshot | None]] = {}  # media_buy_id -> package_id -> Snapshot
     unavailable_reason: SnapshotUnavailableReason | None = None
 
     if include_snapshot:
-        adapter = get_adapter(
-            principal,
-            dry_run=testing_ctx.dry_run if testing_ctx else False,
-            testing_context=testing_ctx,
-            tenant=tenant,
-            sandbox=identity.sandbox,
-        )
-        if adapter.capabilities.supports_realtime_reporting:
-            # Build list of (media_buy_id, package_id, platform_line_item_id) for the adapter
-            package_refs = []
-            for buy in target_media_buys:
+
+        def _package_refs(buys: list[Any]) -> list[tuple[str, str, str | None]]:
+            """(media_buy_id, package_id, platform_line_item_id) triples for one partition."""
+            refs: list[tuple[str, str, str | None]] = []
+            for buy in buys:
                 for pkg in packages_by_media_buy.get(buy.media_buy_id, []):
                     line_item_id = (pkg.package_config or {}).get("platform_line_item_id")
-                    package_refs.append((buy.media_buy_id, pkg.package_id, line_item_id))
+                    refs.append((buy.media_buy_id, pkg.package_id, line_item_id))
+            return refs
 
-            snapshot_data = adapter.get_packages_snapshot(package_refs)
-        else:
-            unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+        # Each partition reads through its own adapter: sandbox buys never touch the
+        # tenant's real ad server. An empty partition constructs no adapter at all, so
+        # the extra call exists only for genuinely mixed requests.
+        for partition, partition_is_sandbox in ((live_buys, False), (sandbox_buys, True)):
+            if not partition:
+                continue
+            adapter = get_adapter(
+                principal,
+                dry_run=testing_ctx.dry_run if testing_ctx else False,
+                testing_context=testing_ctx,
+                tenant=tenant,
+                sandbox=partition_is_sandbox,
+            )
+            if not adapter.capabilities.supports_realtime_reporting:
+                unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+                continue
+            # Keyed by media_buy_id, so partitions cannot collide on merge. Response
+            # ordering is driven by target_media_buys below and is unaffected.
+            snapshot_data.update(adapter.get_packages_snapshot(_package_refs(partition)))
 
     # Build response
     response_media_buys = []
@@ -407,6 +435,7 @@ def _fetch_target_media_buys(
     return [
         _MediaBuyData(
             media_buy_id=buy.media_buy_id,
+            account_id=buy.account_id,
             currency=buy.currency,
             budget=buy.budget,
             start_date=cast(date, buy.start_date),

@@ -40,7 +40,8 @@ class TestResolveAccountById:
                 repo = AccountRepository(session, tenant.tenant_id)
                 result = resolve_account(ref, env.identity, repo)
 
-            assert result == "acc_001"
+            assert result.account_id == "acc_001"
+            assert result.sandbox is False, "a non-sandbox account must not claim sandbox mode"
 
     def test_not_found_raises(self, integration_db):
         """Non-existent account_id → AdCPAccountNotFoundError."""
@@ -102,7 +103,8 @@ class TestResolveAccountByNaturalKey:
                 repo = AccountRepository(session, tenant.tenant_id)
                 result = resolve_account(ref, env.identity, repo)
 
-            assert result == "acc_nat"
+            assert result.account_id == "acc_nat"
+            assert result.sandbox is False, "a non-sandbox account must not claim sandbox mode"
 
     def test_natural_key_no_access_raises_not_found(self, integration_db):
         """Account exists but agent has no access → AdCPAccountNotFoundError.

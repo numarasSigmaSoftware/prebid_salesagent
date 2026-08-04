@@ -68,3 +68,39 @@ def test_guard_would_catch_a_regression() -> None:
     assert not any(kw.arg == "sandbox" for kw in call.keywords), (
         "the detector's own predicate no longer distinguishes a sandbox-less call — this guard would pass vacuously"
     )
+
+
+# Operations addressed by media_buy_id carry no account reference, so identity.sandbox is
+# structurally False for them. Sourcing sandbox= from the identity on these paths is the
+# original defect wearing the right keyword — the presence check above cannot see it.
+_BUY_KEYED_MODULES = (
+    "src/core/tools/media_buy_update.py",
+    "src/core/tools/performance.py",
+    "src/core/tools/media_buy_list.py",
+    "src/core/tools/media_buy_delivery.py",
+)
+
+
+def test_buy_keyed_operations_do_not_source_sandbox_from_identity() -> None:
+    """A correct keyword from the wrong source still dispatches sandbox buys to live."""
+    offenders: list[str] = []
+    for rel in _BUY_KEYED_MODULES:
+        tree = safe_parse(REPO_ROOT / rel)
+        assert tree is not None, f"{rel} is missing — update _BUY_KEYED_MODULES"
+        for call in iter_call_expressions(tree, "get_adapter"):
+            for kw in call.keywords:
+                if kw.arg != "sandbox":
+                    continue
+                # sandbox=identity.sandbox
+                if isinstance(kw.value, ast.Attribute) and kw.value.attr == "sandbox":
+                    base = getattr(kw.value.value, "id", None)
+                    if base == "identity":
+                        offenders.append(f"{rel}:{call.lineno}")
+
+    assert not offenders, (
+        "buy-keyed operation sources sandbox= from identity.sandbox at:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nidentity.sandbox is only populated when the request carries an account "
+        "reference; these operations are addressed by media_buy_id. Derive the mode from "
+        "the buy's account instead (media_buy_sandbox_mode / partition_by_sandbox_mode)."
+    )

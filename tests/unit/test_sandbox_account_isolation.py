@@ -100,4 +100,4 @@ class TestResolvedAccountCarriesMode:
         from src.core.helpers.account_helpers import ResolvedAccount
 
         assert ResolvedAccount("acc_1", bool(None)).sandbox is False
-        assert ResolvedAccount("acc_2", bool(True)).sandbox is True
+        assert ResolvedAccount("acc_2", True).sandbox is True
