@@ -3613,6 +3613,10 @@ async def _create_media_buy_impl(
                 valid_actions=valid_actions_for_status(simulated_lifecycle),
                 context=req.context,
                 errors=property_list_unsupported_advisories(req.packages, adapter),
+                # This branch returns immediately, so the marker cannot be attached later
+                # as it is on the normal path: a sandbox account's success must carry it
+                # here too (AdCP 3.1.1 sandbox.mdx SHOULD).
+                sandbox=True if identity.sandbox else None,
             )
             return CreateMediaBuyResult(response=simulated_response, status=AdcpTaskStatus.completed.value)
 

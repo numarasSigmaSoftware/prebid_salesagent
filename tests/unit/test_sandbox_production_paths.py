@@ -149,6 +149,14 @@ class TestSnapshotPartitioning:
         assert sorted(modes) == [False, True], f"expected one adapter per mode, got {modes}"
 
 
+# update_media_buy, admin media-buy detail, approved-buy execution and deferred creative
+# push are NOT yet graded at the adapter boundary. Attempts to drive them with unit mocks
+# reach no get_adapter call at all (the impls raise earlier), and a test asserting on an
+# empty call list passes vacuously. They need integration tests in the shape of
+# tests/integration/test_sandbox_delivery_account_scoping.py. Tracked as outstanding —
+# the derivation itself is graded by the helper tests, but the wiring is not.
+
+
 # Delivery account scoping (SA-006) is graded in
 # tests/integration/test_sandbox_delivery_account_scoping.py: _get_media_buy_delivery_impl
 # cannot be driven far enough with unit mocks (it raises before the seam), and an

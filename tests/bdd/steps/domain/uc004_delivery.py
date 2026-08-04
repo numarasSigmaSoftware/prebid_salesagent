@@ -3104,6 +3104,34 @@ _VALID_BRAND_DOMAIN = "acme-corp.com"
 _VALID_OPERATOR = "acme-corp.com"
 
 
+def _associate_scenario_buys_with(ctx: dict, account_id: str) -> None:
+    """Point this scenario's media buys at the account the request names.
+
+    The shared media-buy Given runs before the account value is known, so it creates
+    buys with account_id NULL. AdCP 3.1.1 defines ``account`` on
+    get_media_buy_delivery as a FILTER — "Filter delivery data to a specific account"
+    (dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json) — so an
+    unassociated buy is correctly excluded once scoping is enforced. A row the Examples
+    mark *valid* is meant to belong to that account; persist that intent here rather
+    than weakening the production filter.
+    """
+    env = ctx.get("env")
+    session = getattr(env, "_session", None)
+    tenant = ctx.get("db_tenant")
+    if session is None or tenant is None:
+        return
+
+    from sqlalchemy import select
+
+    from src.core.database.models import MediaBuy
+
+    buys = session.scalars(select(MediaBuy).filter_by(tenant_id=tenant.tenant_id)).all()
+    for buy in buys:
+        if buy.account_id is None:
+            buy.account_id = account_id
+    session.commit()
+
+
 def _seed_valid_account_if_named(ctx: dict, value: str) -> None:
     """Seed the account a VALID delivery_account row names, so resolution succeeds.
 
@@ -3146,6 +3174,7 @@ def _seed_valid_account_if_named(ctx: dict, value: str) -> None:
             brand_domain=_VALID_BRAND_DOMAIN,
             operator=_VALID_OPERATOR,
         )
+        _associate_scenario_buys_with(ctx, _VALID_ACCOUNT_ID)
         return
 
     # Natural key (brand + operator), optionally sandbox:true. Non-sandbox and
@@ -3158,15 +3187,17 @@ def _seed_valid_account_if_named(ctx: dict, value: str) -> None:
         and parsed.get("operator") == _VALID_OPERATOR
     ):
         sandbox = bool(parsed.get("sandbox", False))
+        natural_key_account_id = f"acc-acme-corp{'-sandbox' if sandbox else ''}"
         seed_account_with_access(
             tenant,
             principal,
-            account_id=f"acc-acme-corp{'-sandbox' if sandbox else ''}",
+            account_id=natural_key_account_id,
             status="active",
             brand_domain=_VALID_BRAND_DOMAIN,
             operator=_VALID_OPERATOR,
             sandbox=sandbox,
         )
+        _associate_scenario_buys_with(ctx, natural_key_account_id)
 
 
 def _dispatch_partition(ctx: dict, field: str, value: str) -> None:

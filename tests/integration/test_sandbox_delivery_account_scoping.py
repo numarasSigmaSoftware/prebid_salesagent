@@ -76,9 +76,12 @@ class TestDeliveryAccountScoping:
 
             returned = {d.media_buy_id for d in (response.media_buy_deliveries or [])}
 
-            assert live_buy.media_buy_id not in returned, (
-                f"a buy from acc_live survived a request scoped to acc_sbx (returned={returned}); "
-                "it would have been read through the tenant's real adapter"
+            # Exact-set, not just absence: `live not in returned` is also satisfied by an
+            # EMPTY response, which is how an over-broad filter would slip through green.
+            assert returned == {sandbox_buy.media_buy_id}, (
+                f"expected only the in-scope sandbox buy, got {returned}; "
+                f"{live_buy.media_buy_id} present means a buy from another account was read "
+                "through the tenant's real adapter, and an empty set means the filter is over-broad"
             )
 
     def test_unscoped_request_still_returns_both(self, integration_db):
