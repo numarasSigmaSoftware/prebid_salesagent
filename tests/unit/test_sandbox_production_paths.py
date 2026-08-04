@@ -41,9 +41,7 @@ def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMo
     return uow
 
 
-def _sandbox_kwargs(mock_get_adapter: MagicMock) -> list[bool]:
-    """The sandbox= value of every get_adapter call, in order."""
-    return [call.kwargs["sandbox"] for call in mock_get_adapter.call_args_list]
+from tests.helpers.sandbox_assertions import sandbox_modes as _sandbox_kwargs
 
 
 class TestPerformancePath:
@@ -171,7 +169,7 @@ class TestUpdateMediaBuyPath:
             except Exception:  # noqa: BLE001 - response shaping is not what this grades
                 pass
 
-            return [c.kwargs["sandbox"] for c in env.mock["adapter"].call_args_list]
+            return _sandbox_kwargs(env.mock["adapter"])
 
     def test_sandbox_buy_selects_sandbox_adapter(self) -> None:
         modes = self._adapter_modes(account_sandbox=True)

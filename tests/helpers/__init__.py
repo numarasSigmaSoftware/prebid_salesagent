@@ -83,12 +83,16 @@ from tests.helpers.idempotency_seeds import (
     seed_media_buy,
     seed_principal,
 )
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox, sandbox_modes
 
 __all__ = [
     # Auth helpers
     "assert_resolve_auth_dep_passes_token",
     # Envelope assertions
+    "assert_all_live",
+    "assert_all_sandbox",
     "assert_envelope_shape",
+    "sandbox_modes",
     "assert_no_raw_validation_leak",
     # Idempotency cache seeding
     "make_active_cached_success",

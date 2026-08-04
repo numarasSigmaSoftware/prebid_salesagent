@@ -108,3 +108,56 @@ class TestDeliveryAccountScoping:
                 f"unscoped request lost buys (returned={returned}); account filtering must "
                 "apply only when the request carries an account reference"
             )
+
+
+class TestDeliveryAdapterModes:
+    """SA-010: the account filter is not enough — assert which adapter each buy is read
+    through. The scoping tests above pass on returned IDs alone, so replacing
+    sandbox_by_buy[...] with False would leave them green (the mocked adapter is
+    mode-agnostic)."""
+
+    def _modes_for(self, *, scoped_account: str | None):
+        from tests.factories import PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+        from tests.helpers.sandbox_assertions import sandbox_modes
+
+        suffix = scoped_account or "none"
+        with DeliveryPollEnv(tenant_id=f"t_mode_{suffix}", principal_id=f"p_mode_{suffix}") as env:
+            tenant = TenantFactory(tenant_id=f"t_mode_{suffix}")
+            principal = PrincipalFactory(tenant=tenant, principal_id=f"p_mode_{suffix}")
+            sandbox_buy, live_buy = _seed_two_accounts(tenant, principal)
+
+            env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
+            env.set_adapter_response(live_buy.media_buy_id, impressions=2000)
+
+            kwargs = {"media_buy_ids": [sandbox_buy.media_buy_id, live_buy.media_buy_id]}
+            if scoped_account is not None:
+                kwargs["account"] = AccountReference(root=AccountReferenceById(account_id=scoped_account))
+
+            env.call_mcp(**kwargs)
+
+            return sandbox_modes(env.mock["adapter"])
+
+    def test_sandbox_scoped_request_uses_only_a_sandbox_adapter(self, integration_db):
+        modes = self._modes_for(scoped_account="acc_sbx")
+
+        assert modes, "no adapter was constructed — this assertion would be vacuous"
+        assert all(modes), (
+            f"a live adapter read a sandbox-scoped request (modes={modes}); the buy would be "
+            "fetched from the tenant's real ad platform"
+        )
+
+    def test_live_scoped_request_uses_only_a_live_adapter(self, integration_db):
+        """Negative control — 'always sandbox' would pass the test above."""
+        modes = self._modes_for(scoped_account="acc_live")
+
+        assert modes, "no adapter was constructed — this assertion would be vacuous"
+        assert not any(modes), f"expected the live adapter for a live account, got {modes}"
+
+    def test_unscoped_mixed_request_uses_both_modes(self, integration_db):
+        """Both buys are in play, each read through the adapter its own account dictates."""
+        modes = self._modes_for(scoped_account=None)
+
+        assert set(modes) == {True, False}, (
+            f"a mixed unscoped request must read each buy through its own mode, got {modes}"
+        )

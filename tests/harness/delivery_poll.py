@@ -76,14 +76,15 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
 
         repo = MediaBuyRepository(session, self._tenant_id)
         for media_buy_id in media_buy_ids:
-            buy = repo.get_by_id(media_buy_id)
-            if buy is None:
+            # Write through the repository's own API rather than assigning to the ORM row:
+            # tests must not reach around the layer production writes through.
+            updated = repo.update_fields(media_buy_id, account_id=account_id)
+            if updated is None:
                 raise AssertionError(
                     f"cannot associate media buy {media_buy_id!r} with account {account_id!r}: "
                     "the buy does not exist in this scenario's database"
                 )
-            buy.account_id = account_id
-        session.commit()
+        self._commit_factory_data()
 
     def call_a2a(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
         """Call get_media_buy_delivery via real AdCPRequestHandler — full A2A pipeline."""

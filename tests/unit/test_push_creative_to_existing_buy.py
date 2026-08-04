@@ -535,7 +535,9 @@ class TestSandboxAdapterSelection:
         ):
             _call()
 
-        return [c.kwargs["sandbox"] for c in mock_get_adapter.call_args_list]
+        from tests.helpers.sandbox_assertions import sandbox_modes
+
+        return sandbox_modes(mock_get_adapter)
 
     def test_sandbox_buy_selects_sandbox_adapter(self):
         modes = self._adapter_modes(account_sandbox=True)
