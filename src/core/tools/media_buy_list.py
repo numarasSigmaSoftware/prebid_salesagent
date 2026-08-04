@@ -173,7 +173,11 @@ def _get_media_buys_impl(
 
     # Get snapshots from adapter if requested
     snapshot_data: dict[str, dict[str, Snapshot | None]] = {}  # media_buy_id -> package_id -> Snapshot
-    unavailable_reason: SnapshotUnavailableReason | None = None
+    # Unavailability is per media buy, not per response: with mixed sandbox/live
+    # partitions one adapter may lack realtime reporting while the other supports it.
+    # A single global reason would mislabel the supported partition's missing rows as
+    # SNAPSHOT_UNSUPPORTED when they are merely temporarily unavailable.
+    unavailable_by_buy: dict[str, SnapshotUnavailableReason] = {}
 
     if include_snapshot:
 
@@ -200,7 +204,9 @@ def _get_media_buys_impl(
                 sandbox=partition_is_sandbox,
             )
             if not adapter.capabilities.supports_realtime_reporting:
-                unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+                # Scope the reason to this partition's buys only.
+                for buy in partition:
+                    unavailable_by_buy[buy.media_buy_id] = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
                 continue
             # Keyed by media_buy_id, so partitions cannot collide on merge. Response
             # ordering is driven by target_media_buys below and is unaffected.
@@ -232,7 +238,10 @@ def _get_media_buys_impl(
             snapshot = buy_snapshots.get(pkg_id)
             snapshot_unavailable = None
             if include_snapshot and snapshot is None:
-                snapshot_unavailable = unavailable_reason or SnapshotUnavailableReason.SNAPSHOT_TEMPORARILY_UNAVAILABLE
+                snapshot_unavailable = (
+                    unavailable_by_buy.get(buy.media_buy_id)
+                    or SnapshotUnavailableReason.SNAPSHOT_TEMPORARILY_UNAVAILABLE
+                )
 
             # Materialize targeting_overlay from package_config so callers can verify
             # what was persisted. Tolerates the legacy "targeting" key for data written

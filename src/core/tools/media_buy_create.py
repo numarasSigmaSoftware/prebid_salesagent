@@ -4151,6 +4151,10 @@ async def _create_media_buy_impl(
         adcp_response = CreateMediaBuySuccess.sync_success(
             media_buy_id=response.media_buy_id,
             packages=response_packages,
+            # AdCP 3.1.1 sandbox.mdx: "Sellers SHOULD include `sandbox: true` in success
+            # responses". Carried from the adapter response because THIS object — not the
+            # adapter's — is what reaches the buyer; setting it upstream alone drops it.
+            sandbox=True if getattr(response, "sandbox", None) else None,
             # AdCP 3.1 preferred status; mirrors deprecated `status`. Lifecycle on
             # the wire, from the same single source that drives valid_actions
             # (spec 3.1.1 create-media-buy-response.json;

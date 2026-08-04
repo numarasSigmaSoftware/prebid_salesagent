@@ -250,6 +250,17 @@ def _get_media_buy_delivery_impl(
 
         target_media_buys = _get_target_media_buys(req, principal_id, repo, reference_date, testing_ctx)
 
+        # Account scoping: when the request carries an account reference, buys belonging
+        # to a DIFFERENT account of the same principal are out of scope entirely. Without
+        # this, a request scoped to a sandbox account could pull in a live buy (explicitly
+        # or by browsing) and read it through the tenant's real adapter — defeating the
+        # sandbox guarantee via an account-scoping hole. Dropped ids fall through to the
+        # not-found diff below, so the buyer is told rather than silently served less.
+        if identity.account_id is not None:
+            target_media_buys = [
+                (buy_id, buy) for buy_id, buy in target_media_buys if buy.account_id == identity.account_id
+            ]
+
         # Resolve sandbox mode for every targeted buy BEFORE any adapter is built, so an
         # unresolved account raises here rather than being read through the live adapter.
         assert uow.accounts is not None
