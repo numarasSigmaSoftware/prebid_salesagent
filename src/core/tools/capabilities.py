@@ -117,7 +117,7 @@ def _get_adcp_capabilities_impl(
         principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
 
         if principal:
-            adapter = get_adapter(principal, dry_run=True, tenant=tenant)
+            adapter = get_adapter(principal, dry_run=True, tenant=tenant, sandbox=identity.sandbox)
             if adapter and hasattr(adapter, "default_channels"):
                 for channel_name in adapter.default_channels:
                     if channel_name.lower() in CHANNEL_MAPPING:

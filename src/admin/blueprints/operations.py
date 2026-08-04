@@ -222,6 +222,8 @@ def media_buy_detail(tenant_id, media_buy_id):
 
                     from src.core.config_loader import set_current_tenant
                     from src.core.database.models import Tenant
+                    from src.core.database.repositories.account import AccountRepository
+                    from src.core.helpers.account_helpers import account_is_sandbox
                     from src.core.helpers.adapter_helpers import get_adapter
                     from src.core.schemas import Principal as PrincipalSchema
                     from src.core.schemas import ReportingPeriod
@@ -244,7 +246,13 @@ def media_buy_detail(tenant_id, media_buy_id):
                             name=principal.name,
                             platform_mappings=principal.platform_mappings or {},
                         )
-                        adapter = get_adapter(principal_schema, dry_run=False)
+                        # Admin route has no buyer identity; derive the mode from the buy's
+                        # account so a sandbox buy's delivery is read from the simulator.
+                        adapter = get_adapter(
+                            principal_schema,
+                            dry_run=False,
+                            sandbox=account_is_sandbox(AccountRepository(db_session, tenant_id), media_buy.account_id),
+                        )
 
                         # Calculate date range (last 7 days or campaign duration) - always use UTC
                         end_date = datetime.now(UTC)

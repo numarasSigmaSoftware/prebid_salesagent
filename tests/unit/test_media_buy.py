@@ -1492,6 +1492,8 @@ class TestCreateMediaBuyAdapterInteraction:
                 end_time=datetime.now(UTC) + timedelta(days=7),
                 package_pricing_info={},
                 principal=mock_principal,
+                # Live account: this suite grades the real-adapter dispatch path.
+                sandbox=False,
             )
 
         assert isinstance(result, CreateMediaBuyError)
@@ -1523,6 +1525,8 @@ class TestCreateMediaBuyAdapterInteraction:
                     end_time=datetime.now(UTC) + timedelta(days=7),
                     package_pricing_info={},
                     principal=mock_principal,
+                    # Live account: this suite grades the real-adapter dispatch path.
+                    sandbox=False,
                 )
 
     @pytest.mark.asyncio

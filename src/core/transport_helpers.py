@@ -143,6 +143,10 @@ def enrich_identity_with_account(
 
     with AccountUoW(identity.tenant_id) as uow:
         assert uow.accounts is not None
-        account_id = resolve_account(account_ref, identity, uow.accounts)
+        resolved = resolve_account(account_ref, identity, uow.accounts)
 
-    return identity.model_copy(update={"account_id": account_id})
+    # Carry sandbox mode onto the identity here, at the single funnel every transport
+    # passes through. Downstream has no other way to learn it: adapters are selected
+    # per-tenant, so the Account row never reaches adapter selection otherwise.
+    # AdCP 3.1.1 sandbox.mdx: sandbox mode is determined SOLELY by the account reference.
+    return identity.model_copy(update={"account_id": resolved.account_id, "sandbox": resolved.sandbox})

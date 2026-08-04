@@ -300,6 +300,7 @@ class AdminCreativeUoW(BaseUoW):
     products: ProductRepository | None
     workflows: WorkflowRepository | None
     tenant_config: TenantConfigRepository | None
+    accounts: AccountRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
@@ -309,6 +310,9 @@ class AdminCreativeUoW(BaseUoW):
         self.products = ProductRepository(self._session, self._tenant_id)
         self.workflows = WorkflowRepository(self._session, self._tenant_id)
         self.tenant_config = TenantConfigRepository(self._session, self._tenant_id)
+        # Sandbox mode of the owning account gates adapter dispatch on the deferred
+        # creative-push path; without it that path cannot tell a sandbox buy from a live one.
+        self.accounts = AccountRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.creatives = None
@@ -317,3 +321,4 @@ class AdminCreativeUoW(BaseUoW):
         self.products = None
         self.workflows = None
         self.tenant_config = None
+        self.accounts = None

@@ -471,7 +471,13 @@ def _update_media_buy_impl(
 
             principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)
 
-            adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
+            adapter = get_adapter(
+                principal,
+                dry_run=testing_ctx.dry_run,
+                testing_context=testing_ctx,
+                tenant=tenant,
+                sandbox=identity.sandbox,
+            )
             today = req.today or date.today()
 
             # AdCP 3.0.0 spec (core/product.json `property_targeting_allowed`): reject property_list targeting

@@ -71,7 +71,7 @@ def _update_performance_index_impl(
     principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)
 
     # Get the appropriate adapter (no dry_run support for performance updates)
-    adapter = get_adapter(principal, dry_run=False, tenant=tenant)
+    adapter = get_adapter(principal, dry_run=False, tenant=tenant, sandbox=identity.sandbox)
 
     # Convert ProductPerformance to PackagePerformance for the adapter
     package_performance = [

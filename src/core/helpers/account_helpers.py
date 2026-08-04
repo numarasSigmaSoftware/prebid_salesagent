@@ -1,12 +1,14 @@
 """Account resolution helpers.
 
-Bridges AccountReference from request payloads to validated account_id strings.
+Bridges AccountReference from request payloads to a validated account id + sandbox mode.
 Used by _create_media_buy_impl and _sync_creatives_impl.
 
 beads: salesagent-8n4
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
@@ -22,12 +24,29 @@ from src.core.exceptions import (
 from src.core.resolved_identity import ResolvedIdentity
 
 
+class ResolvedAccount(NamedTuple):
+    """A validated account plus the mode that governs its side effects.
+
+    ``sandbox`` is carried alongside the id because it is decided here — at the only
+    place the ``Account`` row is in hand — and is needed far downstream (adapter
+    selection, response shaping). Returning the id alone silently dropped it, which is
+    how sandbox-flagged requests reached the real ad server.
+
+    Per AdCP 3.1.1 ``sandbox.mdx``, sandbox mode is determined SOLELY by the account
+    reference. ``Account.sandbox`` is nullable; NULL means live — matching
+    ``AccountRepository``'s own ``sandbox IS NULL OR sandbox = False`` filter.
+    """
+
+    account_id: str
+    sandbox: bool
+
+
 def resolve_account(
     account_ref: AccountReference,
     identity: ResolvedIdentity,
     repo: AccountRepository,
-) -> str:
-    """Resolve an AccountReference to a validated account_id.
+) -> ResolvedAccount:
+    """Resolve an AccountReference to a validated account id + sandbox mode.
 
     Handles both variants of the AdCP AccountReference union:
     - AccountReferenceById: lookup by explicit account_id, verify agent access
@@ -39,7 +58,7 @@ def resolve_account(
         repo: AccountRepository scoped to the correct tenant.
 
     Returns:
-        Validated account_id string.
+        ResolvedAccount: validated account_id plus its sandbox mode.
 
     Raises:
         AdCPAccountNotFoundError: Account not found by ID or natural key.
@@ -70,6 +89,29 @@ def resolve_account(
     # Pydantic upstream. A fresh variant reaching here is an internal contract
     # violation, not a buyer-facing not-found — raise ValueError, not AdCPError.
     raise ValueError(f"Unsupported AccountReference variant: {type(inner)}")
+
+
+def account_is_sandbox(repo: AccountRepository, account_id: str | None) -> bool:
+    """Sandbox mode of an account, for paths that have no ResolvedIdentity.
+
+    Deferred execution (the approval executor, creative push, admin routes) runs after
+    the request identity is gone but must apply the same sandbox semantics — an approved
+    sandbox buy dispatching to the real ad server is the same defect as an inline one.
+
+    Takes the caller's ``AccountRepository`` rather than opening its own session: these
+    call sites already hold one, and a second connection inside the adapter-dispatch path
+    would be both a wasted round-trip and a real-DB dependency in unit-tested code.
+
+    Fail-closed: an unknown or unresolvable account returns False (live). Sandbox mode
+    SUPPRESSES side effects, so the unsafe default would be claiming a suppression we
+    cannot substantiate; treating it as live leaves the operator's approval gate in
+    control. Callers that cannot tolerate a live dispatch must refuse instead.
+    """
+    if not account_id:
+        return False
+
+    account = repo.get_by_id(account_id)
+    return bool(account.sandbox) if account is not None else False
 
 
 def _check_account_status(account_id: str, status: str | None) -> None:
@@ -116,7 +158,7 @@ def _resolve_by_id(
     account_id: str,
     identity: ResolvedIdentity,
     repo: AccountRepository,
-) -> str:
+) -> ResolvedAccount:
     """Resolve by explicit account_id — lookup + access check + status check."""
     account = repo.get_by_id(account_id)
     if account is None:
@@ -129,14 +171,14 @@ def _resolve_by_id(
 
     _check_account_status(account_id, account.status)
 
-    return account.account_id
+    return ResolvedAccount(account.account_id, bool(account.sandbox))
 
 
 def _resolve_by_natural_key(
     ref: AccountReferenceByNaturalKey,
     identity: ResolvedIdentity,
     repo: AccountRepository,
-) -> str:
+) -> ResolvedAccount:
     """Resolve by natural key (brand + operator + sandbox) — lookup + ambiguity check + access check + status check."""
     brand_domain = ref.brand.domain
     brand_id = None
@@ -183,4 +225,4 @@ def _resolve_by_natural_key(
 
     _check_account_status(account.account_id, account.status)
 
-    return account.account_id
+    return ResolvedAccount(account.account_id, bool(account.sandbox))

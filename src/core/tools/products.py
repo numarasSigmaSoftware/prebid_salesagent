@@ -708,7 +708,7 @@ async def _get_products_impl(
             from src.core.helpers.adapter_helpers import get_adapter
 
             # Get adapter in dry-run mode (no actual ad server calls)
-            adapter = get_adapter(principal, dry_run=True, tenant=tenant)
+            adapter = get_adapter(principal, dry_run=True, tenant=tenant, sandbox=identity.sandbox)
 
             supported_models = adapter.get_supported_pricing_models()
 

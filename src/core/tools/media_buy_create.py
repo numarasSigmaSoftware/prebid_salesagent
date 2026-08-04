@@ -117,7 +117,9 @@ from src.core.database.models import MediaPackage as DBMediaPackage
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.database.models import Product as ProductModel
+from src.core.database.repositories.account import AccountRepository
 from src.core.helpers import log_tool_activity
+from src.core.helpers.account_helpers import account_is_sandbox
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
     extract_click_url,
@@ -534,6 +536,16 @@ def _pre_validate_package_creatives(
         raise
 
 
+def _buy_account_id(repo: Any, media_buy_id: str) -> str | None:
+    """account_id of a media buy, or None when the buy is unknown.
+
+    Deferred paths need the owning account to decide sandbox mode; they hold a buy id,
+    not an identity. Returns None rather than raising — the caller fails closed to live.
+    """
+    buy = repo.get_by_id(media_buy_id)
+    return buy.account_id if buy is not None else None
+
+
 def _execute_adapter_media_buy_creation(
     request: CreateMediaBuyRequest,
     packages: list[MediaPackage],
@@ -543,6 +555,8 @@ def _execute_adapter_media_buy_creation(
     principal: Principal,
     testing_ctx: TestingContext | None = None,
     tenant: Any = None,
+    *,
+    sandbox: bool,
 ) -> schemas.CreateMediaBuyResponse:
     """Execute adapter's create_media_buy call.
 
@@ -566,7 +580,7 @@ def _execute_adapter_media_buy_creation(
     """
     # Get adapter using helper
     dry_run = testing_ctx.dry_run if testing_ctx else False
-    adapter = get_adapter(principal, dry_run=dry_run, testing_context=testing_ctx, tenant=tenant)
+    adapter = get_adapter(principal, dry_run=dry_run, testing_context=testing_ctx, tenant=tenant, sandbox=sandbox)
 
     # Call adapter with detailed error logging
     try:
@@ -782,6 +796,12 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 error_msg = f"Media buy {media_buy_id} not found"
                 logger.error(f"[APPROVAL] {error_msg}")
                 return False, error_msg
+
+            # Read the account id while the row is still attached: the adapter call below
+            # runs outside this session, where an expired attribute would raise
+            # DetachedInstanceError. Needed to re-derive sandbox mode at execution time.
+            mb_account_id = media_buy.account_id
+            mb_sandbox = account_is_sandbox(AccountRepository(session, tenant_id), mb_account_id)
 
             # Reconstruct CreateMediaBuyRequest from raw_request
             try:
@@ -1048,6 +1068,9 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             principal,
             testing_ctx,
             tenant=tenant_obj,
+            # Deferred execution: the request identity is long gone, so re-derive the
+            # account's mode. An approved sandbox buy must not dispatch to a real adapter.
+            sandbox=mb_sandbox,
         )
 
         # Check if adapter returned an error response
@@ -1163,7 +1186,13 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     logger.info(f"[APPROVAL] Uploading {len(assets)} creatives to adapter")
 
                     # Get adapter and upload creatives
-                    adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
+                    adapter = get_adapter(
+                        principal,
+                        dry_run=False,
+                        testing_context=testing_ctx,
+                        tenant=tenant_obj,
+                        sandbox=mb_sandbox,
+                    )
 
                     # Call adapter's add_creative_assets method
                     # For GAM, the media_buy_id is the GAM order ID
@@ -1214,7 +1243,13 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         # 2. Creatives may have been uploaded after the initial approval attempt
         logger.info(f"[APPROVAL] Attempting to approve order {response.media_buy_id} in GAM")
         try:
-            adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
+            adapter = get_adapter(
+                principal,
+                dry_run=False,
+                testing_context=testing_ctx,
+                tenant=tenant_obj,
+                sandbox=mb_sandbox,
+            )
             if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                 approval_success = adapter.orders_manager.approve_order(response.media_buy_id)
                 if approval_success:
@@ -1311,7 +1346,16 @@ def push_creative_to_existing_buy(
             if not principal:
                 return False, f"Principal {creative.principal_id} not found"
 
-            adapter = get_adapter(principal, dry_run=False, tenant=tenant_obj)
+            # Deferred path (no request identity): re-derive the buy's account mode so a
+            # creative push against a sandbox buy never reaches a real ad server.
+            assert uow.accounts is not None
+            assert uow.media_buys is not None
+            adapter = get_adapter(
+                principal,
+                dry_run=False,
+                tenant=tenant_obj,
+                sandbox=account_is_sandbox(uow.accounts, _buy_account_id(uow.media_buys, media_buy_id)),
+            )
             if not (hasattr(adapter, "creatives_manager") and adapter.creatives_manager):
                 return False, "Adapter does not support creative upload"
 
@@ -2699,7 +2743,9 @@ async def _create_media_buy_impl(
 
         # Get the appropriate adapter with testing context
         # Use dry_run from testing context (which comes from config or testing flags)
-        adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
+        adapter = get_adapter(
+            principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant, sandbox=identity.sandbox
+        )
 
         # Check if manual approval is required
         # Use tenant.human_review_required as the authoritative source, with adapter setting as fallback
@@ -3568,7 +3614,15 @@ async def _create_media_buy_impl(
         # This uses the same function as manual approval to ensure consistency across adapters
         try:
             response = _execute_adapter_media_buy_creation(
-                req, packages, start_time, end_time, package_pricing_info, principal, testing_ctx, tenant=tenant
+                req,
+                packages,
+                start_time,
+                end_time,
+                package_pricing_info,
+                principal,
+                testing_ctx,
+                tenant=tenant,
+                sandbox=identity.sandbox,
             )
         except Exception as adapter_error:
             raise

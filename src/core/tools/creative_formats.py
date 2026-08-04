@@ -505,10 +505,11 @@ def _list_creative_formats_impl(
     )
 
     # Create response (no message/specification_version - not in adapter schema)
-    # Determine sandbox flag from identity (BR-RULE-209 INV-4)
-    sandbox_flag: bool | None = None
-    if identity and identity.testing_context and identity.testing_context.dry_run:
-        sandbox_flag = True
+    # Sandbox flag comes from the resolved account, never from a request header
+    # (BR-RULE-209 INV-4). AdCP 3.1.1 sandbox.mdx: "Sandbox mode is determined solely by
+    # the account reference", and the X-Dry-Run header this previously read is deprecated
+    # with "Sellers MUST NOT alter behavior based on these headers".
+    sandbox_flag: bool | None = True if (identity and identity.sandbox) else None
 
     # Format list from registry is compatible with library Format type
     response = ListCreativeFormatsResponse(

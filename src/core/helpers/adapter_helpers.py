@@ -84,7 +84,12 @@ from src.core.schemas import Principal
 
 
 def get_adapter(
-    principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
+    principal: Principal,
+    dry_run: bool = False,
+    testing_context: Any = None,
+    tenant: Any = None,
+    *,
+    sandbox: bool = False,
 ) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
     """Get the appropriate adapter instance for the selected adapter type.
 
@@ -93,6 +98,14 @@ def get_adapter(
         dry_run: Whether to run in dry-run mode
         testing_context: Optional test context for simulations
         tenant: Tenant context (from identity.tenant). Falls back to ContextVar if not provided.
+        sandbox: True when the resolved account is a sandbox account
+            (``identity.sandbox``). Forces the mock adapter so no real ad-platform call
+            is ever made. AdCP 3.1.1 ``sandbox.mdx`` §Seller implementation: sandbox
+            requests "MUST NOT make real ad platform API calls (no real orders, line
+            items, etc.)" and "MUST NOT charge real money or create real billing records".
+            Keyword-only and explicit at every call site — enforced by
+            ``tests/unit/test_architecture_get_adapter_sandbox.py`` so a new call site
+            cannot silently default to the live adapter.
     """
     import logging
 
@@ -113,6 +126,21 @@ def get_adapter(
         tenant_id = tenant.tenant_id
         selected_adapter = tenant.ad_server or "mock"
     logger.info(f"[ADAPTER_SELECT] Initial selected_adapter from tenant.ad_server: {selected_adapter}")
+
+    if sandbox:
+        # Short-circuit BEFORE the AdapterConfig lookup: a sandbox account must never reach a
+        # real adapter — not its API, not even its credentials. The mock adapter is the
+        # simulator the spec asks for ("MUST return realistic response shapes with simulated
+        # data"). Adapters are configured per-tenant, so this is the only layer that can tell
+        # a sandbox request from a live one.
+        logger.info("[ADAPTER_SELECT] sandbox account — forcing mock adapter, no real ad-platform calls")
+        return MockAdServerAdapter(
+            {"enabled": True, "dry_run": dry_run},
+            principal,
+            dry_run,
+            tenant_id=tenant_id,
+            strategy_context=testing_context,
+        )
 
     # Get adapter config via repository
     from src.core.database.repositories.adapter_config import AdapterConfigRepository

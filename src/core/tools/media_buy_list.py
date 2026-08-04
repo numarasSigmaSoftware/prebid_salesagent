@@ -164,6 +164,7 @@ def _get_media_buys_impl(
             dry_run=testing_ctx.dry_run if testing_ctx else False,
             testing_context=testing_ctx,
             tenant=tenant,
+            sandbox=identity.sandbox,
         )
         if adapter.capabilities.supports_realtime_reporting:
             # Build list of (media_buy_id, package_id, platform_line_item_id) for the adapter
