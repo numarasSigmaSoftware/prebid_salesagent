@@ -149,12 +149,52 @@ class TestSnapshotPartitioning:
         assert sorted(modes) == [False, True], f"expected one adapter per mode, got {modes}"
 
 
-# update_media_buy, admin media-buy detail, approved-buy execution and deferred creative
-# push are NOT yet graded at the adapter boundary. Attempts to drive them with unit mocks
-# reach no get_adapter call at all (the impls raise earlier), and a test asserting on an
-# empty call list passes vacuously. They need integration tests in the shape of
-# tests/integration/test_sandbox_delivery_account_scoping.py. Tracked as outstanding —
-# the derivation itself is graded by the helper tests, but the wiring is not.
+class TestUpdateMediaBuyPath:
+    """update_media_buy mutates a buy addressed by id — the highest-risk buy-keyed path.
+
+    Driven through MediaBuyUpdateEnv rather than hand-rolled mocks: the harness already
+    patches the whole dependency set, so the impl actually reaches get_adapter. A
+    hand-mocked attempt reached zero calls and would have asserted vacuously.
+    """
+
+    def _adapter_modes(self, *, account_sandbox: bool) -> list[bool]:
+        from tests.harness.media_buy_update import MediaBuyUpdateEnv
+
+        with MediaBuyUpdateEnv() as env:
+            env.set_media_buy(media_buy_id="mb-001", account_id="acc-001")
+            env.set_account(account_id="acc-001", sandbox=account_sandbox)
+            env.set_currency_limit()
+
+            try:
+                # A package update is what actually reaches adapter dispatch.
+                env.call_impl(media_buy_id="mb-001", packages=[{"package_id": "pkg-1", "budget": 50.0}])
+            except Exception:  # noqa: BLE001 - response shaping is not what this grades
+                pass
+
+            return [c.kwargs["sandbox"] for c in env.mock["adapter"].call_args_list]
+
+    def test_sandbox_buy_selects_sandbox_adapter(self) -> None:
+        modes = self._adapter_modes(account_sandbox=True)
+
+        assert modes, "update_media_buy reached no adapter at all — this assertion would be vacuous"
+        assert all(modes), (
+            f"update_media_buy on a sandbox buy built a live adapter (modes={modes}); "
+            "the mutation would then reach the tenant's real ad server"
+        )
+
+    def test_live_buy_selects_live_adapter(self) -> None:
+        """Negative control — 'always sandbox' would silently disable real updates."""
+        modes = self._adapter_modes(account_sandbox=False)
+
+        assert modes, "update_media_buy reached no adapter at all — this assertion would be vacuous"
+        assert not any(modes), f"expected the live adapter for a live account, got {modes}"
+
+
+# Admin media-buy detail, approved-buy execution and deferred creative push are graded by
+# their derivation (account_is_sandbox / _buy_account_id) in the helper tests, but not yet
+# at their own adapter boundary — those paths have no harness env and cannot be reached
+# with ad-hoc mocks. Integration tests shaped like
+# tests/integration/test_sandbox_delivery_account_scoping.py are the way in.
 
 
 # Delivery account scoping (SA-006) is graded in

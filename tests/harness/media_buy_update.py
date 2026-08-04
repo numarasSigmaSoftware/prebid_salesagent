@@ -128,7 +128,14 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         # need a specific status call ``set_media_buy(status=...)``.
         _default_mb = MagicMock()
         _default_mb.status = "active"
+        _default_mb.account_id = None
         self._uow_instance.media_buys.get_by_id.return_value = _default_mb
+
+        # Default to a LIVE account: a MagicMock's truthy `sandbox` would otherwise make
+        # every test look like a sandbox request and silently mask adapter-selection bugs.
+        _default_account = MagicMock()
+        _default_account.sandbox = False
+        self._uow_instance.accounts.get_by_id.return_value = _default_account
 
         # The *_or_raise repository helpers delegate to the plain getters and raise
         # the typed not-found when absent. Wiring the mock the same way lets tests
@@ -274,6 +281,21 @@ class MediaBuyUpdateEnv(BaseTestEnv):
             setattr(mb, k, v)
         self._uow_instance.media_buys.get_by_id.return_value = mb
         return mb
+
+    def set_account(self, account_id: str = "acc-001", sandbox: bool = False) -> MagicMock:
+        """Configure what uow.accounts.get_by_id returns.
+
+        Buy-keyed operations derive sandbox mode from the owning account, so a test that
+        cares which adapter is selected must be able to say what that account is. Without
+        this the UoW mock auto-creates an account whose ``sandbox`` is a truthy MagicMock.
+
+        Returns the mock Account for further customization.
+        """
+        account = MagicMock()
+        account.account_id = account_id
+        account.sandbox = sandbox
+        self._uow_instance.accounts.get_by_id.return_value = account
+        return account
 
     def set_currency_limit(
         self,
