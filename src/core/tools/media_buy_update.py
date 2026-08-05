@@ -575,6 +575,7 @@ def _update_media_buy_impl(
                     valid_actions=_dry_run_actions,
                     context=req.context,
                     errors=property_list_unsupported_advisories(req.packages, adapter),
+                    sandbox=True if _mb_sandbox else None,
                 )
 
                 return UpdateMediaBuyResult(response=dry_run_response, status=AdcpTaskStatus.completed.value)
@@ -752,6 +753,7 @@ def _update_media_buy_impl(
                         affected_packages=affected_pkgs,
                         valid_actions=_post_action_actions,
                         errors=property_list_unsupported_advisories(req.packages, adapter),
+                        sandbox=True if _mb_sandbox else None,
                     )
                     # Log successful update_media_buy (pause/resume)
                     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
@@ -1407,6 +1409,7 @@ def _update_media_buy_impl(
                 valid_actions=_final_actions,
                 context=req.context,
                 errors=property_list_unsupported_advisories(req.packages, adapter),
+                sandbox=True if _mb_sandbox else None,
             )
 
             # Log successful update_media_buy call

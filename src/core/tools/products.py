@@ -708,6 +708,19 @@ async def _get_products_impl(
             from src.core.helpers.adapter_helpers import get_adapter
 
             # Get adapter in dry-run mode (no actual ad server calls)
+            #
+            # identity.sandbox is structurally False here, ALWAYS — not merely usually.
+            # get_products never calls enrich_identity_with_account and never reads
+            # GetProductsRequest.account, so nothing ever populates it. Harmless today
+            # because this call is dry_run=True against static-config methods only
+            # (get_supported_pricing_models), so no live ad-server call is reachable
+            # either way.
+            #
+            # This is also why GetProductsResponse carries no sandbox marker even though
+            # the field exists and the spec asks for it (#1874): stamping
+            # `sandbox=identity.sandbox` would be a permanent no-op that READS as
+            # implemented. Wiring account enrichment for get_products — a new request
+            # parameter across the MCP, A2A and REST surfaces — is the actual prerequisite.
             adapter = get_adapter(principal, dry_run=True, tenant=tenant, sandbox=identity.sandbox)
 
             supported_models = adapter.get_supported_pricing_models()

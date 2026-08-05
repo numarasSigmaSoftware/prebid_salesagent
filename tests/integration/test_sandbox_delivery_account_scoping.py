@@ -40,6 +40,20 @@ def _returned_ids(result: TransportResult) -> set[str]:
     return {d["media_buy_id"] for d in (wire.get("media_buy_deliveries") or [])}
 
 
+def _wire_sandbox_marker(result: TransportResult) -> bool | None:
+    """The top-level ``sandbox`` marker as it appears on the wire.
+
+    Read from ``wire_response`` for the same reason as :func:`_returned_ids`: the
+    marker is a buyer-facing contract, so grading the typed model would only prove
+    the model round-trips. ``None`` means the key is absent, which is the correct
+    encoding for a live response — the spec says to include it when true.
+    """
+    assert not result.is_error, f"dispatch failed: {result.error!r}"
+    wire = result.wire_response
+    assert wire is not None, "no wire response captured — this assertion would grade nothing"
+    return wire.get("sandbox")
+
+
 def _seed_two_accounts(tenant, principal):
     """One sandbox account and one live account, each owning a media buy.
 
@@ -228,4 +242,60 @@ class TestDeliveryAdapterModes:
 
         assert set(modes) == {True, False}, (
             f"a mixed unscoped request must read each buy through its own mode, got {modes}"
+        )
+
+
+class TestDeliverySandboxMarkerOnTheWire:
+    """#1874: a sandbox delivery response must SAY it carries simulated data.
+
+    Routing a sandbox account to the mock adapter keeps the buyer's money safe; the
+    marker is what lets the buyer tell simulated numbers from real ones. Without it a
+    sandbox delivery report is indistinguishable on the wire from a live one.
+
+    The mixed case is the interesting one. ``sandbox_by_buy`` is per-buy and one
+    response can span both modes, but the v3.1.1 schema offers only a single top-level
+    flag ("When true, this response CONTAINS simulated data from sandbox mode") and no
+    per-row field. ANY-semantics follows that wording and fails safer: all-or-nothing
+    would leave a mixed response completely unmarked, handing the buyer simulated rows
+    with no signal at all.
+    """
+
+    def _marker_for(self, transport, *, scoped_account: str | None):
+        from tests.factories import PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        suffix = f"{transport.value}_{scoped_account or 'mixed'}"
+        with DeliveryPollEnv(tenant_id=f"t_mk_{suffix}", principal_id=f"p_mk_{suffix}") as env:
+            tenant = TenantFactory(tenant_id=f"t_mk_{suffix}")
+            principal = PrincipalFactory(tenant=tenant, principal_id=f"p_mk_{suffix}")
+            sandbox_buy, live_buy = _seed_two_accounts(tenant, principal)
+            env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
+            env.set_adapter_response(live_buy.media_buy_id, impressions=2000)
+
+            kwargs = {"media_buy_ids": [sandbox_buy.media_buy_id, live_buy.media_buy_id]}
+            if scoped_account is not None:
+                kwargs["account"] = {"account_id": scoped_account}
+            return _wire_sandbox_marker(env.call_via(transport, **kwargs))
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_sandbox_scoped_response_is_marked(self, integration_db, transport):
+        assert self._marker_for(transport, scoped_account="acc_sbx") is True, (
+            f"[{transport.value}] a sandbox-scoped delivery response must carry sandbox=true; "
+            "without it the buyer cannot tell simulated metrics from real ones"
+        )
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_live_scoped_response_is_not_marked(self, integration_db, transport):
+        """Negative control — 'always mark' would pass the test above and mislabel real data."""
+        assert self._marker_for(transport, scoped_account="acc_live") is None, (
+            f"[{transport.value}] a live response must omit the marker entirely; marking it "
+            "would tell the buyer real delivery data is simulated"
+        )
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_mixed_response_is_marked(self, integration_db, transport):
+        """Unscoped request spans both modes: the response DOES contain simulated data."""
+        assert self._marker_for(transport, scoped_account=None) is True, (
+            f"[{transport.value}] a response containing any sandbox buy must be marked; "
+            "leaving a mixed response unmarked hands the buyer simulated rows with no signal"
         )
