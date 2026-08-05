@@ -214,17 +214,13 @@ class TestDeliveryLookupFailureIsCountedNotSkipped:
     """
 
     async def _drive(self, env, buy, response):
-        from unittest.mock import patch
-
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness.delivery_poll import mock_delivery_response
 
-        # AWAIT inside the patch context. Returning the coroutine and awaiting it
-        # outside would exit the `with` first, un-patching before the body ever runs —
-        # the real impl would execute and the test would grade nothing it intended.
-        with patch(
-            "src.services.delivery_webhook_scheduler._get_media_buy_delivery_impl",
-            return_value=response,
-        ):
+        # AWAIT inside the context. Returning the coroutine and awaiting it outside
+        # would exit the `with` first, un-patching before the body ever runs — the
+        # real impl would execute and the test would grade nothing it intended.
+        with mock_delivery_response(response):
             return await DeliveryWebhookScheduler()._send_report_for_media_buy(
                 buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
             )

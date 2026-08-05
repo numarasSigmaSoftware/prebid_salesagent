@@ -101,6 +101,26 @@ def mock_webhook_post(
 
 
 @contextmanager
+def mock_delivery_response(response: Any) -> Iterator[Any]:
+    """Stub the delivery lookup the scheduler performs, with a fixed result.
+
+    One seam ABOVE ``mock_send_notification``: that one short-circuits the send,
+    this one short-circuits what the scheduler *reads* before deciding to send —
+    letting a test drive the lookup-failure branches (a non-response result, or a
+    response carrying advisory errors) without a real adapter failure.
+
+    Lives here rather than as a ``patch`` in the test file so the behavioural-mock
+    cap keeps shrinking (tests/unit/test_architecture_behavioral_mock_cap.py) and
+    the patch target is stated once.
+    """
+    with patch(
+        "src.services.delivery_webhook_scheduler._get_media_buy_delivery_impl",
+        return_value=response,
+    ) as mock_impl:
+        yield mock_impl
+
+
+@contextmanager
 def mock_send_notification(scheduler: DeliveryWebhookScheduler, *, delivered: bool = True) -> Iterator[AsyncMock]:
     """Stub a scheduler's ``webhook_service.send_notification`` with a fixed outcome.
 

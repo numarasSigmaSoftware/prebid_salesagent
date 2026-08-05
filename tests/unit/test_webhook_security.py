@@ -1054,7 +1054,13 @@ class TestWebhookAuditHmacKeyProductionValidation:
     to run without it OUTSIDE production, so the enforcement has to live here,
     not in the field default."""
 
-    def _validate(self, *, webhook_audit_hmac_key: str, is_production: bool) -> None:
+    def _validate(self, *, webhook_audit_hmac_key: str, is_production: bool, declared: bool | None = None) -> None:
+        """Drive validate_configuration() for a given production shape.
+
+        ``declared`` distinguishes a deployment that set ENVIRONMENT=production from
+        one this codebase merely INFERS is production (PRODUCTION / FLY_APP_NAME).
+        Defaults to ``is_production`` so the pre-existing cases keep their meaning.
+        """
         from src.core.config import AppConfig, validate_configuration
 
         with (
@@ -1063,6 +1069,10 @@ class TestWebhookAuditHmacKeyProductionValidation:
                 return_value=AppConfig(webhook_audit_hmac_key=webhook_audit_hmac_key),
             ),
             patch("src.core.config.is_production", return_value=is_production),
+            patch(
+                "src.core.config.declares_production_explicitly",
+                return_value=is_production if declared is None else declared,
+            ),
         ):
             validate_configuration()
 
@@ -1070,19 +1080,42 @@ class TestWebhookAuditHmacKeyProductionValidation:
         self._validate(webhook_audit_hmac_key="", is_production=False)  # must not raise
 
     def test_unset_key_is_rejected_in_production(self):
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
             self._validate(webhook_audit_hmac_key="", is_production=True)
 
     def test_short_key_is_rejected_in_production(self):
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be at least"):
+        with pytest.raises(RuntimeError, match="shorter than the required"):
             self._validate(webhook_audit_hmac_key="too-short", is_production=True)
 
     def test_whitespace_only_key_is_rejected_in_production(self):
         """A whitespace-only key would satisfy `if not key` (it's a non-empty
         string) but is exactly as useless as an unset one -- the same "no real
         secret" gap _redact_url_credentials treats as blank."""
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
             self._validate(webhook_audit_hmac_key="   \t\n  ", is_production=True)
+
+    def test_inferred_production_warns_instead_of_refusing_to_start(self, caplog):
+        """A deployment we newly INFER is production must not be bricked on upgrade.
+
+        is_production() was broadened to cover PRODUCTION / FLY_APP_NAME. This is an
+        open-source project: those deployments cannot be surveyed or warned ahead of
+        time, and they changed nothing — so raising here would stop a downstream
+        service from booting on a configuration that was valid the day before.
+        They get a loud, actionable warning; enforcement waits for a later release.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="src.core.config"):
+            self._validate(webhook_audit_hmac_key="", is_production=True, declared=False)
+
+        assert any("WEBHOOK_AUDIT_HMAC_KEY" in r.getMessage() for r in caplog.records), (
+            "an inferred-production deployment with no key must be warned, not silently accepted"
+        )
+
+    def test_declared_production_still_refuses(self):
+        """Negative control — the warn path must not swallow the declared case."""
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
+            self._validate(webhook_audit_hmac_key="", is_production=True, declared=True)
 
     def test_sufficiently_long_key_is_accepted_in_production(self):
         self._validate(webhook_audit_hmac_key="x" * 32, is_production=True)  # must not raise

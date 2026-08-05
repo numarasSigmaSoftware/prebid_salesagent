@@ -115,36 +115,31 @@ other column on the row (id, tenant_id, principal_id, media_buy_id,
 task_type, status, timestamps) is untouched and still provides correlation
 value.
 
-Operational note: _redact_rows() issues one unbounded UPDATE with no
-batching. This is deliberate, not an oversight -- see the "What this gives
-up" reasoning above for why the sweep must be unconditional and exact, and
-batching would add cursor logic to a file whose entire value is being
-trivially auditable.
+Operational note: _redact_rows() sweeps in committed batches of
+_REDACT_BATCH_SIZE rows rather than one unbounded UPDATE. An earlier version
+of this migration did the latter and defended it as deliberate -- the sweep
+must be unconditional and exact, and batching costs some of the trivial
+auditability that is this file's main asset. That trade was re-weighed and
+reversed: this is an open-source project, so the size of any given
+deployment's webhook_delivery_log is not merely unmeasured but unknowable
+from here, and a table with no retention policy has no upper bound. Holding
+row locks on a stranger's production table for an unbounded time is the worse
+risk. The predicate is self-limiting (a redacted row stops matching), so the
+batched form is idempotent and resumable; the cost is that a partial sweep is
+visible between batches, which is strictly safer than an unredacted one.
 
-Its deployment cost is the UPDATE statement's own execution footprint --
-whatever WAL it generates and whatever row locks it holds while running,
-for however long it takes to touch every qualifying row -- and nothing
-mitigates that footprint; it is what it is, for the duration of the
-statement. (An earlier version of this note claimed the statement's locks
-persist until the whole `alembic upgrade head` invocation commits, and
-recommended running this revision as an isolated step to bound that. That
-claim was wrong: b5838b839548, the very next migration in this chain,
-opens an autocommit_block(), which alembic's own documentation states
-unconditionally commits the preceding ambient transaction -- so in this
-actual chain, this migration's locks are released as soon as the very
-next migration boots, automatically, regardless of what an operator does.
-Manually isolating this revision as its own step therefore achieves
-nothing beyond what already happens; that advice is intentionally removed
-rather than left to mislead.)
+Deployment cost is now bounded PER STATEMENT rather than per table: each
+batch's WAL and row locks scale with _REDACT_BATCH_SIZE, not with however
+many rows the table happens to hold. Total wall-clock still scales with the
+table, but no single statement blocks writers for an unbounded stretch, and
+the autocommit_block() means each batch's locks are released as it commits
+rather than being held until the migration ends.
 
-Before deploying to an environment with meaningful traffic, check
-`SELECT count(*) FROM webhook_delivery_log` -- a large table means a
-correspondingly long-running single statement, full stop, with no
-operator-side mitigation available today. (Separately: webhook_delivery_log
-has no retention/pruning policy anywhere in this codebase, so it grows
-unboundedly over time -- that is the actual root cause behind this
-migration's cost, and is a more durable fix than anything migration-side;
-worth its own follow-up.)
+webhook_delivery_log has no retention/pruning policy anywhere in this
+codebase, so it grows without bound -- that is the actual root cause behind
+this migration's cost, and a retention policy is a more durable fix than
+anything migration-side, since it bounds every future migration over this
+table too. Worth its own follow-up.
 
 Revision ID: 168914d7ca05
 Revises: b7c9d2e4f6a8
@@ -166,6 +161,10 @@ depends_on: str | Sequence[str] | None = None
 
 _REDACTED_PLACEHOLDER = "<redacted-by-migration>"
 
+# Rows per committed statement. Large enough that a small table finishes in one pass,
+# small enough that no single statement holds locks on a big one for long.
+_REDACT_BATCH_SIZE = 5000
+
 
 def _redact_rows() -> None:
     """Overwrite webhook_url and error_message with the constant placeholder
@@ -186,19 +185,51 @@ def _redact_rows() -> None:
     version -- WAL, row lock -- for any UPDATE that touches a row regardless
     of whether the written value differs) on a row that's already done.
     """
-    connection = op.get_bind()
-    connection.execute(
-        text(
-            """
-            UPDATE webhook_delivery_log
-            SET webhook_url = :placeholder,
-                error_message = CASE WHEN error_message IS NULL THEN NULL ELSE :placeholder END
-            WHERE webhook_url != :placeholder
-               OR (error_message IS NOT NULL AND error_message != :placeholder)
-            """
-        ),
-        {"placeholder": _REDACTED_PLACEHOLDER},
-    )
+    # Batched, in an autocommit block, so each statement's locks and WAL are bounded.
+    #
+    # webhook_delivery_log has no retention policy anywhere in this codebase, so its
+    # size is unbounded AND unknowable here: this is an open-source project, and a
+    # single unbounded UPDATE would hold row locks on a downstream operator's table
+    # for however long it takes -- on a table whose size we cannot survey and they may
+    # not have measured. The earlier "check SELECT count(*) first" advice assumed an
+    # operator who reads migration docstrings before upgrading; most will not.
+    #
+    # Correct to batch because the predicate is self-limiting: a redacted row no
+    # longer matches, so each pass takes the next slice and a crash mid-run simply
+    # resumes on re-run. Committing per batch does give up all-or-nothing -- a partial
+    # sweep is visible between batches -- which is acceptable here because a partially
+    # redacted table is strictly safer than an unredacted one, and re-running finishes
+    # the job.
+    #
+    # (The durable fix is a retention/pruning policy on this table; that bounds every
+    # future migration too, and is tracked separately.)
+    with op.get_context().autocommit_block():
+        connection = op.get_bind()
+        while True:
+            result = connection.execute(
+                text(
+                    """
+                    WITH batch AS (
+                        SELECT id
+                        FROM webhook_delivery_log
+                        WHERE webhook_url != :placeholder
+                           OR (error_message IS NOT NULL AND error_message != :placeholder)
+                        ORDER BY id
+                        LIMIT :batch_size
+                    )
+                    UPDATE webhook_delivery_log AS w
+                    SET webhook_url = :placeholder,
+                        error_message = CASE
+                            WHEN w.error_message IS NULL THEN NULL ELSE :placeholder
+                        END
+                    FROM batch
+                    WHERE w.id = batch.id
+                    """
+                ),
+                {"placeholder": _REDACTED_PLACEHOLDER, "batch_size": _REDACT_BATCH_SIZE},
+            )
+            if not result.rowcount:
+                break
 
 
 def upgrade() -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
 from adcp.types import MediaBuyStatus
 
 from src.core.tools._media_buy_status import (
@@ -585,13 +586,17 @@ class TestDeliveryErrorWarningCarriesThePayload:
             patch.object(sched, "_get_media_buy_delivery_impl", return_value=response),
             patch.object(sched, "resolve_canonical_status", return_value="active"),
         ):
-            delivered = asyncio.run(
-                sched.DeliveryWebhookScheduler()._deliver_report(
-                    MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}, is_final=False
+            # ADAPTER_TIMEOUT is a REAL failure, not the MEDIA_BUY_NOT_FOUND "no data"
+            # advisory, so the branch now raises rather than returning False: a final
+            # that could not be built must count as a batch error, not a silent skip.
+            # The warning still fires first — which is what this test grades.
+            with pytest.raises(RuntimeError, match="ADAPTER_TIMEOUT"):
+                asyncio.run(
+                    sched.DeliveryWebhookScheduler()._deliver_report(
+                        MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}, is_final=False
+                    )
                 )
-            )
 
-        assert delivered is False
         assert rendered, "the error branch must emit a warning"
         line = "\n".join(rendered)
         assert "ADAPTER_TIMEOUT" in line, f"the adapter error code must reach the log; got {line!r}"
