@@ -269,10 +269,27 @@ def get_gam_oauth_config() -> GAMOAuthConfig:
 def is_production() -> bool:
     """Check if running in production environment.
 
-    True if any recognized production signal is present -- matching the union of
-    signals the real server bootstrap (scripts/run_server.py) and several src/core
-    modules (auth.py, logging_config.py, audit_logger.py) already treat as
-    production. A deployment that sets PRODUCTION or relies on Fly.io's
+    True if any recognized production signal is present. This is a strict SUPERSET
+    of what the real server bootstrap (scripts/run_server.py) and several src/core
+    modules (auth.py, logging_config.py, audit_logger.py) treat as production --
+    NOT a match for them, despite an earlier version of this docstring claiming
+    parity. Those four test ``FLY_APP_NAME or PRODUCTION`` by bare presence and do
+    not consult ENVIRONMENT at all, so the two definitions disagree in both
+    directions:
+
+    - ENVIRONMENT=production alone: production here, NOT production to those four.
+    - PRODUCTION=false: NOT production here (see the truthy-vocabulary note below),
+      but production to those four, because a bare presence check cannot see the
+      value. So the reassurance below holds for THIS function only -- an operator
+      who sets PRODUCTION=false still gets production auth/logging/audit behavior.
+
+    Converging those four onto this function is a behavior change for exactly that
+    PRODUCTION=false deployment (it would newly enable verbose auth logging), so it
+    is deliberately not done here; the divergence is graded by
+    test_is_production_diverges_from_the_bare_presence_checks so it cannot drift
+    further unnoticed.
+
+    A deployment that sets PRODUCTION or relies on Fly.io's
     auto-populated FLY_APP_NAME, but never explicitly sets ENVIRONMENT=production,
     used to read as non-production here even though scripts/run_server.py already
     bound it to 0.0.0.0 as production traffic -- silently skipping every
