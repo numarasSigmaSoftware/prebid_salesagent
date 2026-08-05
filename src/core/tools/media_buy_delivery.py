@@ -725,6 +725,13 @@ def _get_media_buy_delivery_impl(
             notification_type=notification_type,
             sequence_number=sequence_number,
             next_expected_at=next_expected_at,
+            # ANY, not all: the pinned v3.1.1 schema defines this field as "When true,
+            # this response CONTAINS simulated data from sandbox mode", and a single
+            # response can span both modes (sandbox_by_buy is per-buy). All-or-nothing
+            # would leave a mixed response completely unmarked — the buyer would see
+            # simulated rows with no signal at all, which is the worse failure. There is
+            # no per-row sandbox field in the schema to be more precise with.
+            sandbox=True if any(sandbox_by_buy.values()) else None,
         )
 
         # Apply testing hooks if needed
