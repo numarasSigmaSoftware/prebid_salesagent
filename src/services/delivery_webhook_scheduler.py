@@ -55,6 +55,53 @@ SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or str(DEFAU
 FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 
 
+def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: object) -> bool:
+    """Whether a delivery lookup result can be reported on.
+
+    Returns True when the result is usable, False for a LEGITIMATE skip, and RAISES
+    on a real failure — mirroring ``_send_report_for_media_buy``'s documented contract,
+    which reserves False for "unsupported frequency, dedup, no data, no URL" and says a
+    failed delivery raises so the batch counts an error rather than logging a send.
+
+    Extracted from ``_deliver_report`` to keep that method under the PLR0915 statement
+    ceiling; the discrimination below is the whole reason this is not a one-liner.
+    """
+    if not isinstance(delivery_response, GetMediaBuyDeliveryResponse):
+        # %r-style detail, not %s: this branch proved the object is NOT the response
+        # model, so its type is unknown. A result that is not the model at all is none
+        # of the contract's legitimate skips — returning False here made the batch print
+        # "0 sent, 0 errors" for a terminal buy whose spec-required final could not be
+        # built, hiding the failure entirely.
+        raise RuntimeError(
+            f"Delivery lookup for media buy {media_buy.media_buy_id} returned "
+            f"{type(delivery_response).__name__}, not GetMediaBuyDeliveryResponse"
+        )
+
+    if delivery_response.errors is not None:
+        # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
+        # human-readable envelope summary ("No delivery data found for the specified
+        # period."), so "%s" of the model renders a success-shaped sentence with the
+        # error payload absent — the one diagnostic this branch exists to emit.
+        logger.warning(
+            "`Couldn't get media_delivery` for %s. We received an error in the result. errors=%s",
+            media_buy.media_buy_id,
+            delivery_response.errors,
+        )
+        # Discriminate, don't blanket-skip. The impl emits two advisory shapes here:
+        # MEDIA_BUY_NOT_FOUND when a requested buy isn't reportable — which IS the "no
+        # data" case the contract lists as a legitimate False — and SERVICE_UNAVAILABLE
+        # when the adapter actually failed. Returning False for both let a real adapter
+        # failure count as a skip; raising for both would make every no-data buy an error.
+        if any(e.code != "MEDIA_BUY_NOT_FOUND" for e in delivery_response.errors):
+            raise RuntimeError(
+                f"Delivery lookup for media buy {media_buy.media_buy_id} failed: "
+                f"{[e.code for e in delivery_response.errors]}"
+            )
+        return False
+
+    return True
+
+
 class DeliveryWebhookScheduler:
     """Scheduler for sending delivery reports via webhooks."""
 
@@ -399,43 +446,7 @@ class DeliveryWebhookScheduler:
 
         delivery_response = _get_media_buy_delivery_impl(req, identity)
 
-        if not isinstance(delivery_response, GetMediaBuyDeliveryResponse):
-            # %r, not %s: this branch proved the object is NOT the response model, so its
-            # type is unknown (dict/None/other) — repr is unambiguous where a __str__
-            # summary would not be. (Never .model_dump() here: that AttributeErrors on a
-            # non-model and would raise from inside the error path.)
-            # RAISE, not return False: the documented contract reserves False for a
-            # LEGITIMATE skip (unsupported frequency, dedup, no data, no URL). A result
-            # that is not the response model at all is none of those — returning False
-            # made the batch print "0 sent, 0 errors" for a terminal buy whose
-            # spec-required final could not be built, hiding the failure entirely.
-            raise RuntimeError(
-                f"Delivery lookup for media buy {media_buy.media_buy_id} returned "
-                f"{type(delivery_response).__name__}, not GetMediaBuyDeliveryResponse"
-            )
-
-        if delivery_response.errors is not None:
-            # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
-            # human-readable envelope summary ("No delivery data found for the specified
-            # period."), so "%s" of the model renders a success-shaped sentence with the
-            # error payload absent — the one diagnostic this branch exists to emit.
-            logger.warning(
-                "`Couldn't get media_delivery` for %s. We received an error in the result. errors=%s",
-                media_buy.media_buy_id,
-                delivery_response.errors,
-            )
-            # Discriminate, don't blanket-skip. The impl emits two advisory shapes here:
-            # MEDIA_BUY_NOT_FOUND when a requested buy isn't reportable — which IS the
-            # "no data" case the contract lists as a legitimate False — and
-            # SERVICE_UNAVAILABLE when the adapter actually failed. Returning False for
-            # both let a real adapter failure count as a skip, so the batch reported
-            # "0 errors" for a final that never went out. Raising for both would be the
-            # opposite bug: every buy with no delivery data would count as an error.
-            if any(e.code != "MEDIA_BUY_NOT_FOUND" for e in delivery_response.errors):
-                raise RuntimeError(
-                    f"Delivery lookup for media buy {media_buy.media_buy_id} failed: "
-                    f"{[e.code for e in delivery_response.errors]}"
-                )
+        if not _delivery_lookup_is_usable(media_buy, delivery_response):
             return False
 
         # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
