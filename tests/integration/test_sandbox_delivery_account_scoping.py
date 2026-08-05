@@ -143,6 +143,51 @@ class TestDeliveryAccountScoping:
             )
 
 
+class TestUnresolvableAccountRefusesOnTheWire:
+    """The fail-closed refusal must reach the buyer as a typed envelope, not a 500.
+
+    ``account_is_sandbox`` raises when a buy's non-null account cannot be resolved,
+    rather than defaulting to live — refusing to dispatch beats guessing "live" for a
+    buy that might be sandbox. Asserting that only as ``pytest.raises`` on the
+    in-process exception would grade the raise but not the contract: what the buyer
+    receives is the two-layer envelope, and the boundary translation sits between.
+
+    The DB's composite FK (ON DELETE SET NULL) makes an orphaned reference unreachable
+    through any normal write — deleting an account nulls every referencing buy, and
+    Postgres rejects a dangling one — so this raise is defense-in-depth against
+    corruption or a future write path that skips resolution. Reaching it therefore
+    means simulating the unresolvable lookup at the repository seam. Everything after
+    that point is real: production's raise, the boundary translation, the wire bytes.
+    """
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_unresolvable_account_yields_account_not_found(self, integration_db, transport):
+        from unittest.mock import patch
+
+        from src.core.database.repositories.account import AccountRepository
+        from tests.factories import PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        suffix = transport.value
+        with DeliveryPollEnv(tenant_id=f"t_unres_{suffix}", principal_id=f"p_unres_{suffix}") as env:
+            tenant = TenantFactory(tenant_id=f"t_unres_{suffix}")
+            principal = PrincipalFactory(tenant=tenant, principal_id=f"p_unres_{suffix}")
+            sandbox_buy, _live_buy = _seed_two_accounts(tenant, principal)
+            env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
+
+            # No account reference on the request: the only account lookup left is the
+            # sandbox derivation for the targeted buys, so this isolates that raise
+            # from request-side account resolution (already graded elsewhere).
+            with patch.object(AccountRepository, "get_by_id", return_value=None):
+                result = env.call_via(transport, media_buy_ids=[sandbox_buy.media_buy_id])
+
+            assert result.is_error, (
+                f"[{suffix}] an unresolvable account must refuse dispatch, not return a "
+                f"success payload: {result.payload!r}"
+            )
+            result.assert_wire_error("ACCOUNT_NOT_FOUND", recovery="terminal")
+
+
 class TestDeliveryAdapterModes:
     """SA-010: the account filter is not enough — assert which adapter each buy is read
     through. The scoping tests above pass on returned IDs alone, so replacing
