@@ -248,18 +248,16 @@ def _get_media_buy_delivery_impl(
         assert uow.media_buys is not None
         repo = uow.media_buys
 
-        target_media_buys = _get_target_media_buys(req, principal_id, repo, reference_date, testing_ctx)
-
-        # Account scoping: when the request carries an account reference, buys belonging
-        # to a DIFFERENT account of the same principal are out of scope entirely. Without
-        # this, a request scoped to a sandbox account could pull in a live buy (explicitly
-        # or by browsing) and read it through the tenant's real adapter — defeating the
-        # sandbox guarantee via an account-scoping hole. Dropped ids fall through to the
-        # not-found diff below, so the buyer is told rather than silently served less.
-        if identity.account_id is not None:
-            target_media_buys = [
-                (buy_id, buy) for buy_id, buy in target_media_buys if buy.account_id == identity.account_id
-            ]
+        # Account scoping happens in the query (see MediaBuyRepository.get_by_principal):
+        # when the request carries an account reference, buys belonging to a DIFFERENT
+        # account of the same principal are never fetched. Without it, a request scoped
+        # to a sandbox account could pull in a live buy (explicitly or by browsing) and
+        # read it through the tenant's real adapter — defeating the sandbox guarantee via
+        # an account-scoping hole. Out-of-scope ids fall through to the not-found diff
+        # below, so the buyer is told rather than silently served less.
+        target_media_buys = _get_target_media_buys(
+            req, principal_id, repo, reference_date, testing_ctx, account_id=identity.account_id
+        )
 
         # Resolve sandbox mode for every targeted buy BEFORE any adapter is built, so an
         # unresolved account raises here rather than being read through the live adapter.
@@ -958,6 +956,7 @@ def _get_target_media_buys(
     repo: MediaBuyRepository,
     reference_date: date,
     testing_ctx: "AdCPTestContext | None" = None,
+    account_id: str | None = None,
 ) -> list[tuple[str, MediaBuy]]:
     # The internal delivery filter vocabulary is exactly the canonical status
     # set (pending_creatives, pending_start, active, paused, completed,
@@ -973,11 +972,12 @@ def _get_target_media_buys(
     else:
         filter_statuses = _resolve_delivery_status_filter(req.status_filter, valid_internal_statuses)
 
-    # Fetch media buys by IDs or all for principal
+    # Fetch media buys by IDs or all for principal, scoped to the referenced account
+    # when the request carries one — buys of another account are never loaded.
     if req.media_buy_ids:
-        fetched_buys = repo.get_by_principal(principal_id, media_buy_ids=req.media_buy_ids)
+        fetched_buys = repo.get_by_principal(principal_id, media_buy_ids=req.media_buy_ids, account_id=account_id)
     else:
-        fetched_buys = repo.get_by_principal(principal_id)
+        fetched_buys = repo.get_by_principal(principal_id, account_id=account_id)
 
     # Filter on the persisted status (authoritative), date-refined against the
     # SAME clock the reported status uses (_simulation_clock) so a time-simulation

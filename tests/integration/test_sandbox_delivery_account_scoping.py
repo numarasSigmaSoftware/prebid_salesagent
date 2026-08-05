@@ -20,9 +20,24 @@ from datetime import date
 import pytest
 from adcp.types import AccountReference, AccountReferenceById
 
+from tests.harness.transport import Transport, TransportResult
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox, sandbox_modes
 
 pytestmark = pytest.mark.requires_db
+
+
+def _returned_ids(result: TransportResult) -> set[str]:
+    """media_buy_ids in the response, read from the real wire body.
+
+    Reads ``wire_response`` — the serialized bytes the buyer receives — rather than
+    the typed ``payload``. Asserting on the model would grade re-serialization of an
+    in-process object, so a transport that never applied the scope could still look
+    correct. Fails loudly when no wire was captured instead of silently degrading.
+    """
+    assert not result.is_error, f"dispatch failed: {result.error!r}"
+    wire = result.wire_response
+    assert wire is not None, "no wire response captured — this assertion would grade nothing"
+    return {d["media_buy_id"] for d in (wire.get("media_buy_deliveries") or [])}
 
 
 def _seed_two_accounts(tenant, principal):
@@ -53,40 +68,55 @@ def _seed_two_accounts(tenant, principal):
     return buys["acc_sbx"], buys["acc_live"]
 
 
+# Account resolution (enrich_identity_with_account) is a transport-boundary
+# responsibility, so identity.account_id — which the scope keys on — is only populated
+# on a real wrapper path; call_impl would grade nothing. Every wire transport is
+# parametrized rather than MCP alone: the isolation guarantee is a property of the
+# buyer contract, so a transport that resolved the account differently (or not at all)
+# would be a live hole this file exists to catch.
+_WIRE_TRANSPORTS = (Transport.MCP, Transport.A2A, Transport.REST)
+
+# The account reference in its WIRE shape. A real buyer sends JSON, and A2A/REST carry
+# kwargs through protobuf/JSON serialization, so a constructed AccountReference model
+# does not survive the trip — passing one fails validation there while working
+# in-process on MCP. The dict is what every transport actually receives.
+_ACCOUNT_REF = {"account_id": "acc_sbx"}
+
+
 class TestDeliveryAccountScoping:
-    def test_sandbox_scoped_request_excludes_the_live_buy(self, integration_db):
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_sandbox_scoped_request_excludes_the_live_buy(self, integration_db, transport):
         """Both buys belong to the principal; only the in-scope one may be returned."""
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
-        with DeliveryPollEnv(tenant_id="t_scope", principal_id="p_scope") as env:
-            tenant = TenantFactory(tenant_id="t_scope")
-            principal = PrincipalFactory(tenant=tenant, principal_id="p_scope")
+        suffix = transport.value
+        with DeliveryPollEnv(tenant_id=f"t_scope_{suffix}", principal_id=f"p_scope_{suffix}") as env:
+            tenant = TenantFactory(tenant_id=f"t_scope_{suffix}")
+            principal = PrincipalFactory(tenant=tenant, principal_id=f"p_scope_{suffix}")
             sandbox_buy, live_buy = _seed_two_accounts(tenant, principal)
 
             env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
             env.set_adapter_response(live_buy.media_buy_id, impressions=2000)
 
-            # Driven through MCP, not call_impl: account resolution
-            # (enrich_identity_with_account) is a transport-boundary responsibility, so
-            # identity.account_id — which the filter keys on — is only populated on a
-            # real wrapper path.
-            response = env.call_mcp(
+            result = env.call_via(
+                transport,
                 media_buy_ids=[sandbox_buy.media_buy_id, live_buy.media_buy_id],
-                account=AccountReference(root=AccountReferenceById(account_id="acc_sbx")),
+                account=_ACCOUNT_REF,
             )
 
-            returned = {d.media_buy_id for d in (response.media_buy_deliveries or [])}
+            returned = _returned_ids(result)
 
             # Exact-set, not just absence: `live not in returned` is also satisfied by an
             # EMPTY response, which is how an over-broad filter would slip through green.
             assert returned == {sandbox_buy.media_buy_id}, (
-                f"expected only the in-scope sandbox buy, got {returned}; "
+                f"[{suffix}] expected only the in-scope sandbox buy, got {returned}; "
                 f"{live_buy.media_buy_id} present means a buy from another account was read "
                 "through the tenant's real adapter, and an empty set means the filter is over-broad"
             )
 
-    def test_unscoped_request_still_returns_both(self, integration_db):
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_unscoped_request_still_returns_both(self, integration_db, transport):
         """Negative control: without an account reference, both buys remain in scope.
 
         Without this, 'return nothing' would satisfy the test above.
@@ -94,21 +124,22 @@ class TestDeliveryAccountScoping:
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
-        with DeliveryPollEnv(tenant_id="t_scope2", principal_id="p_scope2") as env:
-            tenant = TenantFactory(tenant_id="t_scope2")
-            principal = PrincipalFactory(tenant=tenant, principal_id="p_scope2")
+        suffix = transport.value
+        with DeliveryPollEnv(tenant_id=f"t_scope2_{suffix}", principal_id=f"p_scope2_{suffix}") as env:
+            tenant = TenantFactory(tenant_id=f"t_scope2_{suffix}")
+            principal = PrincipalFactory(tenant=tenant, principal_id=f"p_scope2_{suffix}")
             sandbox_buy, live_buy = _seed_two_accounts(tenant, principal)
 
             env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
             env.set_adapter_response(live_buy.media_buy_id, impressions=2000)
 
-            response = env.call_mcp(media_buy_ids=[sandbox_buy.media_buy_id, live_buy.media_buy_id])
+            result = env.call_via(transport, media_buy_ids=[sandbox_buy.media_buy_id, live_buy.media_buy_id])
 
-            returned = {d.media_buy_id for d in (response.media_buy_deliveries or [])}
+            returned = _returned_ids(result)
 
             assert returned == {sandbox_buy.media_buy_id, live_buy.media_buy_id}, (
-                f"unscoped request lost buys (returned={returned}); account filtering must "
-                "apply only when the request carries an account reference"
+                f"[{suffix}] unscoped request lost buys (returned={returned}); account filtering "
+                "must apply only when the request carries an account reference"
             )
 
 
