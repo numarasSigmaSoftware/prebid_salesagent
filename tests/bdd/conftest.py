@@ -2799,9 +2799,39 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # Scheduler-originated events do not enter through an AdCP request transport.
 # Keep these scenarios single-run instead of producing misleading A2A/MCP/REST
 # variants that all exercise the same outbound scheduler path.
+# Membership is derived from the STEP, not the scenario's subject matter: a
+# scenario belongs here when its When step never consults ctx["transport"], so
+# the a2a/mcp/rest copies execute byte-identical code. Two webhook scenarios are
+# deliberately ABSENT — webhook-creds-short/valid dispatch a real create_media_buy
+# carrying the config, so their copies grade each transport's Pydantic boundary
+# and must keep multiplying.
 _TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
+    "T-UC-004-boundary-credentials",
+    "T-UC-004-delayed-all-available",
+    "T-UC-004-delayed-count-nonnegative",
+    "T-UC-004-delayed-no-false-complete",
+    "T-UC-004-partition-credentials",
+    "T-UC-004-status-reporting-delayed",
+    "T-UC-004-webhook-adjusted-resend",
+    "T-UC-004-webhook-bearer",
+    "T-UC-004-webhook-circuit-halfopen",
+    "T-UC-004-webhook-circuit-open",
+    "T-UC-004-webhook-circuit-recovery",
+    "T-UC-004-webhook-hmac",
+    "T-UC-004-webhook-no-aggregated",
+    "T-UC-004-webhook-no-config",
+    "T-UC-004-webhook-no-retry-4xx",
+    "T-UC-004-webhook-notification-type",
+    "T-UC-004-webhook-partial-data",
+    "T-UC-004-webhook-retry-5xx",
+    "T-UC-004-webhook-retry-network",
+    "T-UC-004-webhook-retry-success",
     "T-UC-004-webhook-scheduled",
     "T-UC-004-webhook-scheduler-derivation",
+    "T-UC-004-webhook-sequence",
+    "T-UC-004-webhook-ssrf-blocked",
+    "T-UC-004-webhook-window-update",
+    "T-UC-004-window-first-report",
 }
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
