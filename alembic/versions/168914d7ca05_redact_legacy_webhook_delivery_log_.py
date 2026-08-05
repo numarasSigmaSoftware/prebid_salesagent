@@ -15,11 +15,12 @@ and simpler -- we cannot recover any operationally useful information from
 these rows regardless, so there is nothing lost by not attempting a "real"
 digest.
 
-downgrade() does not raise: this migration makes no schema changes to revert,
-and CI's mandatory Migration Roundtrip job (scripts/ci/migration_roundtrip.py)
-runs upgrade(head) -> downgrade(one step back) -> upgrade(head) on every PR,
-so downgrade() failing here would break that job on every future PR, not just
-this one.
+downgrade() does not raise: this migration makes no schema changes to revert.
+(An earlier version of this note justified that by CI's Migration Roundtrip job.
+That was true when written -- this revision was head -- but b5838b839548 has
+since landed on top of it. The job downgrades ONE step from head, i.e. TO this
+revision, so it runs b5838's downgrade() and never this one's. The job imposes
+no requirement on this function; not raising is simply correct on its own.)
 
 downgrade() also does not merely no-op: it sweeps the table for every row
 that isn't already exactly the placeholder, so a row inserted (e.g. via raw
@@ -53,11 +54,15 @@ replacing it, and each of which a real credential slipped through:
    token) can land in that exact grammar by coincidence -- not
    hypothetically: "tokenSecret123 delivering webhook to REDACTED" matched
    it. Worse, "every row at upgrade time is unsafe" is only true for the
-   FIRST upgrade: CI's own mandatory roundtrip job forces an
-   upgrade -> downgrade -> upgrade sequence on every PR, and by the time of
-   a re-upgrade, the fixed runtime may already have written a genuinely
-   safe row that downgrade correctly preserved. Making upgrade()
-   unconditional again destroyed exactly that row on re-upgrade.
+   FIRST upgrade: on any re-upgrade the fixed runtime may already have
+   written a genuinely safe row that downgrade correctly preserved, and
+   making upgrade() unconditional destroyed exactly that row. (This
+   previously cited CI's roundtrip job as the sequence that forces a
+   re-upgrade. It does not: the job downgrades one step from head, which is
+   now b5838b839548, so this revision's upgrade() runs exactly once and is
+   never re-run. The conditional sweep is still the right design -- it rests
+   on the raw-SQL-bypass threat model below, which does not depend on CI --
+   but it is not CI that exercises it.)
 
 4. Keeping error_message fully fail-closed (never shape-checked, on any
    transition) but still trusting webhook_url's shape unconditionally --
@@ -99,8 +104,10 @@ runtime wrote completely correctly. This is judged acceptable: this specific
 migration reverts no schema (see the "downgrade() does not raise" paragraph
 above), so a real production downgrade-then-reupgrade of JUST this revision,
 with genuine traffic in between, is not a realistic operational pattern --
-the only place this sequence is exercised at all is CI's roundtrip check,
-which has no real audit data to lose. And even in the case where a broader,
+and no automated job exercises this sequence either -- CI's roundtrip
+downgrades one step from head (b5838b839548), stopping AT this revision rather
+than through it, so this revision's downgrade() never runs there. And even in
+the case where a broader,
 multi-revision rollback DOES pass through this one while the fixed runtime
 keeps running: the cost is a genericized webhook_url/error_message during
 that window, a debugging inconvenience -- not a security exposure, and every
@@ -210,10 +217,10 @@ def downgrade() -> None:
     anything. But a pure no-op here would leave a real gap: a row inserted
     (e.g. via raw SQL, bypassing the application) after upgrade() ran but
     before an operator downgrades would sail through unredacted, since
-    nothing else would ever touch it. Re-running the sweep closes that gap
-    and still satisfies CI's mandatory upgrade -> downgrade -> upgrade
-    roundtrip (scripts/ci/migration_roundtrip.py), which requires this
-    function not to raise. See _redact_rows() and the module docstring for
+    nothing else would ever touch it. Re-running the sweep closes that gap.
+    (This previously claimed CI's roundtrip job requires this function not to
+    raise. It does not run this function at all -- it downgrades one step from
+    head, which is b5838b839548.) See _redact_rows() and the module docstring for
     why downgrade() shares upgrade()'s exact sweep.
     """
     _redact_rows()
