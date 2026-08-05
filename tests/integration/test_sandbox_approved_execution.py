@@ -130,13 +130,26 @@ def _seed_approved_buy(*, tenant_id: str, sandbox: bool, buy_id: str = "mb_exec"
 
 
 def _run_executor(*, tenant_id: str, sandbox: bool):
-    """Run the approval executor for real and return its get_adapter mock.
+    """Run the approval executor for real; return its TWO get_adapter mocks.
 
     ``_execute_adapter_media_buy_creation`` is deliberately NOT patched: patching it grades
     only the first forwarding hop (executor -> helper) and leaves the helper's own
-    get_adapter, the creative upload, and the final order approval unproven. Every adapter
-    the run selects is recorded on one mock, so the shared strict assertions cover all
-    three sites at once.
+    get_adapter, the creative upload, and the final order approval unproven.
+
+    Adapter selections land on two DISTINCT bindings, so both are patched and both returned:
+
+    - ``mock_module_binding`` — ``media_buy_create.get_adapter`` (module-global import).
+      Records the media-buy creation selection.
+    - ``mock_lazy_binding`` — ``adapter_helpers.get_adapter``, which the executor re-imports
+      at call time (media_buy_create.py:1120). Records the creative-upload and
+      final-approval selections, which the module-global patch cannot observe at all.
+
+    Callers assert over both. Asserting over either alone leaves half the sites ungraded —
+    which is precisely how an earlier version of this test mis-read two live call sites as
+    "branch not reached".
+
+    Returns:
+        tuple[MagicMock, MagicMock]: (module-global binding, lazy-import binding).
     """
     from src.core.schemas import CreateMediaBuySuccess
     from src.core.tools.media_buy_create import execute_approved_media_buy
