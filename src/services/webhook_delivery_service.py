@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 from adcp import get_adcp_spec_version
+from adcp.types import NotificationType
 
 from src.core.webhook_validator import (
     redact_webhook_url_for_audit,
@@ -238,12 +239,17 @@ class WebhookDeliveryService:
                 sequence_number = self._sequence_numbers[media_buy_id]
 
             # Determine notification type per new spec
+            # Spelled from the spec enum rather than as literals: this value is
+            # PERSISTED and later queried by equality (see delivery repository's
+            # final-notification predicate), so a writer and a reader that spell
+            # it independently can desync on a spec rename without either side
+            # looking wrong.
             if is_final:
-                notification_type = "final"
+                notification_type = NotificationType.final.value
             elif is_adjusted:
-                notification_type = "adjusted"  # New in spec
+                notification_type = NotificationType.adjusted.value
             else:
-                notification_type = "scheduled"
+                notification_type = NotificationType.scheduled.value
 
             # Calculate next_expected_at if not final
             next_expected_at = None

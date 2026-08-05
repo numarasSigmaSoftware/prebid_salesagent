@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from adcp.types import NotificationType
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
@@ -50,7 +51,7 @@ def successful_final_log_clauses(
         WebhookDeliveryLog.media_buy_id == media_buy_id,
         WebhookDeliveryLog.task_type == task_type,
         WebhookDeliveryLog.status == "success",
-        WebhookDeliveryLog.notification_type == "final",
+        WebhookDeliveryLog.notification_type == NotificationType.final.value,
     )
 
 
