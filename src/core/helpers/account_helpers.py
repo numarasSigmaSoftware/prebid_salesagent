@@ -9,7 +9,7 @@ beads: salesagent-8n4
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
@@ -92,7 +92,7 @@ def resolve_account(
     raise ValueError(f"Unsupported AccountReference variant: {type(inner)}")
 
 
-def account_is_sandbox(repo: AccountRepository, account_id: str | None) -> bool:
+def account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> bool:
     """Sandbox mode of an account, for paths that have no ResolvedIdentity.
 
     Deferred execution (the approval executor, creative push, admin routes) runs after
@@ -116,7 +116,7 @@ def account_is_sandbox(repo: AccountRepository, account_id: str | None) -> bool:
     if not account_id:
         return False
 
-    account = repo.get_by_id(account_id)
+    account = accounts.get_by_id(account_id)
     if account is None:
         raise AdCPAccountNotFoundError(
             f"Account '{account_id}' referenced by this operation could not be resolved; "
@@ -124,22 +124,6 @@ def account_is_sandbox(repo: AccountRepository, account_id: str | None) -> bool:
             suggestion="Verify the account still exists and is accessible to this tenant.",
         )
     return bool(account.sandbox)
-
-
-def media_buy_sandbox_mode(accounts: AccountRepository, media_buys: Any, media_buy_id: str) -> bool:
-    """Sandbox mode of the account owning a media buy, for single-buy operations.
-
-    Operations addressed only by ``media_buy_id`` (update, performance, single-buy
-    delivery) carry no account reference, so ``identity.sandbox`` is structurally False
-    for them. Deriving the mode from the *buy* is the only correct source; using the
-    identity would silently dispatch sandbox buys to the live adapter.
-
-    A buy that does not exist yields False (live) — the caller's own not-found handling
-    owns that case. A buy whose non-null account cannot be resolved raises, per
-    :func:`account_is_sandbox`.
-    """
-    buy = media_buys.get_by_id(media_buy_id)
-    return account_is_sandbox(accounts, buy.account_id if buy is not None else None)
 
 
 def partition_by_sandbox_mode[T](

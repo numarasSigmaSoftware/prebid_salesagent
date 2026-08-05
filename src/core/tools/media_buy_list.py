@@ -163,8 +163,8 @@ def _get_media_buys_impl(
         # while the accounts repo is still in scope; every non-null account resolves
         # BEFORE any adapter call, so an unresolved one raises rather than silently
         # landing in the live partition.
-        sandbox_buys: list[Any] = []
-        live_buys: list[Any] = list(target_media_buys)
+        sandbox_buys: list[_MediaBuyData] = []
+        live_buys: list[_MediaBuyData] = list(target_media_buys)
         if include_snapshot:
             assert uow.accounts is not None
             sandbox_buys, live_buys = partition_by_sandbox_mode(

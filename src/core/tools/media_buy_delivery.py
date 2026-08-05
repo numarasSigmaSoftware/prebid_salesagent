@@ -83,6 +83,7 @@ PLATFORM_DEFAULT_ATTRIBUTION_MODEL = AttributionModel.last_touch
 # adcp 3.6.0: Use schemas.ReportingPeriod (extends creative ReportingPeriod) for adapter compat.
 # The media-buy-specific ReportingPeriod has identical fields (start, end) but different identity.
 # Adapters are typed to accept schemas.ReportingPeriod, so we use that here.
+from src.adapters.base import AdServerAdapter
 from src.core.auth import require_identity, require_principal_id, require_tenant, resolve_principal_or_raise
 from src.core.database.models import MediaBuy, PricingOption
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
@@ -204,7 +205,7 @@ def _get_media_buy_delivery_impl(
     # live buys at once, and identity.sandbox is structurally False when the request is
     # addressed by media_buy_ids alone. One adapter is built per mode, lazily, so a
     # single-mode request still constructs exactly one.
-    _adapters_by_mode: dict[bool, Any] = {}
+    _adapters_by_mode: dict[bool, AdServerAdapter] = {}
 
     def _adapter_for(is_sandbox: bool) -> Any:
         if is_sandbox not in _adapters_by_mode:
@@ -266,7 +267,7 @@ def _get_media_buy_delivery_impl(
         # request that is usually a handful of accounts.
         assert uow.accounts is not None
         sandbox_targets, _live_targets = partition_by_sandbox_mode(
-            uow.accounts, target_media_buys, lambda pair: getattr(pair[1], "account_id", None)
+            uow.accounts, target_media_buys, lambda pair: pair[1].account_id
         )
         sandbox_ids = {buy_id for buy_id, _buy in sandbox_targets}
         sandbox_by_buy: dict[str, bool] = {buy_id: buy_id in sandbox_ids for buy_id, _buy in target_media_buys}

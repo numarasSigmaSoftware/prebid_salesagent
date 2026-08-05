@@ -21,7 +21,6 @@ import pytest
 
 from src.core.helpers.account_helpers import (
     account_is_sandbox,
-    media_buy_sandbox_mode,
     partition_by_sandbox_mode,
 )
 
@@ -56,6 +55,24 @@ def _media_buys_repo(buys: dict[str, str | None]) -> MagicMock:
     return repo
 
 
+def _seam_for(accounts: MagicMock, buys: MagicMock) -> MagicMock:
+    """A UoW stub carrying the REAL buy-keyed seam over the given repo stubs.
+
+    Binds production's own methods rather than reimplementing the derivation, so
+    these stay oracles for the seam and not for a copy of it.
+    """
+    from types import MethodType
+
+    from src.core.database.repositories.uow import BuyKeyedSandboxMixin
+
+    uow = MagicMock()
+    uow.accounts = accounts
+    uow.media_buys = buys
+    uow.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, uow)
+    uow.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, uow)
+    return uow
+
+
 class TestSingleBuyDerivation:
     """update / performance / single-buy delivery are addressed by media_buy_id only."""
 
@@ -63,27 +80,27 @@ class TestSingleBuyDerivation:
         accounts = _accounts_repo({"acc_sbx": True})
         buys = _media_buys_repo({"mb_1": "acc_sbx"})
 
-        assert media_buy_sandbox_mode(accounts, buys, "mb_1") is True
+        assert _seam_for(accounts, buys).sandbox_mode_by_id("mb_1") is True
 
     def test_live_buy_yields_live_mode(self) -> None:
         """Negative control: without it, 'always sandbox' would pass the test above."""
         accounts = _accounts_repo({"acc_live": False})
         buys = _media_buys_repo({"mb_2": "acc_live"})
 
-        assert media_buy_sandbox_mode(accounts, buys, "mb_2") is False
+        assert _seam_for(accounts, buys).sandbox_mode_by_id("mb_2") is False
 
     def test_null_sandbox_column_is_live(self) -> None:
         accounts = _accounts_repo({"acc_legacy": None})
         buys = _media_buys_repo({"mb_3": "acc_legacy"})
 
-        assert media_buy_sandbox_mode(accounts, buys, "mb_3") is False
+        assert _seam_for(accounts, buys).sandbox_mode_by_id("mb_3") is False
 
     def test_buy_with_no_account_is_live(self) -> None:
         """Legacy buys predate account references; live is their only meaningful mode."""
         accounts = _accounts_repo({})
         buys = _media_buys_repo({"mb_legacy": None})
 
-        assert media_buy_sandbox_mode(accounts, buys, "mb_legacy") is False
+        assert _seam_for(accounts, buys).sandbox_mode_by_id("mb_legacy") is False
 
 
 class TestUnresolvedAccountRefusesDispatch:

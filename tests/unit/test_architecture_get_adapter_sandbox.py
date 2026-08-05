@@ -104,5 +104,5 @@ def test_buy_keyed_operations_do_not_source_sandbox_from_identity() -> None:
         + "\n  ".join(offenders)
         + "\n\nidentity.sandbox is only populated when the request carries an account "
         "reference; these operations are addressed by media_buy_id. Derive the mode from "
-        "the buy's account instead (media_buy_sandbox_mode / partition_by_sandbox_mode)."
+        "the buy's account instead (uow.sandbox_mode_by_id / partition_by_sandbox_mode)."
     )
