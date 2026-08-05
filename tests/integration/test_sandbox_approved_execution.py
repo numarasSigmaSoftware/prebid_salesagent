@@ -17,13 +17,15 @@ its reach):
 
     media_buy_create.py:583   helper's own get_adapter      CAUGHT
     media_buy_create.py:1080  executor -> helper forwarding CAUGHT
-    media_buy_create.py:1201  creative upload               NOT CAUGHT — branch not reached
-    media_buy_create.py:1258  final order approval          NOT CAUGHT — branch not reached
+    media_buy_create.py:1201  creative upload               CAUGHT
+    media_buy_create.py:1258  final order approval          CAUGHT
 
-The buy now completes successfully with an approved, dimension-bearing creative assigned,
-but the upload and approval branches still do not execute, so their adapter selections are
-ungraded. Closing them needs the assignment/response shape those branches require (the
-approval branch also looks GAM-specific: it gates on ``adapter.orders_manager``).
+An earlier version read the last two as "branch not reached". That was wrong: they were
+reached, but ``execute_approved_media_buy`` re-imports ``get_adapter`` from
+``adapter_helpers`` at call time (media_buy_create.py:1120), so those selections went to an
+unpatched binding the test could not see. Both bindings are patched now, and reachability
+is asserted rather than assumed — add_creative_assets and approve_order must have been
+called, and both mocks must be non-empty.
 
 AdCP 3.1.1 ``dist/docs/3.1.1/media-buy/advanced-topics/sandbox.mdx`` §Seller
 implementation: sandbox requests MUST NOT make real ad platform API calls.
@@ -43,6 +45,7 @@ from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 pytestmark = pytest.mark.requires_db
 
 _MODULE = "src.core.tools.media_buy_create"
+_HELPERS = "src.core.helpers.adapter_helpers"
 
 
 class _ExecEnv(IntegrationEnv):
@@ -147,34 +150,49 @@ def _run_executor(*, tenant_id: str, sandbox: bool):
         buy = _seed_approved_buy(tenant_id=tenant_id, sandbox=sandbox)
         env._commit_factory_data()
 
-        with patch(f"{_MODULE}.get_adapter", return_value=adapter) as mock_get_adapter:
+        # execute_approved_media_buy re-imports get_adapter from adapter_helpers at call
+        # time (media_buy_create.py:1120), so the creative-upload and approval selections
+        # bypass the module-global binding entirely. Patch BOTH or those two sites are
+        # invisible — which is exactly why an earlier matrix read them as "branch not
+        # reached" when they were in fact reached through an unpatched adapter.
+        with (
+            patch(f"{_MODULE}.get_adapter", return_value=adapter) as mock_module_binding,
+            patch(f"{_HELPERS}.get_adapter", return_value=adapter) as mock_lazy_binding,
+        ):
             success, error = execute_approved_media_buy(buy.media_buy_id, tenant_id)
 
-    print(
-        "PROBE upload_called:",
-        adapter.creatives_manager.add_creative_assets.called,
-        "approve_called:",
-        adapter.orders_manager.approve_order.called,
-        "selections:",
-        len(mock_get_adapter.call_args_list),
-        "success:",
-        success,
-        "err:",
-        error,
-    )
+    # Reachability, asserted rather than printed: every branch whose adapter selection this
+    # test claims to grade must actually have run.
     assert adapter.create_media_buy.called, (
-        f"the executor never reached the adapter's create_media_buy (success={success}, "
-        f"error={error}); asserting over an empty selection list would pass vacuously"
+        f"never reached the adapter's create_media_buy (success={success}, error={error})"
     )
-    return mock_get_adapter
+    assert adapter.creatives_manager.add_creative_assets.called, (
+        f"never reached the creative-upload branch (success={success}, error={error}); "
+        "its adapter selection would be ungraded"
+    )
+    assert adapter.orders_manager.approve_order.called, (
+        f"never reached the final order-approval branch (success={success}, error={error}); "
+        "its adapter selection would be ungraded"
+    )
+    assert mock_module_binding.call_args_list, "module-global get_adapter was never used"
+    assert mock_lazy_binding.call_args_list, (
+        "the lazily-imported get_adapter was never used — the upload/approval selections are not being recorded"
+    )
+    return mock_module_binding, mock_lazy_binding
 
 
 class TestApprovedExecutionSandboxDispatch:
     """Grades EVERY adapter the approval run selects: creation, creative upload, approval."""
 
     def test_approving_a_sandbox_buy_uses_sandbox_adapters_throughout(self, integration_db):
-        assert_all_sandbox(_run_executor(tenant_id="t_exec_sbx", sandbox=True), context="approved-buy execution")
+        module_binding, lazy_binding = _run_executor(tenant_id="t_exec_sbx", sandbox=True)
+
+        assert_all_sandbox(module_binding, context="approved-buy execution (creation)")
+        assert_all_sandbox(lazy_binding, context="approved-buy execution (upload/approval)")
 
     def test_approving_a_live_buy_uses_live_adapters_throughout(self, integration_db):
         """Negative control — 'always sandbox' would silently stop real approvals."""
-        assert_all_live(_run_executor(tenant_id="t_exec_live", sandbox=False), context="approved-buy execution")
+        module_binding, lazy_binding = _run_executor(tenant_id="t_exec_live", sandbox=False)
+
+        assert_all_live(module_binding, context="approved-buy execution (creation)")
+        assert_all_live(lazy_binding, context="approved-buy execution (upload/approval)")
