@@ -25,7 +25,14 @@ def sandbox_modes(mock_get_adapter: Any) -> list[bool]:
                 f"get_adapter called without an explicit sandbox= argument: {call}. "
                 "Every call site must decide the mode explicitly."
             )
-        modes.append(call.kwargs["sandbox"])
+        value = call.kwargs["sandbox"]
+        if type(value) is not bool:
+            raise AssertionError(
+                f"get_adapter called with a non-bool sandbox= argument: {value!r} ({type(value).__name__}) "
+                f"in {call}. A falsy-but-not-False value (None, 0, '') would silently satisfy "
+                "assert_all_live() as if it were an explicit live decision."
+            )
+        modes.append(value)
     return modes
 
 

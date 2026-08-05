@@ -34,6 +34,15 @@ class TestSandboxModes:
         with pytest.raises(AssertionError, match="without an explicit sandbox="):
             sandbox_modes(mock)
 
+    @pytest.mark.parametrize("value", [None, 0, 1, "", "true", "False"])
+    def test_raises_on_a_non_bool_value(self, value: object) -> None:
+        """A falsy-but-not-False value must not silently satisfy assert_all_live()."""
+        mock = MagicMock()
+        mock(object(), sandbox=value)
+
+        with pytest.raises(AssertionError, match="non-bool sandbox="):
+            sandbox_modes(mock)
+
 
 class TestAssertAllSandbox:
     def test_passes_when_every_call_is_sandbox(self) -> None:
