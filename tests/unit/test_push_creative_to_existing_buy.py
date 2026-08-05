@@ -503,7 +503,7 @@ class TestSandboxAdapterSelection:
     with every existing test still green.
     """
 
-    def _adapter_modes(self, *, account_sandbox: bool) -> list[bool]:
+    def _adapter_modes(self, *, account_sandbox: bool) -> MagicMock:
         creative = _make_creative()
         uow = _make_uow(
             tenant=_make_tenant(),

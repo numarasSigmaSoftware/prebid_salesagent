@@ -282,7 +282,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                             "by_package": delivery_response.by_package,
                         }
                 except Exception as e:
-                    logger.warning(f"Could not fetch delivery metrics for {media_buy_id}: {e}")
+                    logger.warning(f"Could not fetch delivery metrics for {media_buy_id}: {e}", exc_info=True)
                     # Continue without metrics - don't fail the whole page
 
             return render_template(

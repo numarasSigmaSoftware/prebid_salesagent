@@ -153,7 +153,7 @@ class TestUpdateMediaBuyPath:
     hand-mocked attempt reached zero calls and would have asserted vacuously.
     """
 
-    def _adapter_modes(self, *, account_sandbox: bool) -> list[bool]:
+    def _adapter_modes(self, *, account_sandbox: bool) -> MagicMock:
         from tests.harness.media_buy_update import MediaBuyUpdateEnv
 
         with MediaBuyUpdateEnv() as env:
