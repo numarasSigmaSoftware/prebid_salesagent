@@ -178,25 +178,16 @@ class TestUpdateMediaBuyPath:
 
 
 # Deferred creative push is graded at its own adapter boundary in
-# tests/unit/test_push_creative_to_existing_buy.py::TestSandboxAdapterSelection
-# (mutation-verified). Two paths remain graded only by their derivation:
+# tests/unit/test_push_creative_to_existing_buy.py::TestSandboxAdapterSelection, and
+# approved-buy execution in tests/integration/test_sandbox_approved_execution.py — both
+# mutation-verified. One path remains graded only by its derivation:
 #
-#   - approved-buy execution (execute_approved_media_buy). Diagnosis so far, so the next
-#     attempt does not restart from zero: the unit template in
-#     test_execute_approved_pending_review_filter.py drives it via
-#     session.scalars(...).first().side_effect = [tenant, mb]. The sandbox derivation adds
-#     an AccountRepository lookup on that same mock chain, so the sequence must also carry
-#     the account — and getting the ORDER right relative to the package/product reads is
-#     what has defeated two attempts (symptoms: "Adapter creation failed: " with an empty
-#     message when the list is exhausted, "Failed to reconstruct package pkg_1: " when the
-#     account consumes a slot reconstruction needed). Mock-sequence fragility is the whole
-#     problem, so the durable fix is an INTEGRATION test with real rows, shaped like
-#     tests/integration/test_sandbox_delivery_account_scoping.py, which sidesteps
-#     side_effect ordering entirely.
-#   - admin media-buy detail: read-only, and lowest risk of the set.
+#   - admin media-buy detail: read-only, and the lowest risk of the set.
+
 #
-# Both need a fixture that reaches dispatch — either a faithful extension of that unit
-# template or an integration test shaped like test_sandbox_delivery_account_scoping.py.
+# The executor was closed by dropping mock-sequence fixtures entirely: real rows produce
+# actionable validation errors ("packages.0.budget: Required field is missing") instead of
+# opaque side_effect exhaustion, which is what made it tractable after two failed attempts.
 
 
 # Delivery account scoping (SA-006) is graded in
