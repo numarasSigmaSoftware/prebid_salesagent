@@ -88,7 +88,7 @@ from src.core.database.models import MediaBuy, PricingOption
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.product import ProductRepository
-from src.core.helpers.account_helpers import account_is_sandbox
+from src.core.helpers.account_helpers import partition_by_sandbox_mode
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -263,11 +263,15 @@ def _get_media_buy_delivery_impl(
 
         # Resolve sandbox mode for every targeted buy BEFORE any adapter is built, so an
         # unresolved account raises here rather than being read through the live adapter.
+        # Modes come from the caching partition helper: AccountRepository.get_by_id emits
+        # one SELECT per call, so resolving per buy would issue one query per buy on a
+        # request that is usually a handful of accounts.
         assert uow.accounts is not None
-        sandbox_by_buy: dict[str, bool] = {
-            buy_id: account_is_sandbox(uow.accounts, getattr(buy, "account_id", None))
-            for buy_id, buy in target_media_buys
-        }
+        sandbox_targets, _live_targets = partition_by_sandbox_mode(
+            uow.accounts, target_media_buys, lambda pair: getattr(pair[1], "account_id", None)
+        )
+        sandbox_ids = {buy_id for buy_id, _buy in sandbox_targets}
+        sandbox_by_buy: dict[str, bool] = {buy_id: buy_id in sandbox_ids for buy_id, _buy in target_media_buys}
 
         # Diff requested IDs vs found IDs to report missing ones (salesagent-mexj)
         not_found_errors: list[Error] = []

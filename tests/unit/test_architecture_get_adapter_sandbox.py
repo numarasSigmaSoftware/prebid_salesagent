@@ -55,9 +55,11 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
     assert not missing, (
         "get_adapter() called without an explicit sandbox= decision at:\n  "
         + "\n  ".join(missing)
-        + "\n\nPass sandbox=identity.sandbox where a ResolvedIdentity is in scope, or "
-        "account_is_sandbox(tenant_id, account_id) on deferred paths (approval executor, "
-        "admin routes). See AdCP 3.1.1 sandbox.mdx §Seller implementation."
+        + "\n\nPass sandbox=identity.sandbox where an account-enriched ResolvedIdentity is "
+        "in scope. On buy-keyed and deferred paths (update, performance, creative push, "
+        "the approval executor, admin routes) use MediaBuyUoW.sandbox_mode_by_id(id) — or "
+        "sandbox_mode(buy) when the row is already loaded. See AdCP 3.1.1 sandbox.mdx "
+        "§Seller implementation."
     )
 
 

@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_identity, require_principal_id, require_tenant, resolve_principal_or_raise
 from src.core.database.repositories import MediaBuyUoW
-from src.core.helpers.account_helpers import media_buy_sandbox_mode
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import PackagePerformance, UpdatePerformanceIndexRequest, UpdatePerformanceIndexResponse
@@ -66,11 +65,10 @@ def _update_performance_index_impl(
 
     with MediaBuyUoW(tenant["tenant_id"]) as uow:
         assert uow.media_buys is not None
-        assert uow.accounts is not None
         _verify_principal(req.media_buy_id, identity, uow.media_buys, context=req.context)
         # This operation is addressed by media_buy_id and carries no account reference,
         # so identity.sandbox is structurally False here — the mode must come from the buy.
-        sandbox = media_buy_sandbox_mode(uow.accounts, uow.media_buys, req.media_buy_id)
+        sandbox = uow.sandbox_mode_by_id(req.media_buy_id)
     principal_id = require_principal_id(identity, context=req.context)
 
     principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)

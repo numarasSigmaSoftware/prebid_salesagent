@@ -19,11 +19,19 @@ _UOW_PATCH = "src.core.database.repositories.uow.AdminCreativeUoW"
 
 def _make_uow(*, tenant=None, creative=None, assignments=None, package=None):
     """AdminCreativeUoW context manager with configurable repository returns."""
+    from types import MethodType
+
+    from src.core.database.repositories.uow import BuyKeyedSandboxMixin
+
     uow = MagicMock()
     uow.tenant_config.get_tenant.return_value = tenant
     uow.creatives.admin_get_by_id.return_value = creative
     uow.assignments.get_by_creative.return_value = assignments if assignments is not None else []
     uow.media_buys.get_package.return_value = package
+    # Bind the REAL seam methods so the sandbox tests below still exercise production's
+    # derivation against mocked repos; a MagicMock would hand get_adapter a non-bool.
+    uow.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, uow)
+    uow.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, uow)
     uow.__enter__ = MagicMock(return_value=uow)
     uow.__exit__ = MagicMock(return_value=False)
     return uow

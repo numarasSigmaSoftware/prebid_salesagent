@@ -536,16 +536,6 @@ def _pre_validate_package_creatives(
         raise
 
 
-def _buy_account_id(repo: Any, media_buy_id: str) -> str | None:
-    """account_id of a media buy, or None when the buy is unknown.
-
-    Deferred paths need the owning account to decide sandbox mode; they hold a buy id,
-    not an identity. Returns None rather than raising — the caller fails closed to live.
-    """
-    buy = repo.get_by_id(media_buy_id)
-    return buy.account_id if buy is not None else None
-
-
 def _execute_adapter_media_buy_creation(
     request: CreateMediaBuyRequest,
     packages: list[MediaPackage],
@@ -1355,13 +1345,12 @@ def push_creative_to_existing_buy(
 
             # Deferred path (no request identity): re-derive the buy's account mode so a
             # creative push against a sandbox buy never reaches a real ad server.
-            assert uow.accounts is not None
             assert uow.media_buys is not None
             adapter = get_adapter(
                 principal,
                 dry_run=False,
                 tenant=tenant_obj,
-                sandbox=account_is_sandbox(uow.accounts, _buy_account_id(uow.media_buys, media_buy_id)),
+                sandbox=uow.sandbox_mode_by_id(media_buy_id),
             )
             if not (hasattr(adapter, "creatives_manager") and adapter.creatives_manager):
                 return False, "Adapter does not support creative upload"

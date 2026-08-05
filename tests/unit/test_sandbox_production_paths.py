@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def _account(sandbox: bool) -> MagicMock:
     account = MagicMock()
@@ -33,9 +31,19 @@ def _buy(media_buy_id: str, account_id: str | None) -> MagicMock:
 
 def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMock:
     """A UoW stub whose accounts/media_buys repos answer from the given maps."""
+    from types import MethodType
+
+    from src.core.database.repositories.uow import BuyKeyedSandboxMixin
+
     uow = MagicMock()
     uow.accounts.get_by_id.side_effect = lambda aid: _account(accounts[aid]) if aid in accounts else None
     uow.media_buys.get_by_id.side_effect = lambda mid: _buy(mid, buys[mid]) if mid in buys else None
+    # Bind the REAL seam methods onto the stub. A MagicMock would return a MagicMock
+    # for sandbox_mode_by_id(), which is not a bool and would grade nothing; binding
+    # production's own methods means these tests still exercise the real derivation,
+    # just against mocked repositories.
+    uow.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, uow)
+    uow.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, uow)
     uow.__enter__.return_value = uow
     uow.__exit__.return_value = False
     return uow
@@ -197,25 +205,10 @@ class TestUpdateMediaBuyPath:
 # this test read green while grading nothing.
 
 
-@pytest.mark.parametrize(
-    ("module_name", "symbol"),
-    [
-        ("src.core.tools.performance", "media_buy_sandbox_mode"),
-        ("src.core.tools.media_buy_update", "account_is_sandbox"),
-        ("src.core.tools.media_buy_list", "partition_by_sandbox_mode"),
-        ("src.core.tools.media_buy_delivery", "account_is_sandbox"),
-    ],
-)
-def test_each_buy_keyed_module_imports_a_buy_derived_source(module_name: str, symbol: str) -> None:
-    """Each buy-keyed module must import a buy-derived mode source, not rely on identity.
-
-    Cheap structural companion to the behavioural tests above: if someone deletes the
-    derivation and falls back to identity.sandbox, the import disappears with it.
-    """
-    import importlib
-
-    module = importlib.import_module(module_name)
-    assert hasattr(module, symbol), (
-        f"{module_name} no longer imports {symbol}; a buy-keyed operation cannot source "
-        "sandbox mode from identity.sandbox (it is structurally False there)"
-    )
+# A former oracle here asserted hasattr(module, "<helper name>") for each buy-keyed
+# module. It graded import PRESENCE, not use — a module could import the helper and
+# still pass identity.sandbox — and it broke the moment the derivation moved behind
+# MediaBuyUoW.sandbox_mode*, which is the correct shape. The invariant it reached for
+# is carried by test_architecture_get_adapter_sandbox.py (every call site decides
+# explicitly; buy-keyed modules may not source it from identity) plus the behavioural
+# pairs above, both of which fail on real regressions rather than on import churn.

@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import warnings
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +43,9 @@ from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.workflow import WorkflowRepository
+
+if TYPE_CHECKING:
+    from src.core.database.models import MediaBuy
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,48 @@ class BaseUoW:
         raise NotImplementedError
 
 
-class MediaBuyUoW(BaseUoW):
+class BuyKeyedSandboxMixin:
+    """The single seam for buy-keyed sandbox decisions.
+
+    Operations addressed only by ``media_buy_id`` — update, performance, deferred
+    creative push, the approval executor, the admin detail route — carry no account
+    reference, so ``identity.sandbox`` is structurally False for them and the account
+    owning the buy is the only correct source. Any UoW that owns both ``media_buys``
+    and ``accounts`` gets the derivation here, so it is decided in one place rather
+    than re-derived (and left free to drift) at each call site.
+
+    Mixed into every UoW that provides both repositories; the annotations below are
+    the contract those UoWs must satisfy.
+    """
+
+    media_buys: MediaBuyRepository | None
+    accounts: AccountRepository | None
+
+    def sandbox_mode(self, media_buy: MediaBuy | None) -> bool:
+        """Sandbox mode of the account owning ``media_buy``.
+
+        A ``None`` buy yields False (live); the caller's own not-found handling owns
+        that case. A buy whose non-null account cannot be resolved raises
+        ``AdCPAccountNotFoundError`` rather than silently defaulting to live.
+        """
+        # Lazy by necessity: account_helpers imports repositories.account, which
+        # executes repositories/__init__ -> uow, so a module-scope import here cycles.
+        from src.core.helpers.account_helpers import account_is_sandbox
+
+        assert self.accounts is not None
+        return account_is_sandbox(self.accounts, media_buy.account_id if media_buy is not None else None)
+
+    def sandbox_mode_by_id(self, media_buy_id: str) -> bool:
+        """Sandbox mode of the account owning the buy with ``media_buy_id``.
+
+        Convenience over :meth:`sandbox_mode` for callers holding only an id; prefer
+        :meth:`sandbox_mode` when the row is already loaded, to avoid a second lookup.
+        """
+        assert self.media_buys is not None
+        return self.sandbox_mode(self.media_buys.get_by_id(media_buy_id))
+
+
+class MediaBuyUoW(BuyKeyedSandboxMixin, BaseUoW):
     """Unit of Work for MediaBuy operations.
 
     Wraps a database session and provides tenant-scoped repositories for
@@ -282,7 +326,7 @@ class CreativeUoW(BaseUoW):
         self.assignments = None
 
 
-class AdminCreativeUoW(BaseUoW):
+class AdminCreativeUoW(BuyKeyedSandboxMixin, BaseUoW):
     """Unit of Work for admin creative operations.
 
     Provides CreativeRepository, CreativeAssignmentRepository, MediaBuyRepository,
