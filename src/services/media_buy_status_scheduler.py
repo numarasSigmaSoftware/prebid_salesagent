@@ -19,6 +19,7 @@ import os
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
@@ -105,7 +106,27 @@ class MediaBuyStatusScheduler:
                 )
 
                 for media_buy in media_buys:
-                    new_status = self._compute_new_status(media_buy, now, session)
+                    # One unprocessable row must not strand every other buy's transition.
+                    # This sweep now covers the legacy serving aliases too, so it reaches
+                    # older rows whose flight fields were written under earlier
+                    # conventions; letting a single bad row abort the loop would leave
+                    # every buy after it stuck in a transitional state indefinitely.
+                    #
+                    # SQLAlchemyError is deliberately NOT caught: _compute_new_status
+                    # queries (creative approval), and a failed statement leaves the
+                    # transaction aborted, so continuing would only produce a cascade of
+                    # failures on rows that were never actually bad. A session-level
+                    # fault aborts the sweep; a row-level one skips the row.
+                    try:
+                        new_status = self._compute_new_status(media_buy, now, session)
+                    except SQLAlchemyError:
+                        raise
+                    except Exception as e:
+                        logger.error(
+                            f"Skipping status update for media buy {media_buy.media_buy_id}: {e}",
+                            exc_info=True,
+                        )
+                        continue
 
                     if new_status and new_status != media_buy.status:
                         old_status = media_buy.status

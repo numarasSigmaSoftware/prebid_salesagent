@@ -688,6 +688,14 @@ class ProtocolWebhookService:
                     completed_at=datetime.now(UTC),
                 )
 
+                # Audit sink, matching every sibling terminal path in this method. This
+                # was the only failure branch that wrote a delivery-log row but no audit
+                # entry — and it is the branch for UNEXPECTED errors, so an operator
+                # watching the audit stream saw a clean run precisely when something
+                # unanticipated broke. The message is already the safe, redacted form.
+                if audit_logger:
+                    audit_logger.log_warning(f"{task_type} webhook failed: {error_message}")
+
                 return False
 
         # Should never reach here

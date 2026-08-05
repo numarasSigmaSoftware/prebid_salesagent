@@ -230,7 +230,18 @@ class DeliveryWebhookScheduler:
             tenant_id: The tenant ID
 
         Returns:
-            bool: True if report was triggered successfully, False otherwise
+            bool: True when a webhook was actually sent; False when the buy was
+            LEGITIMATELY skipped (no reporting webhook configured, dedup, no data).
+
+        Raises:
+            Exception: propagated from the send path. A real failure must NOT be
+                flattened into False here — the admin route already distinguishes
+                three outcomes (sent / skipped / errored) and swallowing the
+                exception collapsed the last two into one "Failed to trigger …
+                check logs" banner, telling an operator the same thing whether
+                nothing needed sending or the adapter actually broke. This mirrors
+                _send_report_for_media_buy's contract rather than re-flattening it
+                one layer up.
         """
         try:
             with get_db_session() as session:
@@ -255,8 +266,10 @@ class DeliveryWebhookScheduler:
                 # the read-check path (best-effort; #1606 for true exactly-once).
                 return await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
         except Exception as e:
+            # Log here (this frame knows the media_buy_id) then RE-RAISE, so the caller
+            # can tell a genuine failure from a legitimate skip.
             logger.error(f"Error manually triggering report for {media_buy_id}: {e}", exc_info=True)
-            return False
+            raise
 
     def _should_skip_send(
         self, delivery_repo: DeliveryRepository, media_buy: MediaBuy, *, is_final: bool, force: bool

@@ -84,7 +84,18 @@ def isolated_postgres_db() -> Iterator[tuple[Engine, str]]:
 
     parsed = parse_postgres_url()
     if not parsed:
-        pytest.skip("Requires PostgreSQL DATABASE_URL")
+        # FAIL in CI, skip only locally. 27 tests across 5 migration files ride this
+        # helper, and a skip is indistinguishable from a pass in the aggregate — so a
+        # CI job that lost its DATABASE_URL would report green while running none of
+        # the migration coverage. Locally, skipping is the right convenience: a
+        # developer without Postgres should not be blocked.
+        if os.environ.get("CI"):
+            pytest.fail(
+                "DATABASE_URL is unset or not a PostgreSQL URL, but CI is set. Every test "
+                "using migration_db / migration_db_fresh would silently skip and the job "
+                "would report green without running any migration coverage."
+            )
+        pytest.skip("Requires PostgreSQL DATABASE_URL (set CI=1 to make this a failure)")
 
     user, password, host, port = parsed
     db_name = f"test_migration_{uuid.uuid4().hex[:8]}"
