@@ -2113,13 +2113,24 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
     )
 
     def __repr__(self):
+        # url is MASKED, exactly like the token fields below it. A buyer-supplied
+        # webhook URL is itself a credential in the capability-URL style this codebase
+        # already guards against elsewhere: the secret can be the userinfo, a
+        # subdomain, or the path. Printing it here leaked it into every log line that
+        # renders this object (e.g. admin/blueprints/creatives.py logs the config at
+        # INFO), which no amount of care at those call sites could fix.
+        #
+        # A constant, not a redaction helper: __repr__ must never raise, and the
+        # URL-parsing helpers can (a malformed IPv6 host raises ValueError). A repr
+        # needs to not leak, not to stay correlatable — the durable audit form lives
+        # in WebhookDeliveryLog via _redact_url_credentials.
         return (
             f"<PushNotificationConfig("
             f"id='{self.id}', "
             f"tenant_id='{self.tenant_id}', "
             f"principal_id='{self.principal_id}', "
             f"session_id='{self.session_id}', "
-            f"url='{self.url}', "
+            f"url={'***' if self.url else None}, "
             f"authentication_type='{self.authentication_type}', "
             f"authentication_token='***', "
             f"validation_token='***', "

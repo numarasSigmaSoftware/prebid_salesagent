@@ -649,6 +649,15 @@ class TestCredentialsNeverReachTheLog:
                 headers={},
                 metadata=self._metadata(),
             )
+        # Vacuity guard, pinned to THIS site. Every assertion in this class is
+        # "secret NOT in caplog.text", which an empty — or merely unrelated — caplog
+        # satisfies trivially. Asserting only that SOMETHING was logged is not enough:
+        # other INFO lines in the same block keep caplog non-empty, so silencing the
+        # line under test still passed. Verified by mutation both ways.
+        assert "Sending webhook for task" in caplog.text, (
+            "_send_with_retry_and_logging emitted no line — the not-in-log assertions below would pass "
+            f"vacuously. Captured instead: {caplog.text!r}"
+        )
         return mock_post
 
     async def _send_via_config(self, service, url: str, caplog) -> MagicMock:
@@ -666,6 +675,15 @@ class TestCredentialsNeverReachTheLog:
                 payload={"task_id": "media-buy-1"},
                 metadata=self._metadata(),
             )
+        # Vacuity guard, pinned to THIS site. Every assertion in this class is
+        # "secret NOT in caplog.text", which an empty — or merely unrelated — caplog
+        # satisfies trivially. Asserting only that SOMETHING was logged is not enough:
+        # other INFO lines in the same block keep caplog non-empty, so silencing the
+        # line under test still passed. Verified by mutation both ways.
+        assert "push_notification_config (sanitized)" in caplog.text, (
+            "send_notification's safe-config site emitted no line — the not-in-log assertions below would pass "
+            f"vacuously. Captured instead: {caplog.text!r}"
+        )
         return mock_post
 
     @pytest.mark.asyncio
