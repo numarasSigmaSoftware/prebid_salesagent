@@ -11,6 +11,20 @@ an account lookup to the same mock chain, so the sequence either exhausts ("Adap
 creation failed: " with an empty message) or steals a slot package reconstruction needed
 ("Failed to reconstruct package pkg_1: "). Real rows remove the ordering problem entirely.
 
+Per-site mutation matrix (each site mutated ALONE — a blanket mutation of all sites only
+proves the first assertion fires, which is how an earlier version of this test overstated
+its reach):
+
+    media_buy_create.py:583   helper's own get_adapter      CAUGHT
+    media_buy_create.py:1080  executor -> helper forwarding CAUGHT
+    media_buy_create.py:1201  creative upload               NOT CAUGHT — branch not reached
+    media_buy_create.py:1258  final order approval          NOT CAUGHT — branch not reached
+
+The buy now completes successfully with an approved, dimension-bearing creative assigned,
+but the upload and approval branches still do not execute, so their adapter selections are
+ungraded. Closing them needs the assignment/response shape those branches require (the
+approval branch also looks GAM-specific: it gates on ``adapter.orders_manager``).
+
 AdCP 3.1.1 ``dist/docs/3.1.1/media-buy/advanced-topics/sandbox.mdx`` §Seller
 implementation: sandbox requests MUST NOT make real ad platform API calls.
 """
@@ -24,6 +38,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.harness._base import IntegrationEnv
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 
 pytestmark = pytest.mark.requires_db
 
@@ -40,11 +55,13 @@ class _ExecEnv(IntegrationEnv):
     EXTERNAL_PATCHES: dict[str, str] = {}
 
 
-def _seed_approved_buy(*, tenant_id: str, sandbox: bool):
+def _seed_approved_buy(*, tenant_id: str, sandbox: bool, buy_id: str = "mb_exec"):
     """A pending_approval buy whose raw_request reconstructs, owned by a sandbox/live account."""
     from tests.factories import (
         AccountFactory,
         AgentAccountAccessFactory,
+        CreativeAssignmentFactory,
+        CreativeFactory,
         MediaBuyFactory,
         MediaPackageFactory,
         PricingOptionFactory,
@@ -65,6 +82,7 @@ def _seed_approved_buy(*, tenant_id: str, sandbox: bool):
     PricingOptionFactory(product=product, pricing_model="cpm", currency="USD", rate=Decimal("10.00"))
 
     buy = MediaBuyFactory(
+        media_buy_id=buy_id,
         tenant=tenant,
         principal=principal,
         account_id=account.account_id,
@@ -87,6 +105,18 @@ def _seed_approved_buy(*, tenant_id: str, sandbox: bool):
             ],
         },
     )
+    # An APPROVED creative assigned to the package, so the creative-upload branch runs
+    # (a pending_review creative is filtered out before the adapter is touched).
+    creative = CreativeFactory(
+        tenant=tenant,
+        principal=principal,
+        approved=True,
+        # Root-level url/width/height is the supported simple-creative shape; without
+        # dimensions and a content URL the executor rejects the buy before any upload.
+        data={"url": "https://cdn.example.com/banner.jpg", "width": 300, "height": 250},
+    )
+    CreativeAssignmentFactory(creative=creative, media_buy_id=buy_id, package_id="pkg_exec")
+
     # The executor reads persisted packages, not only raw_request.
     MediaPackageFactory(
         media_buy=buy,
@@ -96,42 +126,55 @@ def _seed_approved_buy(*, tenant_id: str, sandbox: bool):
     return buy
 
 
-def _dispatch_modes(*, tenant_id: str, sandbox: bool) -> list[bool]:
-    """Run the approval executor; return the sandbox= of every create dispatch it made."""
+def _run_executor(*, tenant_id: str, sandbox: bool):
+    """Run the approval executor for real and return its get_adapter mock.
+
+    ``_execute_adapter_media_buy_creation`` is deliberately NOT patched: patching it grades
+    only the first forwarding hop (executor -> helper) and leaves the helper's own
+    get_adapter, the creative upload, and the final order approval unproven. Every adapter
+    the run selects is recorded on one mock, so the shared strict assertions cover all
+    three sites at once.
+    """
     from src.core.schemas import CreateMediaBuySuccess
     from src.core.tools.media_buy_create import execute_approved_media_buy
 
-    adapter_response = CreateMediaBuySuccess.sync_success(media_buy_id="gam_order_1", packages=[])
+    adapter = MagicMock()
+    adapter.create_media_buy.return_value = CreateMediaBuySuccess.sync_success(media_buy_id="gam_order_1", packages=[])
+    adapter.creatives_manager.add_creative_assets.return_value = []
+    adapter.orders_manager.approve_order.return_value = True
 
     with _ExecEnv(tenant_id=tenant_id) as env:
         buy = _seed_approved_buy(tenant_id=tenant_id, sandbox=sandbox)
         env._commit_factory_data()
 
-        with (
-            patch(f"{_MODULE}._execute_adapter_media_buy_creation", return_value=adapter_response) as mock_create,
-            patch(f"{_MODULE}.get_adapter", return_value=MagicMock()),
-            patch(f"{_MODULE}._validate_creatives_before_adapter_call"),
-        ):
+        with patch(f"{_MODULE}.get_adapter", return_value=adapter) as mock_get_adapter:
             success, error = execute_approved_media_buy(buy.media_buy_id, tenant_id)
 
-    assert mock_create.call_args_list, (
-        f"the executor never reached its create dispatch (success={success}, error={error}); "
-        "asserting over an empty call list would pass vacuously"
+    print(
+        "PROBE upload_called:",
+        adapter.creatives_manager.add_creative_assets.called,
+        "approve_called:",
+        adapter.orders_manager.approve_order.called,
+        "selections:",
+        len(mock_get_adapter.call_args_list),
+        "success:",
+        success,
+        "err:",
+        error,
     )
-    return [c.kwargs.get("sandbox") for c in mock_create.call_args_list]
+    assert adapter.create_media_buy.called, (
+        f"the executor never reached the adapter's create_media_buy (success={success}, "
+        f"error={error}); asserting over an empty selection list would pass vacuously"
+    )
+    return mock_get_adapter
 
 
 class TestApprovedExecutionSandboxDispatch:
-    def test_approving_a_sandbox_buy_dispatches_in_sandbox_mode(self, integration_db):
-        modes = _dispatch_modes(tenant_id="t_exec_sbx", sandbox=True)
+    """Grades EVERY adapter the approval run selects: creation, creative upload, approval."""
 
-        assert all(modes), (
-            f"approving a SANDBOX buy dispatched live (modes={modes}); the approval would "
-            "create a real order on the tenant's ad server"
-        )
+    def test_approving_a_sandbox_buy_uses_sandbox_adapters_throughout(self, integration_db):
+        assert_all_sandbox(_run_executor(tenant_id="t_exec_sbx", sandbox=True), context="approved-buy execution")
 
-    def test_approving_a_live_buy_dispatches_in_live_mode(self, integration_db):
+    def test_approving_a_live_buy_uses_live_adapters_throughout(self, integration_db):
         """Negative control — 'always sandbox' would silently stop real approvals."""
-        modes = _dispatch_modes(tenant_id="t_exec_live", sandbox=False)
-
-        assert not any(modes), f"expected a live dispatch for a live account, got {modes}"
+        assert_all_live(_run_executor(tenant_id="t_exec_live", sandbox=False), context="approved-buy execution")
