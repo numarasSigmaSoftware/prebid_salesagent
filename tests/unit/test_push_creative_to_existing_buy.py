@@ -535,22 +535,15 @@ class TestSandboxAdapterSelection:
         ):
             _call()
 
-        from tests.helpers.sandbox_assertions import sandbox_modes
-
-        return sandbox_modes(mock_get_adapter)
+        return mock_get_adapter
 
     def test_sandbox_buy_selects_sandbox_adapter(self):
-        modes = self._adapter_modes(account_sandbox=True)
+        from tests.helpers.sandbox_assertions import assert_all_sandbox
 
-        assert modes, "no adapter was constructed — this assertion would be vacuous"
-        assert all(modes), (
-            f"creative push on a sandbox buy built a live adapter (modes={modes}); "
-            "the creative would be uploaded to the tenant's real ad server"
-        )
+        assert_all_sandbox(self._adapter_modes(account_sandbox=True), context="deferred creative push")
 
     def test_live_buy_selects_live_adapter(self):
         """Negative control — 'always sandbox' would silently stop real creative pushes."""
-        modes = self._adapter_modes(account_sandbox=False)
+        from tests.helpers.sandbox_assertions import assert_all_live
 
-        assert modes, "no adapter was constructed — this assertion would be vacuous"
-        assert not any(modes), f"expected the live adapter for a live account, got {modes}"
+        assert_all_live(self._adapter_modes(account_sandbox=False), context="deferred creative push")

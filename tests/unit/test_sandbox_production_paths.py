@@ -41,13 +41,14 @@ def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMo
     return uow
 
 
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 from tests.helpers.sandbox_assertions import sandbox_modes as _sandbox_kwargs
 
 
 class TestPerformancePath:
     """update_performance_index is addressed by media_buy_id only."""
 
-    def _run(self, *, account_sandbox: bool) -> list[bool]:
+    def _run_capturing(self, *, account_sandbox: bool):
         from src.core.tools import performance as perf
 
         req = MagicMock()
@@ -74,17 +75,14 @@ class TestPerformancePath:
             except Exception:  # noqa: BLE001 - response shaping is not what this grades
                 pass
 
-        return _sandbox_kwargs(mock_get_adapter)
+        return mock_get_adapter
 
     def test_sandbox_buy_selects_sandbox_adapter(self) -> None:
-        assert self._run(account_sandbox=True) == [True], (
-            "update_performance_index on a sandbox buy must build a sandbox adapter; "
-            "identity.sandbox is False here, so a False means the wrong source was used"
-        )
+        assert_all_sandbox(self._run_capturing(account_sandbox=True), context="update_performance_index")
 
     def test_live_buy_selects_live_adapter(self) -> None:
         """Negative control — 'always sandbox' would pass the test above."""
-        assert self._run(account_sandbox=False) == [False]
+        assert_all_live(self._run_capturing(account_sandbox=False), context="update_performance_index")
 
 
 class TestSnapshotPartitioning:
@@ -169,33 +167,32 @@ class TestUpdateMediaBuyPath:
             except Exception:  # noqa: BLE001 - response shaping is not what this grades
                 pass
 
-            return _sandbox_kwargs(env.mock["adapter"])
+            return env.mock["adapter"]
 
     def test_sandbox_buy_selects_sandbox_adapter(self) -> None:
-        modes = self._adapter_modes(account_sandbox=True)
-
-        assert modes, "update_media_buy reached no adapter at all — this assertion would be vacuous"
-        assert all(modes), (
-            f"update_media_buy on a sandbox buy built a live adapter (modes={modes}); "
-            "the mutation would then reach the tenant's real ad server"
-        )
+        assert_all_sandbox(self._adapter_modes(account_sandbox=True), context="update_media_buy")
 
     def test_live_buy_selects_live_adapter(self) -> None:
         """Negative control — 'always sandbox' would silently disable real updates."""
-        modes = self._adapter_modes(account_sandbox=False)
-
-        assert modes, "update_media_buy reached no adapter at all — this assertion would be vacuous"
-        assert not any(modes), f"expected the live adapter for a live account, got {modes}"
+        assert_all_live(self._adapter_modes(account_sandbox=False), context="update_media_buy")
 
 
 # Deferred creative push is graded at its own adapter boundary in
 # tests/unit/test_push_creative_to_existing_buy.py::TestSandboxAdapterSelection
 # (mutation-verified). Two paths remain graded only by their derivation:
 #
-#   - approved-buy execution (execute_approved_media_buy): an adapted copy of the working
-#     test in test_execute_approved_pending_review_filter.py still bails at
-#     "Failed to reconstruct package pkg_1" before reaching the create dispatch, so the
-#     fixture is not yet faithful enough to assert on. Not shipped rather than shipped red.
+#   - approved-buy execution (execute_approved_media_buy). Diagnosis so far, so the next
+#     attempt does not restart from zero: the unit template in
+#     test_execute_approved_pending_review_filter.py drives it via
+#     session.scalars(...).first().side_effect = [tenant, mb]. The sandbox derivation adds
+#     an AccountRepository lookup on that same mock chain, so the sequence must also carry
+#     the account — and getting the ORDER right relative to the package/product reads is
+#     what has defeated two attempts (symptoms: "Adapter creation failed: " with an empty
+#     message when the list is exhausted, "Failed to reconstruct package pkg_1: " when the
+#     account consumes a slot reconstruction needed). Mock-sequence fragility is the whole
+#     problem, so the durable fix is an INTEGRATION test with real rows, shaped like
+#     tests/integration/test_sandbox_delivery_account_scoping.py, which sidesteps
+#     side_effect ordering entirely.
 #   - admin media-buy detail: read-only, and lowest risk of the set.
 #
 # Both need a fixture that reaches dispatch — either a faithful extension of that unit

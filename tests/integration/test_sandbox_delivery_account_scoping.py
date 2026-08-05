@@ -20,6 +20,8 @@ from datetime import date
 import pytest
 from adcp.types import AccountReference, AccountReferenceById
 
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox, sandbox_modes
+
 pytestmark = pytest.mark.requires_db
 
 
@@ -119,7 +121,6 @@ class TestDeliveryAdapterModes:
     def _modes_for(self, *, scoped_account: str | None):
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
-        from tests.helpers.sandbox_assertions import sandbox_modes
 
         suffix = scoped_account or "none"
         with DeliveryPollEnv(tenant_id=f"t_mode_{suffix}", principal_id=f"p_mode_{suffix}") as env:
@@ -136,27 +137,18 @@ class TestDeliveryAdapterModes:
 
             env.call_mcp(**kwargs)
 
-            return sandbox_modes(env.mock["adapter"])
+            return env.mock["adapter"]
 
     def test_sandbox_scoped_request_uses_only_a_sandbox_adapter(self, integration_db):
-        modes = self._modes_for(scoped_account="acc_sbx")
-
-        assert modes, "no adapter was constructed — this assertion would be vacuous"
-        assert all(modes), (
-            f"a live adapter read a sandbox-scoped request (modes={modes}); the buy would be "
-            "fetched from the tenant's real ad platform"
-        )
+        assert_all_sandbox(self._modes_for(scoped_account="acc_sbx"), context="sandbox-scoped delivery")
 
     def test_live_scoped_request_uses_only_a_live_adapter(self, integration_db):
         """Negative control — 'always sandbox' would pass the test above."""
-        modes = self._modes_for(scoped_account="acc_live")
-
-        assert modes, "no adapter was constructed — this assertion would be vacuous"
-        assert not any(modes), f"expected the live adapter for a live account, got {modes}"
+        assert_all_live(self._modes_for(scoped_account="acc_live"), context="live-scoped delivery")
 
     def test_unscoped_mixed_request_uses_both_modes(self, integration_db):
         """Both buys are in play, each read through the adapter its own account dictates."""
-        modes = self._modes_for(scoped_account=None)
+        modes = sandbox_modes(self._modes_for(scoped_account=None))
 
         assert set(modes) == {True, False}, (
             f"a mixed unscoped request must read each buy through its own mode, got {modes}"
