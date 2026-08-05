@@ -113,9 +113,9 @@ from src.core.validation_helpers import (
 )
 from src.core.version import get_version
 from src.core.webhook_validator import (
+    redact_webhook_url_for_audit,
     reject_unsafe_webhook_registration_url,
     webhook_ssrf_suggestion,
-    webhook_url_for_log,
 )
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
@@ -679,7 +679,7 @@ class AdCPRequestHandler(RequestHandler):
                 logger.info(
                     "Protocol-level push notification config provided for task %s: %s",
                     task_id,
-                    webhook_url_for_log(push_notification_config.url),
+                    redact_webhook_url_for_audit(push_notification_config.url),
                 )
             if push_notification_config:
                 self._task_push_configs[task_id] = push_notification_config

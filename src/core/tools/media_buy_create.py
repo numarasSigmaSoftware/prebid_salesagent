@@ -162,7 +162,7 @@ from src.core.tools.financial_validation import (
 
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
-from src.core.webhook_validator import reject_unsafe_registration_source_url, webhook_url_for_log
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_registration_source_url
 from src.services.activity_feed import activity_feed
 from src.services.gam_product_config_service import GAMProductConfigService
 from src.services.targeting_capabilities import (
@@ -2146,7 +2146,7 @@ async def _create_media_buy_impl(
                 logger.info(
                     "[MCP/A2A] Registering push notification config id=%s url=%s",
                     push_notification_config.get("id"),
-                    webhook_url_for_log(str(url)),
+                    redact_webhook_url_for_audit(str(url)),
                 )
                 schemes = authentication.get("schemes", []) if authentication else []
                 auth_type = schemes[0] if schemes else None

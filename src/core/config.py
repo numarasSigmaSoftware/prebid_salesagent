@@ -155,7 +155,7 @@ class AppConfig(BaseSettings):
         """Restrict to a bounded, safe format.
 
         This value is embedded verbatim into log lines and the durable
-        WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so an
+        WebhookDeliveryLog.webhook_url column (see redact_webhook_url_for_audit), so an
         unrestricted value -- colons, angle brackets, newlines, control characters,
         unbounded length -- could corrupt the audit identifier's structure or open a
         log-injection vector. It's operator-set deployment config, not buyer input,

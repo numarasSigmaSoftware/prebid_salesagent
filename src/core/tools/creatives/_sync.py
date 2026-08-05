@@ -16,7 +16,7 @@ from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
-from src.core.webhook_validator import reject_unsafe_registration_source_url, webhook_url_for_log
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_registration_source_url
 
 from ._assignments import _process_assignments
 from ._processing import _create_new_creative, _failed_sync_result, _update_existing_creative
@@ -107,7 +107,7 @@ def _sync_creatives_impl(
         # Log scheme+host+path only — never credentials / full auth blob.
         logger.info(
             "[sync_creatives] Push notification webhook URL: %s",
-            webhook_url_for_log(str(webhook_url)),
+            redact_webhook_url_for_audit(str(webhook_url)),
         )
 
     # Track actions per creative for AdCP-compliant response

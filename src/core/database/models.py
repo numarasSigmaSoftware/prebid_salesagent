@@ -2123,7 +2123,7 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
         # A constant, not a redaction helper: __repr__ must never raise, and the
         # URL-parsing helpers can (a malformed IPv6 host raises ValueError). A repr
         # needs to not leak, not to stay correlatable — the durable audit form lives
-        # in WebhookDeliveryLog via _redact_url_credentials.
+        # in WebhookDeliveryLog via redact_webhook_url_for_audit.
         return (
             f"<PushNotificationConfig("
             f"id='{self.id}', "

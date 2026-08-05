@@ -13,8 +13,6 @@ Application-level webhooks are configured via:
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import time
@@ -32,12 +30,11 @@ from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
 from src.core.audit_logger import get_audit_logger
-from src.core.config import get_config
 from src.core.database.database_session import get_db_session
 from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
-from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_outbound_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +88,7 @@ def _delivery_log_context(
         tenant_id=tenant_id,
         principal_id=principal_id,
         media_buy_id=media_buy_id,
-        webhook_url=_redact_url_credentials(url),
+        webhook_url=redact_webhook_url_for_audit(url),
         task_type=task_type,
         idempotency_key=idempotency_key,
         sequence_number=sequence_number,
@@ -185,69 +182,6 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
-_AUDIT_REDACTION_CONTEXT = b"protocol_webhook_service._redact_url_credentials.v4"
-
-
-def _redact_url_credentials(url: str) -> str:
-    """Return a non-reversible audit form of *url*, for log output AND durable storage.
-
-    Keeps only ``scheme://<redacted:key_id:hmac>`` — nothing about the buyer-supplied
-    host, port, path, query, or fragment survives. Two earlier versions of this
-    function kept the hostname on the theory that a hostname can't carry a
-    credential; that assumption is wrong for capability-style delivery URLs, where
-    the credential IS the (sub)domain (e.g. ``https://tok-9fK2z8mQ.hooks.example.com/deliver``)
-    — a private/unique or otherwise unclassifiable subdomain is exactly as
-    unconstrained as the path or query, so it gets the same treatment.
-
-    The digest is an HMAC-SHA256 (never a bare hash) keyed with a DEDICATED secret,
-    ``AppConfig.webhook_audit_hmac_key`` — deliberately not ``flask_secret_key``.
-    Reusing the session-signing key would make this correlation identifier a
-    hostage of routine session-key rotation (rotate the session key, and every
-    historical ``WebhookDeliveryLog`` row becomes unrecognizable), and
-    ``flask_secret_key`` ships a public, unvalidated dev default that a
-    misconfigured production deployment could silently inherit. The dedicated key
-    is required and length-checked in production by ``validate_configuration()``.
-    Truncated to 128 bits, so two log lines or DB rows can be recognized as the
-    same target without exposing it — but unlike an unkeyed digest, it can't be
-    matched offline against a dictionary of guessed URLs (low-entropy webhook URLs
-    are a real threat model an unkeyed hash doesn't defend against).
-
-    The key ID (``AppConfig.webhook_audit_hmac_key_id``, default ``"v1"``) is folded
-    into the HMAC input for domain separation AND written into the output in the
-    clear, so a key rotation doesn't just silently break correlation for every row
-    written under the old key — the row's own audit identifier still says which key
-    generation produced it.
-
-    ``validate_configuration()`` requires a real key in production, but a blank
-    (or whitespace-only) key is legal OUTSIDE production — the same shared
-    staging/dev environments that skip it can still hold real buyer URLs and
-    write real ``WebhookDeliveryLog`` rows, so this function must not silently
-    degrade to an HMAC keyed with an empty string: that would produce a value
-    that *looks* like a real per-URL digest while being exactly as guessable as
-    an unkeyed hash (zero secret material). Instead it emits a constant,
-    non-correlating placeholder (``scheme://<redacted>``, no digest, no key ID)
-    — honestly offering no correlation rather than a fake one.
-
-    Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
-    (pure audit data — never read back to dial a real request). Never use this on the URL
-    passed to ``requests`` for the actual outbound call — that one needs the untouched original.
-    """
-    try:
-        parsed = urlparse(url)
-        if not parsed.hostname:
-            return "REDACTED"
-        config = get_config()
-        raw_key = config.webhook_audit_hmac_key
-        if not raw_key.strip():
-            return f"{parsed.scheme}://<redacted>"
-        key_id = config.webhook_audit_hmac_key_id
-        message = _AUDIT_REDACTION_CONTEXT + b":" + key_id.encode() + b":" + url.encode()
-        digest = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()[:32]
-        return f"{parsed.scheme}://<redacted:{key_id}:{digest}>"
-    except Exception:
-        return "REDACTED"
-
-
 def _safe_delivery_error_message(url: str, *, reason: str) -> str:
     """Build a bounded, non-leaking error_message for a failed webhook delivery.
 
@@ -258,11 +192,11 @@ def _safe_delivery_error_message(url: str, *, reason: str) -> str:
     request URL in their string form -- ``HTTPError.__str__()`` includes it
     verbatim, userinfo and all; ``ConnectionError``'s message includes
     host+path+query -- which would leak exactly the credentials
-    ``_redact_url_credentials()`` exists to keep out of logs and
+    ``redact_webhook_url_for_audit()`` exists to keep out of logs and
     ``WebhookDeliveryLog``. *reason* must be bounded, already-safe text (an
     exception type name, an HTTP status phrase) -- never raw exception text.
     """
-    return f"{reason} delivering webhook to {_redact_url_credentials(url)}"
+    return f"{reason} delivering webhook to {redact_webhook_url_for_audit(url)}"
 
 
 class ProtocolWebhookService:
@@ -313,7 +247,7 @@ class ProtocolWebhookService:
             # Same redaction the success path and the durable log use: on this
             # path the hostname can itself be the credential, so the rejection
             # branch must not log it in the clear.
-            sanitize=_redact_url_credentials,
+            sanitize=redact_webhook_url_for_audit,
         )
         if rejected:
             return False
@@ -328,7 +262,7 @@ class ProtocolWebhookService:
         # must not leave a different credential in the log line.
         safe_config = {
             "url": (
-                _redact_url_credentials(push_notification_config.url)
+                redact_webhook_url_for_audit(push_notification_config.url)
                 if hasattr(push_notification_config, "url") and push_notification_config.url
                 else None
             ),
@@ -486,7 +420,7 @@ class ProtocolWebhookService:
         # + an HMAC-SHA256, and `url` does not change across retries. Inlined in
         # the log call below, all of that re-ran on every attempt, eagerly, even
         # when the INFO line was never emitted.
-        redacted_url = _redact_url_credentials(url)
+        redacted_url = redact_webhook_url_for_audit(url)
 
         for attempt in range(max_attempts):
             try:

@@ -44,7 +44,7 @@ LEGACY_CREDENTIALED_URL = "https://buyer:s3cr3t-password@secret.example/hook?tok
 LEGACY_ERROR_MESSAGE = f"HTTP 404: 404 Client Error: Not Found for url: {LEGACY_CREDENTIALED_URL}"
 CREDENTIAL_SUBSTRINGS = ("buyer", "s3cr3t-password", "secret.example", "leaked-legacy-value")
 
-# A well-formed webhook_url in the exact shape _redact_url_credentials()
+# A well-formed webhook_url in the exact shape redact_webhook_url_for_audit()
 # (protocol_webhook_service.py) actually produces for a keyed digest. No
 # longer "safe" in the sense of being preserved -- nothing is, any more --
 # but still useful as a realistic example of genuine runtime output, for
@@ -303,7 +303,7 @@ class TestWebhookDeliveryLogRedactionMigration:
         -- exactly what the fixed runtime would itself produce -- if they
         appear as LEGACY data (present before upgrade() runs). Seeds a
         webhook_url in the exact keyed-digest shape
-        _redact_url_credentials() (protocol_webhook_service.py) produces,
+        redact_webhook_url_for_audit() (protocol_webhook_service.py) produces,
         paired with each of the four legitimate error_message reason
         formats _safe_delivery_error_message() can produce
         (_legitimate_error_messages()), and confirms upgrade() redacts all
@@ -439,7 +439,7 @@ class TestWebhookDeliveryLogRedactionMigration:
 
         # Step 2: fixed runtime writes a genuinely well-formed row (simulated
         # here via a direct insert using the exact shape
-        # _redact_url_credentials() / _safe_delivery_error_message() produce).
+        # redact_webhook_url_for_audit() / _safe_delivery_error_message() produce).
         well_formed_error = f"HTTP 404 error delivering webhook to {_RUNTIME_KEYED_URL}"
         row_id = f"{id_prefix}fixed-runtime-write"
         _insert_row(engine, row_id, _RUNTIME_KEYED_URL, well_formed_error)

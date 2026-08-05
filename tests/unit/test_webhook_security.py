@@ -23,7 +23,7 @@ from src.core.webhook_validator import (
 def _webhook_audit_hmac_key_configured():
     """Give every test in this module a real (non-blank) webhook_audit_hmac_key.
 
-    _redact_url_credentials treats a blank key as "no real secret configured" and
+    redact_webhook_url_for_audit treats a blank key as "no real secret configured" and
     emits a constant, non-correlating placeholder instead of a digest -- see its
     docstring. Most tests in this file exercise the KEYED (digest) path and would
     otherwise silently hit the placeholder path instead, since no
@@ -35,7 +35,7 @@ def _webhook_audit_hmac_key_configured():
     from src.core.config import AppConfig
 
     with patch(
-        "src.services.protocol_webhook_service.get_config",
+        "src.core.webhook_validator.get_config",
         return_value=AppConfig(webhook_audit_hmac_key="test-suite-default-hmac-key-not-a-real-secret"),
     ):
         yield
@@ -365,7 +365,7 @@ class TestWebhookAuthenticator:
 
 
 class TestRedactUrlCredentials:
-    """``_redact_url_credentials`` keeps only ``scheme://<redacted:key_id:hmac>`` --
+    """``redact_webhook_url_for_audit`` keeps only ``scheme://<redacted:key_id:hmac>`` --
     a non-reversible audit form -- before a URL reaches a log line or durable storage.
 
     Three earlier versions of this function redacted a specific carrier (userinfo,
@@ -380,15 +380,15 @@ class TestRedactUrlCredentials:
     same target without exposing it AND without being matchable offline against a
     dictionary of guessed URLs (an unkeyed hash would be). The key is deliberately
     ``AppConfig.webhook_audit_hmac_key``, not the Flask session key -- see
-    ``_redact_url_credentials``'s docstring for why reusing a session-signing key
+    ``redact_webhook_url_for_audit``'s docstring for why reusing a session-signing key
     as a durable correlation key is its own defect. The key ID is embedded in the
     output so a future key rotation doesn't silently orphan every historical row.
     """
 
     def _redact(self, url: str) -> str:
-        from src.services.protocol_webhook_service import _redact_url_credentials
+        from src.core.webhook_validator import redact_webhook_url_for_audit
 
-        return _redact_url_credentials(url)
+        return redact_webhook_url_for_audit(url)
 
     def _key_id_and_digest(self, redacted: str) -> tuple[str, str]:
         inner = redacted.removeprefix("https://<redacted:").removeprefix("http://<redacted:").removesuffix(">")
@@ -427,12 +427,12 @@ class TestRedactUrlCredentials:
 
         url = "https://example.com/hook?token=abc"
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="secret-one"),
         ):
             redacted_with_secret_one = self._redact(url)
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="secret-two"),
         ):
             redacted_with_secret_two = self._redact(url)
@@ -449,7 +449,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="a-real-secret", webhook_audit_hmac_key_id="v7"),
         ):
             redacted = self._redact("https://example.com/hook")
@@ -465,12 +465,12 @@ class TestRedactUrlCredentials:
 
         url = "https://example.com/hook?token=abc"
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v1"),
         ):
             redacted_v1 = self._redact(url)
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v2"),
         ):
             redacted_v2 = self._redact(url)
@@ -580,7 +580,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key=""),
         ):
             assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
@@ -589,7 +589,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="   \t  "),
         ):
             assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
@@ -600,7 +600,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key=""),
         ):
             assert self._redact("https://example.com/hook-a") == self._redact("https://example.com/hook-b")
@@ -730,7 +730,7 @@ class TestCredentialsNeverReachTheLog:
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_query_credentials(self, caplog):
         """Every prior case in this class used a userinfo-only URL, so a regression that
-        replaced _redact_url_credentials with a userinfo-only implementation at THIS log
+        replaced redact_webhook_url_for_audit with a userinfo-only implementation at THIS log
         site would have passed all of them. No userinfo here -- query-only."""
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
@@ -770,7 +770,7 @@ class TestFailurePathsNeverLeakCredentials:
     VERBATIM (userinfo, capability subdomain, query values, all of it, since
     it's built from response.url), and ConnectionError/Timeout messages
     include host+path+query. TestCredentialsNeverReachTheLog proves the
-    explicit `_redact_url_credentials(url)` logging call sites are safe; this
+    explicit `redact_webhook_url_for_audit(url)` logging call sites are safe; this
     class proves the EXCEPTION-DERIVED messages on the failure paths are too
     -- a fix that only touched the former would still leak every carrier the
     moment a delivery attempt failed.
@@ -1108,7 +1108,7 @@ class TestWebhookAuditHmacKeyProductionValidation:
     def test_whitespace_only_key_is_rejected_in_production(self):
         """A whitespace-only key would satisfy `if not key` (it's a non-empty
         string) but is exactly as useless as an unset one -- the same "no real
-        secret" gap _redact_url_credentials treats as blank."""
+        secret" gap redact_webhook_url_for_audit treats as blank."""
         with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
             self._validate(webhook_audit_hmac_key="   \t\n  ", is_production=True)
 
@@ -1146,7 +1146,7 @@ class TestWebhookAuditHmacKeyProductionValidation:
 
 class TestWebhookAuditHmacKeyIdFormatValidation:
     """webhook_audit_hmac_key_id is embedded verbatim into log lines and the durable
-    WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so it must
+    WebhookDeliveryLog.webhook_url column (see redact_webhook_url_for_audit), so it must
     be restricted to a bounded, safe format -- an operator typo or copy-paste error
     (colons, angle brackets, newlines, control characters, unbounded length)
     shouldn't be able to corrupt the audit identifier's structure or open a
@@ -1216,7 +1216,7 @@ class TestSsrfRejectionLogNeverLeaksCredentials:
     paths around it -- yet it logged ``scheme://host/path`` plus the raw SSRF
     reason while every other line in the same send path replaced host AND path
     with a keyed digest. For a capability-style delivery URL the (sub)domain IS
-    the credential (see ``_redact_url_credentials``'s docstring), so that split
+    the credential (see ``redact_webhook_url_for_audit``'s docstring), so that split
     leaked the secret on precisely the failure path an attacker can provoke.
 
     Two independent carriers are pinned here because closing only one still
@@ -1247,24 +1247,81 @@ class TestSsrfRejectionLogNeverLeaksCredentials:
         """Shared by every caller, whatever sanitizer they pass: the SSRF reason
         is scrubbed of the hostname before it reaches a log.
 
-        Deliberately scoped to the REASON, not the whole line -- under the
-        default sanitizer the ``url=`` field still renders scheme://host/path
-        (``webhook_url_for_log``'s documented form, unchanged here). Converging
-        the Application / OrderApproval senders onto a redacting sanitizer is
-        tracked separately; asserting the whole line here would fail for a
-        reason this test does not own.
+        Deliberately scoped to the REASON, not the whole line, and deliberately
+        run under the LAX sanitizer: the reason scrub must hold even for a caller
+        whose ``url=`` field still renders scheme://host/path, so it cannot be
+        carried accidentally by the sanitizer the caller happens to pass. The
+        whole-line close for capability-style URLs is the sibling test below.
         """
-        from src.core.webhook_validator import REDACTED_HOST_FOR_LOG
+        from src.core.webhook_validator import REDACTED_HOST_FOR_LOG, webhook_url_for_log
 
-        text = self._capture_rejection_log(caplog)
+        text = self._capture_rejection_log(caplog, sanitize=webhook_url_for_log)
         assert f"cannot resolve hostname: {REDACTED_HOST_FOR_LOG.lower()}" in text
         assert f"cannot resolve hostname: {self.CAPABILITY_SECRET}" not in text
 
     def test_protocol_path_redacts_the_url_field_too(self, caplog):
-        """The Protocol sender passes its own redacting sanitizer, so neither
-        carrier survives -- this is the full close for capability-style URLs."""
-        from src.services.protocol_webhook_service import _redact_url_credentials
+        """With a redacting sanitizer neither carrier survives -- the full close
+        for capability-style URLs.
 
-        text = self._capture_rejection_log(caplog, sanitize=_redact_url_credentials)
+        Every production sender now passes this one (Protocol, Application and
+        OrderApproval alike), and ``sanitize`` is a required argument with no
+        default, so a new gate cannot silently inherit the lax form."""
+        from src.core.webhook_validator import redact_webhook_url_for_audit
+
+        text = self._capture_rejection_log(caplog, sanitize=redact_webhook_url_for_audit)
         assert self.CAPABILITY_SECRET not in text
         assert "hooks.example.com" not in text, "host must not survive in the url= field either"
+
+
+class TestEveryOutboundGateUsesTheRedactingSanitizer:
+    """No production SSRF gate may render a buyer-supplied URL with the lax form.
+
+    ``sanitize`` being required stops a new gate from *silently* inheriting the
+    lax sanitizer, but it cannot stop one from naming it explicitly. This pins
+    the choice itself: the rejection branch fires precisely for hostile or
+    misconfigured URLs, so it is the last place that should be laxer than the
+    success path it guards.
+    """
+
+    def test_all_production_call_sites_pass_the_strong_redactor(self):
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        offenders = []
+        for path in src.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                if name != "reject_unsafe_outbound_webhook_url":
+                    continue
+                passed = {
+                    kw.arg: getattr(kw.value, "id", None) or getattr(kw.value, "attr", None) for kw in node.keywords
+                }
+                if passed.get("sanitize") != "redact_webhook_url_for_audit":
+                    offenders.append(f"{path.relative_to(src.parent)}:{node.lineno} -> {passed.get('sanitize')!r}")
+
+        assert not offenders, "outbound SSRF gate(s) not using redact_webhook_url_for_audit:\n  " + "\n  ".join(
+            offenders
+        )
+
+    def test_the_guard_can_actually_see_a_call_site(self):
+        """Guards that scan for a pattern must be shown to find it at all --
+        otherwise an empty offender list is indistinguishable from a broken
+        matcher and the assertion above passes vacuously forever."""
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        found = sum(
+            1
+            for path in src.rglob("*.py")
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.Call)
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+            == "reject_unsafe_outbound_webhook_url"
+        )
+        assert found >= 3, f"expected the three outbound gates, matcher found {found}"
