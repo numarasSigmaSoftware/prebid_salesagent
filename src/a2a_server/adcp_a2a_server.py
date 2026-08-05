@@ -2047,6 +2047,12 @@ class AdCPRequestHandler(RequestHandler):
             push_notification_config=params.get("push_notification_config"),
             reporting_webhook=params.get("reporting_webhook"),
             context=params.get("context"),
+            # Forwarded for parity with the MCP wrapper and the A2A create handler,
+            # both of which pass these through. Dropping idempotency_key silently
+            # removes retry safety for A2A buyers; dropping ext discards the caller's
+            # extension payload without any signal that it was ignored.
+            ext=params.get("ext"),
+            idempotency_key=params.get("idempotency_key"),
             identity=identity,
         )
 

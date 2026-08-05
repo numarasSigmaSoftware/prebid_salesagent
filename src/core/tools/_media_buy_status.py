@@ -185,6 +185,13 @@ REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_SERVING, CA
 REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in REPORTABLE_CANONICAL_STATUSES
 )
+# The completion-only subset of REPORTABLE: persisted statuses that map to canonical
+# "completed" rather than to a serving state. NOT what the delivery scheduler passes --
+# its terminal arm is WEBHOOK_TERMINAL_PERSISTED_STATUSES ({canceled, completed,
+# rejected}), of which this is the completion member. Derived here rather than in the
+# consumer so a change to the status map moves both together; the reader is the e2e
+# final-webhook helper (tests/e2e/utils.py), which needs the single deterministic
+# status a completing buy lands on.
 COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
 # Reporting webhooks are persistent channels, so "no more data will ever

@@ -81,6 +81,49 @@ class TestA2AParameterMapping:
             assert call_kwargs["media_buy_id"] == "mb_123"
             assert call_kwargs["paused"] is False  # adcp 2.12.0+: paused=False means resume
 
+    def test_update_media_buy_forwards_ext_and_idempotency_key(self):
+        """The A2A update handler must forward every param the raw function accepts.
+
+        ``update_media_buy_raw`` declares ``ext`` and ``idempotency_key``; the MCP
+        wrapper and the A2A CREATE handler both pass them. The A2A UPDATE handler
+        silently dropped both, so an A2A buyer's retry key never reached the
+        idempotency layer (no retry safety) and their extension payload was discarded
+        with no signal that it had been ignored.
+
+        Dropping a parameter is invisible to the type checker — the call simply omits a
+        keyword with a default — which is why this is pinned per-field.
+        """
+        import asyncio
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        handler = AdCPRequestHandler()
+
+        with (
+            patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
+            patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool") as mock_update,
+        ):
+            mock_update.return_value = {"status": "success", "media_buy_id": "mb_123"}
+
+            parameters = {
+                "media_buy_id": "mb_123",
+                "paused": False,
+                "ext": {"vendor_field": "vendor_value"},
+                "idempotency_key": "idem-key-abc123",
+            }
+
+            asyncio.run(handler._handle_update_media_buy_skill(parameters=parameters, identity=_MOCK_IDENTITY))
+
+            call_kwargs = mock_update.call_args.kwargs
+            assert call_kwargs.get("idempotency_key") == "idem-key-abc123", (
+                "A2A update must forward idempotency_key; dropping it removes retry safety "
+                f"for A2A buyers while MCP and A2A create both forward it (got {call_kwargs.get('idempotency_key')!r})"
+            )
+            assert call_kwargs.get("ext") == {"vendor_field": "vendor_value"}, (
+                "A2A update must forward ext; dropping it discards the caller's extension "
+                f"payload with no signal (got {call_kwargs.get('ext')!r})"
+            )
+
     def test_update_media_buy_backward_compatibility_with_updates(self):
         """
         Test backward compatibility with legacy 'updates' field.

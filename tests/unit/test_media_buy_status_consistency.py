@@ -220,9 +220,12 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_completed_persisted_statuses_is_the_reportable_remainder(self):
         """Pin COMPLETED_PERSISTED_STATUSES — the delivery scheduler's completed arm.
 
-        The scheduler passes SERVING_PERSISTED_STATUSES and COMPLETED_PERSISTED_STATUSES
-        into get_reportable_for_delivery, so together they must reconstitute REPORTABLE
-        exactly — a drift in either arm silently changes which buys get a final webhook.
+        The scheduler does NOT pass this constant: get_reportable_for_delivery receives
+        SERVING_PERSISTED_STATUSES and WEBHOOK_TERMINAL_PERSISTED_STATUSES ({canceled,
+        completed, rejected}). This is the completion-only subset of REPORTABLE, and its
+        reader is the e2e final-webhook helper, which needs the one persisted status a
+        completing buy lands on. Pinning it still matters: a drift in the status map
+        would silently change which buy that helper selects.
 
         Only the LITERAL assertions below have teeth. Because the constant is defined as
         ``REPORTABLE - SERVING``, the union/disjointness relations are true by
