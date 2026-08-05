@@ -259,7 +259,9 @@ class DeliveryWebhookScheduler:
         UPDATE then matches 0 rows and loses). The returned token is passed to
         _release_final_webhook_claim on a definitive failure/no-send so the claim doesn't
         block an immediate retry for the whole lease. Does NOT close the
-        crash-after-POST window — #1606.
+        post-POST window — #1606. That window is not crash-only: a failure of the
+        success-path ``_write_delivery_log`` (which raises) is indistinguishable
+        here from a failed send, so the claim is released and the final re-sends.
         """
         now = datetime.now(UTC)
         won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_final_webhook(
@@ -402,10 +404,15 @@ class DeliveryWebhookScheduler:
             # type is unknown (dict/None/other) — repr is unambiguous where a __str__
             # summary would not be. (Never .model_dump() here: that AttributeErrors on a
             # non-model and would raise from inside the error path.)
-            logger.warning(
-                "`Couldn't get media_delivery` for %s. Result is %r", media_buy.media_buy_id, delivery_response
+            # RAISE, not return False: the documented contract reserves False for a
+            # LEGITIMATE skip (unsupported frequency, dedup, no data, no URL). A result
+            # that is not the response model at all is none of those — returning False
+            # made the batch print "0 sent, 0 errors" for a terminal buy whose
+            # spec-required final could not be built, hiding the failure entirely.
+            raise RuntimeError(
+                f"Delivery lookup for media buy {media_buy.media_buy_id} returned "
+                f"{type(delivery_response).__name__}, not GetMediaBuyDeliveryResponse"
             )
-            return False
 
         if delivery_response.errors is not None:
             # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
@@ -417,6 +424,18 @@ class DeliveryWebhookScheduler:
                 media_buy.media_buy_id,
                 delivery_response.errors,
             )
+            # Discriminate, don't blanket-skip. The impl emits two advisory shapes here:
+            # MEDIA_BUY_NOT_FOUND when a requested buy isn't reportable — which IS the
+            # "no data" case the contract lists as a legitimate False — and
+            # SERVICE_UNAVAILABLE when the adapter actually failed. Returning False for
+            # both let a real adapter failure count as a skip, so the batch reported
+            # "0 errors" for a final that never went out. Raising for both would be the
+            # opposite bug: every buy with no delivery data would count as an error.
+            if any(e.code != "MEDIA_BUY_NOT_FOUND" for e in delivery_response.errors):
+                raise RuntimeError(
+                    f"Delivery lookup for media buy {media_buy.media_buy_id} failed: "
+                    f"{[e.code for e in delivery_response.errors]}"
+                )
             return False
 
         # Sequence number for this webhook: max SUCCESSFULLY DELIVERED

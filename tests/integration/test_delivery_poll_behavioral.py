@@ -198,6 +198,85 @@ async def _drive_failed_send(scheduler: DeliveryWebhookScheduler, env: DeliveryP
             )
 
 
+class TestDeliveryLookupFailureIsCountedNotSkipped:
+    """A failed delivery lookup must count as an error, per the method's own contract.
+
+    ``_send_report_for_media_buy`` documents False as reserved for a LEGITIMATE skip —
+    unsupported frequency, dedup, no data, no URL — and says a failed delivery raises so
+    the batch counts an error. Two error exits returned False instead, so a terminal buy
+    whose spec-required final could not be built was reported as "0 sent, 0 errors": the
+    operator saw a clean batch and no webhook.
+
+    The discrimination matters in both directions. The impl emits MEDIA_BUY_NOT_FOUND
+    when a requested buy simply isn't reportable — that IS the contract's "no data" and
+    must stay a quiet skip — and SERVICE_UNAVAILABLE when the adapter actually failed.
+    Raising on both would make every no-data buy an error; raising on neither is the bug.
+    """
+
+    async def _drive(self, env, buy, response):
+        from unittest.mock import patch
+
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        # AWAIT inside the patch context. Returning the coroutine and awaiting it
+        # outside would exit the `with` first, un-patching before the body ever runs —
+        # the real impl would execute and the test would grade nothing it intended.
+        with patch(
+            "src.services.delivery_webhook_scheduler._get_media_buy_delivery_impl",
+            return_value=response,
+        ):
+            return await DeliveryWebhookScheduler()._send_report_for_media_buy(
+                buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+            )
+
+    def _error(self, code):
+        from adcp.types import Error
+
+        return Error(code=code, message=f"{code} for test")
+
+    def _response_with(self, errors):
+        """A minimally-valid delivery response carrying only the given advisories."""
+        from src.core.schemas import AggregatedTotals
+
+        return GetMediaBuyDeliveryResponse(
+            reporting_period={"start": datetime.now(UTC), "end": datetime.now(UTC)},
+            currency="USD",
+            aggregated_totals=AggregatedTotals(impressions=0.0, spend=0.0, media_buy_count=0),
+            media_buy_deliveries=[],
+            errors=errors,
+        )
+
+    @pytest.mark.asyncio
+    async def test_adapter_failure_raises_so_the_batch_counts_an_error(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_fail", principal_id="p_lookup_fail") as env:
+            buy = _serving_webhook_buy(env)
+            response = self._response_with([self._error("SERVICE_UNAVAILABLE")])
+            with pytest.raises(RuntimeError, match="failed"):
+                await self._drive(env, buy, response)
+
+    @pytest.mark.asyncio
+    async def test_not_found_advisory_stays_a_quiet_skip(self, integration_db):
+        """Negative control — raising here would make every no-data buy an error."""
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_nf", principal_id="p_lookup_nf") as env:
+            buy = _serving_webhook_buy(env)
+            response = self._response_with([self._error("MEDIA_BUY_NOT_FOUND")])
+            assert await self._drive(env, buy, response) is False
+
+    @pytest.mark.asyncio
+    async def test_non_response_result_raises(self, integration_db):
+        """Not the response model at all — none of the contract's legitimate skips."""
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_type", principal_id="p_lookup_type") as env:
+            buy = _serving_webhook_buy(env)
+            with pytest.raises(RuntimeError, match="not GetMediaBuyDeliveryResponse"):
+                await self._drive(env, buy, None)
+
+
 def _race_two_workers(worker: Callable[[Session, threading.Barrier], bool]) -> list[bool]:
     """Run ``worker(session, barrier)`` on two OS threads released together, return both bools.
 

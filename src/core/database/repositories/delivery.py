@@ -306,9 +306,13 @@ class DeliveryRepository:
         the hourly delivery batch — the batch selects completed buys and skips the
         final when this returns True (no time window; independent of the 24h
         "scheduled" dedup). This is a READ-only check, so it does NOT by itself
-        guarantee exactly-once under concurrent workers or a crash between a
-        successful POST and the log write — that needs an atomic reserve / outbox
-        (#1606).
+        guarantee exactly-once under concurrent workers, nor when the successful
+        POST and its log write come apart. That second window is NOT crash-only:
+        ``_write_delivery_log`` raises on a persistence failure, and the scheduler
+        classifies any exception from the send as a failed send — releasing the
+        final claim and leaving no success row — so a DB error on the post-2xx
+        write alone re-sends the final on the next batch. Closing it needs an
+        atomic reserve / outbox (#1606).
 
         Uses ``successful_final_log_clauses`` — the same predicate
         ``MediaBuyRepository.get_reportable_for_delivery`` correlates against —
