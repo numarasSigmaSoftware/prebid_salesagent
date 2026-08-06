@@ -365,6 +365,15 @@ jobs:
           # No host uvx in this job (no _setup-env); the dedicated Security
           # Audit check owns the uv-secure scan.
           RUN_ALL_SKIP_AUDIT: 1
+          # Per-worker e2e stacks (server + DB per xdist worker). Without this the
+          # leg runs against ONE shared server and ONE shared database while that
+          # server's background schedulers commit independently — the contention
+          # this setting exists to remove. It surfaced as intermittent
+          # DeadlockDetected at fixture setup, striking a different scenario each
+          # run with an unchanged pass count, which reads as a broken test rather
+          # than as contention. 2 fits the runner (4 CPU); locally on 4 CPU it
+          # provisions both stacks, stays green, and cuts the leg from 220s to 143s.
+          E2E_WORKERS: 2
       - name: Cleanup Docker services
         if: always()
         run: docker compose -f docker-compose.e2e.yml down -v 2>/dev/null || true
