@@ -56,18 +56,27 @@ def upgrade() -> None:
     Self-heals a leftover INVALID index from a prior interrupted CONCURRENTLY
     build (see module docstring) -- IF NOT EXISTS alone would silently skip
     rebuilding it since it only checks the catalog name, not indisvalid.
+
+    The lookup resolves through ``to_regclass`` rather than matching
+    ``pg_class.relname``, because a bare name match is not schema-scoped: an
+    identically-named index in ANY schema satisfies it, while the DROP that
+    follows resolves through ``search_path``. Those are different indexes, so
+    the check could green-light dropping something it never examined -- or
+    report a leftover that the DROP then cannot find. ``to_regclass`` resolves
+    exactly as the DROP does, so the check and the action always agree, and it
+    returns NULL instead of raising when nothing matches.
     """
     with op.get_context().autocommit_block():
         conn = op.get_bind()
         invalid_leftover = conn.execute(
-            text(
-                "SELECT 1 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid "
-                "WHERE c.relname = :name AND NOT i.indisvalid"
-            ),
+            text("SELECT 1 FROM pg_index WHERE indexrelid = to_regclass(:name) AND NOT indisvalid"),
             {"name": _INDEX_NAME},
         ).scalar()
         if invalid_leftover:
-            op.execute(f"DROP INDEX CONCURRENTLY {_INDEX_NAME}")
+            # IF EXISTS despite the check above: autocommit_block means these run as
+            # separate transactions, so a concurrent migration or an operator can drop
+            # the index in between and turn a self-heal into a failed deploy.
+            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}")
         op.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {_INDEX_NAME} ON media_buys (status)")
 
 
