@@ -93,6 +93,13 @@ def webhook_ssrf_suggestion() -> str:
 def sanitize_webhook_url_for_log(url: str | None) -> str | None:
     """Return ``scheme://host/path`` for logs — never userinfo or query.
 
+    Returns None rather than raising on an unparseable URL. ``urlparse`` raises
+    ``ValueError: Invalid IPv6 URL`` on inputs like ``https://[::1`` — and this
+    runs on the logging path, often while already handling a failure, where a
+    raise would replace the error being reported with a parse error from the code
+    reporting it. The buyer supplies this string, so malformed input is reachable,
+    not hypothetical.
+
     NOT credential-safe for capability-style delivery URLs, where the credential
     IS the (sub)domain or the path (``https://tok-9fK2z8mQ.hooks.example.com/deliver``):
     both survive this form. Callers that must be safe against that threat model
@@ -102,7 +109,10 @@ def sanitize_webhook_url_for_log(url: str | None) -> str | None:
     """
     if not url:
         return None
-    parsed = urlparse(str(url))
+    try:
+        parsed = urlparse(str(url))
+    except ValueError:
+        return None
     if parsed.scheme and parsed.hostname:
         return f"{parsed.scheme}://{parsed.hostname}{parsed.path or ''}"
     return None

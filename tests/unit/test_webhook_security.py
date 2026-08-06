@@ -1325,3 +1325,44 @@ class TestEveryOutboundGateUsesTheRedactingSanitizer:
             == "reject_unsafe_outbound_webhook_url"
         )
         assert found >= 3, f"expected the three outbound gates, matcher found {found}"
+
+
+class TestLogSanitizersAreTotal:
+    """Neither log sanitizer may raise on a buyer-supplied URL.
+
+    Both run on the logging path, frequently while an error is already being
+    handled, so a raise here replaces the failure being reported with a parse
+    error from the code reporting it. ``urlparse`` raises on malformed IPv6
+    literals, and the URL is buyer-supplied, so the input is reachable.
+    """
+
+    MALFORMED = (
+        "https://[::1",  # unterminated IPv6 literal -> urlparse raises
+        "http://[",
+        "://nohost",
+        "",
+        "   ",
+        "not-a-url",
+    )
+
+    def test_urlparse_really_does_raise_on_the_probe(self):
+        """Pins the premise: if urlparse stops raising, these guards are testing nothing."""
+        import pytest
+        from urllib.parse import urlparse
+
+        with pytest.raises(ValueError):
+            urlparse("https://[::1")
+
+    def test_weak_sanitizer_never_raises(self):
+        from src.core.webhook_validator import sanitize_webhook_url_for_log, webhook_url_for_log
+
+        for url in self.MALFORMED:
+            assert sanitize_webhook_url_for_log(url) is None, url
+            # The "total" helper must yield the placeholder, never propagate.
+            assert webhook_url_for_log(url) == "<unparseable-url>", url
+
+    def test_strong_redactor_never_raises(self):
+        from src.core.webhook_validator import redact_webhook_url_for_audit
+
+        for url in self.MALFORMED:
+            assert redact_webhook_url_for_audit(url) == "REDACTED", url

@@ -2874,11 +2874,15 @@ _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 
 # Send-time webhook scenarios that assert in-process mock/circuit-breaker state.
 # Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
-_NO_E2E_REST_TAGS: frozenset[str] = frozenset(
-    {
-        "T-UC-004-webhook-ssrf-blocked",
-    }
-)
+#
+# EMPTY, and not by accident: its sole entry (T-UC-004-webhook-ssrf-blocked) became
+# unreachable once that scenario was routed as transport-independent above. That
+# check returns before this one is consulted, so a scenario in BOTH sets is
+# excluded from e2e_rest by never being parametrized at all — the entry here was
+# protecting nothing while reading as though it were. Being transport-independent
+# SUBSUMES this exclusion; entries are only meaningful for scenarios that still
+# parametrize. test_no_e2e_rest_tags_are_reachable keeps that true.
+_NO_E2E_REST_TAGS: frozenset[str] = frozenset()
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
