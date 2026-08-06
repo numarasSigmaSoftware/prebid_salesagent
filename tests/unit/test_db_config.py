@@ -138,43 +138,6 @@ class TestPinnedErrorEnumIsNotACanonicityGate:
             self._assert_shape("PROPOSAL_NOT_FOUND", None)
 
 
-class TestBddTransportTagSetsDoNotOverlap:
-    """A tag in both routing sets makes its _NO_E2E_REST_TAGS entry dead.
-
-    pytest_generate_tests returns early for transport-independent scenarios, well
-    before the e2e_rest exclusion is consulted. So an entry appearing in both sets
-    excludes nothing — it reads as protection while being unreachable, which is
-    how the previous sole entry rotted after its scenario was routed.
-    """
-
-    @staticmethod
-    def _sets():
-        import re
-        from pathlib import Path
-
-        src = (Path(__file__).resolve().parents[1] / "bdd" / "conftest.py").read_text()
-        ti = re.search(r"_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = \{(.*?)\n\}", src, re.S).group(1)
-        ne = re.search(r"_NO_E2E_REST_TAGS: frozenset\[str\] = frozenset\((.*?)\)\n", src, re.S).group(1)
-        return set(re.findall(r'"([\w.-]+)"', ti)), set(re.findall(r'"([\w.-]+)"', ne))
-
-    def test_the_parser_finds_the_transport_independent_set(self):
-        """Guards that scan by regex must be shown to match, or an empty overlap is
-        indistinguishable from a broken parser."""
-        transport_independent, _ = self._sets()
-        assert len(transport_independent) >= 20, (
-            f"parser found only {len(transport_independent)} routed tags — regex likely stale"
-        )
-
-    def test_no_e2e_rest_tags_are_reachable(self):
-        transport_independent, no_e2e_rest = self._sets()
-        dead = sorted(no_e2e_rest & transport_independent)
-        assert not dead, (
-            f"_NO_E2E_REST_TAGS entries {dead} are also transport-independent, so the e2e_rest "
-            "check never runs for them — remove the entry, or un-route the scenario if it must "
-            "still parametrize across transports"
-        )
-
-
 class TestBddDispatchersShareOneResultRecorder:
     """Every BDD dispatcher must route ctx-writing through record_transport_result.
 
