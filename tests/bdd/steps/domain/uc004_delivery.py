@@ -24,6 +24,7 @@ from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
 from tests.helpers.delivery_assertions import (
+    WEBHOOK_ONLY_FIELDS,
     assert_next_expected_at_shape,
     assert_omits_webhook_only_fields,
     assert_partial_data_pairing,
@@ -1111,8 +1112,16 @@ def _request_single_mb(ctx: dict, mb_id: str) -> None:
 
 
 @when(parsers.parse('the Buyer Agent requests delivery metrics for "{mb_id}"'))
+@when(parsers.parse('the Buyer Agent requests delivery metrics for "{mb_id}" via the synchronous API'))
 def when_request_single_mb(ctx: dict, mb_id: str) -> None:
-    """Request delivery metrics for a single media buy."""
+    """Request delivery metrics for a single media buy.
+
+    The "via the synchronous API" phrasing maps here rather than to a step of its
+    own: the synchronous API IS this request path — the contrast the scenario
+    draws is against a WEBHOOK delivery, not against a different request. Without
+    the mapping the scenario auto-xfailed on a missing step definition, which
+    reads as covered in the suite totals while grading nothing.
+    """
     _request_single_mb(ctx, mb_id)
 
 
@@ -1897,6 +1906,35 @@ def then_poll_omits_webhook_only_fields(ctx: dict) -> None:
         f"poll returned no deliveries — omission check would be vacuous (keys={list(wire.keys())})"
     )
     assert_omits_webhook_only_fields(wire, context="synchronous poll wire")
+
+
+@then(parsers.parse('"{field}" should be absent'))
+def then_named_field_absent_from_wire(ctx: dict, field: str) -> None:
+    """Assert one named field is absent from the synchronous poll's WIRE body.
+
+    The scenario names its fields one at a time rather than invoking the whole
+    webhook-only set, so this reads the same wire the set-wise assertion does and
+    applies the identical rule to a single key. Restricted to WEBHOOK_ONLY_FIELDS:
+    a free-form absence step would silently pass for a misspelled or non-existent
+    field name, which is the failure mode an absence assertion is least able to
+    notice on its own.
+
+    ``wire_dict`` raises when a wire transport stashed no body, rather than
+    degrading to a ``model_dump()`` of the reconstructed payload — re-serializing
+    the model would drop an explicit wire null and pass against the very leak this
+    scenario exists to catch.
+    """
+    assert field in WEBHOOK_ONLY_FIELDS, (
+        f'"{field}" is not a webhook-only field {sorted(WEBHOOK_ONLY_FIELDS)} — this step '
+        "would assert the absence of a key that never exists, and pass for the wrong reason"
+    )
+    wire = wire_dict(ctx)
+    # Anchor: these fields only surface alongside deliveries, so a delivery-less
+    # response would satisfy the absence check vacuously.
+    assert wire.get("media_buy_deliveries"), (
+        f"poll returned no deliveries — absence of {field!r} would be vacuous (keys={list(wire.keys())})"
+    )
+    assert field not in wire, f"synchronous poll wire must omit webhook-only {field!r}, got {wire.get(field)!r}"
 
 
 @then('the payload should not include "aggregated_totals" field')
