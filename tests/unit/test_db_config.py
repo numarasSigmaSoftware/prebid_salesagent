@@ -173,3 +173,35 @@ class TestBddTransportTagSetsDoNotOverlap:
             "check never runs for them — remove the entry, or un-route the scenario if it must "
             "still parametrize across transports"
         )
+
+
+class TestBddDispatchersWriteTheSameCtxKeys:
+    """Every BDD dispatcher must write the full key set its consumers read.
+
+    Envelope consumers read `ctx.get("wire_error_envelope")` and guard with
+    `if isinstance(envelope, dict)`, so a dispatcher that omits the key does not
+    fail — it skips the assertion block, and the step passes having graded
+    nothing. A dispatcher writing a subset is a vacuity vector, which is why this
+    is pinned as equality rather than left to review.
+    """
+
+    @staticmethod
+    def _written_keys(rel: str) -> set[str]:
+        import re
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1] / rel).read_text()
+        return set(re.findall(r'ctx\["(\w+)"\]\s*=', src))
+
+    def test_the_scan_finds_keys_in_both_dispatchers(self):
+        for rel in ("bdd/steps/generic/_dispatch.py", "bdd/steps/generic/when_request.py"):
+            assert len(self._written_keys(rel)) >= 4, f"scan found too few keys in {rel} — pattern stale"
+
+    def test_when_request_writes_every_key_dispatch_request_does(self):
+        canonical = self._written_keys("bdd/steps/generic/_dispatch.py")
+        actual = self._written_keys("bdd/steps/generic/when_request.py")
+        missing = sorted(canonical - actual)
+        assert not missing, (
+            f"when_request omits ctx keys {missing} that dispatch_request writes; consumers read "
+            "them defensively, so scenarios on this path skip those assertions silently"
+        )

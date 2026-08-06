@@ -74,6 +74,14 @@ def _call_via(
         ctx["result"] = result
         if result.is_error:
             ctx["error"] = result.error
+            # Parity with dispatch_request, which sets these two. Their absence is
+            # not a loud failure: envelope consumers read them as
+            # `ctx.get("wire_error_envelope")` and guard with `if isinstance(...,
+            # dict)`, so a missing key SKIPS the assertion block and the step passes
+            # having graded nothing. A dispatcher that writes a subset of the keys
+            # its consumers read is therefore a vacuity vector, not a gap.
+            ctx["wire_error_envelope"] = result.wire_error_envelope
+            ctx["synthesized_error_envelope"] = result.synthesized_error_envelope
         else:
             ctx["response"] = result.payload
             # Real serialized wire (REST/A2A/MCP); None on IMPL — surfaced for
