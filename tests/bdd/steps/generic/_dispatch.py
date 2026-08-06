@@ -11,6 +11,39 @@ from typing import Any
 _SENTINEL = object()
 
 
+def record_transport_result(ctx: dict, result: Any) -> None:
+    """Record a TransportResult into ctx — the ONE place that mapping lives.
+
+    Every BDD dispatcher routes through here rather than writing ctx keys itself.
+    A dispatcher that wrote its own subset would not fail loudly: envelope
+    consumers read ``ctx.get("wire_error_envelope")`` behind an
+    ``if isinstance(..., dict)`` guard, so a missing key SKIPS the assertion and
+    the step passes having graded nothing. Keeping the mapping in one function
+    makes that class of silent pass unreachable rather than merely tested for.
+
+    ``ctx["result"]`` is the normalized TransportResult, so Then-steps can use the
+    transport-independent assertions (``result.assert_wire_error``) instead of
+    hand-rolling envelope parsing.
+
+    On error, both envelopes are captured: the real wire one (A2A/REST/MCP) and
+    the synthesized one (IMPL has no wire), so Then steps can assert the two-layer
+    AdCP shape per the Error Verification Policy. Both are None-safe.
+
+    On success, ``wire_response`` carries the real serialized body the buyer
+    receives, never the reconstructed typed payload — None on IMPL and on
+    non-stashing envs, where ``wire_field()`` guards against silent tautologies.
+    See tests/CLAUDE.md "TransportResult.wire_response".
+    """
+    ctx["result"] = result
+    if result.is_error:
+        ctx["error"] = result.error
+        ctx["wire_error_envelope"] = result.wire_error_envelope
+        ctx["synthesized_error_envelope"] = result.synthesized_error_envelope
+    else:
+        ctx["response"] = result.payload
+        ctx["wire_response"] = result.wire_response
+
+
 def dispatch_request(ctx: dict, *, identity: Any = _SENTINEL, **kwargs: Any) -> None:
     """Dispatch a request through ctx['transport'] via call_via, or direct call_impl.
 
@@ -59,24 +92,6 @@ def dispatch_request(ctx: dict, *, identity: Any = _SENTINEL, **kwargs: Any) -> 
         # Expose the normalized TransportResult so Then-steps can use the
         # harness-provided, transport-independent assertions (result.assert_wire_error)
         # instead of hand-rolling envelope parsing.
-        ctx["result"] = result
-        if result.is_error:
-            ctx["error"] = result.error
-            # Capture the real wire envelope (A2A/REST/MCP) and the
-            # synthesized envelope (IMPL has no wire) so Then steps can
-            # assert the two-layer AdCP shape per the Error Verification
-            # Policy. Both are None-safe; absent keys mean "no envelope".
-            ctx["wire_error_envelope"] = result.wire_error_envelope
-            ctx["synthesized_error_envelope"] = result.synthesized_error_envelope
-        else:
-            ctx["response"] = result.payload
-            # Propagate the real serialized success-path wire body so Then steps
-            # can assert on what the buyer actually receives (ctx["wire_response"]),
-            # not the reconstructed typed payload (REST HTTP body; A2A/MCP artifact
-            # only when the env routes through _run_a2a_handler/_run_mcp_client).
-            # None on IMPL / non-stashing envs; the wire_field() helper guards
-            # against silent tautologies (#1417). See tests/CLAUDE.md
-            # "TransportResult.wire_response".
-            ctx["wire_response"] = result.wire_response
+        record_transport_result(ctx, result)
     except Exception as exc:
         ctx["error"] = exc

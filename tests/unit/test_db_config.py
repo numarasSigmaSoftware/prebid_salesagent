@@ -175,33 +175,64 @@ class TestBddTransportTagSetsDoNotOverlap:
         )
 
 
-class TestBddDispatchersWriteTheSameCtxKeys:
-    """Every BDD dispatcher must write the full key set its consumers read.
+class TestBddDispatchersShareOneResultRecorder:
+    """Every BDD dispatcher must route ctx-writing through record_transport_result.
 
-    Envelope consumers read `ctx.get("wire_error_envelope")` and guard with
-    `if isinstance(envelope, dict)`, so a dispatcher that omits the key does not
-    fail — it skips the assertion block, and the step passes having graded
-    nothing. A dispatcher writing a subset is a vacuity vector, which is why this
-    is pinned as equality rather than left to review.
+    The mapping from TransportResult to ctx keys has exactly one home. A dispatcher
+    that writes its own keys does not fail loudly when it omits one: envelope
+    consumers read ctx.get("wire_error_envelope") behind an `if isinstance(...,
+    dict)` guard, so a missing key skips the assertion block and the step passes
+    having graded nothing. Delegation makes that unreachable; this keeps it true.
     """
 
+    DISPATCHERS = ("bdd/steps/generic/_dispatch.py", "bdd/steps/generic/when_request.py")
+    RECORDER_KEYS = {
+        "result",
+        "error",
+        "wire_error_envelope",
+        "synthesized_error_envelope",
+        "response",
+        "wire_response",
+    }
+
     @staticmethod
-    def _written_keys(rel: str) -> set[str]:
-        import re
+    def _source(rel):
         from pathlib import Path
 
-        src = (Path(__file__).resolve().parents[1] / rel).read_text()
+        return (Path(__file__).resolve().parents[1] / rel).read_text()
+
+    @staticmethod
+    def _ctx_keys(src):
+        import re
+
         return set(re.findall(r'ctx\["(\w+)"\]\s*=', src))
 
-    def test_the_scan_finds_keys_in_both_dispatchers(self):
-        for rel in ("bdd/steps/generic/_dispatch.py", "bdd/steps/generic/when_request.py"):
-            assert len(self._written_keys(rel)) >= 4, f"scan found too few keys in {rel} — pattern stale"
+    def _recorder_body(self):
+        src = self._source("bdd/steps/generic/_dispatch.py")
+        body = src[src.index("def record_transport_result(") :]
+        return body.split("\ndef ")[0]
 
-    def test_when_request_writes_every_key_dispatch_request_does(self):
-        canonical = self._written_keys("bdd/steps/generic/_dispatch.py")
-        actual = self._written_keys("bdd/steps/generic/when_request.py")
-        missing = sorted(canonical - actual)
-        assert not missing, (
-            f"when_request omits ctx keys {missing} that dispatch_request writes; consumers read "
-            "them defensively, so scenarios on this path skip those assertions silently"
+    def test_the_recorder_writes_every_ctx_key(self):
+        """Pins the premise: uniform delegation to a recorder that dropped a key
+        would be consistent and still wrong."""
+        assert self._ctx_keys(self._recorder_body()) == self.RECORDER_KEYS
+
+    def test_no_dispatcher_writes_recorder_keys_itself(self):
+        # "error" is deliberately exempt: the recorder sets it from result.error,
+        # but a dispatcher's `except Exception as exc: ctx["error"] = exc` records a
+        # RAISED exception, which never had a TransportResult to derive from. Both
+        # writes are legitimate and neither can be routed through the other. The
+        # remaining five are result-derived and have exactly one source.
+        recorder_owned = self.RECORDER_KEYS - {"error"}
+        recorder_body = self._recorder_body()
+        offenders = {}
+        for rel in self.DISPATCHERS:
+            src = self._source(rel)
+            assert "record_transport_result" in src, f"{rel} does not delegate to the shared recorder"
+            hand_rolled = self._ctx_keys(src.replace(recorder_body, "")) & recorder_owned
+            if hand_rolled:
+                offenders[rel] = sorted(hand_rolled)
+        assert not offenders, (
+            f"dispatchers writing recorder-owned ctx keys directly: {offenders} — route them "
+            "through record_transport_result so a partial write cannot pass silently"
         )

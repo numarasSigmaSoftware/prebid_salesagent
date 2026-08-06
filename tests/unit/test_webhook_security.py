@@ -1347,8 +1347,9 @@ class TestLogSanitizersAreTotal:
 
     def test_urlparse_really_does_raise_on_the_probe(self):
         """Pins the premise: if urlparse stops raising, these guards are testing nothing."""
-        import pytest
         from urllib.parse import urlparse
+
+        import pytest
 
         with pytest.raises(ValueError):
             urlparse("https://[::1")
