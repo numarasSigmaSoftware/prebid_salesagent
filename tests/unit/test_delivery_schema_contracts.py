@@ -511,3 +511,49 @@ class TestUpgradeLegacyFormatIds:
             format_ids=[fmt],
         )
         assert pkg.format_ids[0].id == "fmt_video"
+
+
+class TestNotificationTypeVocabularyIsSingle:
+    """The webhook writer and the delivery reader must spell notification_type alike.
+
+    The SDK ships TWO NotificationType enums: a 16-member top-level union spanning
+    every notification kind, and the 5-member response-level enum that actually
+    models this field. The scheduler imports the response-level one (its import
+    carries a note that the two differ); the delivery service writes the value and
+    the delivery repository queries it back by equality.
+
+    The four delivery values agree across both today, which is why mixing them is
+    invisible. If the SDK ever diverges one, a webhook would be persisted under one
+    spelling and the final-notification predicate would look for another — each
+    side individually correct, silently never matching. That is precisely the class
+    of failure a passing test suite does not notice, so it is pinned here.
+    """
+
+    def test_both_sdk_enums_agree_on_every_delivery_notification_value(self):
+        from adcp.types import NotificationType as TopLevel
+        from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
+            NotificationType as ResponseLevel,
+        )
+
+        response_values = {m.name: m.value for m in ResponseLevel}
+        top_values = {m.name: m.value for m in TopLevel}
+
+        shared = sorted(set(response_values) & set(top_values))
+        assert shared, "the two enums share no member names — the mapping assumption is gone"
+
+        mismatched = {n: (top_values[n], response_values[n]) for n in shared if top_values[n] != response_values[n]}
+        assert not mismatched, (
+            "top-level and response-level NotificationType disagree on "
+            f"{mismatched} — production writes notification_type with one and queries it "
+            "with the other, so a divergence silently breaks the final-notification lookup"
+        )
+
+    def test_the_values_production_persists_exist_in_the_response_level_enum(self):
+        """The response-level enum is the field's real domain; the writer must stay inside it."""
+        from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
+            NotificationType as ResponseLevel,
+        )
+
+        persisted = {"final", "adjusted", "scheduled"}
+        domain = {m.value for m in ResponseLevel}
+        assert persisted <= domain, f"production persists values outside the field's domain: {persisted - domain}"
