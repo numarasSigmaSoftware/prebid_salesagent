@@ -323,6 +323,27 @@ def declares_production_explicitly() -> bool:
     doing it to a Fly.io deployment that merely has FLY_APP_NAME populated is not.
 
     Enforce on this predicate; WARN on the difference between it and is_production().
+
+    What the broadening actually reaches — the complete set, because a partial list
+    is what makes the reclassification look smaller than it is. Every behavior gated
+    on is_production() changes for a deployment that has FLY_APP_NAME or a truthy
+    PRODUCTION but never set ENVIRONMENT:
+
+    - ``webhook_validator._strict_mode`` — SSRF policy. HTTPS becomes REQUIRED and the
+      testing localhost bypass is withdrawn. This is the one with teeth: a Fly-only
+      deployment that delivered webhooks over plain HTTP now has them REJECTED.
+    - ``get_pydantic_extra_mode`` — forbid to ignore, so unknown request fields are
+      accepted instead of rejected.
+    - ``mcp_compat_middleware`` (two sites) — unknown fields are stripped silently, and
+      a validation failure is retried with a deep strip.
+    - ``product_conversion`` — a product missing delivery_measurement takes the adapter
+      default with an info log rather than the non-production path.
+    - ``validate_configuration`` — the webhook-audit HMAC key requirement, which is
+      warned rather than enforced for exactly this newly-inferred set (above).
+
+    Note the directions differ: the SSRF change is a tightening that can break a
+    working deployment, while the extra-mode and compat changes are loosenings. A
+    reader who only saw the loosenings would misjudge the upgrade risk.
     """
     return os.getenv("ENVIRONMENT", "development").lower() == "production"
 

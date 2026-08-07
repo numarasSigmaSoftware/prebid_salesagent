@@ -236,3 +236,53 @@ class TestBddDispatchersShareOneResultRecorder:
             f"dispatchers writing recorder-owned ctx keys directly: {offenders} — route them "
             "through record_transport_result so a partial write cannot pass silently"
         )
+
+
+class TestProductionConsequenceListIsComplete:
+    """declares_production_explicitly's docstring enumerates what broadening reaches.
+
+    That list is the only place an operator can see the upgrade risk, and it claims
+    to be complete. It was written naming two of six consequences — the two
+    loosenings — while omitting the SSRF tightening that can reject webhooks a
+    deployment was successfully delivering. A prose completeness claim needs a
+    mechanism, so this pins the module set rather than the wording.
+    """
+
+    EXPECTED_MODULES = {
+        "config.py",
+        "mcp_compat_middleware.py",
+        "product_conversion.py",
+        "webhook_validator.py",
+    }
+
+    @staticmethod
+    def _modules_gating_on_is_production():
+        import re
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        found = set()
+        for path in src.rglob("*.py"):
+            body = path.read_text()
+            # the call, not the import or the definition
+            if re.search(r"\bis_production\(\)", body) and "def is_production" not in body.split("\n\n")[0]:
+                if re.search(r"(?<!def )\bis_production\(\)", body):
+                    found.add(path.name)
+        return found
+
+    def test_the_scan_finds_call_sites(self):
+        assert self._modules_gating_on_is_production(), "scan found no is_production() callers — pattern stale"
+
+    def test_every_module_gating_on_is_production_is_documented(self):
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[2] / "src" / "core" / "config.py").read_text()
+        start = doc.index("What the broadening actually reaches")
+        listed_section = doc[start : start + 2000]
+
+        actual = self._modules_gating_on_is_production()
+        undocumented = sorted(m for m in actual if m.replace(".py", "") not in listed_section)
+        assert not undocumented, (
+            f"modules gate on is_production() but are absent from the enumeration: {undocumented} — "
+            "an operator reading it would underestimate what changes on upgrade"
+        )

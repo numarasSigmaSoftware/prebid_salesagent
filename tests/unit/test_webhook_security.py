@@ -1367,3 +1367,73 @@ class TestLogSanitizersAreTotal:
 
         for url in self.MALFORMED:
             assert redact_webhook_url_for_audit(url) == "REDACTED", url
+
+    def test_the_ssrf_gate_returns_rejected_rather_than_raising(self):
+        """The gate is the third sibling, and the one where raising costs the most.
+
+        Its rejection branch fires precisely for hostile or malformed URLs. Raising
+        there replaces the (rejected, reason) the caller is waiting on with an
+        exception from the code doing the rejecting — so the caller never learns the
+        URL was unsafe, and a crash stands in for a refusal. Two sibling parsers in
+        this module were guarded before this one was, which is how it survived.
+        """
+        import logging
+
+        from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_outbound_webhook_url
+
+        for url in self.MALFORMED:
+            if not url.strip():
+                continue  # blank is a caller-side precondition, not an SSRF verdict
+            rejected, reason = reject_unsafe_outbound_webhook_url(
+                url, log=logging.getLogger("ssrf-totality-probe"), kind="Probe", sanitize=redact_webhook_url_for_audit
+            )
+            assert rejected is True, f"{url!r} must be REJECTED, not accepted"
+            assert reason, f"{url!r} rejected with an empty reason"
+
+
+class TestSupersededSanitizersStayOutOfProduction:
+    """The lax renderers must not come back at a production log site.
+
+    Their own docstring says the form is not credential-safe for capability-style
+    delivery URLs, where the credential IS the subdomain or the path. Every
+    production caller now uses the keyed-digest redactor. They remain only because
+    tests still pin their contract, and a helper with no production caller is
+    exactly what gets innocently reused — so this pins the absence rather than
+    trusting the docstring to be read.
+    """
+
+    SUPERSEDED = ("webhook_url_for_log", "sanitize_webhook_url_for_log")
+
+    @staticmethod
+    def _src_root():
+        from pathlib import Path
+
+        return Path(__file__).resolve().parents[2] / "src"
+
+    def test_the_scan_can_see_the_replacement_in_use(self):
+        """Guards asserting an absence must first be shown to find a presence."""
+        import re
+
+        hits = sum(
+            len(re.findall(r"\bredact_webhook_url_for_audit\s*\(", p.read_text()))
+            for p in self._src_root().rglob("*.py")
+        )
+        assert hits >= 5, f"scan found only {hits} uses of the replacement — pattern likely stale"
+
+    def test_superseded_lax_sanitizers_have_no_production_callers(self):
+        import re
+
+        offenders = []
+        for path in self._src_root().rglob("*.py"):
+            if path.name == "webhook_validator.py":
+                continue  # defines them, and webhook_url_for_log calls its own helper
+            body = path.read_text()
+            for name in self.SUPERSEDED:
+                for m in re.finditer(rf"\b{name}\s*\(", body):
+                    line = body[: m.start()].count("\n") + 1
+                    offenders.append(f"{path.name}:{line} -> {name}")
+        assert not offenders, (
+            "superseded lax sanitizer reintroduced in production:\n  "
+            + "\n  ".join(offenders)
+            + "\nUse redact_webhook_url_for_audit — the lax form leaks a capability URL's credential."
+        )

@@ -21,6 +21,8 @@ from src.core.config import get_config, is_production
 from src.core.exceptions import AdCPValidationError
 from src.core.security.url_validator import check_url_ssrf
 
+logger = logging.getLogger(__name__)
+
 # Fallback used when an action label is not a member of the SDK's closed
 # TaskType enum. create_mcp_webhook_payload() restricts task_type to that
 # enum and would otherwise reject the payload as schema-invalid.
@@ -92,6 +94,12 @@ def webhook_ssrf_suggestion() -> str:
 
 def sanitize_webhook_url_for_log(url: str | None) -> str | None:
     """Return ``scheme://host/path`` for logs — never userinfo or query.
+
+    SUPERSEDED — no production caller remains; use ``redact_webhook_url_for_audit``.
+    This form keeps host and path, which for a capability-style delivery URL IS the
+    credential, so reintroducing it at a log site would reopen what that redactor
+    closed. Kept because its contract is still pinned by tests, and enforced by
+    test_superseded_lax_sanitizers_have_no_production_callers.
 
     Returns None rather than raising on an unparseable URL. ``urlparse`` raises
     ``ValueError: Invalid IPv6 URL`` on inputs like ``https://[::1`` — and this
@@ -189,6 +197,12 @@ def redact_webhook_url_for_audit(url: str) -> str:
         digest = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()[:32]
         return f"{parsed.scheme}://<redacted:{key_id}:{digest}>"
     except Exception:
+        # Fails CLOSED — never the raw URL — but not silently: every audit row and
+        # log line degrades to the same constant, so without this the whole column
+        # can lose its correlation value (a misconfigured key, say) with nothing
+        # anywhere saying why. debug, not warning: on a malformed buyer URL this is
+        # the expected outcome, and the caller already records the rejection.
+        logger.debug("Webhook URL redaction fell back to the constant placeholder", exc_info=True)
         return "REDACTED"
 
 
@@ -290,7 +304,15 @@ def reject_unsafe_outbound_webhook_url(
     is_valid, error_msg = WebhookURLValidator.validate_outbound_webhook_url(url)
     if is_valid:
         return False, ""
-    hostname = urlparse(str(url)).hostname
+    # This branch fires precisely for hostile or malformed URLs, so it is the last
+    # place that may raise: urlparse rejects a malformed IPv6 literal such as
+    # https://[::1 with ValueError, which would replace the SSRF rejection the
+    # caller is waiting on — (rejected, reason) — with an exception from the code
+    # doing the rejecting, and the caller would never learn the URL was unsafe.
+    try:
+        hostname = urlparse(str(url)).hostname
+    except ValueError:
+        hostname = None
     loggable_reason = error_msg.replace(hostname, REDACTED_HOST_FOR_LOG) if hostname else error_msg
     log.error(
         "%s webhook URL failed SSRF validation (url=%s): %s",

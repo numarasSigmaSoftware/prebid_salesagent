@@ -35,8 +35,10 @@ console = Console()
 def _log_webhook_send_outcome(config_url: str, sent: bool) -> None:
     """Log webhook delivery result; never treat ``False`` as success.
 
-    ``config_url`` is sanitized to ``scheme://host/path`` so credentials in
-    userinfo/query never reach the console (AdCP L1 SSRF log hygiene).
+    ``config_url`` is reduced to ``scheme://<redacted:key:digest>`` — host and path
+    included, not just userinfo/query. A capability-style delivery URL carries its
+    credential in the subdomain or the path, so the older scheme://host/path form
+    this once described was not safe for it.
     """
     safe_url = redact_webhook_url_for_audit(config_url)
     if sent:
