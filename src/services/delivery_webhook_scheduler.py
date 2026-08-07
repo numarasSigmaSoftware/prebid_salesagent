@@ -376,11 +376,30 @@ class DeliveryWebhookScheduler:
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
             raw_freq = str(reporting_webhook.get("reporting_frequency") or "daily").lower()
 
+            # Computed BEFORE the cadence gate below, which must not strand it.
+            is_final = (
+                resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
+            )
+
             # Same set the create/update capability validator rejects against. If
             # these drift, an unsupported cadence is accepted at booking and then
             # silently never sent — the acknowledged-but-never-fires state
             # validate_reporting_webhook_frequency exists to prevent.
-            if not force and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
+            #
+            # `not is_final` is load-bearing, not defensive. This gate reads
+            # reporting_frequency, and until that key was corrected it read a key
+            # raw_request never contained, so it never fired. Live, it applies to a
+            # population that predates the booking-time validator: create used to
+            # accept hourly/monthly with only a warning that they "will be ignored
+            # until implemented", and no migration normalises those rows. Skipping
+            # their PERIODIC sends is the intended behavior. Skipping their FINAL
+            # send is not — the anti-join re-selects a buy until a success-final row
+            # exists, so returning False here would mean that row is never written
+            # and the terminal notification never goes out, for the whole life of
+            # the buy. That is the exact outcome the claim/lease machinery below
+            # exists to make exactly-once rather than never, and _should_skip_send
+            # is already final-aware for the same reason.
+            if not force and not is_final and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
                 logger.warning(
                     "Skipping reporting webhook with frequency '%s' for media buy %s – "
                     "supported delivery-webhook frequencies are: %s",
@@ -389,10 +408,6 @@ class DeliveryWebhookScheduler:
                     ", ".join(sorted(SUPPORTED_REPORTING_FREQUENCIES)),
                 )
                 return False
-
-            is_final = (
-                resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
-            )
 
             # Best-effort read-only de-dup (no claim here — the atomic concurrency
             # claim is taken inside _deliver_report, just before the POST).

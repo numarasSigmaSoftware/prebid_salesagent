@@ -434,7 +434,11 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reporting_frequency", ["hourly", "monthly"])
 async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_db, reporting_frequency):
-    """The scheduler reads reporting_frequency instead of silently defaulting to daily."""
+    """The scheduler reads reporting_frequency instead of silently defaulting to daily.
+
+    Mid-flight only — the terminal case is the sibling below, and asserting the skip
+    on a SERVING buy alone is what let the final-blind gate look correct.
+    """
     tenant_id, principal_id = _create_test_tenant_and_principal()
     reporting_webhook = {
         **DAILY_REPORTING_WEBHOOK,
@@ -451,6 +455,48 @@ async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_
         await scheduler._send_reports()
 
     mock_send.assert_not_awaited()
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reporting_frequency", ["hourly", "monthly"])
+async def test_unsupported_frequency_still_sends_the_final_report(integration_db, reporting_frequency):
+    """An unsupported cadence suppresses PERIODIC sends, never the terminal one.
+
+    These rows are reachable and legal: create accepted hourly/monthly with only a
+    warning that they "will be ignored until implemented", the booking-time
+    validator is new, and no migration normalises what already exists.
+
+    Skipping their final send is unrecoverable rather than merely late. The
+    scheduler's anti-join re-selects a buy until a success-final row exists, so a
+    skip here means that row is never written and the buy is re-selected and
+    re-skipped for the rest of its life — the terminal notification simply never
+    arrives. Reverting the gate to its final-blind form reddens this test and not
+    its mid-flight sibling, which is the pairing that was missing.
+    """
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    reporting_webhook = {
+        **DAILY_REPORTING_WEBHOOK,
+        "reporting_frequency": reporting_frequency,
+    }
+    # Flight is over: resolve_canonical_status derives a terminal status from the
+    # dates, which is what makes this buy's next send the FINAL one.
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        start_date=datetime(2024, 1, 1, tzinfo=UTC),
+        end_date=datetime(2024, 1, 31, tzinfo=UTC),
+        reporting_webhook=reporting_webhook,
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    with mock_send_notification(scheduler) as mock_send:
+        await scheduler._send_reports()
+
+    assert mock_send.await_count == 1, (
+        f"final report was not sent for a {reporting_frequency!r} buy past its flight end — "
+        "the cadence gate stranded the terminal notification, which no later run can recover"
+    )
 
 
 @pytest.mark.requires_db
