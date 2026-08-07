@@ -159,11 +159,20 @@ class TestBddTransportTagSetsDoNotOverlap:
 
     def test_the_parser_finds_the_transport_independent_set(self):
         """Guards that scan by regex must be shown to match, or an empty overlap is
-        indistinguishable from a broken parser."""
+        indistinguishable from a broken parser.
+
+        Anchored on known members rather than a count. The original floor (">= 20")
+        encoded the set's size at the moment it was written, so legitimately
+        un-routing a dormant scenario broke a test that has nothing to do with the
+        size — a guard that fails for the wrong reason trains people to adjust the
+        number, which is exactly how a real staleness would then slip through.
+        """
         transport_independent, _ = self._sets()
-        assert len(transport_independent) >= 20, (
-            f"parser found only {len(transport_independent)} routed tags — regex likely stale"
-        )
+        assert transport_independent, "parser found no routed tags — regex is stale"
+        for anchor in ("T-UC-004-webhook-hmac", "T-UC-004-webhook-scheduled"):
+            assert anchor in transport_independent, (
+                f"parser did not find {anchor}, which is routed in conftest — regex is stale"
+            )
 
     def test_no_e2e_rest_tags_are_reachable(self):
         transport_independent, no_e2e_rest = self._sets()
