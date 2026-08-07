@@ -182,6 +182,20 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
+def _audit_webhook_outcome(audit_logger: Any, message: str, *, success: bool = False) -> None:
+    """The one guarded audit sink for webhook delivery outcomes.
+
+    Six call sites open-coded ``if audit_logger:`` around a single log call. Beyond
+    the repetition, that shape is how one of them came to be missing entirely: a
+    guard that must be re-typed at each new outcome branch is a guard that will
+    eventually not be. Callers state the outcome; whether a sink exists is decided
+    here, once.
+    """
+    if audit_logger is None:
+        return
+    (audit_logger.log_success if success else audit_logger.log_warning)(message)
+
+
 def _safe_delivery_error_message(url: str, *, reason: str) -> str:
     """Build a bounded, non-leaking error_message for a failed webhook delivery.
 
@@ -470,10 +484,9 @@ class ProtocolWebhookService:
                         completed_at=datetime.now(UTC),
                     )
 
-                    if audit_logger:
-                        audit_logger.log_warning(
-                            f"{task_type} webhook failed with non-2xx response {response.status_code}"
-                        )
+                    _audit_webhook_outcome(
+                        audit_logger, f"{task_type} webhook failed with non-2xx response {response.status_code}"
+                    )
 
                     return False
 
@@ -489,11 +502,12 @@ class ProtocolWebhookService:
                 )
 
                 # Log to audit system (success)
-                if audit_logger:
-                    audit_logger.log_success(
-                        f"{task_type} webhook delivered successfully (sequence #{sequence_number}, "
-                        f"{response_time_ms}ms, {payload_size_bytes} bytes)"
-                    )
+                _audit_webhook_outcome(
+                    audit_logger,
+                    f"{task_type} webhook delivered successfully (sequence #{sequence_number}, "
+                    f"{response_time_ms}ms, {payload_size_bytes} bytes)",
+                    success=True,
+                )
 
                 return True
 
@@ -525,8 +539,7 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (failure)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed with client error {status_code}")
+                    _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed with client error {status_code}")
 
                     return False
 
@@ -564,8 +577,7 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (failure after all retries)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed after {max_attempts} attempts")
+                    _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed after {max_attempts} attempts")
 
                     return False
 
@@ -605,8 +617,9 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (network failure)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed with network error: {type(e).__name__}")
+                    _audit_webhook_outcome(
+                        audit_logger, f"{task_type} webhook failed with network error: {type(e).__name__}"
+                    )
 
                     return False
 
@@ -627,8 +640,7 @@ class ProtocolWebhookService:
                 # entry — and it is the branch for UNEXPECTED errors, so an operator
                 # watching the audit stream saw a clean run precisely when something
                 # unanticipated broke. The message is already the safe, redacted form.
-                if audit_logger:
-                    audit_logger.log_warning(f"{task_type} webhook failed: {error_message}")
+                _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed: {error_message}")
 
                 return False
 

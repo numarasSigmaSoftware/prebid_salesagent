@@ -733,3 +733,48 @@ async def test_serving_persisted_status_is_selected_for_delivery_webhook(integra
             f"persisted status {persisted_status!r} with a reporting_webhook must be selected "
             f"exactly once by the delivery webhook scheduler (awaited: {mock_send.await_args_list!r})"
         )
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
+    """A batch that suppressed every buy must not read like one with no work.
+
+    Every skip returns False — dedup, unsupported cadence, no claim won — so a
+    summary counting only sends and errors prints "0 sent, 0 errors" whether the
+    scheduler found nothing to do or silently suppressed everything it found. An
+    operator cannot tell a healthy idle scheduler from one dropping every webhook,
+    which is how a stranded population stays invisible.
+
+    Spies the module logger rather than using caplog: caplog depends on global
+    logging state that other tests mutate, so a caplog version of this passed alone
+    and saw an empty capture inside the full suite — green for the wrong reason.
+    """
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    # Mid-flight buy on an unsupported cadence: reaches the loop, then suppresses.
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook={**DAILY_REPORTING_WEBHOOK, "reporting_frequency": "hourly"},
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    summaries: list[str] = []
+
+    def capture(msg, *args, **kwargs):
+        summaries.append(msg % args if args else msg)
+
+    with (
+        patch("src.services.delivery_webhook_scheduler.logger.info", side_effect=capture),
+        mock_send_notification(scheduler) as mock_send,
+    ):
+        await scheduler._send_reports()
+
+    mock_send.assert_not_awaited()
+    batch = [m for m in summaries if "batch complete" in m]
+    assert batch, f"scheduler emitted no batch summary (saw {summaries!r})"
+    assert "0 sent" in batch[-1], batch[-1]
+    assert "1 suppressed" in batch[-1], (
+        f"the suppressed buy is invisible in the summary: {batch[-1]!r} — this line is "
+        "the only place an operator sees that work was dropped rather than absent"
+    )

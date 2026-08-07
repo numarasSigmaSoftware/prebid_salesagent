@@ -174,6 +174,8 @@ class DeliveryWebhookScheduler:
 
                 reports_sent = 0
                 errors = 0
+                suppressed = 0
+                not_reportable = 0
 
                 for media_buy in media_buys:
                     try:
@@ -197,12 +199,15 @@ class DeliveryWebhookScheduler:
                         # advisory as a warning-worthy failure.
                         canonical = resolve_canonical_status(media_buy, datetime.now(UTC).date())
                         if canonical not in WEBHOOK_REPORTABLE_CANONICAL_STATUSES:
+                            not_reportable += 1
                             continue
 
                         # Send delivery report; only count it when a webhook
                         # actually went out (dedup/frequency skips return False).
                         if await self._send_report_for_media_buy(media_buy, reporting_webhook, session):
                             reports_sent += 1
+                        else:
+                            suppressed += 1
 
                     except Exception as e:
                         logger.error(
@@ -215,7 +220,21 @@ class DeliveryWebhookScheduler:
                         )
                         errors += 1
 
-                logger.info(f"Daily delivery report batch complete: {reports_sent} sent, {errors} errors")
+                # Suppressions are reported, not just sends and errors. Every skip on
+                # this path returns False — dedup, unsupported cadence, no claim won,
+                # nothing to report — so a summary of only sent+errors renders a batch
+                # that suppressed every buy identically to one with no work to do:
+                # "0 sent, 0 errors". That is the reading under which a population
+                # whose webhooks were skipped on every pass looks like a quiet, healthy
+                # scheduler. _delivery_lookup_is_usable calls out the same hazard for
+                # one branch; this closes it for the rest.
+                logger.info(
+                    "Daily delivery report batch complete: %d sent, %d suppressed, %d not reportable, %d errors",
+                    reports_sent,
+                    suppressed,
+                    not_reportable,
+                    errors,
+                )
 
         except Exception as e:
             logger.error(f"Error in daily delivery report batch: {e}", exc_info=True)
