@@ -2809,9 +2809,11 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # reference reads the same as absence of a step. Routing those is wrong twice: the
 # derivation has nothing to derive from, and de-parametrizing shrinks the dormancy
 # signal from three xfails to one, making an unwired scenario look like a
-# deliberate single-run. Six such tags were removed from this set for that reason
-# (the delayed-* trio, webhook-adjusted-resend, webhook-partial-data,
-# webhook-window-update); they stay parametrized until their steps are wired.
+# deliberate single-run. Eight such tags were removed from this set for that reason
+# — the whole partial-data/window family: the delayed-* trio,
+# webhook-adjusted-resend, webhook-partial-data, webhook-window-update,
+# window-first-report and status-reporting-delayed. They stay parametrized until
+# their steps are wired.
 #
 # Two webhook scenarios are deliberately ABSENT for the opposite reason —
 # webhook-creds-short/valid dispatch a real create_media_buy carrying the config,
@@ -2820,7 +2822,6 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 _TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
     "T-UC-004-boundary-credentials",
     "T-UC-004-partition-credentials",
-    "T-UC-004-status-reporting-delayed",
     "T-UC-004-webhook-bearer",
     "T-UC-004-webhook-circuit-halfopen",
     "T-UC-004-webhook-circuit-open",
@@ -2837,7 +2838,6 @@ _TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
     "T-UC-004-webhook-scheduler-derivation",
     "T-UC-004-webhook-sequence",
     "T-UC-004-webhook-ssrf-blocked",
-    "T-UC-004-window-first-report",
 }
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).

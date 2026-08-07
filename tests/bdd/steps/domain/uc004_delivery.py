@@ -1925,8 +1925,12 @@ def then_named_field_absent_from_wire(ctx: dict, field: str) -> None:
     scenario exists to catch.
     """
     assert field in WEBHOOK_ONLY_FIELDS, (
-        f'"{field}" is not a webhook-only field {sorted(WEBHOOK_ONLY_FIELDS)} — this step '
-        "would assert the absence of a key that never exists, and pass for the wrong reason"
+        f'"{field}" is not a webhook-only field {sorted(WEBHOOK_ONLY_FIELDS)}, and this step '
+        "only reads the TOP LEVEL of the wire body, so it would assert the absence of a key "
+        "that is never there anyway and pass for the wrong reason.\n"
+        "Do not widen this set to make a scenario bind. supersedes_window, for instance, "
+        "lives at media_buy_deliveries[].by_package[] — absent from the top level by "
+        "construction — so a nested field needs a step that walks to its actual location."
     )
     wire = wire_dict(ctx)
     # Anchor: these fields only surface alongside deliveries, so a delivery-less
