@@ -361,6 +361,7 @@ async def test_signed_reporting_webhook_puts_a_bearer_header_on_the_wire(integra
                 "Authorization": "Bearer signed-webhook-test-credential-0001",
             },
             timeout=10.0,
+            allow_redirects=False,
         )
 
 
@@ -394,6 +395,7 @@ async def test_hmac_reporting_webhook_signs_the_exact_posted_body(integration_db
             dynamic_keys=frozenset({"X-AdCP-Signature", "X-AdCP-Timestamp"}),
         ),
         timeout=10.0,
+        allow_redirects=False,
     )
     call = mock_post.call_args
     assert "json" not in call.kwargs

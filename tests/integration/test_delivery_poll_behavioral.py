@@ -736,6 +736,238 @@ class TestConcurrentFinalWebhookClaim:
             assert all(w["result"]["notification_type"] == "final" for w in wires)
 
 
+@pytest.mark.requires_db
+class TestConcurrentPeriodicWebhookClaim:
+    """Periodic (non-final) webhooks are ALSO serialized across concurrent workers.
+
+    Mirrors TestConcurrentFinalWebhookClaim above for the periodic-send path:
+    _should_skip_send's 24h dedup is a separate, READ-ONLY check against send
+    history, so two workers that both observe "no recent send" would both POST
+    without an atomic claim in between — e.g. two replicas under horizontal
+    scaling, both running their own DeliveryWebhookScheduler against the same
+    database. Proven here with two OS threads racing the SAME claim via a
+    ``threading.Barrier`` so the contention genuinely overlaps, not just two
+    sequential sessions.
+
+    Unlike the final claim, a SUCCESSFUL periodic send also releases its own
+    claim immediately (see test_successful_send_releases_the_claim_immediately)
+    — periodic sends are expected to repeat (next day's batch, or an operator's
+    force re-trigger), so the claim's job is narrowly to protect the send
+    itself, not to stand in for the 24h dedup window (that's the
+    WebhookDeliveryLog's job).
+
+    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-03
+    """
+
+    @pytest.mark.asyncio
+    async def test_fresh_claim_held_by_another_worker_blocks_the_batch(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            # Simulate a concurrent worker that claimed the periodic send moments ago.
+            session = env.get_session()
+            buy.last_periodic_webhook_claimed_at = datetime.now(UTC)
+            session.commit()
+
+            assert await env.run_delivery_batch() == [], "a fresh claim held by another worker must block the send"
+
+    @pytest.mark.asyncio
+    async def test_stale_claim_is_reclaimed_and_periodic_sent(self, integration_db):
+        from src.services.delivery_webhook_scheduler import PERIODIC_WEBHOOK_CLAIM_LEASE
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            # A crashed worker's claim, older than the lease -> reclaimable.
+            session = env.get_session()
+            buy.last_periodic_webhook_claimed_at = (
+                datetime.now(UTC) - PERIODIC_WEBHOOK_CLAIM_LEASE - timedelta(minutes=1)
+            )
+            session.commit()
+
+            wires = await env.run_delivery_batch()
+            assert len(wires) == 1, "a stale claim must be reclaimed so the periodic send is not stranded"
+            assert wires[0]["result"]["notification_type"] == "scheduled"
+
+    def test_concurrent_claim_attempts_exactly_one_winner(self, integration_db):
+        """Genuine overlapping contention: two OS threads race the SAME conditional UPDATE.
+
+        Same mechanism as the final claim's equivalent test above (EvalPlanQual
+        "first updater wins" — see that test's docstring for the full Postgres
+        explanation). The property under test is that EXACTLY ONE thread ever
+        wins, never zero and never two.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            mb_id = buy.media_buy_id
+            env.get_session().commit()  # ensure the buy is visible to other connections
+
+            now = datetime.now(UTC)
+            cutoff = now - timedelta(minutes=15)
+
+            def worker(session: Session, barrier: threading.Barrier) -> bool:
+                barrier.wait(timeout=5)  # release both threads together
+                won = MediaBuyRepository(session, "t1").try_claim_periodic_webhook(mb_id, now=now, stale_before=cutoff)
+                session.commit()
+                return won
+
+            results = _race_two_workers(worker)
+            assert sorted(results) == [False, True], (
+                f"exactly one of two genuinely concurrent threads must win the claim, got {results}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_entrypoints_produce_exactly_one_webhook(self, integration_db):
+        """Two real scheduler/manual entrypoints racing the SAME buy produce exactly one POST.
+
+        force=True bypasses the 24h dedup (so both threads reach the claim step)
+        but NOT the atomic claim itself -- the property under test is that the
+        claim, not the dedup, is what prevents the duplicate send.
+        """
+        import asyncio
+
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+        from tests.harness.delivery_poll import mock_webhook_post
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            mb_id = buy.media_buy_id
+            reporting_webhook = dict(buy.raw_request["reporting_webhook"])
+            env.get_session().commit()  # ensure the buy is visible to other connections/threads
+
+            scheduler = DeliveryWebhookScheduler()  # shared instance -> shared webhook_service
+
+            def worker(session: Session, barrier: threading.Barrier) -> bool:
+                # Load the row BEFORE the barrier so both threads race the SEND, not the fetch.
+                media_buy = MediaBuyRepository(session, "t1").get_by_id(mb_id)
+                barrier.wait(timeout=5)  # release both threads together
+                return asyncio.run(
+                    scheduler._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
+                )
+
+            with mock_webhook_post(scheduler) as mock_post:
+                results = _race_two_workers(worker)
+
+            assert mock_post.call_count == 1, (
+                f"two concurrent entrypoints racing the same buy must produce exactly one outbound "
+                f"webhook, got {mock_post.call_count}"
+            )
+            assert sorted(results) == [False, True], f"exactly one entrypoint call must report success, got {results}"
+
+    @pytest.mark.asyncio
+    async def test_failed_send_releases_the_claim_for_immediate_retry(self, integration_db):
+        """A definitive send failure releases the periodic claim so a retry isn't blocked for the lease."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            mb_id = buy.media_buy_id
+
+            scheduler = DeliveryWebhookScheduler()
+            await _drive_failed_send(scheduler, env, buy)
+
+            # The claim was released: the row is NULL again and immediately re-claimable.
+            session = env.get_session()
+            session.expire_all()
+            refreshed = MediaBuyRepository(session, "t1").get_by_id(mb_id)
+            assert refreshed.last_periodic_webhook_claimed_at is None, "a failed periodic send must release its claim"
+
+    @pytest.mark.asyncio
+    async def test_successful_send_releases_the_claim_immediately(self, integration_db):
+        """Unlike a final claim, a SUCCESSFUL periodic send releases its own claim right away.
+
+        Periodic sends are expected to repeat (next day's batch, an operator's
+        force re-trigger) -- holding the claim for the full lease after a
+        successful send would block a legitimate next attempt for up to 15
+        minutes even though nothing is actually racing. The 24h dedup window
+        that DOES span that gap is enforced separately, by the WebhookDeliveryLog
+        read-check in _should_skip_send -- not by this claim.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            mb_id = buy.media_buy_id
+
+            wires = await env.run_delivery_batch()
+            assert len(wires) == 1, "the periodic send must go out"
+
+            session = env.get_session()
+            session.expire_all()
+            refreshed = MediaBuyRepository(session, "t1").get_by_id(mb_id)
+            assert refreshed.last_periodic_webhook_claimed_at is None, (
+                "a successful periodic send must release its own claim immediately, "
+                "not hold it for the rest of the lease"
+            )
+
+    def test_release_only_clears_own_token(self, integration_db):
+        """A's late release must NOT clear B's newer claim (the token guard's one invariant).
+
+        Same invariant as the final claim's equivalent test above -- distinguishes
+        the ``== claimed_at`` predicate from a clear-any-claim (``IS NOT NULL``)
+        implementation.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            mb_id = buy.media_buy_id
+            session = env.get_session()
+            repo = MediaBuyRepository(session, "t1")
+
+            t2 = datetime.now(UTC)
+            t1 = t2 - timedelta(minutes=16)  # older than the 15-min lease at t2
+
+            # A wins the fresh claim at T1.
+            assert repo.try_claim_periodic_webhook(mb_id, now=t1, stale_before=t1 - timedelta(minutes=15)) is True
+            # B re-claims at T2: A's T1 claim is stale by then (t1 < t2 - lease).
+            assert repo.try_claim_periodic_webhook(mb_id, now=t2, stale_before=t2 - timedelta(minutes=15)) is True
+
+            # A's late release with its stale token must NOT clear B's claim.
+            assert repo.release_periodic_webhook_claim(mb_id, claimed_at=t1) is False
+            session.expire_all()
+            assert repo.get_by_id(mb_id).last_periodic_webhook_claimed_at == t2, (
+                "a stale-token release must leave the newer owner's claim intact"
+            )
+
+    @pytest.mark.asyncio
+    async def test_batch_continues_after_midloop_periodic_commit(self, integration_db):
+        """The periodic claim's mid-loop session commit doesn't break later buys in the batch.
+
+        _claim_periodic_webhook commits the shared batch session (for
+        cross-worker visibility), which expires the remaining batch rows
+        (expire_on_commit) — they must lazily reload and still process
+        correctly. Two serving buys in one batch: the first periodic claim's
+        commit happens mid-loop, and the second buy is read and sent AFTER that
+        commit. Both periodic sends must go out.
+        """
+        from tests.factories import PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            buy_a = _serving_webhook_buy(env, mb_id="mb_periodic_a", tenant=tenant, principal=principal)
+            buy_b = _serving_webhook_buy(env, mb_id="mb_periodic_b", tenant=tenant, principal=principal)
+
+            wires = await env.run_delivery_batch()
+
+            assert len(wires) == 2, "both periodic sends must go out despite the mid-loop claim commits"
+            sent = {w["result"]["media_buy_deliveries"][0]["media_buy_id"] for w in wires}
+            assert sent == {buy_a.media_buy_id, buy_b.media_buy_id}
+            assert all(w["result"]["notification_type"] == "scheduled" for w in wires)
+
+
 # ---------------------------------------------------------------------------
 # UC-004-ALT-WEBHOOK-PUSH-REPORTING-05
 # ---------------------------------------------------------------------------

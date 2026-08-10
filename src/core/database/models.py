@@ -941,6 +941,16 @@ class MediaBuy(Base):
     # than the lease. NULL until a final is claimed. The residual crash-after-POST
     # duplicate window is deferred to the durable outbox (#1606).
     final_webhook_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Same pattern as final_webhook_claimed_at, but for PERIODIC (non-final)
+    # delivery webhooks: the 24h dedup check in _should_skip_send is read-only,
+    # so two concurrent workers (e.g. two replicas under horizontal scaling) can
+    # both read "no recent send" and both POST -- each with a different
+    # idempotency_key, so the buyer's own idempotency dedup doesn't catch it. Set
+    # by a conditional UPDATE (MediaBuyRepository.try_claim_periodic_webhook)
+    # before the periodic POST so only one worker sends per claim window; a stale
+    # claim self-heals once older than the lease, same as the final claim. NULL
+    # until a periodic send is claimed.
+    last_periodic_webhook_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     tenant = relationship("Tenant", back_populates="media_buys", overlaps="media_buys")

@@ -106,6 +106,61 @@ class MediaBuyRepository:
         ).scalar_one_or_none()
         return released_id is not None
 
+    def try_claim_periodic_webhook(
+        self, media_buy_id: str, *, now: datetime.datetime, stale_before: datetime.datetime
+    ) -> bool:
+        """Atomically claim this buy's PERIODIC delivery webhook. True if THIS caller won.
+
+        Same pattern as ``try_claim_final_webhook``, for the non-final (periodic)
+        send path: a single conditional UPDATE that sets
+        ``last_periodic_webhook_claimed_at = now`` only when it is unset OR older
+        than ``stale_before``, so a crashed worker's claim self-heals rather than
+        stranding the buy's next periodic report. Two concurrent workers (e.g. two
+        replicas under horizontal scaling) race on the same row; exactly one
+        UPDATE matches and RETURNs the id — the loser matches 0 rows and skips the
+        send. The 24h dedup in ``_should_skip_send`` is a separate, READ-ONLY
+        check against successful send history; this claim closes the race window
+        between that check and the POST, it does not replace the dedup itself.
+        The caller MUST commit for the claim to be visible to other transactions.
+        """
+        claimed_id = self._session.execute(
+            update(MediaBuy)
+            .where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.media_buy_id == media_buy_id,
+                or_(
+                    MediaBuy.last_periodic_webhook_claimed_at.is_(None),
+                    MediaBuy.last_periodic_webhook_claimed_at < stale_before,
+                ),
+            )
+            .values(last_periodic_webhook_claimed_at=now)
+            .returning(MediaBuy.media_buy_id)
+        ).scalar_one_or_none()
+        return claimed_id is not None
+
+    def release_periodic_webhook_claim(self, media_buy_id: str, *, claimed_at: datetime.datetime) -> bool:
+        """Release THIS worker's periodic-webhook claim so a definitive failure/no-send
+        doesn't block an immediate retry for the whole lease. True if the claim was cleared.
+
+        Token-guarded: clears ``last_periodic_webhook_claimed_at`` only when it
+        still equals ``claimed_at`` — the exact timestamp this worker wrote in
+        ``try_claim_periodic_webhook``. If the lease already expired and another
+        worker re-claimed with a newer timestamp, the ``== claimed_at`` predicate
+        matches 0 rows, so this never clears a newer owner's claim. Lease recovery
+        still covers an actual crash (where no release runs). The caller MUST commit.
+        """
+        released_id = self._session.execute(
+            update(MediaBuy)
+            .where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.media_buy_id == media_buy_id,
+                MediaBuy.last_periodic_webhook_claimed_at == claimed_at,
+            )
+            .values(last_periodic_webhook_claimed_at=None)
+            .returning(MediaBuy.media_buy_id)
+        ).scalar_one_or_none()
+        return released_id is not None
+
     # ------------------------------------------------------------------
     # Single MediaBuy lookups
     # ------------------------------------------------------------------
