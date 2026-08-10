@@ -140,6 +140,38 @@ class TestAccountReferenceRoutesTheAdapter:
         assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")
 
 
+def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_run: bool = False):
+    """Create against an account of the given mode; return the wire ``sandbox`` value.
+
+    One body for both marker classes. The live path and the dry-run path build their
+    response objects at different sites in ``_create_media_buy_impl`` — the dry-run branch
+    returns early, so it cannot pick up a marker attached later — and each needs its own
+    oracle. Sharing the setup keeps the only difference between them the thing under test.
+    """
+    from tests.factories import AccountFactory, AgentAccountAccessFactory
+
+    with MediaBuyCreateEnv(dry_run=dry_run) as env:
+        tenant, principal, product, _pricing = env.setup_media_buy_data()
+        AccountFactory(tenant=tenant, account_id="acc_marker", sandbox=account_sandbox)
+        AgentAccountAccessFactory(
+            tenant_id=tenant.tenant_id, principal_id=principal.principal_id, account_id="acc_marker"
+        )
+        now = datetime.now(UTC)
+        result = env.call_via(
+            transport,
+            account={"account_id": "acc_marker"},
+            brand={"domain": "marker.example.com"},
+            packages=[{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
+            start_time=(now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end_time=(now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            po_number=f"MARKER-{'DRY-' if dry_run else ''}{transport.value}",
+        )
+        assert not result.is_error, f"dispatch failed: {result.error!r}"
+        wire = result.wire_response
+        assert wire is not None, "no wire response captured — this assertion would grade nothing"
+        return wire.get("sandbox")
+
+
 class TestSandboxMarkerReachesTheBuyer:
     """``sandbox: true`` on the create response — the half the buyer actually reads.
 
@@ -161,36 +193,9 @@ class TestSandboxMarkerReachesTheBuyer:
     correct encoding for a live response — the obligation is to include it when true.
     """
 
-    @staticmethod
-    def _marker(transport: Transport, *, account_sandbox: bool):
-        from datetime import UTC, datetime, timedelta
-
-        from tests.factories import AccountFactory, AgentAccountAccessFactory
-
-        with MediaBuyCreateEnv() as env:
-            tenant, principal, product, _pricing = env.setup_media_buy_data()
-            AccountFactory(tenant=tenant, account_id="acc_marker", sandbox=account_sandbox)
-            AgentAccountAccessFactory(
-                tenant_id=tenant.tenant_id, principal_id=principal.principal_id, account_id="acc_marker"
-            )
-            now = datetime.now(UTC)
-            result = env.call_via(
-                transport,
-                account={"account_id": "acc_marker"},
-                brand={"domain": "marker.example.com"},
-                packages=[{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
-                start_time=(now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                end_time=(now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                po_number=f"MARKER-{transport.value}",
-            )
-            assert not result.is_error, f"dispatch failed: {result.error!r}"
-            wire = result.wire_response
-            assert wire is not None, "no wire response captured — this assertion would grade nothing"
-            return wire.get("sandbox")
-
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_sandbox_create_is_marked_on_the_wire(self, integration_db, transport):
-        assert self._marker(transport, account_sandbox=True) is True, (
+        assert _create_and_read_marker(transport, account_sandbox=True) is True, (
             f"[{transport.value}] a create against a sandbox account carried no sandbox marker; "
             "the buyer cannot distinguish a simulated booking from one that moved real budget"
         )
@@ -198,7 +203,52 @@ class TestSandboxMarkerReachesTheBuyer:
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_live_create_is_not_marked(self, integration_db, transport):
         """Negative control — 'always mark' would pass above and mislabel real bookings."""
-        assert self._marker(transport, account_sandbox=False) is None, (
+        assert _create_and_read_marker(transport, account_sandbox=False) is None, (
             f"[{transport.value}] a live response carried the sandbox marker; absent is the "
             "correct encoding, and marking it tells the buyer a real booking was simulated"
+        )
+
+
+class TestSandboxMarkerOnTheDryRunBranch:
+    """The dry-run early return is a THIRD response-construction site, and had no oracle.
+
+    ``_create_media_buy_impl`` builds its success response at three places: the adapter
+    path, the value the adapter path carries forward, and the dry-run branch, which
+    returns immediately and so cannot inherit a marker attached downstream. The class
+    above grades the first two. Replacing the dry-run branch's
+    ``sandbox=True if identity.sandbox else None`` with a bare ``None`` left
+    ``tests/unit -k "dry_run or sandbox"`` at 86 passed — no test combined a sandbox
+    account with dry_run, so the branch this change added was ungraded.
+
+    Dry run and sandbox are different axes and the spec says so (``sandbox.mdx``
+    §"Sandbox vs dry run"): dry run validates without booking, sandbox is a persistent
+    simulated environment. A buyer may use both at once, and when they do the response
+    still has to say which one it is.
+
+    REST ONLY, deliberately. The sibling class above runs all three transports; this one
+    cannot, because the harness has no way to put a request into dry-run mode over
+    in-process MCP or A2A. ``x-dry-run`` is injected by the e2e REST dispatcher alone
+    (``tests/harness/dispatchers.py``), and ``_run_mcp_client`` builds its header dict
+    with only ``x-adcp-auth``/``x-adcp-tenant`` and patches ``get_http_headers`` in two
+    modules that do not include ``testing_hooks`` — the seam that reads the flag into
+    ``testing_ctx``. So ``MediaBuyCreateEnv(dry_run=True)`` dispatched over MCP or A2A
+    takes the ordinary adapter path and picks the marker up from a DIFFERENT site.
+    Parametrizing those two transports here was tried and passes vacuously: mutating this
+    branch to ``sandbox=None`` reddens ``[rest]`` and leaves ``[mcp]``/``[a2a]`` green.
+    A test that cannot fail is worse than an absent one, so they are not listed. Closing
+    the harness gap is tracked separately — it is shared infrastructure and would change
+    what every dry-run test in the repo actually exercises.
+    """
+
+    def test_dry_run_against_a_sandbox_account_is_still_marked(self, integration_db):
+        assert _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True) is True, (
+            "a dry-run create against a sandbox account carried no sandbox marker; the "
+            "early-return branch builds its own response and must set it there"
+        )
+
+    def test_dry_run_against_a_live_account_is_not_marked(self, integration_db):
+        """Negative control — marking every dry run would pass above and misreport the mode."""
+        assert _create_and_read_marker(Transport.REST, account_sandbox=False, dry_run=True) is None, (
+            "a dry-run create against a LIVE account was marked sandbox; dry run is not "
+            "sandbox, and conflating them tells the buyer the wrong thing"
         )
