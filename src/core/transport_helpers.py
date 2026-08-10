@@ -145,8 +145,16 @@ def enrich_identity_with_account(
         assert uow.accounts is not None
         resolved = resolve_account(account_ref, identity, uow.accounts)
 
-    # Carry sandbox mode onto the identity here, at the single funnel every transport
-    # passes through. Downstream has no other way to learn it: adapters are selected
-    # per-tenant, so the Account row never reaches adapter selection otherwise.
+    # The SOLE writer of ResolvedIdentity.sandbox in src/ — but not a funnel every
+    # request passes through, and the difference matters. This function is invoked from
+    # seven per-tool sites (create_media_buy x2, get_media_buy_delivery x2,
+    # sync_creatives x2, the REST route), so a NEW tool that accepts an account
+    # reference and forgets to call it gets sandbox=False for a real sandbox account,
+    # silently and with every guard still green. get_products and
+    # get_adcp_capabilities are the standing examples: both accept or declare an
+    # account and neither enriches.
+    #
+    # Downstream has no other way to learn the mode: adapters are selected per-tenant,
+    # so the Account row never reaches adapter selection otherwise.
     # AdCP 3.1.1 sandbox.mdx: sandbox mode is determined SOLELY by the account reference.
     return identity.model_copy(update={"account_id": resolved.account_id, "sandbox": resolved.sandbox})

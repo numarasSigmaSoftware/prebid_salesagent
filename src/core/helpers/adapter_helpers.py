@@ -135,7 +135,24 @@ def get_adapter(
         # a sandbox request from a live one.
         logger.info("[ADAPTER_SELECT] sandbox account — forcing mock adapter, no real ad-platform calls")
         return MockAdServerAdapter(
-            {"enabled": True, "dry_run": dry_run},
+            {
+                "enabled": True,
+                "dry_run": dry_run,
+                # Stated, not inherited. The tenant's own mock branch below defaults this
+                # to True "for safety" from AdapterConfig; this branch cannot read that
+                # row (the whole point of short-circuiting above is to touch no adapter
+                # config), so the two mock adapters would differ on a field
+                # _create_media_buy_impl actually reads — a sandbox buy auto-executing
+                # where the tenant's mock would queue for approval.
+                #
+                # False is deliberate here rather than merely inherited: a simulator that
+                # parks the buyer's request awaiting a human defeats what the sandbox is
+                # for, and the approval gate exists to protect real spend, which this
+                # adapter cannot incur. Written out so the divergence is a decision the
+                # next reader can see, instead of one produced by an absent key — a test
+                # asserting only "the mock was selected" cannot tell those apart.
+                "manual_approval_required": False,
+            },
             principal,
             dry_run,
             tenant_id=tenant_id,

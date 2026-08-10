@@ -505,10 +505,20 @@ def _list_creative_formats_impl(
     )
 
     # Create response (no message/specification_version - not in adapter schema)
-    # Sandbox flag comes from the resolved account, never from a request header
-    # (BR-RULE-209 INV-4). AdCP 3.1.1 sandbox.mdx: "Sandbox mode is determined solely by
-    # the account reference", and the X-Dry-Run header this previously read is deprecated
-    # with "Sellers MUST NOT alter behavior based on these headers".
+    # THIS line no longer reads a request header for the mode; it is not a statement
+    # about the repo. The deprecated headers are still read elsewhere — testing_hooks
+    # reads x-dry-run into testing_ctx.dry_run, which drives get_adapter(dry_run=...)
+    # at several call sites, skips setup validation and manual approval, and gates
+    # apply_testing_hooks — so quoting sandbox.mdx's "Sellers MUST NOT alter behavior
+    # based on these headers" as though it were honoured repo-wide would misread. The
+    # spec's own remedy is the half worth carrying: "Sellers SHOULD ignore the headers
+    # entirely and MAY log a deprecation warning."
+    #
+    # Also dead as written: this module never calls enrich_identity_with_account and
+    # ListCreativeFormatsRequest has no account field in the pinned SDK, so
+    # identity.sandbox is structurally False and sandbox_flag is always None. Removing
+    # the header source was spec-correct; it has not yet been replaced by a live one.
+    # Tracked with the other unenriched paths rather than fixed here.
     sandbox_flag: bool | None = True if (identity and identity.sandbox) else None
 
     # Format list from registry is compatible with library Format type

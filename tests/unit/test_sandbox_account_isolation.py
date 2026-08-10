@@ -92,12 +92,67 @@ class TestSandboxRidesOnIdentity:
 
 
 class TestResolvedAccountCarriesMode:
-    """The flag was previously discarded at the one place it was known."""
+    """The NamedTuple's own contract — the DERIVATION is graded elsewhere.
 
-    def test_null_sandbox_column_is_live(self) -> None:
-        """Account.sandbox is nullable; NULL means live, matching AccountRepository's own
-        ``sandbox IS NULL OR sandbox = False`` filter."""
+    This class once claimed to grade the resolution seam ("the flag was previously
+    discarded at the one place it was known") while asserting
+    ``ResolvedAccount("acc_1", bool(None)).sandbox is False`` — which computes
+    ``bool()`` in the test body and reads a field back. Production's
+    ``bool(account.sandbox)`` at ``account_helpers.py:216``/``:270`` never ran, so
+    dropping the coercion at both sites left it green (it emits 2 mypy arg-type
+    errors, so the coercion is enforced by ``make quality``, but not by this test).
+
+    The derivation is now graded against a real row, through production, in
+    ``tests/integration/test_resolve_account.py::TestResolveAccountCarriesSandboxMode``
+    — including the NULL-column case this once approximated. What remains here is
+    the narrow thing a unit test can honestly own: the container preserves what it
+    is handed.
+    """
+
+    def test_resolved_account_preserves_the_mode_it_is_given(self) -> None:
         from src.core.helpers.account_helpers import ResolvedAccount
 
-        assert ResolvedAccount("acc_1", bool(None)).sandbox is False
+        assert ResolvedAccount("acc_1", False).sandbox is False
         assert ResolvedAccount("acc_2", True).sandbox is True
+
+
+class TestSandboxMockAdapterConfigIsStated:
+    """The sandbox mock and the tenant's own mock must not silently differ.
+
+    ``get_adapter`` builds a mock adapter on two paths: the sandbox short-circuit, and
+    the tenant whose configured ad server IS mock. The second reads AdapterConfig and
+    defaults ``manual_approval_required`` to True "for safety"; the first cannot read
+    that row at all — short-circuiting before any adapter config is the point.
+
+    ``_create_media_buy_impl`` reads ``adapter.manual_approval_required``, so an absent
+    key on one path and an explicit default on the other is a live behavioural fork: a
+    sandbox buy auto-executes where the tenant's mock queues. A test asserting only
+    "the mock adapter was selected" cannot see it, which is why this asserts the value.
+    """
+
+    @staticmethod
+    def _sandbox_adapter():
+        from unittest.mock import MagicMock
+
+        from src.core.helpers.adapter_helpers import get_adapter
+
+        principal = MagicMock()
+        principal.platform_mappings = {}
+        return get_adapter(principal, dry_run=True, tenant={"tenant_id": "t_cfg", "ad_server": "mock"}, sandbox=True)
+
+    def test_sandbox_mock_does_not_require_manual_approval(self) -> None:
+        """Deliberate, and stated in the config rather than inherited from the base class.
+
+        If this ever needs to become True, the change belongs in adapter_helpers with
+        its reason — not by deleting the key and letting the base default decide.
+        """
+        assert self._sandbox_adapter().manual_approval_required is False, (
+            "the sandbox mock's approval behaviour changed; a simulator that parks the "
+            "buyer's request awaiting a human defeats what the sandbox is for"
+        )
+
+    def test_sandbox_mock_is_actually_the_mock_adapter(self) -> None:
+        """Anchor: without this the assertion above could pass on any object."""
+        from src.adapters.mock_ad_server import MockAdServer
+
+        assert isinstance(self._sandbox_adapter(), MockAdServer)

@@ -9,11 +9,17 @@ beads: salesagent-8n4
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
 from src.core.database.repositories.account import AccountRepository
+
+if TYPE_CHECKING:
+    # Annotation only: importing models here at runtime would pull the ORM into a
+    # helper the repositories themselves import, which is the cycle uow.py documents.
+    from src.core.database.models import MediaBuy
+
 from src.core.exceptions import (
     AdCPAccountAmbiguousError,
     AdCPAccountNotFoundError,
@@ -90,6 +96,22 @@ def resolve_account(
     # Pydantic upstream. A fresh variant reaching here is an internal contract
     # violation, not a buyer-facing not-found — raise ValueError, not AdCPError.
     raise ValueError(f"Unsupported AccountReference variant: {type(inner)}")
+
+
+def sandbox_mode_for_buy(accounts: AccountRepository, media_buy: MediaBuy | None) -> bool:
+    """Sandbox mode of the account owning ``media_buy`` — the one buy-keyed derivation.
+
+    Two kinds of caller need this and only one of them can hold a UoW:
+    ``BuyKeyedSandboxMixin.sandbox_mode`` delegates here for UoW holders, and paths that
+    hold a raw session (the admin detail route) call it directly. Before this existed
+    they open-coded ``account_is_sandbox(repo, buy.account_id)`` instead, which is the
+    same decision expressed twice — and the shape that let five call sites drift into
+    three different forms of the same question.
+
+    The None-buy and unresolvable-account policies are ``account_is_sandbox``'s; see its
+    docstring for why those two cases are deliberately not symmetric.
+    """
+    return account_is_sandbox(accounts, media_buy.account_id if media_buy is not None else None)
 
 
 def account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> bool:

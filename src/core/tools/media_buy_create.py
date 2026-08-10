@@ -117,9 +117,7 @@ from src.core.database.models import MediaPackage as DBMediaPackage
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.database.models import Product as ProductModel
-from src.core.database.repositories.account import AccountRepository
 from src.core.helpers import log_tool_activity
-from src.core.helpers.account_helpers import account_is_sandbox
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
     extract_click_url,
@@ -798,7 +796,11 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             # runs outside this session, where an expired attribute would raise
             # DetachedInstanceError. Needed to re-derive sandbox mode at execution time.
             mb_account_id = media_buy.account_id
-            mb_sandbox = account_is_sandbox(AccountRepository(session, tenant_id), mb_account_id)
+            # The UoW opened at the top of this block owns both repositories, so the
+            # decision goes through the same seam every other buy-keyed path uses
+            # rather than re-deriving it from a hand-built repository. media_buy is
+            # already attached and read synchronously, so this adds no lookup.
+            mb_sandbox = uow.sandbox_mode(media_buy)
 
             # Reconstruct CreateMediaBuyRequest from raw_request
             try:

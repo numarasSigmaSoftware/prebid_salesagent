@@ -207,7 +207,7 @@ def _get_media_buy_delivery_impl(
     # single-mode request still constructs exactly one.
     _adapters_by_mode: dict[bool, AdServerAdapter] = {}
 
-    def _adapter_for(is_sandbox: bool) -> Any:
+    def _adapter_for(is_sandbox: bool) -> AdServerAdapter:
         if is_sandbox not in _adapters_by_mode:
             _adapters_by_mode[is_sandbox] = get_adapter(
                 principal,

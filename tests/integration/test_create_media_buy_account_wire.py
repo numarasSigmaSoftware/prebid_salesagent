@@ -21,12 +21,14 @@ success, by contrast, surfaces as a success envelope) — asserted via
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from tests.harness.assertions import assert_rejected
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 from tests.harness.transport import Transport
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -87,3 +89,52 @@ class TestAccountWirePassthrough:
         reaches enrich and this test fails.
         """
         self._run_account_wire(Transport.REST)
+
+
+class TestAccountReferenceRoutesTheAdapter:
+    """The mode an account reference RESOLVES TO decides which adapter is built.
+
+    The class above proves ``account`` crosses the wire. This proves the resolved
+    mode is then acted on — the identity-keyed forwarding site, which had no oracle.
+
+    ``test_sandbox_production_paths`` grades the BUY-keyed paths, where the mode comes
+    from the buy's own account. This is the other half: a request that CARRIES an
+    account reference, where the mode comes from ``identity.sandbox`` as set by
+    ``enrich_identity_with_account``. Forcing ``sandbox=False`` at the create sites
+    previously left the entire unit suite byte-identical, because nothing anywhere
+    drove ``identity.sandbox`` true.
+    """
+
+    @staticmethod
+    def _adapter_modes(*, account_sandbox: bool):
+        from tests.factories import AccountFactory, AgentAccountAccessFactory
+
+        with MediaBuyCreateEnv() as env:
+            tenant, principal, product, _pricing = env.setup_media_buy_data()
+            AccountFactory(tenant=tenant, account_id="acc_route", sandbox=account_sandbox)
+            # Resolution enforces agent access; without the grant the request is
+            # rejected before any adapter is constructed.
+            AgentAccountAccessFactory(
+                tenant_id=tenant.tenant_id,
+                principal_id=principal.principal_id,
+                account_id="acc_route",
+            )
+            now = datetime.now(UTC)
+            env.call_impl(
+                # The wire shape a buyer sends: a constructed model does not survive
+                # A2A/REST serialization, and the boundary resolves the dict identically.
+                account={"account_id": "acc_route"},
+                brand={"domain": "account-route.example.com"},
+                packages=[{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
+                start_time=(now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end_time=(now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                po_number="ACCOUNT-ROUTE-1",
+            )
+            return env.mock["adapter"]
+
+    def test_sandbox_account_reference_builds_the_sandbox_adapter(self, integration_db):
+        assert_all_sandbox(self._adapter_modes(account_sandbox=True), context="create_media_buy (account ref)")
+
+    def test_live_account_reference_builds_the_live_adapter(self, integration_db):
+        """Negative control — 'always sandbox' would disable real bookings and still pass above."""
+        assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")

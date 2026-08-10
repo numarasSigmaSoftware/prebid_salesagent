@@ -152,9 +152,13 @@ class TestUnresolvableAccountRefusesOnTheWire:
     in-process exception would grade the raise but not the contract: what the buyer
     receives is the two-layer envelope, and the boundary translation sits between.
 
-    The DB's composite FK (ON DELETE SET NULL) makes an orphaned reference unreachable
-    through any normal write — deleting an account nulls every referencing buy, and
-    Postgres rejects a dangling one — so this raise is defense-in-depth against
+    An orphaned reference is unreachable through any supported write, though not by the
+    mechanism first written here: the account DELETE does not null the referencing buys,
+    it FAILS. The FK is composite with ON DELETE SET NULL and no column list, so Postgres
+    nulls ALL referencing columns — including MediaBuy.tenant_id, which is NOT NULL — and
+    rejects the delete outright (probed against real Postgres: NotNullViolation on
+    tenant_id). Separately, sync_accounts --delete_missing only sets status="closed", and
+    get_by_id applies no status filter. So this raise is defense-in-depth against
     corruption or a future write path that skips resolution. Reaching it therefore
     means simulating the unresolvable lookup at the repository seam. Everything after
     that point is real: production's raise, the boundary translation, the wire bytes.

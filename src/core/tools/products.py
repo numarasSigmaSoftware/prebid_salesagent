@@ -708,7 +708,18 @@ async def _get_products_impl(
             from src.core.helpers.adapter_helpers import get_adapter
 
             # Get adapter in dry-run mode (no actual ad server calls)
-            adapter = get_adapter(principal, dry_run=True, tenant=tenant, sandbox=identity.sandbox)
+            adapter = get_adapter(
+                principal,
+                dry_run=True,
+                tenant=tenant,  # identity.sandbox is structurally False here: enrich_identity_with_account is
+                # never called on this path, so the flag is never populated regardless of the
+                # account the buyer sent. Written as the literal it always was, rather than an
+                # expression that reads like a live decision. GetProductsWholesaleRequest.account
+                # exists in the pinned schema and is accepted but never resolved — routing a
+                # sandbox get_products to the mock is tracked separately, and stating False here
+                # does not change behaviour, only what the next reader believes.
+                sandbox=False,
+            )
 
             supported_models = adapter.get_supported_pricing_models()
 

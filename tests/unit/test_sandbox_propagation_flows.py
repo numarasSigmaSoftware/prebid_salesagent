@@ -41,7 +41,14 @@ def _accounts_repo(modes: dict[str, bool | None]) -> MagicMock:
 
 
 def _media_buys_repo(buys: dict[str, str | None]) -> MagicMock:
-    """MediaBuyRepository stub: media_buy_id -> account_id."""
+    """MediaBuyRepository stub: media_buy_id -> account_id.
+
+    Stubs BOTH accessors with one policy. ``sandbox_mode_by_id`` uses the raising
+    variant — an id resolving to no row must not silently mean LIVE — so a stub that
+    defined only ``get_by_id`` would hand the seam a MagicMock whose ``.account_id`` is
+    itself a MagicMock, and the failure would look like a production defect rather than
+    a stub gap.
+    """
     repo = MagicMock()
 
     def get_by_id(media_buy_id: str):
@@ -51,7 +58,16 @@ def _media_buys_repo(buys: dict[str, str | None]) -> MagicMock:
         buy.account_id = buys[media_buy_id]
         return buy
 
+    def get_by_id_or_raise(media_buy_id: str, **_kwargs):
+        buy = get_by_id(media_buy_id)
+        if buy is None:
+            from src.core.exceptions import AdCPMediaBuyNotFoundError
+
+            raise AdCPMediaBuyNotFoundError(f"Media buy '{media_buy_id}' not found")
+        return buy
+
     repo.get_by_id.side_effect = get_by_id
+    repo.get_by_id_or_raise.side_effect = get_by_id_or_raise
     return repo
 
 

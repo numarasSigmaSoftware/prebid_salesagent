@@ -29,6 +29,12 @@ def _buy(media_buy_id: str, account_id: str | None) -> MagicMock:
     return buy
 
 
+def _raise_not_found(media_buy_id: str):
+    from src.core.exceptions import AdCPMediaBuyNotFoundError
+
+    raise AdCPMediaBuyNotFoundError(f"Media buy '{media_buy_id}' not found")
+
+
 def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMock:
     """A UoW stub whose accounts/media_buys repos answer from the given maps."""
     from types import MethodType
@@ -38,6 +44,11 @@ def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMo
     uow = MagicMock()
     uow.accounts.get_by_id.side_effect = lambda aid: _account(accounts[aid]) if aid in accounts else None
     uow.media_buys.get_by_id.side_effect = lambda mid: _buy(mid, buys[mid]) if mid in buys else None
+    # sandbox_mode_by_id uses the RAISING accessor: an id resolving to no row must not
+    # silently mean LIVE. Stubbed from the same map so the two cannot diverge.
+    uow.media_buys.get_by_id_or_raise.side_effect = lambda mid, **_kw: (
+        _buy(mid, buys[mid]) if mid in buys else _raise_not_found(mid)
+    )
     # Bind the REAL seam methods onto the stub. A MagicMock would return a MagicMock
     # for sandbox_mode_by_id(), which is not a bool and would grade nothing; binding
     # production's own methods means these tests still exercise the real derivation,

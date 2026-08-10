@@ -127,9 +127,23 @@ class BuyKeyedSandboxMixin:
     Operations addressed only by ``media_buy_id`` — update, performance, deferred
     creative push, the approval executor, the admin detail route — carry no account
     reference, so ``identity.sandbox`` is structurally False for them and the account
-    owning the buy is the only correct source. Any UoW that owns both ``media_buys``
-    and ``accounts`` gets the derivation here, so it is decided in one place rather
-    than re-derived (and left free to drift) at each call site.
+    owning the buy is the only correct source.
+
+    All five now share ONE derivation, but they do not all reach it the same way, and
+    the difference matters to anyone following an error message here:
+
+    - Four hold a UoW and use this mixin: update and the approval executor via
+      :meth:`sandbox_mode` (the row is already loaded), performance and deferred
+      creative push via :meth:`sandbox_mode_by_id`. Creative push holds an
+      ``AdminCreativeUoW``, not a ``MediaBuyUoW`` — which is why this is a mixin over
+      "any UoW owning both repositories" rather than a method on one class.
+    - The admin detail route holds a raw Flask session and no UoW, so it calls
+      ``account_helpers.sandbox_mode_for_buy`` directly. Sending it through a UoW would
+      close the request's own session underneath it (scoped_session with
+      expire_on_commit) and 500 the page.
+
+    This mixin therefore owns the derivation for UoW holders and delegates the decision
+    itself to that shared function, so the two entry points cannot drift apart.
 
     Mixed into every UoW that provides both repositories; the annotations below are
     the contract those UoWs must satisfy.
@@ -147,19 +161,32 @@ class BuyKeyedSandboxMixin:
         """
         # Lazy by necessity: account_helpers imports repositories.account, which
         # executes repositories/__init__ -> uow, so a module-scope import here cycles.
-        from src.core.helpers.account_helpers import account_is_sandbox
+        from src.core.helpers.account_helpers import sandbox_mode_for_buy
 
         assert self.accounts is not None
-        return account_is_sandbox(self.accounts, media_buy.account_id if media_buy is not None else None)
+        return sandbox_mode_for_buy(self.accounts, media_buy)
 
     def sandbox_mode_by_id(self, media_buy_id: str) -> bool:
         """Sandbox mode of the account owning the buy with ``media_buy_id``.
 
         Convenience over :meth:`sandbox_mode` for callers holding only an id; prefer
         :meth:`sandbox_mode` when the row is already loaded, to avoid a second lookup.
+
+        Raises ``AdCPMediaBuyNotFoundError`` for an id that resolves to no row, rather
+        than returning False. False here means LIVE — "dispatch this to the tenant's
+        real ad server" — decided about a buy that could not be found, which is the
+        fail-OPEN shape ``account_is_sandbox`` refuses one call below for a
+        non-resolvable account. Two not-found policies a function apart is how they
+        drift. Callers were safe only by ordering (media_buy_create built the adapter
+        at :1349 before checking the buy existed at :1359, and was saved by a later
+        join returning None); safety supplied by call order rather than by the seam
+        that owns the decision is exactly what this seam was created to end.
+
+        The ``None``-buy → live allowance stays on :meth:`sandbox_mode`, where the
+        caller has already decided the row's absence is acceptable.
         """
         assert self.media_buys is not None
-        return self.sandbox_mode(self.media_buys.get_by_id(media_buy_id))
+        return self.sandbox_mode(self.media_buys.get_by_id_or_raise(media_buy_id))
 
 
 class MediaBuyUoW(BuyKeyedSandboxMixin, BaseUoW):

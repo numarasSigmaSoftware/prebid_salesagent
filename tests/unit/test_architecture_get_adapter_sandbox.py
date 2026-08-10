@@ -29,17 +29,33 @@ SCAN_ROOTS = (REPO_ROOT / "src",)
 KNOWN_EXEMPT: dict[str, str] = {}
 
 
-def _get_adapter_calls() -> list[tuple[str, int, bool]]:
-    """Return (relative_path, lineno, passes_sandbox) for every get_adapter() call."""
-    found: list[tuple[str, int, bool]] = []
+# Sites whose sandbox= is a hard-wired literal, with the reason it cannot be derived.
+# A literal is normally the defect this guard exists to catch — it satisfies the
+# presence check while dispatching every request to one mode — so an entry here must
+# say why the mode is genuinely static. Allowlists only shrink.
+LITERAL_EXEMPT: dict[str, str] = {
+    "src/core/tools/products.py": (
+        "identity.sandbox is never populated on this path (no enrich_identity_with_account "
+        "call), so the value was already constantly False; the literal states it honestly"
+    ),
+    "src/core/tools/capabilities.py": (
+        "GetAdcpCapabilitiesRequest has no account field in the pinned SDK, so the mode is "
+        "dead by protocol rather than by omission"
+    ),
+}
+
+
+def _get_adapter_calls() -> list[tuple[str, int, bool, ast.expr | None]]:
+    """Return (relative_path, lineno, passes_sandbox, value_node) per get_adapter() call."""
+    found: list[tuple[str, int, bool, ast.expr | None]] = []
     for root in SCAN_ROOTS:
         for path in root.rglob("*.py"):
             tree = safe_parse(path)
             if tree is None:
                 continue
             for call in iter_call_expressions(tree, "get_adapter"):
-                passes = any(kw.arg == "sandbox" for kw in call.keywords)
-                found.append((str(path.relative_to(REPO_ROOT)), call.lineno, passes))
+                value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+                found.append((str(path.relative_to(REPO_ROOT)), call.lineno, value is not None, value))
     return found
 
 
@@ -49,7 +65,9 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
     assert calls, "found no get_adapter() calls — the scan roots are wrong"
 
     missing = [
-        f"{path}:{lineno}" for path, lineno, passes in calls if not passes and f"{path}:{lineno}" not in KNOWN_EXEMPT
+        f"{path}:{lineno}"
+        for path, lineno, passes, _value in calls
+        if not passes and f"{path}:{lineno}" not in KNOWN_EXEMPT
     ]
 
     assert not missing, (
@@ -57,9 +75,13 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
         + "\n  ".join(missing)
         + "\n\nPass sandbox=identity.sandbox where an account-enriched ResolvedIdentity is "
         "in scope. On buy-keyed and deferred paths (update, performance, creative push, "
-        "the approval executor, admin routes) use MediaBuyUoW.sandbox_mode_by_id(id) — or "
-        "sandbox_mode(buy) when the row is already loaded. See AdCP 3.1.1 sandbox.mdx "
-        "§Seller implementation."
+        "the approval executor, admin routes) derive it from the buy's account: with a UoW "
+        "in scope use BuyKeyedSandboxMixin.sandbox_mode(buy) — or sandbox_mode_by_id(id) when "
+        "only the id is held — and without one call "
+        "account_helpers.sandbox_mode_for_buy(accounts, buy). Named for the MIXIN, not a concrete "
+        "UoW: deferred creative push holds an AdminCreativeUoW, so MediaBuyUoW.sandbox_mode_by_id "
+        "is an AttributeError there, and the admin detail route holds no UoW at all. "
+        "See AdCP 3.1.1 sandbox.mdx §Seller implementation."
     )
 
 
@@ -72,37 +94,163 @@ def test_guard_would_catch_a_regression() -> None:
     )
 
 
-# Operations addressed by media_buy_id carry no account reference, so identity.sandbox is
-# structurally False for them. Sourcing sandbox= from the identity on these paths is the
-# original defect wearing the right keyword — the presence check above cannot see it.
-_BUY_KEYED_MODULES = (
-    "src/core/tools/media_buy_update.py",
-    "src/core/tools/performance.py",
-    "src/core/tools/media_buy_list.py",
-    "src/core/tools/media_buy_delivery.py",
-)
+# Sites where identity.sandbox is the CORRECT source: the request itself carries an
+# account reference, which enrich_identity_with_account resolves at the boundary before
+# _impl runs. Everywhere else the identity is unenriched and the flag is structurally
+# False, so reading it is the original defect wearing the right keyword.
+IDENTITY_KEYED_SITES: dict[str, str] = {
+    "src/core/tools/media_buy_create.py": (
+        "create_media_buy declares and forwards `account`; the boundary enriches the "
+        "identity before _impl, so identity.sandbox is the resolved account's mode"
+    ),
+}
 
 
-def test_buy_keyed_operations_do_not_source_sandbox_from_identity() -> None:
-    """A correct keyword from the wrong source still dispatches sandbox buys to live."""
+def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> bool:
+    """True when ``value`` reaches ``identity.sandbox`` — directly or through a local.
+
+    The previous arm only matched ``sandbox=identity.sandbox`` written inline, so it was
+    inert: every scanned site passes a bare Name (``_mb_sandbox``, ``is_sandbox``,
+    ``partition_is_sandbox``, ``sandbox``). Deleting its whole body left the guard green,
+    and reverting a module to the original defect in its own idiom did not redden it.
+    Resolving one assignment hop is what makes the arm able to fail at all.
+    """
+
+    def _is_identity_attr(node: ast.expr) -> bool:
+        # identity.sandbox, self.identity.sandbox, ctx.identity.sandbox ...
+        if not (isinstance(node, ast.Attribute) and node.attr == "sandbox"):
+            return False
+        base = node.value
+        if isinstance(base, ast.Name):
+            return base.id == "identity"
+        return isinstance(base, ast.Attribute) and base.attr == "identity"
+
+    if _is_identity_attr(value):
+        return True
+    if not (isinstance(value, ast.Name) and func is not None):
+        return False
+    # One hop: find the local's assignment inside the same function.
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            targets = [tgt.id for tgt in node.targets if isinstance(tgt, ast.Name)]
+            if value.id in targets and _is_identity_attr(node.value):
+                return True
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == value.id and node.value is not None:
+                if _is_identity_attr(node.value):
+                    return True
+    return False
+
+
+def _enclosing_function(tree: ast.Module, call: ast.Call):
+    """The innermost function containing *call*, or None at module scope."""
+    best = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.lineno <= call.lineno and (node.end_lineno or node.lineno) >= call.lineno:
+            if best is None or node.lineno > best.lineno:
+                best = node
+    return best
+
+
+def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
+    """A correct keyword from the wrong source still dispatches sandbox buys to live.
+
+    Scans every module with a get_adapter call rather than a hardcoded four. The old
+    list named update/performance/list/delivery while the failure message advertised
+    "update, performance, creative push, the approval executor, admin routes" — so
+    injecting the defect at the approval executor or the admin route left the guard
+    green at exactly the sites the message told the reader were covered.
+    """
     offenders: list[str] = []
-    for rel in _BUY_KEYED_MODULES:
-        tree = safe_parse(REPO_ROOT / rel)
-        assert tree is not None, f"{rel} is missing — update _BUY_KEYED_MODULES"
-        for call in iter_call_expressions(tree, "get_adapter"):
-            for kw in call.keywords:
-                if kw.arg != "sandbox":
+    for root in SCAN_ROOTS:
+        for path in root.rglob("*.py"):
+            tree = safe_parse(path)
+            if tree is None:
+                continue
+            rel = str(path.relative_to(REPO_ROOT))
+            if rel in IDENTITY_KEYED_SITES:
+                continue
+            for call in iter_call_expressions(tree, "get_adapter"):
+                value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+                if value is None:
                     continue
-                # sandbox=identity.sandbox
-                if isinstance(kw.value, ast.Attribute) and kw.value.attr == "sandbox":
-                    base = getattr(kw.value.value, "id", None)
-                    if base == "identity":
-                        offenders.append(f"{rel}:{call.lineno}")
+                if _resolves_to_identity_sandbox(value, _enclosing_function(tree, call)):
+                    offenders.append(f"{rel}:{call.lineno}")
 
     assert not offenders, (
-        "buy-keyed operation sources sandbox= from identity.sandbox at:\n  "
-        + "\n  ".join(offenders)
-        + "\n\nidentity.sandbox is only populated when the request carries an account "
-        "reference; these operations are addressed by media_buy_id. Derive the mode from "
-        "the buy's account instead (uow.sandbox_mode_by_id / partition_by_sandbox_mode)."
+        "sandbox= resolves to identity.sandbox on a path that does not carry an account "
+        "reference:\n  " + "\n  ".join(offenders) + "\n\nidentity.sandbox is only populated where the boundary ran "
+        "enrich_identity_with_account. Derive the mode from the buy's account instead "
+        "(BuyKeyedSandboxMixin.sandbox_mode / sandbox_mode_by_id / "
+        "partition_by_sandbox_mode), or add the module to IDENTITY_KEYED_SITES with the "
+        "reason its requests carry an account."
     )
+
+
+def test_identity_arm_catches_both_the_inline_and_the_via_local_form() -> None:
+    """Self-test, both signs and both idioms — the arm was previously inert.
+
+    Production writes the via-local form at every site, so an arm that only matched the
+    inline form could never fire. A negative case is included because an arm that flags
+    everything is as useless as one that flags nothing.
+    """
+    inline = ast.parse("def f(identity):\n    return get_adapter(p, sandbox=identity.sandbox)\n")
+    via_local = ast.parse("def f(identity):\n    s = identity.sandbox\n    return get_adapter(p, sandbox=s)\n")
+    via_self = ast.parse("def f(self):\n    s = self.identity.sandbox\n    return get_adapter(p, sandbox=s)\n")
+    derived = ast.parse("def f(uow, mb):\n    s = uow.sandbox_mode(mb)\n    return get_adapter(p, sandbox=s)\n")
+
+    def _flags(tree: ast.Module) -> bool:
+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "get_adapter")
+        value = next(kw.value for kw in call.keywords if kw.arg == "sandbox")
+        return _resolves_to_identity_sandbox(value, _enclosing_function(tree, call))
+
+    assert _flags(inline), "the arm no longer catches the inline identity.sandbox form"
+    assert _flags(via_local), "the arm does not follow a local assignment — this is how it was inert"
+    assert _flags(via_self), "the arm misses self.identity.sandbox"
+    assert not _flags(derived), "the arm flags a correct buy-keyed derivation"
+
+
+def test_no_call_site_hard_wires_the_sandbox_mode() -> None:
+    """A literal satisfies the presence check while deciding nothing.
+
+    Replacing any site's expression with ``sandbox=False`` — the cheapest way to
+    satisfy arm 1 — left that arm green at 12 of 12 sites, and the unit suite
+    byte-identical for several of them. Presence and value are different claims, so
+    they get different arms: this one rejects a constant unless the site is listed in
+    LITERAL_EXEMPT with a written reason.
+    """
+    offenders = [
+        f"{path}:{lineno}"
+        for path, lineno, _passes, value in _get_adapter_calls()
+        if isinstance(value, ast.Constant) and path not in LITERAL_EXEMPT
+    ]
+
+    assert not offenders, (
+        "get_adapter() called with a hard-wired sandbox= literal at:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nA constant dispatches every request to one mode regardless of the account. "
+        "Derive it (identity.sandbox where the request carries an account reference, "
+        "uow.sandbox_mode*/partition_by_sandbox_mode on buy-keyed paths), or add the site "
+        "to LITERAL_EXEMPT with the reason the mode is genuinely static."
+    )
+
+
+def test_literal_arm_would_catch_a_hard_wired_site() -> None:
+    """Self-test with BOTH signs: the detector must flag a literal and pass a derivation.
+
+    The existing self-test at the top re-implements arm 1's predicate against a
+    synthetic string rather than calling the detector, and covers only one sign. An
+    arm that never fires and an arm with no true positive read identically from the
+    outside — green.
+    """
+    flagged = ast.parse("a = get_adapter(p, sandbox=False)\n")
+    derived = ast.parse("a = get_adapter(p, sandbox=identity.sandbox)\n")
+
+    def _value(tree: ast.Module) -> ast.expr | None:
+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
+        return next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+
+    assert isinstance(_value(flagged), ast.Constant), "the literal arm no longer recognises a constant"
+    assert not isinstance(_value(derived), ast.Constant), "the literal arm would flag a legitimate derivation"

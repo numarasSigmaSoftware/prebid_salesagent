@@ -1,0 +1,127 @@
+"""The admin media-buy detail route reads a sandbox buy through the simulator.
+
+The route builds an adapter to fetch delivery metrics for a buy it is displaying. It
+holds no buyer identity — an operator is looking at someone else's buy — so the mode
+must come from the buy's own account. Getting that wrong reads a sandbox buy's delivery
+from the tenant's real ad server, which is the same defect as dispatching one there.
+
+This route had no oracle at all. Its ``sandbox=`` argument could be replaced with a
+hard-wired ``False`` and every suite stayed green, because the metrics block is gated on
+``status in ("active", "approved", "completed")`` while the only tests that loaded the
+page created a ``pending_approval`` buy — so the block never executed anywhere.
+
+Driven through the Flask client against a real database rather than by calling the view
+function: the mode is derived inside the request, from a row, using the route's own
+session, and that session's lifetime is itself load-bearing here (routing this through a
+UoW would close it under the route and 500 the page).
+"""
+
+import pytest
+
+from src.admin.app import create_app
+from tests.factories import AccountFactory, MediaBuyFactory, PrincipalFactory, TenantFactory
+
+app = create_app()
+
+pytestmark = [pytest.mark.admin, pytest.mark.requires_db]
+
+_TENANT = "mbdetail_sbx_tenant"
+
+
+@pytest.fixture
+def client():
+    app.config["TESTING"] = True
+    app.config["WTF_CSRF_ENABLED"] = False
+    app.config["SESSION_COOKIE_PATH"] = "/"
+    with app.test_client() as c:
+        yield c
+
+
+def _auth(client, tenant_id):
+    """The session shape @require_tenant_access actually reads.
+
+    A partial session yields 403 and the metrics block never runs — which the
+    vacuity anchor below reports rather than passing as "no adapter, no problem".
+    """
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["user"] = {"email": "test@example.com", "is_super_admin": True}
+        sess["email"] = "test@example.com"
+        sess["tenant_id"] = tenant_id
+        sess["test_user"] = "test@example.com"
+        sess["test_user_role"] = "super_admin"
+        sess["test_user_name"] = "Test User"
+        sess["test_tenant_id"] = tenant_id
+
+
+def _seed(factory_session, *, sandbox: bool) -> str:
+    """An ACTIVE buy owned by an account in the given mode.
+
+    ACTIVE is the point: the metrics block the sandbox decision lives in is gated on
+    status, so a pending buy — which is all the existing page tests create — never
+    reaches it.
+
+    Factories only, no session.add()/get_db_session() in the body (CLAUDE.md §Test
+    Fixtures, enforced by test_architecture_repository_pattern, which scans tests/admin).
+    """
+    from datetime import date
+
+    suffix = "sbx" if sandbox else "live"
+    tenant = TenantFactory(tenant_id=f"{_TENANT}_{suffix}", ad_server="mock")
+    principal = PrincipalFactory(tenant=tenant, principal_id=f"p_detail_{suffix}")
+    AccountFactory(tenant=tenant, account_id="acc_detail", sandbox=sandbox)
+    buy = MediaBuyFactory(
+        tenant=tenant,
+        principal=principal,
+        account_id="acc_detail",
+        status="active",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 12, 31),
+    )
+    factory_session.commit()
+    return tenant.tenant_id, buy.media_buy_id
+
+
+def _sandbox_args(monkeypatch) -> list[bool]:
+    """Record the sandbox= of every get_adapter the route builds."""
+    seen: list[bool] = []
+    # Patched at the SOURCE module: the route imports get_adapter inside the request
+    # handler, so it is never an attribute of the blueprint module and patching there
+    # silently no-ops (AttributeError at best, a spy that records nothing at worst).
+    import src.core.helpers.adapter_helpers as helpers
+
+    real = helpers.get_adapter
+
+    def spy(*args, **kwargs):
+        assert "sandbox" in kwargs, "the route built an adapter without deciding the mode"
+        seen.append(kwargs["sandbox"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(helpers, "get_adapter", spy)
+    return seen
+
+
+def test_sandbox_buy_detail_reads_through_the_simulator(client, factory_session, monkeypatch):
+    tenant_id, media_buy_id = _seed(factory_session, sandbox=True)
+    seen = _sandbox_args(monkeypatch)
+    _auth(client, tenant_id)
+
+    client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
+
+    assert seen, "the metrics block never ran — the assertion below would be vacuous"
+    assert all(seen), (
+        f"the admin detail route built a LIVE adapter for a sandbox buy (modes={seen}); "
+        "an operator viewing the page would read its delivery from the tenant's real ad server"
+    )
+
+
+def test_live_buy_detail_reads_through_the_real_adapter(client, factory_session, monkeypatch):
+    """Negative control — 'always sandbox' would silently show simulated delivery for real buys."""
+    tenant_id, media_buy_id = _seed(factory_session, sandbox=False)
+    seen = _sandbox_args(monkeypatch)
+    _auth(client, tenant_id)
+
+    client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
+
+    assert seen, "the metrics block never ran — the assertion below would be vacuous"
+    assert not any(seen), f"a live buy's delivery was read through the simulator (modes={seen})"
