@@ -7,24 +7,29 @@ implementation requires that a request referencing a sandbox account:
     - MUST NOT charge real money or create real billing records
 
 Adapters are selected per-tenant, so ``get_adapter()`` is the single chokepoint where a
-sandbox request can be diverted to the mock adapter. ``sandbox=`` defaults to ``False``
-so that omitting it is *safe by type* but *wrong by default* — a new call site that
-forgets it would dispatch a sandbox buy to the tenant's real ad server, which is the
-exact defect this guard exists to prevent recurring.
+sandbox request can be diverted to the mock adapter. ``sandbox=`` is keyword-only and
+REQUIRED — it has no default, so omitting it is a ``TypeError`` rather than a silent
+dispatch to the tenant's real ad server. That is the enforcement this guard extends, not
+the one it substitutes for: the signature covers every caller in any repo, while these
+arms cover what a type checker cannot see — that a *present* keyword can still carry a
+hard-wired constant, or a value read from an identity that was never enriched.
 
-This is a semantic-SSOT guard: no linter or type checker can see that a missing keyword
-argument means "books a real campaign". Allowlists here may only shrink.
+This is a semantic-SSOT guard: no linter or type checker can see that the wrong keyword
+VALUE means "books a real campaign". Allowlists here may only shrink.
 """
 
 from __future__ import annotations
 
 import ast
+from typing import NamedTuple
 
 from tests.unit._architecture_helpers import REPO_ROOT, iter_call_expressions, safe_parse
 
 SCAN_ROOTS = (REPO_ROOT / "src",)
 
 # Call sites that legitimately cannot decide sandbox mode, with the reason.
+# Keyed by ``path:lineno`` — the only arm where that is right, because a site with NO
+# sandbox= keyword has no expression to name and no stable identity beyond its position.
 # Empty by design — add an entry only with a written justification, never to silence.
 KNOWN_EXEMPT: dict[str, str] = {}
 
@@ -33,29 +38,87 @@ KNOWN_EXEMPT: dict[str, str] = {}
 # A literal is normally the defect this guard exists to catch — it satisfies the
 # presence check while dispatching every request to one mode — so an entry here must
 # say why the mode is genuinely static. Allowlists only shrink.
+#
+# Keyed by ``module::function``, matching IDENTITY_KEYED_SITES. Keying it by MODULE was
+# the same escape hatch that arm was fixed for one commit earlier: a file-wide entry
+# exempts every get_adapter call in the file, so adding a second hard-wired call to an
+# already-listed module inherited the first one's exemption and left this arm green.
+# The two allowlists now answer the same question — "which call site?" — the same way.
 LITERAL_EXEMPT: dict[str, str] = {
-    "src/core/tools/products.py": (
+    "src/core/tools/products.py::_get_products_impl": (
         "identity.sandbox is never populated on this path (no enrich_identity_with_account "
         "call), so the value was already constantly False; the literal states it honestly"
     ),
-    "src/core/tools/capabilities.py": (
+    "src/core/tools/capabilities.py::_get_adcp_capabilities_impl": (
         "GetAdcpCapabilitiesRequest has no account field in the pinned SDK, so the mode is "
         "dead by protocol rather than by omission"
     ),
 }
 
 
-def _get_adapter_calls() -> list[tuple[str, int, bool, ast.expr | None]]:
-    """Return (relative_path, lineno, passes_sandbox, value_node) per get_adapter() call."""
-    found: list[tuple[str, int, bool, ast.expr | None]] = []
+# Sites where identity.sandbox is the CORRECT source: the request itself carries an
+# account reference, which enrich_identity_with_account resolves at the boundary before
+# _impl runs. Everywhere else the identity is unenriched and the flag is structurally
+# False, so reading it is the original defect wearing the right keyword.
+# Keyed by ``module::function``, NOT by module. A module-wide entry exempts every
+# get_adapter call in the file, and media_buy_create.py holds five across four
+# functions — only two of which are request-scoped. Keying it by file therefore
+# un-guarded the approval executor, the site the round that added this arm named as
+# its own example: reverting it to identity.sandbox left the guard green.
+#
+# A function that receives the mode as a PARAMETER needs no entry here: the arm resolves
+# names through assignments only, so a bare parameter never matches, and the value's
+# correctness is graded where it is chosen — at the caller, which is listed. An entry for
+# such a function exempts nothing and reads as coverage it does not provide; one was
+# removed for exactly that reason (deleting it left this file at 6 passed).
+IDENTITY_KEYED_SITES: dict[str, str] = {
+    "src/core/tools/media_buy_create.py::_create_media_buy_impl": (
+        "create_media_buy declares and forwards `account`; the boundary enriches the "
+        "identity before _impl, so identity.sandbox is the resolved account's mode"
+    ),
+}
+
+
+class _AdapterCall(NamedTuple):
+    """One ``get_adapter()`` call site and everything the three arms need about it."""
+
+    path: str
+    lineno: int
+    site: str  # "path::function", or "path" at module scope — the allowlist key
+    func: ast.FunctionDef | ast.AsyncFunctionDef | None
+    value: ast.expr | None  # the sandbox= expression, or None when the keyword is absent
+
+
+def _enclosing_function(tree: ast.Module, call: ast.Call):
+    """The innermost function containing *call*, or None at module scope."""
+    best = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.lineno <= call.lineno and (node.end_lineno or node.lineno) >= call.lineno:
+            if best is None or node.lineno > best.lineno:
+                best = node
+    return best
+
+
+def _get_adapter_calls() -> list[_AdapterCall]:
+    """Every ``get_adapter()`` call under SCAN_ROOTS, with its enclosing function.
+
+    One collector for all three arms. Each previously walked the scan roots itself, so
+    "which sites does this guard see?" had two answers that could drift apart silently.
+    """
+    found: list[_AdapterCall] = []
     for root in SCAN_ROOTS:
         for path in root.rglob("*.py"):
             tree = safe_parse(path)
             if tree is None:
                 continue
+            rel = str(path.relative_to(REPO_ROOT))
             for call in iter_call_expressions(tree, "get_adapter"):
                 value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
-                found.append((str(path.relative_to(REPO_ROOT)), call.lineno, value is not None, value))
+                func = _enclosing_function(tree, call)
+                site = f"{rel}::{func.name}" if func is not None else rel
+                found.append(_AdapterCall(rel, call.lineno, site, func, value))
     return found
 
 
@@ -65,9 +128,9 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
     assert calls, "found no get_adapter() calls — the scan roots are wrong"
 
     missing = [
-        f"{path}:{lineno}"
-        for path, lineno, passes, _value in calls
-        if not passes and f"{path}:{lineno}" not in KNOWN_EXEMPT
+        f"{call.path}:{call.lineno}"
+        for call in calls
+        if call.value is None and f"{call.path}:{call.lineno}" not in KNOWN_EXEMPT
     ]
 
     assert not missing, (
@@ -94,27 +157,6 @@ def test_guard_would_catch_a_regression() -> None:
     )
 
 
-# Sites where identity.sandbox is the CORRECT source: the request itself carries an
-# account reference, which enrich_identity_with_account resolves at the boundary before
-# _impl runs. Everywhere else the identity is unenriched and the flag is structurally
-# False, so reading it is the original defect wearing the right keyword.
-# Keyed by ``module::function``, NOT by module. A module-wide entry exempts every
-# get_adapter call in the file, and media_buy_create.py holds five across four
-# functions — only two of which are request-scoped. Keying it by file therefore
-# un-guarded the approval executor, the site the round that added this arm named as
-# its own example: reverting it to identity.sandbox left the guard green.
-IDENTITY_KEYED_SITES: dict[str, str] = {
-    "src/core/tools/media_buy_create.py::_create_media_buy_impl": (
-        "create_media_buy declares and forwards `account`; the boundary enriches the "
-        "identity before _impl, so identity.sandbox is the resolved account's mode"
-    ),
-    "src/core/tools/media_buy_create.py::_execute_adapter_media_buy_creation": (
-        "called from _create_media_buy_impl with the mode it already resolved from the "
-        "request's account reference, and passed down as a plain argument"
-    ),
-}
-
-
 def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> bool:
     """True when ``value`` reaches ``identity.sandbox`` — directly or through a local.
 
@@ -123,6 +165,10 @@ def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.A
     ``partition_is_sandbox``, ``sandbox``). Deleting its whole body left the guard green,
     and reverting a module to the original defect in its own idiom did not redden it.
     Resolving one assignment hop is what makes the arm able to fail at all.
+
+    A bare PARAMETER deliberately does not match: the mode is chosen by the caller, which
+    the arm grades on its own. Following parameters would flag a forwarding function whose
+    argument is already correct at its only source.
     """
 
     def _is_identity_attr(node: ast.expr) -> bool:
@@ -151,18 +197,6 @@ def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.A
     return False
 
 
-def _enclosing_function(tree: ast.Module, call: ast.Call):
-    """The innermost function containing *call*, or None at module scope."""
-    best = None
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        if node.lineno <= call.lineno and (node.end_lineno or node.lineno) >= call.lineno:
-            if best is None or node.lineno > best.lineno:
-                best = node
-    return best
-
-
 def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
     """A correct keyword from the wrong source still dispatches sandbox buys to live.
 
@@ -172,30 +206,20 @@ def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
     injecting the defect at the approval executor or the admin route left the guard
     green at exactly the sites the message told the reader were covered.
     """
-    offenders: list[str] = []
-    for root in SCAN_ROOTS:
-        for path in root.rglob("*.py"):
-            tree = safe_parse(path)
-            if tree is None:
-                continue
-            rel = str(path.relative_to(REPO_ROOT))
-            for call in iter_call_expressions(tree, "get_adapter"):
-                value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
-                if value is None:
-                    continue
-                func = _enclosing_function(tree, call)
-                site = f"{rel}::{func.name}" if func is not None else rel
-                if site in IDENTITY_KEYED_SITES:
-                    continue
-                if _resolves_to_identity_sandbox(value, func):
-                    offenders.append(f"{rel}:{call.lineno} (in {func.name if func else '<module>'})")
+    offenders = [
+        f"{call.path}:{call.lineno} (in {call.func.name if call.func else '<module>'})"
+        for call in _get_adapter_calls()
+        if call.value is not None
+        and call.site not in IDENTITY_KEYED_SITES
+        and _resolves_to_identity_sandbox(call.value, call.func)
+    ]
 
     assert not offenders, (
         "sandbox= resolves to identity.sandbox on a path that does not carry an account "
         "reference:\n  " + "\n  ".join(offenders) + "\n\nidentity.sandbox is only populated where the boundary ran "
         "enrich_identity_with_account. Derive the mode from the buy's account instead "
         "(BuyKeyedSandboxMixin.sandbox_mode / sandbox_mode_by_id / "
-        "partition_by_sandbox_mode), or add the module to IDENTITY_KEYED_SITES with the "
+        "partition_by_sandbox_mode), or add the site to IDENTITY_KEYED_SITES with the "
         "reason its requests carry an account."
     )
 
@@ -233,9 +257,9 @@ def test_no_call_site_hard_wires_the_sandbox_mode() -> None:
     LITERAL_EXEMPT with a written reason.
     """
     offenders = [
-        f"{path}:{lineno}"
-        for path, lineno, _passes, value in _get_adapter_calls()
-        if isinstance(value, ast.Constant) and path not in LITERAL_EXEMPT
+        f"{call.path}:{call.lineno}"
+        for call in _get_adapter_calls()
+        if isinstance(call.value, ast.Constant) and call.site not in LITERAL_EXEMPT
     ]
 
     assert not offenders, (
@@ -265,3 +289,49 @@ def test_literal_arm_would_catch_a_hard_wired_site() -> None:
 
     assert isinstance(_value(flagged), ast.Constant), "the literal arm no longer recognises a constant"
     assert not isinstance(_value(derived), ast.Constant), "the literal arm would flag a legitimate derivation"
+
+
+def test_exemptions_are_function_scoped_not_module_scoped() -> None:
+    """A second hard-wired call in an already-exempt MODULE must still be flagged.
+
+    Both allowlists were keyed by module at some point, and both times the entry that
+    covered one legitimate site silently covered every future one in the same file. This
+    asserts the property rather than the spelling: every key names a function, and adding
+    a call in an exempt module under a DIFFERENT function is not exempt.
+    """
+    for key in (*LITERAL_EXEMPT, *IDENTITY_KEYED_SITES):
+        assert "::" in key, f"{key!r} exempts a whole module — key it as 'path::function' instead"
+
+    exempt_modules = {key.split("::")[0] for key in LITERAL_EXEMPT}
+    assert exempt_modules, "no literal exemptions to check — this self-test has gone vacuous"
+    for module in exempt_modules:
+        intruder = f"{module}::_some_other_function"
+        assert intruder not in LITERAL_EXEMPT, (
+            f"{intruder} is exempt without its own entry — the arm is module-scoped again"
+        )
+
+
+def test_every_exemption_names_a_real_call_site() -> None:
+    """An allowlist entry that exempts nothing reads as coverage it does not provide.
+
+    The removed ``_execute_adapter_media_buy_creation`` entry matched no site the arm
+    would ever flag — it forwards a parameter, which the arm does not resolve — so the
+    file read as if that path were reviewed and exempted when it was simply invisible.
+    Stale entries are how an allowlist grows without anyone deciding to grow it.
+    """
+    calls = _get_adapter_calls()
+    literal_sites = {call.site for call in calls if isinstance(call.value, ast.Constant)}
+    identity_sites = {
+        call.site for call in calls if call.value is not None and _resolves_to_identity_sandbox(call.value, call.func)
+    }
+
+    assert not (set(LITERAL_EXEMPT) - literal_sites), (
+        "LITERAL_EXEMPT entries that no longer match a hard-wired call site: "
+        f"{sorted(set(LITERAL_EXEMPT) - literal_sites)} — delete them; the site they "
+        "described has changed or gone"
+    )
+    assert not (set(IDENTITY_KEYED_SITES) - identity_sites), (
+        "IDENTITY_KEYED_SITES entries that no longer match a call reading identity.sandbox: "
+        f"{sorted(set(IDENTITY_KEYED_SITES) - identity_sites)} — delete them; an entry that "
+        "exempts nothing is not coverage"
+    )
