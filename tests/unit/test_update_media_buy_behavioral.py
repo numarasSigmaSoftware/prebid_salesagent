@@ -35,6 +35,7 @@ from src.core.schemas import (
     Budget,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
+    UpdateMediaBuySubmitted,
     UpdateMediaBuySuccess,
 )
 from src.core.tools.media_buy_update import _update_media_buy_impl
@@ -486,11 +487,16 @@ def test_manual_approval_path_through_impl():
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
-        # Should return UpdateMediaBuySuccess (not error)
-        assert isinstance(result.response, UpdateMediaBuySuccess)
-        assert result.response.media_buy_id == "mb_manual"
-        # affected_packages should be empty (update not applied yet)
-        assert result.response.affected_packages == []
+        # Spec 3.1.1: a not-yet-applied (pending approval) update is the SUBMITTED variant,
+        # not a completed success. status="submitted" + task_id (the workflow step).
+        assert isinstance(result, UpdateMediaBuySubmitted)
+        assert result.status == "submitted"
+        assert result.task_id == "step_001"
+        # The submitted envelope carries no applied-change fields: the update is deferred
+        # until approval (the pre-3.1.1 success shape asserted `affected_packages == []`).
+        dumped = result.model_dump()
+        assert "affected_packages" not in dumped
+        assert "media_buy_id" not in dumped
 
         # Workflow step should be updated with requires_approval status
         result_calls = env.mock["ctx_mgr"].return_value.audit_workflow_step_result.call_args_list
@@ -597,7 +603,7 @@ def test_manual_approval_creates_object_workflow_mapping():
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
-        assert isinstance(result.response, UpdateMediaBuySuccess)
+        assert isinstance(result, UpdateMediaBuySubmitted)
 
         # The DB session should have had an ObjectWorkflowMapping added via session.add()
         mock_session = env.mock["uow"].return_value.session
@@ -647,7 +653,7 @@ def test_manual_approval_stores_raw_request():
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
-        assert isinstance(result.response, UpdateMediaBuySuccess)
+        assert isinstance(result, UpdateMediaBuySubmitted)
 
         # The workflow step's response_data must contain enough information
         # to execute the update after approval. At minimum, the request data
@@ -939,7 +945,7 @@ class TestUC003PauseResume:
             req = UpdateMediaBuyRequest(media_buy_id="mb_pause_manual", paused=True)
             result = _update_media_buy_impl(req=req, identity=identity)
 
-            assert isinstance(result.response, UpdateMediaBuySuccess)
+            assert isinstance(result, UpdateMediaBuySubmitted)
             result_calls = env.mock["ctx_mgr"].return_value.audit_workflow_step_result.call_args_list
             assert len(result_calls) >= 1
             assert result_calls[0][1]["status"] == "requires_approval"
@@ -1115,7 +1121,7 @@ class TestUC003UpdateCreativeIds:
         """Helper to set up creative-related mocks.
 
         Wires the shared creative-validation path: existence/status/format are
-        resolved via ``uow.creatives.admin_get_by_ids`` and ``uow.products.get_by_id``
+        resolved via ``uow.creatives.get_by_ids`` and ``uow.products.get_by_id``
         (not raw session.scalars), matching production.
         """
         mock_session = env.mock["uow"].return_value.session
@@ -1137,8 +1143,8 @@ class TestUC003UpdateCreativeIds:
             creatives.append(c)
 
         # Creative existence/status via repository (shared validation helper).
-        uow.creatives.admin_get_by_ids.side_effect = None
-        uow.creatives.admin_get_by_ids.return_value = creatives
+        uow.creatives.get_by_ids.side_effect = None
+        uow.creatives.get_by_ids.return_value = creatives
 
         # Session scalars returns creatives (legacy paths) + no existing assignments.
         mock_scalars = MagicMock()
@@ -1169,8 +1175,8 @@ class TestUC003UpdateCreativeIds:
             c1 = MagicMock()
             c1.creative_id = "C1"
             c1.status = "active"
-            env.mock["uow"].return_value.creatives.admin_get_by_ids.side_effect = None
-            env.mock["uow"].return_value.creatives.admin_get_by_ids.return_value = [c1]
+            env.mock["uow"].return_value.creatives.get_by_ids.side_effect = None
+            env.mock["uow"].return_value.creatives.get_by_ids.return_value = [c1]
 
             identity = env.identity
             req = UpdateMediaBuyRequest(
@@ -1247,8 +1253,8 @@ class TestUC003UpdateCreativeIds:
             c1.status = "active"
             c1.agent_url = "http://test.com"
             c1.format = "video"
-            uow.creatives.admin_get_by_ids.side_effect = None
-            uow.creatives.admin_get_by_ids.return_value = [c1]
+            uow.creatives.get_by_ids.side_effect = None
+            uow.creatives.get_by_ids.return_value = [c1]
 
             # Product with only "display" format
             mock_product = MagicMock()
@@ -1291,8 +1297,8 @@ class TestUC003UpdateCreativeIds:
             c1.status = "active"
             c1.agent_url = "http://test.com"
             c1.format = "display"
-            uow.creatives.admin_get_by_ids.side_effect = None
-            uow.creatives.admin_get_by_ids.return_value = [c1]
+            uow.creatives.get_by_ids.side_effect = None
+            uow.creatives.get_by_ids.return_value = [c1]
 
             mock_pkg = MagicMock()
             mock_pkg.package_config = {"product_id": "prod_1"}
@@ -1629,8 +1635,8 @@ class TestUC003UpdateCreativeAssignments:
             uow.media_buys.get_package.return_value = mock_pkg
 
             # C999 does not exist in the creative library.
-            uow.creatives.admin_get_by_ids.side_effect = None
-            uow.creatives.admin_get_by_ids.return_value = []
+            uow.creatives.get_by_ids.side_effect = None
+            uow.creatives.get_by_ids.return_value = []
 
             identity = env.identity
             req = UpdateMediaBuyRequest(
@@ -1940,7 +1946,7 @@ class TestUC003ManualApproval:
             req = UpdateMediaBuyRequest(media_buy_id="mb_deferred", paused=True)
             result = _update_media_buy_impl(req=req, identity=identity)
 
-            assert isinstance(result.response, UpdateMediaBuySuccess)
+            assert isinstance(result, UpdateMediaBuySubmitted)
             # Adapter should NOT be called (deferred until seller approves)
             env.mock["adapter"].return_value.update_media_buy.assert_not_called()
 
@@ -1959,7 +1965,7 @@ class TestUC003ManualApproval:
             req = UpdateMediaBuyRequest(media_buy_id="mb_reject_setup", paused=True)
             result = _update_media_buy_impl(req=req, identity=identity)
 
-            assert isinstance(result.response, UpdateMediaBuySuccess)
+            assert isinstance(result, UpdateMediaBuySubmitted)
             # Verify workflow step created with requires_approval (enables rejection)
             result_calls = env.mock["ctx_mgr"].return_value.audit_workflow_step_result.call_args_list
             assert result_calls[0][1]["status"] == "requires_approval"
@@ -1980,7 +1986,9 @@ class TestUC003ManualApproval:
             req = UpdateMediaBuyRequest(media_buy_id="mb_poll")
             result = _update_media_buy_impl(req=req, identity=identity)
 
-            assert isinstance(result.response, UpdateMediaBuySuccess)
+            assert isinstance(result, UpdateMediaBuySubmitted)
+            # The buyer polls status via the returned task_id (the workflow step).
+            assert result.task_id == "step_001"
             # The workflow step was created (step_id="step_001")
             # and the response allows the buyer to track the status
             env.mock["ctx_mgr"].return_value.create_workflow_step.assert_called_once_with(
@@ -2278,8 +2286,8 @@ class TestUC003ExtI:
             env.mock["uow"].return_value.media_buys.get_by_id.return_value = mock_mb
 
             # No creatives found
-            env.mock["uow"].return_value.creatives.admin_get_by_ids.side_effect = None
-            env.mock["uow"].return_value.creatives.admin_get_by_ids.return_value = []
+            env.mock["uow"].return_value.creatives.get_by_ids.side_effect = None
+            env.mock["uow"].return_value.creatives.get_by_ids.return_value = []
             mock_scalars = MagicMock()
             mock_scalars.all.return_value = []
             mock_session.scalars.return_value = mock_scalars
@@ -2321,8 +2329,8 @@ class TestUC003ExtJ:
             c1.status = "rejected"
             c1.agent_url = "http://test.com"
             c1.format = "display"
-            uow.creatives.admin_get_by_ids.side_effect = None
-            uow.creatives.admin_get_by_ids.return_value = [c1]
+            uow.creatives.get_by_ids.side_effect = None
+            uow.creatives.get_by_ids.return_value = [c1]
 
             mock_pkg = MagicMock()
             mock_pkg.package_config = {"product_id": "prod_1"}
@@ -2368,8 +2376,8 @@ class TestUC003ExtJ:
             c2.agent_url = "http://test.com"
             c2.format = "display"
 
-            uow.creatives.admin_get_by_ids.side_effect = None
-            uow.creatives.admin_get_by_ids.return_value = [c1, c2]
+            uow.creatives.get_by_ids.side_effect = None
+            uow.creatives.get_by_ids.return_value = [c1, c2]
 
             mock_pkg = MagicMock()
             mock_pkg.package_config = {"product_id": "prod_1"}

@@ -162,10 +162,10 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         # approved status and no format restriction (uow.products.get_by_id
         # returns a product without format_ids). Tests that exercise the
         # rejection paths (missing/error/rejected/incompatible) override
-        # admin_get_by_ids or products.get_by_id.
+        # get_by_ids or products.get_by_id.
         self._uow_instance.creatives = MagicMock()
 
-        def _default_admin_get_by_ids(creative_ids: list[str]) -> list[Any]:
+        def _default_get_by_ids(creative_ids: list[str], principal_id: str) -> list[Any]:
             creatives = []
             for cid in creative_ids:
                 cr = MagicMock()
@@ -176,7 +176,7 @@ class MediaBuyUpdateEnv(BaseTestEnv):
                 creatives.append(cr)
             return creatives
 
-        self._uow_instance.creatives.admin_get_by_ids.side_effect = _default_admin_get_by_ids
+        self._uow_instance.creatives.get_by_ids.side_effect = _default_get_by_ids
 
         # products repo: default product has no format restriction so the
         # shared creative-format check is a no-op unless a test overrides it.
@@ -229,11 +229,13 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         mock_cm.__exit__ = MagicMock(return_value=False)
         self.mock["db"].return_value = mock_cm
 
-    def setup_default_data(self) -> tuple[Any, Any]:
+    def setup_default_data(self, **tenant_kwargs: Any) -> tuple[Any, Any]:
         """Return mock tenant + principal for BDD Background steps.
 
         Unit env has no real DB. Returns lightweight mocks that satisfy
         the ctx["tenant"] / ctx["principal"] expectations from Background steps.
+        ``tenant_kwargs`` (base-signature parity) are ignored — there is no
+        tenant row to seed.
         """
         tenant = MagicMock()
         tenant.tenant_id = self._tenant_id

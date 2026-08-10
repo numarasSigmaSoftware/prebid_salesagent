@@ -11,11 +11,13 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
-from src.core.database.models import SyncJob
+from src.core.database.models import PushNotificationConfig, SyncJob
 from src.core.thread_registry import ThreadRegistry
+from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +333,81 @@ def _mark_approval_failed(
         logger.error(f"Failed to mark approval failed: {e}")
 
 
+def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str, str]:
+    """Build HTTP headers for an order-approval webhook POST."""
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "AdCP-Sales-Agent/1.0 (Order Approval Notifications)",
+    }
+    if not config:
+        return headers
+    if config.authentication_type == "bearer" and config.authentication_token:
+        headers["Authorization"] = f"Bearer {config.authentication_token}"
+    elif config.authentication_type == "basic" and config.authentication_token:
+        headers["Authorization"] = f"Basic {config.authentication_token}"
+    if config.validation_token:
+        headers["X-Webhook-Token"] = config.validation_token
+    return headers
+
+
+def _reject_unsafe_approval_webhook_url(webhook_url: str) -> bool:
+    """Return True when the order-approval outbound URL fails the SSRF gate."""
+    rejected, _error_msg = reject_unsafe_outbound_webhook_url(webhook_url, log=logger, kind="OrderApproval")
+    return rejected
+
+
+def _post_approval_webhook_with_retries(
+    webhook_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> None:
+    """POST the approval payload with retries; refuse open redirects."""
+    safe_url = webhook_url_for_log(webhook_url)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with httpx.Client(timeout=10.0, follow_redirects=False) as client:
+                response = client.post(webhook_url, json=payload, headers=headers)
+
+                if 200 <= response.status_code < 300:
+                    logger.info(
+                        "Approval webhook sent to %s (status: %s, attempt: %s)",
+                        safe_url,
+                        payload.get("status"),
+                        attempt + 1,
+                    )
+                    return
+
+                logger.warning(
+                    "Approval webhook to %s returned status %s (attempt: %s/%s)",
+                    safe_url,
+                    response.status_code,
+                    attempt + 1,
+                    max_retries,
+                )
+
+        except httpx.TimeoutException:
+            logger.warning(
+                "Approval webhook to %s timed out (attempt: %s/%s)",
+                safe_url,
+                attempt + 1,
+                max_retries,
+            )
+        except httpx.RequestError as e:
+            logger.warning(
+                "Approval webhook to %s failed: %s (attempt: %s/%s)",
+                safe_url,
+                e,
+                attempt + 1,
+                max_retries,
+            )
+
+        if attempt < max_retries - 1:
+            time.sleep(2**attempt)
+
+    logger.error("Failed to send approval webhook to %s after %s attempts", safe_url, max_retries)
+
+
 def _send_approval_webhook(
     webhook_url: str,
     tenant_id: str,
@@ -354,8 +431,6 @@ def _send_approval_webhook(
         attempts: Number of polling attempts (if available)
     """
     try:
-        import httpx
-
         payload: dict[str, Any] = {
             "event": "order_approval_update",
             "media_buy_id": media_buy_id,
@@ -372,56 +447,20 @@ def _send_approval_webhook(
             payload["attempts"] = attempts
 
         # Get webhook authentication from push notification config
-        from src.core.database.models import PushNotificationConfig
-
         with get_db_session() as db:
             stmt = select(PushNotificationConfig).filter_by(
                 tenant_id=tenant_id, principal_id=principal_id, url=webhook_url, is_active=True
             )
             config = db.scalars(stmt).first()
 
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "AdCP-Sales-Agent/1.0 (Order Approval Notifications)",
-        }
+        if _reject_unsafe_approval_webhook_url(webhook_url):
+            return
 
-        # Add authentication if configured
-        if config:
-            if config.authentication_type == "bearer" and config.authentication_token:
-                headers["Authorization"] = f"Bearer {config.authentication_token}"
-            elif config.authentication_type == "basic" and config.authentication_token:
-                headers["Authorization"] = f"Basic {config.authentication_token}"
-
-            if config.validation_token:
-                headers["X-Webhook-Token"] = config.validation_token
-
-        # Send webhook with retries
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                with httpx.Client(timeout=10.0) as client:
-                    response = client.post(webhook_url, json=payload, headers=headers)
-
-                    if 200 <= response.status_code < 300:
-                        logger.info(
-                            f"Approval webhook sent to {webhook_url} (status: {status}, attempt: {attempt + 1})"
-                        )
-                        return
-
-                    logger.warning(
-                        f"Approval webhook to {webhook_url} returned status {response.status_code} (attempt: {attempt + 1}/{max_retries})"
-                    )
-
-            except httpx.TimeoutException:
-                logger.warning(f"Approval webhook to {webhook_url} timed out (attempt: {attempt + 1}/{max_retries})")
-            except httpx.RequestError as e:
-                logger.warning(f"Approval webhook to {webhook_url} failed: {e} (attempt: {attempt + 1}/{max_retries})")
-
-            # Wait before retry (exponential backoff)
-            if attempt < max_retries - 1:
-                time.sleep(2**attempt)
-
-        logger.error(f"Failed to send approval webhook to {webhook_url} after {max_retries} attempts")
+        _post_approval_webhook_with_retries(
+            webhook_url,
+            payload,
+            _approval_webhook_headers(config),
+        )
 
     except Exception as e:
         logger.error(f"Error sending approval webhook: {e}", exc_info=True)

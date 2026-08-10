@@ -112,9 +112,48 @@ from src.core.validation_helpers import (
     adcp_validation_boundary,
 )
 from src.core.version import get_version
+from src.core.webhook_validator import (
+    reject_unsafe_webhook_registration_url,
+    webhook_ssrf_suggestion,
+    webhook_url_for_log,
+)
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
+
+
+def _invalid_params_from_ssrf_error(exc: Exception) -> InvalidParamsError:
+    """Wrap an SSRF rejection as A2A InvalidParamsError with AdCP ``data`` envelope."""
+    if isinstance(exc, AdCPValidationError):
+        adcp_err = exc
+    else:
+        adcp_err = AdCPValidationError(
+            str(exc),
+            field="push_notification_config.url",
+            suggestion=webhook_ssrf_suggestion(),
+            recovery="correctable",
+        )
+    return InvalidParamsError(
+        message=adcp_err.message,
+        data=build_two_layer_error_envelope(adcp_err),
+    )
+
+
+def _reject_unsafe_a2a_webhook_url(url: str) -> None:
+    """Raise InvalidParamsError when ``url`` fails the registration SSRF gate.
+
+    A2A push-config endpoints (message/send configuration, setTaskPushNotificationConfig)
+    translate SSRF failures to ``InvalidParamsError`` (-32602) while attaching the
+    two-layer AdCP envelope in ``data`` (``VALIDATION_ERROR`` / ``recovery=correctable``
+    + suggestion) — same pattern as the auth rejection on ``on_message_send``.
+    Delegates to ``reject_unsafe_webhook_registration_url`` so recovery/suggestion/field
+    cannot drift from the tool-path gate. AdCP tool wrappers raise ``AdCPValidationError``
+    directly for the same helper.
+    """
+    try:
+        reject_unsafe_webhook_registration_url(url, field="push_notification_config.url")
+    except AdCPValidationError as e:
+        raise _invalid_params_from_ssrf_error(e) from e
 
 
 def _dict_to_value(d: dict) -> struct_pb2.Value:
@@ -201,7 +240,8 @@ class AdCPRequestHandler(RequestHandler):
         (``ValueError → AdCPValidationError``, ``PermissionError →
         AdCPAuthorizationError``, arbitrary ``Exception →
         AdCPError(INTERNAL_ERROR)``) so the wire output stays in
-        ``STANDARD_ERROR_CODES`` and the envelope shape never degrades to a
+        ``WIRE_STANDARD_CODES`` (SDK ``STANDARD_ERROR_CODES`` plus the
+        pinned-spec supplement) and the envelope shape never degrades to a
         flat ``{"error": "..."}`` dict the storyboard runner would synthesize
         as ``MCP_ERROR``.
         """
@@ -436,9 +476,14 @@ class AdCPRequestHandler(RequestHandler):
                 "task_type": skills[0] if skills else "unknown",
             }
 
-            await push_notification_service.send_notification(
+            sent = await push_notification_service.send_notification(
                 push_notification_config=push_notification_config, payload=payload, metadata=metadata
             )
+            if not sent:
+                logger.warning(
+                    "Protocol webhook not delivered for task %s (send_notification returned False)",
+                    task.id,
+                )
         except Exception as e:
             # Don't fail the task if webhook fails
             logger.warning("Failed to send protocol-level webhook for task %s: %s", task.id, e)
@@ -468,20 +513,35 @@ class AdCPRequestHandler(RequestHandler):
                 SyncAccountsResponse,
                 SyncCreativesResponse,
                 UpdateMediaBuyError,
+                UpdateMediaBuySubmitted,
                 UpdateMediaBuySuccess,
             )
 
             # For union types (CreateMediaBuyResponse, UpdateMediaBuyResponse),
             # determine which concrete class based on data content
             if skill_name == "create_media_buy":
-                # Success responses have media_buy_id, error responses have errors
+                # Success responses have media_buy_id, error responses have errors.
+                # No CreateMediaBuySubmitted branch on purpose: submitted results
+                # take the status=="submitted" early-return in on_message_send
+                # (Task state=SUBMITTED, no artifacts) BEFORE artifact/text
+                # reconstruction, so a submitted body can never reach here —
+                # same control-flow fact as update_media_buy (PR #1567 round-2 follow-up).
                 if "media_buy_id" in data:
                     return CreateMediaBuySuccess(**data)
                 else:
                     return CreateMediaBuyError(**data)
             elif skill_name == "update_media_buy":
-                # Success responses have media_buy_id, error responses have errors
-                if "media_buy_id" in data:
+                # Submitted (pending-approval) responses carry status="submitted" + task_id
+                # and no applied media_buy_id; success responses have media_buy_id; error
+                # responses have errors. Check submitted first — a submitted envelope must not
+                # be mis-reconstructed as UpdateMediaBuySuccess (whose status is Literal completed).
+                # NB: on the normal path a submitted result takes the status=="submitted"
+                # early-return in on_message_send (Task state=SUBMITTED, no artifacts) BEFORE
+                # artifact/text reconstruction reaches here (PR #1567 round-2); this branch is a
+                # defensive backstop guarded by test_a2a_update_media_buy_submitted_guard.py.
+                if data.get("status") == "submitted":
+                    return UpdateMediaBuySubmitted(**data)
+                elif "media_buy_id" in data:
                     return UpdateMediaBuySuccess(**data)
                 else:
                     return UpdateMediaBuyError(**data)
@@ -558,14 +618,12 @@ class AdCPRequestHandler(RequestHandler):
         msg_id = params.message.message_id or None
         context_id = params.message.context_id or msg_id or f"ctx_{task_id}"
 
-        # Extract push notification config from protocol layer (A2A SendMessageConfiguration)
+        # Extract push notification config from protocol layer (A2A SendMessageConfiguration).
+        # SSRF gate runs after auth resolution below (defense-in-depth: AUTH_REQUIRED
+        # before scheme/blocked-host checks when the request requires credentials).
         push_notification_config: TaskPushNotificationConfig | None = None
         if params.HasField("configuration") and params.configuration.HasField("task_push_notification_config"):
             push_notification_config = params.configuration.task_push_notification_config
-            if push_notification_config.url:
-                logger.info(
-                    f"Protocol-level push notification config provided for task {task_id}: {push_notification_config.url}"
-                )
 
         # Prepare task metadata (JSON-serializable only — protobuf Struct)
         task_metadata: dict[str, Any] = {
@@ -581,9 +639,6 @@ class AdCPRequestHandler(RequestHandler):
             status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
             metadata=_dict_to_struct(task_metadata),
         )
-        # Store push notification config outside protobuf metadata (not JSON-serializable)
-        if push_notification_config:
-            self._task_push_configs[task_id] = push_notification_config
         self.tasks[task_id] = task
 
         try:
@@ -616,6 +671,18 @@ class AdCPRequestHandler(RequestHandler):
                         )
                     ),
                 )
+
+            # SSRF-reject unsafe push URLs after the auth-required gate so callers
+            # that need credentials see AUTH_REQUIRED before scheme/blocked-host checks.
+            if push_notification_config and push_notification_config.url:
+                _reject_unsafe_a2a_webhook_url(push_notification_config.url)
+                logger.info(
+                    "Protocol-level push notification config provided for task %s: %s",
+                    task_id,
+                    webhook_url_for_log(push_notification_config.url),
+                )
+            if push_notification_config:
+                self._task_push_configs[task_id] = push_notification_config
 
             # ── Transport boundary: resolve identity ONCE ──
             # Like REST's _resolve_auth(), identity is resolved here and passed
@@ -1017,42 +1084,68 @@ class AdCPRequestHandler(RequestHandler):
         # result is already Task | Message — yield it directly
         yield result
 
+    def _get_task_or_raise(self, task_id: str) -> Task:
+        """Return the in-memory task, or raise ``TaskNotFoundError``.
+
+        A bare ``None`` return makes the SDK synthesize a generic internal error;
+        the A2A spec defines ``TaskNotFoundError`` for an unknown task id, so
+        raising it is the correct thing to do here and is what an A2A client
+        should be able to react to precisely.
+
+        What a client sees TODAY is still ``-32603``, not the spec's ``-32001``:
+        this app builds its A2A routes with ``enable_v0_3_compat=True``
+        (``src/app.py:306``), so requests dispatch through
+        ``a2a.compat.v0_3.jsonrpc_adapter``, whose ``handle_request`` ends in a
+        bare ``except Exception -> CoreInternalError`` with no ``A2AError -> code``
+        mapping — the mapping the SDK's own main dispatcher performs. Returning
+        ``None`` produces the same ``-32603`` there, so the code cannot be fixed
+        at this layer (#1670). Raising the right type is still correct and is what
+        will surface ``-32001`` the moment that gap closes; the xfail'd
+        live-server test pins the current reality.
+
+        The requested id is put on both the message and structured ``data``.
+        Only the message reaches a client today: the same compat adapter that
+        flattens the code to ``-32603`` rebuilds the error as
+        ``CoreInternalError(message=str(e))``, which drops ``data`` — driving
+        the real route returns ``data: null``. Populating it is still correct
+        and becomes readable when #1670 closes, the same as the code.
+
+        Shared by ``on_get_task`` and ``on_cancel_task`` so both surface the
+        same error.
+        """
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
+        return task
+
     async def on_get_task(
         self,
         params: GetTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/get' method to retrieve task status.
 
-        Args:
-            params: Parameters specifying the task ID
-            context: Server call context
-
-        Returns:
-            Task object if found, otherwise None
+        Raises ``TaskNotFoundError`` for an unknown task id — see
+        ``_get_task_or_raise`` (and #1670 for why the wire code is still -32603).
         """
-        task_id = params.id
-        return self.tasks.get(task_id)
+        return self._get_task_or_raise(params.id)
 
     async def on_cancel_task(
         self,
         params: CancelTaskRequest,
         context: ServerCallContext,
-    ) -> Task | None:
+    ) -> Task:
         """Handle 'tasks/cancel' method to cancel a task.
 
-        Args:
-            params: Parameters specifying the task ID
-            context: Server call context
-
-        Returns:
-            Task object with canceled status, or None if not found
+        Raises ``TaskNotFoundError`` for an unknown task id — cancelling a task
+        that does not exist is the same not-found condition as get, not a silent
+        no-op. See ``_get_task_or_raise`` (and #1670 for why the wire code is
+        still -32603).
         """
-        task_id = params.id
-        task = self.tasks.get(task_id)
-        if task:
-            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
-            self.tasks[task_id] = task
+        task = self._get_task_or_raise(params.id)
+        # CopyFrom mutates the stored Task in place — self.tasks already holds
+        # this exact reference, so re-storing it would rebind the same object.
+        task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
         return task
 
     async def on_list_tasks(
@@ -1162,23 +1255,30 @@ class AdCPRequestHandler(RequestHandler):
             if not url:
                 raise InvalidParamsError(message="Missing required parameter: url")
 
+            _reject_unsafe_a2a_webhook_url(url)
+
             auth_type = None
             auth_token_value = None
             if params.HasField("authentication"):
                 auth_type = params.authentication.scheme or None
                 auth_token_value = params.authentication.credentials or None
 
-            with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
-                assert uow.push_notification_configs is not None
-                _config, created = uow.push_notification_configs.upsert(
-                    config_id=config_id,
-                    principal_id=tool_context.principal_id,
-                    url=url,
-                    authentication_type=auth_type,
-                    authentication_token=auth_token_value,
-                    validation_token=validation_token,
-                    session_id=None,
-                )
+            try:
+                with PushNotificationConfigUoW(tool_context.tenant_id) as uow:
+                    assert uow.push_notification_configs is not None
+                    _config, created = uow.push_notification_configs.upsert(
+                        config_id=config_id,
+                        principal_id=tool_context.principal_id,
+                        url=url,
+                        authentication_type=auth_type,
+                        authentication_token=auth_token_value,
+                        validation_token=validation_token,
+                        session_id=None,
+                    )
+            except ValueError as e:
+                # Repository SSRF gate (defense in depth) — same enveloped path as
+                # _reject_unsafe_a2a_webhook_url above.
+                raise _invalid_params_from_ssrf_error(e) from e
 
             logger.info(
                 f"Push notification config {'created' if created else 'updated'}: {config_id} for tenant {tool_context.tenant_id}"

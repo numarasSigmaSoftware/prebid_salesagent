@@ -87,6 +87,9 @@ class CreateMediaBuyBody(SalesAgentBaseModel):
     context: dict[str, Any] | None = None
     ext: dict[str, Any] | None = None
     idempotency_key: str | None = None
+    # AdCP 3.1.1 create-in-paused-state. Declared but NOT forwarded to the raw wrapper
+    # below, and not honored by _impl even if it were — see #1619.
+    paused: bool | None = None
     adcp_version: str = "1.0.0"
 
 

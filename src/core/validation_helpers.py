@@ -13,7 +13,13 @@ from contextlib import contextmanager
 
 from pydantic import ValidationError
 
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import (
+    AdCPValidationError,
+    build_validation_error_details,
+)
+from src.core.exceptions import (
+    first_validation_error_field as first_validation_error_field,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +50,12 @@ def adcp_validation_boundary(context: str = "parameters", field: str | None = No
     try:
         yield
     except ValidationError as e:
+        errors = e.errors()
         raise AdCPValidationError(
             format_validation_error(e, context=context),
             field=field if field is not None else first_validation_error_field(e),
             suggestion=suggest_validation_fix(e),
+            details=build_validation_error_details(errors),
         ) from e
 
 
@@ -70,10 +78,19 @@ def run_async_in_sync_context(coroutine):
     if not asyncio.iscoroutine(coroutine):
         raise TypeError(f"Expected coroutine, got {type(coroutine)}")
 
+    # Loop DETECTION only inside this try. The coroutine must execute OUTSIDE
+    # it: a RuntimeError raised BY the coroutine (e.g. httpx/anyio "Event loop
+    # is closed") re-raised out of future.result() would otherwise be misread
+    # as "no running loop" and the already-CONSUMED coroutine re-run on a fresh
+    # loop — mangling the real error into "cannot reuse already awaited
+    # coroutine" (salesagent-mpo1).
     try:
-        # Check if there's already a running event loop
         asyncio.get_running_loop()
+        in_async_context = True
+    except RuntimeError:
+        in_async_context = False
 
+    if in_async_context:
         # We're in an async context, run in thread pool to avoid nested loop error
         # Create a new event loop in the thread to run the coroutine
         def run_in_thread():
@@ -87,14 +104,14 @@ def run_async_in_sync_context(coroutine):
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_in_thread)
             return future.result()
-    except RuntimeError:
-        # No running loop, safe to create one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(coroutine)
-        finally:
-            loop.close()
+
+    # No running loop, safe to create one
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coroutine)
+    finally:
+        loop.close()
 
 
 def safe_parse_json_field(field_value, field_name="field", default=None):
@@ -128,29 +145,6 @@ def safe_parse_json_field(field_value, field_name="field", default=None):
     else:
         logger.warning(f"Unexpected type for {field_name}: {type(field_value)}")
         return default if default is not None else {}
-
-
-def first_validation_error_field(validation_error: ValidationError) -> str | None:
-    """Return the bracket-notation field path of the first Pydantic error, or ``None``.
-
-    Lets a transport boundary attach a structured ``field`` to the
-    ``AdCPValidationError`` it raises, so the wire envelope carries the offending
-    field path (e.g. ``packages[0].budget``) instead of only the rendered message.
-    List indices render as ``[i]`` so the boundary-derived path matches the
-    hand-rolled ``field=`` strings raised inside the _impl layer (``packages[].budget``).
-    """
-    errors = validation_error.errors()
-    if not errors:
-        return None
-    parts: list[str] = []
-    for loc in errors[0]["loc"]:
-        if isinstance(loc, int):
-            parts.append(f"[{loc}]")
-        elif parts:
-            parts.append(f".{loc}")
-        else:
-            parts.append(str(loc))
-    return "".join(parts)
 
 
 def package_field_path(attr: str) -> str:

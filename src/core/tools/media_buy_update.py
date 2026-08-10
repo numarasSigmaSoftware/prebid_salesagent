@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from adcp import PushNotificationConfig
 from adcp.server.helpers import MEDIA_BUY_STATE_MACHINE, is_terminal_status, valid_actions_for_status
@@ -21,6 +21,9 @@ from adcp.types import MediaBuyStatus
 from pydantic import Field
 
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
+
+if TYPE_CHECKING:
+    from src.core.database.models import MediaBuy
 
 # ---------------------------------------------------------------------------
 # Financial policy constants (F-05)
@@ -79,6 +82,7 @@ from src.core.schemas import (
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
     UpdateMediaBuyResult,
+    UpdateMediaBuySubmitted,
     UpdateMediaBuySuccess,
 )
 from src.core.testing_hooks import AdCPTestContext
@@ -175,6 +179,7 @@ def _validate_creatives_for_assignment(
     creative_ids: list[str],
     *,
     uow: "MediaBuyUoW",
+    principal_id: str,
     product: "DBProduct | None",
     product_name: str | None = None,
     context: ContextObject | None = None,
@@ -187,7 +192,11 @@ def _validate_creatives_for_assignment(
     (wire code ``CREATIVE_REJECTED``, correctable) on the first failing
     category, always carrying a ``suggestion`` for buyer recovery:
 
-    1. Existence — every ``creative_id`` exists for this tenant.
+    1. Existence — every ``creative_id`` exists for this principal within the
+       tenant. The creatives PK is composite (creative_id, tenant_id,
+       principal_id): another principal's creative resolves to "not found"
+       (uniform, no field leak) — never passes this gate on their row, which
+       the assignment insert would then violate on the composite FK.
     2. Status — none are in ``error`` or ``rejected`` state.
     3. Format compatibility — each creative's ``(agent_url, format)`` is
        supported by the package's product ``format_ids``. A product with no
@@ -196,6 +205,7 @@ def _validate_creatives_for_assignment(
     Args:
         creative_ids: Creative IDs referenced by the package update.
         uow: Tenant-scoped unit of work exposing ``creatives``.
+        principal_id: The requesting buyer's principal (from ResolvedIdentity).
         product: The package's product ORM record (or ``None`` if the package
             has no resolvable product, in which case the format check is skipped).
         product_name: Display name for error messages (falls back to the
@@ -211,12 +221,15 @@ def _validate_creatives_for_assignment(
 
     requested_ids = list(dict.fromkeys(creative_ids))  # de-dup, preserve order
 
-    # (a) Existence — tenant-scoped multi-get via repository.
+    # (a) Existence — principal-scoped multi-get via repository.
     assert uow.creatives is not None, "MediaBuyUoW.creatives required for creative validation"
-    creatives_list = uow.creatives.admin_get_by_ids(requested_ids)
+    creatives_list = uow.creatives.get_by_ids(requested_ids, principal_id)
     found_by_id = {c.creative_id: c for c in creatives_list}
     missing_ids = [cid for cid in requested_ids if cid not in found_by_id]
     if missing_ids:
+        # FIXME(#1598): CREATIVE_REJECTED here vs the pinned enum's
+        # CREATIVE_NOT_FOUND uniformity MUST — the BR-UC-003 ext-i storyboard
+        # cell grades CREATIVE_REJECTED; deferred pending upstream reconciliation.
         raise AdCPCreativeRejectedError(
             f"Creative IDs not found: {', '.join(missing_ids)}",
             suggestion=(
@@ -334,7 +347,7 @@ def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
-) -> UpdateMediaBuyResult:
+) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
     Callers construct the validated UpdateMediaBuyRequest at their boundary
@@ -532,7 +545,17 @@ def _update_media_buy_impl(
                 # parity with get_media_buys — see _adcp_status_and_actions).
                 _dry_run_mb = uow.media_buys.get_by_id(req.media_buy_id)
 
-                # Build simulated response
+                # Build simulated response.
+                # The wire status="completed" is KEPT for dry_run and is
+                # spec-correct (PR #1567): spec 3.1.1
+                # update-media-buy-response.json has exactly three variants
+                # (Success/Error/Submitted) and NO simulation envelope; dry_run is a
+                # (deprecated) testing hook (X-Dry-Run header), not a wire field, and the
+                # spec is SILENT on a dry_run response status -> production authoritative.
+                # Unlike pending-approval (-> UpdateMediaBuySubmitted) and reject
+                # (-> Error), a dry_run buyer asked to SIMULATE the would-be
+                # outcome, which IS completion -> "completed" is a truthful preview, not a
+                # lie. Guarded by tests/integration/test_media_buy_dry_run_status.py.
                 _dry_run_mbs, _dry_run_actions = _adcp_status_and_actions(_dry_run_mb)
                 dry_run_response = UpdateMediaBuySuccess(
                     media_buy_id=req.media_buy_id or "",
@@ -557,13 +580,13 @@ def _update_media_buy_impl(
                 # Store the original request alongside the response so the approval
                 # execution path can re-execute the update after human approval.
                 # This mirrors create_media_buy's raw_request pattern.
-                _approval_mb = uow.media_buys.get_by_id(req.media_buy_id)
-                _approval_mbs, _approval_actions = _adcp_status_and_actions(_approval_mb)
-                approval_response = UpdateMediaBuySuccess(
-                    media_buy_id=req.media_buy_id or "",
-                    media_buy_status=_approval_mbs,  # AdCP 3.1: mirrors `status`
-                    affected_packages=[],  # Not yet applied — pending approval
-                    valid_actions=_approval_actions,
+                # Spec 3.1.1 models a not-yet-applied (pending human approval) update as the
+                # UpdateMediaBuySubmitted response variant: protocol-envelope status="submitted"
+                # + a task_id the buyer polls for the outcome. Returning UpdateMediaBuySuccess
+                # here would falsely assert the update was applied (its envelope status is
+                # "completed"). task_id is the workflow step the admin approval flow acts on.
+                approval_response = UpdateMediaBuySubmitted(
+                    task_id=step.step_id,
                     context=req.context,
                     errors=property_list_unsupported_advisories(req.packages, adapter),
                 )
@@ -588,7 +611,10 @@ def _update_media_buy_impl(
                 )
                 session.add(mapping)
 
-                return UpdateMediaBuyResult(response=approval_response, status=AdcpTaskStatus.submitted.value)
+                # UpdateMediaBuySubmitted carries the protocol-envelope
+                # status="submitted" (const) natively — returned unwrapped so every
+                # transport serializes the spec-correct submitted envelope.
+                return approval_response
 
             # Validate currency limits if flight dates or budget changes
             # This prevents workarounds where buyers extend flight to bypass daily max
@@ -873,6 +899,7 @@ def _update_media_buy_impl(
                         _validate_creatives_for_assignment(
                             pkg_update.creative_ids,
                             uow=uow,
+                            principal_id=principal_id,
                             product=product,
                             context=req.context,
                         )
@@ -1023,6 +1050,7 @@ def _update_media_buy_impl(
                         _validate_creatives_for_assignment(
                             [ca.creative_id for ca in pkg_update.creative_assignments],
                             uow=uow,
+                            principal_id=principal_id,
                             product=ca_product,
                             context=req.context,
                         )
@@ -1105,9 +1133,13 @@ def _update_media_buy_impl(
                             weight = ca.weight
                             placement_ids = ca.placement_ids
 
-                            # Find or create assignment record
+                            # Find or create assignment record. principal_id is part of
+                            # the match key: the same creative_id can exist under two
+                            # principals (composite creatives PK), and the create branch
+                            # below inserts under the requester's principal.
                             assign_stmt = select(DBAssignment).where(
                                 DBAssignment.tenant_id == tenant["tenant_id"],
+                                DBAssignment.principal_id == principal_id,
                                 DBAssignment.media_buy_id == actual_media_buy_id,
                                 DBAssignment.package_id == pkg_update.package_id,
                                 DBAssignment.creative_id == creative_id,

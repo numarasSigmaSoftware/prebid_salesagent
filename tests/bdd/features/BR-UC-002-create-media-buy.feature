@@ -66,9 +66,15 @@ Feature: BR-UC-002 Create Media Buy
     And the account "acc-001" exists and is active
     When the Buyer Agent sends the create_media_buy request
     Then the response status should be "submitted"
-    And the response should include a "media_buy_id"
-    And the response should include a "workflow_step_id"
-    And the response status should be "submitted"
+    # Reconciled to spec 3.1.1 (PR #1567 round-2 item 2): create-media-buy-response.json
+    # oneOf CreateMediaBuySubmitted requires status="submitted" + task_id and has
+    # NO media_buy_id/confirmed_at/revision — they land on the task's completion
+    # artifact. The pre-3.1.1 assertions (media_buy_id + workflow_step_id) claimed
+    # confirmation of a not-yet-committed buy. Mirrors the BR-UC-003 reconciliation.
+    And the response should contain a task_id
+    And the response should NOT contain "media_buy_id" field
+    And the response should NOT contain "confirmed_at" field
+    And the response should NOT contain "revision" field
     And a Slack notification should be sent to the Seller
     # POST-S7: Buyer knows their media buy is awaiting seller approval
     # POST-S8: Seller knows there is a media buy requiring their review
@@ -422,6 +428,23 @@ Feature: BR-UC-002 Create Media Buy
     And the error code should be "VALIDATION_ERROR"
     And the error should include "suggestion" field
     # --- ext-o: Creative Not Found in Library ---
+
+  @T-UC-002-ext-webhook-ssrf @extension @ext-webhook-ssrf @error @post-f1 @post-f2 @post-f3
+  Scenario: Reporting webhook URL targeting a blocked host is rejected
+    Given a valid create_media_buy request
+    And the request includes a reporting_webhook with url "http://169.254.169.254/latest/meta-data/"
+    When the Buyer Agent sends the create_media_buy request
+    Then the operation should fail
+    And the error code should be "VALIDATION_ERROR"
+    And the error recovery should be "correctable"
+    And the error should include "suggestion" field
+    # Repo-local SSRF policy (ungraded extension): reuses AdCP 3.1.1
+    # VALIDATION_ERROR / recovery=correctable enum values + suggestion on
+    # MCP/REST/A2A tool transports. Schema is silent on SSRF. A2A-native
+    # push-config endpoints (message/send configuration,
+    # setTaskPushNotificationConfig) map the same gate to InvalidParamsError
+    # with the AdCP VALIDATION_ERROR envelope in data= — unit-pinned, not this scenario.
+    # @source repo=adcp ref=v3.1.1 path=dist/schemas/3.1.1/enums/error-code.json (recovery via enumMetadata)
 
   @T-UC-002-ext-o @extension @ext-o @error @post-f1 @post-f2 @post-f3
   Scenario: Creative IDs not found in library

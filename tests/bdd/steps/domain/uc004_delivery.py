@@ -109,15 +109,6 @@ def _assert_placements_sorted_by(packages: list[Any], metric: str, *, fallback: 
         pytest.xfail("PRODUCTION GAP: no packages have by_placement data to verify sort")
 
 
-def _resolve_media_buy_id(ctx: dict, mb_id: str) -> str:
-    """Resolve a Gherkin media-buy alias (e.g., 'mb-001') to its DB id.
-
-    Currently identity since _ensure_media_buy_in_db stores the alias as-is.
-    Indirection retained for future tests that may need separate aliasing.
-    """
-    return ctx.get("media_buy_id_aliases", {}).get(mb_id, mb_id)
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # GIVEN steps — media buy setup and adapter configuration
 # ═══════════════════════════════════════════════════════════════════════
@@ -288,11 +279,18 @@ def given_adapter_has_data(ctx: dict, mb_id: str) -> None:
 
 @given("the ad server adapter has delivery data for both media buys")
 def given_adapter_has_data_both(ctx: dict) -> None:
-    """Configure adapter mock to return data for both media buys."""
+    """Configure adapter mock to return data for both media buys.
+
+    Seeds conversions/conversion_value alongside impressions/spend so the
+    roas / cost_per_acquisition aggregated_totals scalars
+    (media-buy/get-media-buy-delivery-response.json, pin 04f59d2d5) are
+    derivable: with two buys, roas = 1000/500 = 2.0 and
+    cost_per_acquisition = 500/20 = 25.0 — the literals the Then steps assert.
+    """
     env = ctx["env"]
     media_buys = ctx.get("media_buys", {})
     for mb_id in list(media_buys.keys())[:2]:
-        env.set_adapter_response(media_buy_id=mb_id)
+        env.set_adapter_response(media_buy_id=mb_id, conversions=10.0, conversion_value=500.0)
 
 
 @given("the ad server adapter has delivery data for all media buys")
@@ -521,6 +519,17 @@ def given_webhook_returns_status(ctx: dict, status_code: int, reason: str) -> No
     """Configure webhook endpoint to return specific status."""
     env = ctx["env"]
     env.set_http_status(status_code, reason)
+
+
+@given("the outbound webhook URL is blocked by SSRF validation")
+def given_outbound_webhook_ssrf_blocked(ctx: dict) -> None:
+    """Force send-time SSRF gate to reject the configured webhook URL.
+
+    Does not blanket-mock all UC-004 scenarios: only this Given opts into the
+    reject branch via CircuitBreakerEnv.set_url_invalid().
+    """
+    env = ctx["env"]
+    env.set_url_invalid("Webhook URL resolves to blocked IP range 169.254.0.0/16")
 
 
 @given("the webhook endpoint is unreachable (connection timeout)")
@@ -1344,6 +1353,68 @@ def then_has_aggregated_totals(ctx: dict) -> None:
     )
 
 
+@then('the aggregated_totals should include "roas" as total conversion_value over total spend')
+def then_aggregated_roas(ctx: dict) -> None:
+    """Assert aggregated_totals.roas equals the Given-derived literal 2.0.
+
+    Spec (pin 04f59d2d5): media-buy/get-media-buy-delivery-response.json
+    defines aggregated_totals.roas as "total conversion_value / total spend".
+    The Given seeds two buys at conversion_value=500.0, spend=250.0 each, so
+    roas = 1000 / 500 = 2.0. Asserting the literal (not a quotient recomputed
+    from production's own per-delivery output) means a same-source extraction
+    bug cannot self-validate (PR #1430 review).
+    """
+    resp = ctx.get("response")
+    assert resp is not None, "Expected a response"
+    agg = resp.aggregated_totals
+    roas = getattr(agg, "roas", None)
+    assert roas is not None, "aggregated_totals.roas is missing — production does not compute roas"
+    conversion_values = [getattr(d.totals, "conversion_value", None) for d in resp.media_buy_deliveries]
+    assert all(v is not None for v in conversion_values), (
+        f"per-delivery totals.conversion_value missing (roas input must be reported per buy): {conversion_values}"
+    )
+    assert roas == pytest.approx(2.0), (
+        f"aggregated_totals.roas ({roas}) != 2.0 (Given seeds 2 buys x conversion_value 500.0 / 2 x spend 250.0)"
+    )
+
+
+@then('the aggregated_totals should include "cost_per_acquisition" as total spend over total conversions')
+def then_aggregated_cost_per_acquisition(ctx: dict) -> None:
+    """Assert aggregated_totals.cost_per_acquisition equals the Given-derived literal 25.0.
+
+    Spec (pin 04f59d2d5): media-buy/get-media-buy-delivery-response.json
+    defines aggregated_totals.cost_per_acquisition as "total spend / total
+    conversions". The Given seeds two buys at conversions=10.0, spend=250.0
+    each, so cpa = 500 / 20 = 25.0. Literal assertion for the same
+    same-source-extraction reason as the roas step above.
+    """
+    resp = ctx.get("response")
+    assert resp is not None, "Expected a response"
+    agg = resp.aggregated_totals
+    cpa = getattr(agg, "cost_per_acquisition", None)
+    assert cpa is not None, (
+        "aggregated_totals.cost_per_acquisition is missing — production does not compute cost_per_acquisition"
+    )
+    conversions = [getattr(d.totals, "conversions", None) for d in resp.media_buy_deliveries]
+    assert all(c is not None for c in conversions), (
+        f"per-delivery totals.conversions missing (cpa input must be reported per buy): {conversions}"
+    )
+    assert cpa == pytest.approx(25.0), (
+        f"aggregated_totals.cost_per_acquisition ({cpa}) != 25.0 (Given seeds 2 buys x spend 250.0 / 2 x conversions 10.0)"
+    )
+
+
+@then(parsers.parse('the aggregated_totals should include "media_buy_count" equal to {count:d}'))
+def then_aggregated_media_buy_count(ctx: dict, count: int) -> None:
+    """Assert aggregated_totals.media_buy_count matches the scenario's buy count."""
+    resp = ctx.get("response")
+    assert resp is not None, "Expected a response"
+    agg = resp.aggregated_totals
+    assert agg.media_buy_count == count, (
+        f"aggregated_totals.media_buy_count ({agg.media_buy_count}) != expected ({count})"
+    )
+
+
 @then("the aggregated impressions should equal the sum of individual impressions")
 def then_aggregated_impressions(ctx: dict) -> None:
     """Assert aggregated impressions equal sum of individual values."""
@@ -1683,6 +1754,31 @@ def then_webhook_marked_failed(ctx: dict) -> None:
     assert success is False, (
         f"Expected webhook delivery to be marked as failed (success=False), "
         f"got success={success!r} from webhook_result={ctx.get('webhook_result')!r}"
+    )
+
+
+@then("the webhook delivery should be skipped without an HTTP POST")
+def then_webhook_skipped_no_post(ctx: dict) -> None:
+    """Assert send-time SSRF skip: delivery failed and httpx POST was never called."""
+    env = ctx["env"]
+    success = _extract_webhook_success(ctx)
+    assert success is False, f"Expected SSRF-skipped delivery to return False, got success={success!r}"
+    post_mock = env.mock["post"]
+    assert post_mock.call_count == 0, f"Expected no HTTP POST after SSRF rejection, got {post_mock.call_count} call(s)"
+
+
+@then("the circuit breaker should record a failure")
+def then_circuit_breaker_recorded_failure(ctx: dict) -> None:
+    """Assert the send-time SSRF path called circuit_breaker.record_failure()."""
+    env = ctx["env"]
+    service = env.get_service()
+    endpoint_key = ctx.get("circuit_breaker_endpoint_key", f"{env._tenant_id}:{_WEBHOOK_URL}")
+    cb = service._circuit_breakers.get(endpoint_key)
+    assert cb is not None, (
+        f"Expected circuit breaker for {endpoint_key!r} after SSRF skip, found keys={list(service._circuit_breakers)}"
+    )
+    assert cb.failure_count >= 1, (
+        f"Expected failure_count >= 1 after SSRF rejection for {endpoint_key!r}, got {cb.failure_count}"
     )
 
 
@@ -2716,10 +2812,12 @@ def _assert_wire_rejection(ctx: dict, field: str) -> None:
         code = layer.get("code")
         recovery = layer.get("recovery")
         # SERVICE_UNAVAILABLE must be excluded too: ERROR_CODE_MAPPING remaps
-        # INTERNAL_ERROR / CONFIGURATION_ERROR to SERVICE_UNAVAILABLE, and the base
-        # AdCPError default recovery is "terminal" — so a {SERVICE_UNAVAILABLE,
-        # terminal} server fault would otherwise pass as a field rejection. (#1420 should-fix)
-        assert code and code not in {"INTERNAL_ERROR", "SERVICE_UNAVAILABLE", "AUTH_REQUIRED"}, (
+        # INTERNAL_ERROR to SERVICE_UNAVAILABLE, and the base AdCPError default
+        # recovery is "terminal" — so a {SERVICE_UNAVAILABLE, terminal} server fault
+        # would otherwise pass as a field rejection. (#1420 should-fix)
+        # CONFIGURATION_ERROR now passes through untranslated (salesagent-nr2q) and is
+        # likewise a seller-side fault, never a field rejection.
+        assert code and code not in {"INTERNAL_ERROR", "SERVICE_UNAVAILABLE", "CONFIGURATION_ERROR", "AUTH_REQUIRED"}, (
             f"Invalid {field}: expected a client rejection on the wire, got code={code!r} "
             f"— a server crash or auth failure is not a field rejection. Envelope: {envelope}"
         )
