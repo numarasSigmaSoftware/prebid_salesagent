@@ -98,10 +98,19 @@ def test_guard_would_catch_a_regression() -> None:
 # account reference, which enrich_identity_with_account resolves at the boundary before
 # _impl runs. Everywhere else the identity is unenriched and the flag is structurally
 # False, so reading it is the original defect wearing the right keyword.
+# Keyed by ``module::function``, NOT by module. A module-wide entry exempts every
+# get_adapter call in the file, and media_buy_create.py holds five across four
+# functions — only two of which are request-scoped. Keying it by file therefore
+# un-guarded the approval executor, the site the round that added this arm named as
+# its own example: reverting it to identity.sandbox left the guard green.
 IDENTITY_KEYED_SITES: dict[str, str] = {
-    "src/core/tools/media_buy_create.py": (
+    "src/core/tools/media_buy_create.py::_create_media_buy_impl": (
         "create_media_buy declares and forwards `account`; the boundary enriches the "
         "identity before _impl, so identity.sandbox is the resolved account's mode"
+    ),
+    "src/core/tools/media_buy_create.py::_execute_adapter_media_buy_creation": (
+        "called from _create_media_buy_impl with the mode it already resolved from the "
+        "request's account reference, and passed down as a plain argument"
     ),
 }
 
@@ -170,14 +179,16 @@ def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
             if tree is None:
                 continue
             rel = str(path.relative_to(REPO_ROOT))
-            if rel in IDENTITY_KEYED_SITES:
-                continue
             for call in iter_call_expressions(tree, "get_adapter"):
                 value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
                 if value is None:
                     continue
-                if _resolves_to_identity_sandbox(value, _enclosing_function(tree, call)):
-                    offenders.append(f"{rel}:{call.lineno}")
+                func = _enclosing_function(tree, call)
+                site = f"{rel}::{func.name}" if func is not None else rel
+                if site in IDENTITY_KEYED_SITES:
+                    continue
+                if _resolves_to_identity_sandbox(value, func):
+                    offenders.append(f"{rel}:{call.lineno} (in {func.name if func else '<module>'})")
 
     assert not offenders, (
         "sandbox= resolves to identity.sandbox on a path that does not carry an account "

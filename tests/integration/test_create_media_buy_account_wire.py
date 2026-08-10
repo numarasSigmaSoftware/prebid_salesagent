@@ -138,3 +138,67 @@ class TestAccountReferenceRoutesTheAdapter:
     def test_live_account_reference_builds_the_live_adapter(self, integration_db):
         """Negative control — 'always sandbox' would disable real bookings and still pass above."""
         assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")
+
+
+class TestSandboxMarkerReachesTheBuyer:
+    """``sandbox: true`` on the create response — the half the buyer actually reads.
+
+    Routing a sandbox request to the mock keeps the buyer's money safe; the marker is
+    what lets them tell a simulated booking from a real one. Without it a create against
+    a sandbox account is indistinguishable on the wire from one that moved real budget.
+
+    This had no oracle at all: deleting ``response.sandbox = True`` left every
+    sandbox-selected test green, while the BDD scenarios that specify the marker are
+    dormant. For a change whose standard is that both halves are mutation-graded, the
+    ungraded half was the one facing the buyer.
+
+    Asserted on ``wire_response`` — the serialized bytes — not the typed payload:
+    grading the model would only prove it round-trips, and a transport that dropped the
+    field on serialization would still look correct.
+
+    AdCP 3.1.1 ``sandbox.mdx``: "Sellers SHOULD include ``sandbox: true`` in success
+    responses when processing a sandbox account request." Absent (not ``false``) is the
+    correct encoding for a live response — the obligation is to include it when true.
+    """
+
+    @staticmethod
+    def _marker(transport: Transport, *, account_sandbox: bool):
+        from datetime import UTC, datetime, timedelta
+
+        from tests.factories import AccountFactory, AgentAccountAccessFactory
+
+        with MediaBuyCreateEnv() as env:
+            tenant, principal, product, _pricing = env.setup_media_buy_data()
+            AccountFactory(tenant=tenant, account_id="acc_marker", sandbox=account_sandbox)
+            AgentAccountAccessFactory(
+                tenant_id=tenant.tenant_id, principal_id=principal.principal_id, account_id="acc_marker"
+            )
+            now = datetime.now(UTC)
+            result = env.call_via(
+                transport,
+                account={"account_id": "acc_marker"},
+                brand={"domain": "marker.example.com"},
+                packages=[{"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
+                start_time=(now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end_time=(now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                po_number=f"MARKER-{transport.value}",
+            )
+            assert not result.is_error, f"dispatch failed: {result.error!r}"
+            wire = result.wire_response
+            assert wire is not None, "no wire response captured — this assertion would grade nothing"
+            return wire.get("sandbox")
+
+    @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+    def test_sandbox_create_is_marked_on_the_wire(self, integration_db, transport):
+        assert self._marker(transport, account_sandbox=True) is True, (
+            f"[{transport.value}] a create against a sandbox account carried no sandbox marker; "
+            "the buyer cannot distinguish a simulated booking from one that moved real budget"
+        )
+
+    @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+    def test_live_create_is_not_marked(self, integration_db, transport):
+        """Negative control — 'always mark' would pass above and mislabel real bookings."""
+        assert self._marker(transport, account_sandbox=False) is None, (
+            f"[{transport.value}] a live response carried the sandbox marker; absent is the "
+            "correct encoding, and marking it tells the buyer a real booking was simulated"
+        )

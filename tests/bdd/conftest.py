@@ -329,12 +329,18 @@ _XFAIL_TAGS: dict[str, str] = {
     # FIXME(salesagent-gh8p.13 / production-gap bead): natural-key sandbox resolution
     # without prior provisioning is unimplemented. _resolve_by_natural_key
     # (account_helpers.py:110) requires the sandbox account to already exist —
-    # raises ACCOUNT_NOT_FOUND rather than auto-provisioning — and
-    # CreateMediaBuyResult exposes no sandbox field to echo. Step dispatches the
-    # real natural-key create on the wire; flips to a pass when sandbox
-    # auto-provisioning + the sandbox echo land. BR-RULE-209 INV-8.
-    "T-UC-002-sandbox-natural-key": "natural-key sandbox auto-provisioning + sandbox echo not implemented "
-    "in create_media_buy (ACCOUNT_NOT_FOUND without prior provisioning) — spec-production gap (salesagent-gh8p.13)",
+    # raises ACCOUNT_NOT_FOUND rather than auto-provisioning. The "no sandbox field
+    # to echo" half of this reason is NO LONGER TRUE: create_media_buy sets
+    # response.sandbox for a sandbox account, graded on real wire bytes across
+    # mcp/a2a/rest by
+    # tests/integration/test_create_media_buy_account_wire.py::TestSandboxMarkerReachesTheBuyer.
+    # Only auto-provisioning remains, so that is what this reason now says — an xfail
+    # reason that asserts a resolved gap is how a scenario stays parked after the work
+    # it was waiting on has landed. Step dispatches the real natural-key create on the
+    # wire; flips to a pass when auto-provisioning lands. BR-RULE-209 INV-8.
+    "T-UC-002-sandbox-natural-key": "natural-key sandbox AUTO-PROVISIONING not implemented in create_media_buy "
+    "(ACCOUNT_NOT_FOUND without prior provisioning) — spec-production gap (salesagent-gh8p.13). "
+    "The sandbox response marker itself IS implemented and graded.",
     # FIXME(salesagent-9vgz.1): inline creative upload not persisted in create_media_buy
     # process_and_upload_package_creatives → _sync_creatives_impl should persist
     # creatives to DB, but the Then step "upload creatives to creative library" fails
@@ -2139,8 +2145,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 {"pending_activation", "expired"},
                 "status_filter value validation emits VALIDATION_ERROR, not STATUS_FILTER_INVALID_VALUE (unimplemented)",
             ),
-            # Sandbox echo (sandbox=true/false in the response) is not implemented;
-            # only the production-absent row is graded.
+            # Scoped to get_media_buys: create_media_buy DOES emit the marker (graded on
+            # the wire in tests/integration/test_create_media_buy_account_wire.py), but
+            # the query response carries no sandbox field, so only the production-absent
+            # row is graded here. Named per-tool rather than as a blanket "not
+            # implemented", which stopped being true for create.
             (
                 "T-UC-019-boundary-sandbox",
                 {"sandbox account", "explicit production"},

@@ -89,7 +89,13 @@ def get_adapter(
     testing_context: Any = None,
     tenant: Any = None,
     *,
-    sandbox: bool = False,
+    # REQUIRED, no default. A default is what makes "forgot to decide" indistinguishable
+    # from "decided live" — and the wrong one books a real campaign for a sandbox buyer.
+    # The structural guard covers src/ only, so a default here silently un-guards every
+    # caller outside it. Same reasoning as the required `sanitize` on
+    # reject_unsafe_outbound_webhook_url: when the two values fail asymmetrically, the
+    # safe move is to make omission impossible rather than to pick a side.
+    sandbox: bool,
 ) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
     """Get the appropriate adapter instance for the selected adapter type.
 
