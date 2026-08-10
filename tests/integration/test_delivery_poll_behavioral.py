@@ -1042,6 +1042,47 @@ class TestDedupSuppressesPriorFinalWebhook:
             mock_send.assert_not_awaited()
 
 
+class TestFinalNotSuppressedByPriorScheduledDedupWindow:
+    """The FINAL must fire even when a "scheduled" webhook already succeeded
+    inside the 24h dedup window -- the is_final branch must decide on
+    ``has_successful_final`` alone, never falling through to the 24h check.
+
+    ``get_recent_successful_log`` (the 24h check) is NOT scoped to
+    notification_type -- it spans ANY successful send, by design, so a
+    "scheduled" success also dedups a subsequent "scheduled" attempt (see
+    TestDedupSuppressesPriorFinalWebhook). ``_should_skip_send``'s docstring
+    says the final path "fires regardless of the 24h window (so the status
+    scheduler flipping the buy to persisted 'completed' before this hourly
+    batch can't leave the spec-required final unsent)" -- precisely because a
+    buy that served earlier the same day commonly already has a same-day
+    "scheduled" success on record when it completes. Reinstating the is_final
+    branch's dropped ``return False`` (i.e. letting it fall through into the
+    24h check below) reproduces exactly that: the same-day "scheduled" success
+    silently swallows the final, with no error and no operator-visible signal.
+
+    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_sent_despite_same_day_scheduled_success(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            # An ended buy -> resolves to canonical "completed" -> its report is a final.
+            buy = _serving_webhook_buy(env, flight="completed")
+
+            # A periodic "scheduled" webhook already succeeded for this buy inside
+            # the 24h window (e.g. sent earlier the same day, while still serving).
+            _seed_delivery_log(
+                env, buy, log_id="prior-scheduled-success", status="success", notification_type="scheduled"
+            )
+
+            wires = await env.run_delivery_batch()
+
+            assert len(wires) == 1, "the final must not be suppressed by the same-day scheduled success"
+            assert wires[0]["result"]["notification_type"] == "final"
+
+
 class TestBatchContinuesPastFailedSend:
     """A failed send does NOT abort the batch — the loop continues to the rest.
 
