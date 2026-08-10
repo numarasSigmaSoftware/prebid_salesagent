@@ -34,6 +34,22 @@ from src.core.tools._media_buy_status import (
     resolve_canonical_status,
 )
 from src.core.tools.media_buy_list import _PERSISTED_STATUS_TO_ADCP, _compute_status
+from src.services import delivery_webhook_scheduler as sched
+from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+# Importing delivery_webhook_scheduler here, at module scope, means pytest binds
+# `sched.get_db_session` during collection -- before any test's autouse
+# mock_all_external_dependencies fixture (tests/unit/conftest.py) has patched
+# src.core.database.database_session.get_db_session. A body-level import instead
+# would do this module's first-ever import mid-test, inside that patch's window:
+# `from X import get_db_session` binds the name to whatever X.get_db_session
+# currently is, and that binding survives the patch's teardown (which only
+# restores X's own attribute, not this already-bound copy) -- permanently
+# wiring sched.get_db_session to one test's MagicMock for the rest of the
+# process. Reproduced: this poisoned
+# tests/integration/test_reporting_webhook_frequency_wire.py when both ran in
+# one pytest invocation (e.g. `make test-entity`), turning its real DB reads
+# into MagicMock reads.
 
 # A reference date inside the default flight window below, so a generic serving
 # status resolves to "active" (not date-refined away).
@@ -508,9 +524,6 @@ class TestSchedulerPassesDerivedStatusVocabulary:
         import asyncio
         from unittest.mock import MagicMock, patch
 
-        from src.services import delivery_webhook_scheduler as sched
-        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
-
         session = MagicMock()
         cm = MagicMock()
         cm.__enter__ = MagicMock(return_value=session)
@@ -547,7 +560,6 @@ class TestDeliveryErrorWarningCarriesThePayload:
         from unittest.mock import MagicMock, patch
 
         from src.core.schemas import AggregatedTotals, GetMediaBuyDeliveryResponse
-        from src.services import delivery_webhook_scheduler as sched
 
         # An empty-delivery failure response: exactly the shape whose __str__ renders
         # "No delivery data found for the specified period."
