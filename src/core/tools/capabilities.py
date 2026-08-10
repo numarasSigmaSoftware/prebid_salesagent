@@ -14,8 +14,12 @@ from adcp.types.generated_poc.core.media_buy_features import MediaBuyFeatures
 from adcp.types.generated_poc.core.postal_area_support import (
     PostalAreaSupport,  # adcp 6.6: standalone GeoPostalAreas removed; capabilities use PostalAreaSupport
 )
+from adcp.types.generated_poc.enums.billing_party import BillingParty
 from adcp.types.generated_poc.enums.channels import MediaChannel
 from adcp.types.generated_poc.enums.specialism import AdcpSpecialism
+from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
+    Account as AccountCapabilities,
+)
 from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     Adcp,
     Execution,
@@ -69,6 +73,42 @@ CHANNEL_MAPPING: dict[str, MediaChannel] = {
     "affiliate": MediaChannel.affiliate,
     "product_placement": MediaChannel.product_placement,
 }
+
+
+# Sandbox support is declared, not implied. AdCP 3.1.1
+# media-buy/advanced-topics/sandbox.mdx §Capabilities discovery: "Sellers declare
+# sandbox support in get_adcp_capabilities" and "If account.sandbox is not declared
+# or is false, the seller does not support sandbox." A conforming buyer checks this
+# BEFORE using sandbox mode, so routing sandbox accounts to the simulator correctly
+# and staying silent here leaves the whole feature undiscoverable — the buyer never
+# asks for the mode that was just made safe.
+#
+# sandbox is seller-wide — the routing lives in get_adapter, which every tenant goes
+# through — but ``supported_billing`` is REQUIRED on this type and is a per-tenant
+# column, so the block cannot be a module constant without inventing a billing claim.
+# Built per response instead, from the tenant that is actually answering.
+def _account_capabilities(tenant: dict | None) -> AccountCapabilities | None:
+    """The account capability block, or None when it cannot be stated truthfully.
+
+    ``sandbox`` is seller-wide — the routing lives in get_adapter, which every tenant
+    goes through — but the block also carries ``supported_billing``, which the schema
+    REQUIRES and rejects as an empty list, and which is a free-form per-tenant column.
+    So the block can only be emitted for a tenant that actually has billing configured.
+
+    Omitting is deliberate in the other cases, and is the same choice the tenant-less
+    path makes. The alternative is inventing a billing claim to buy the sandbox
+    declaration, and a wrong capability is worse than an absent one: the buyer acts on
+    it. Unknown billing strings are dropped rather than coerced — the column predates
+    the enum, and a value the SDK does not know must not take capabilities discovery
+    down for that tenant.
+    """
+    if tenant is None:
+        return None
+    known = {b.value for b in BillingParty}
+    billing = [BillingParty(b) for b in (tenant.get("supported_billing") or []) if b in known]
+    if not billing:
+        return None
+    return AccountCapabilities(supported_billing=billing, sandbox=True)
 
 
 def _get_adcp_capabilities_impl(
@@ -278,6 +318,7 @@ def _get_adcp_capabilities_impl(
         ),
         supported_protocols=[SupportedProtocol.media_buy],
         specialisms=[AdcpSpecialism.sales_non_guaranteed],
+        account=_account_capabilities(tenant),
         media_buy=media_buy,
         last_updated=datetime.now(UTC),
     )
