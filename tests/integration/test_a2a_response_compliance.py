@@ -102,8 +102,12 @@ class TestA2ASpecCompliance:
         ctx = {"user_id": "1234567890"}
         response = SyncCreativesResponse(**response_data, context=ctx)
 
-        # Check no extra fields
-        spec_fields = {"creatives", "dry_run", "context"}
+        # Check no extra fields.
+        # status defaults to TaskStatus.completed (protocol envelope default, same as
+        # get_products/list_creative_formats above) -- previously the SDK's own Any=None
+        # default meant status was always excluded, which was itself a bug (PR review on
+        # #1899): a successful sync must not silently omit the protocol status.
+        spec_fields = {"creatives", "dry_run", "context", "status"}
         response_fields = set(response.model_dump().keys())
         extra_fields = response_fields - spec_fields
 

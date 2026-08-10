@@ -663,11 +663,13 @@ class UpdateMediaBuySubmitted(AdCPUpdateMediaBuySubmitted):  # type: ignore[misc
     ``UpdateMediaBuySuccess``, whose adcp-6.6 envelope ``status`` defaults to
     ``"completed"`` and would falsely assert the update was applied.
 
-    The update transport wrappers serialize the returned model straight onto the
-    wire (``ToolResult(structured_content=response)`` / A2A / REST), so returning
-    this type from the manual-approval branch yields the spec-correct submitted
-    envelope on every transport. ``status`` defaults to ``"submitted"`` on the
-    library base; ``task_id`` is required.
+    ``status`` defaults to ``"submitted"`` on the library base; ``task_id`` is
+    required. Like every other AdCPBaseModel subclass, MCP must serialize this
+    via ``response.model_dump(mode="json")`` before handing it to ToolResult —
+    passing the bare model leaks every unset optional (context, message,
+    timestamp, errors, ...) as an explicit wire ``null`` (fastmcp's ToolResult
+    serializes structured_content via pydantic_core, bypassing exclude_none;
+    verified empirically — see tests/unit/test_mcp_wrapper_structured_content_wire_shape.py).
     """
 
     def __str__(self) -> str:

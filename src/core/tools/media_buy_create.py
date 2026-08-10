@@ -35,7 +35,6 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import PackageRequest as AdcpPackageRequest
 from adcp.types.aliases import Package as ResponsePackage
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 
@@ -155,6 +154,7 @@ from src.core.tools.financial_validation import (
     validate_max_daily_package_spend,
     validate_min_package_budget,
 )
+from src.core.transport_helpers import build_mcp_tool_result
 
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
@@ -4490,7 +4490,7 @@ async def create_media_buy(
         context_id=_ctx_id,
         raw_wire_payload=raw_wire_payload,
     )
-    return ToolResult(content=str(result), structured_content=result)
+    return build_mcp_tool_result(str(result), result)
 
 
 async def create_media_buy_raw(

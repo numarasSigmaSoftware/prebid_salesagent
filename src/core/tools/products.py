@@ -15,7 +15,6 @@ from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
 from adcp.types import BrandReference, ContextObject, PropertyListReference
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
 from src.adapters import get_adapter_default_channels
@@ -38,7 +37,7 @@ from src.core.schemas import (
 )
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tool_context import ToolContext
-from src.core.transport_helpers import resolve_identity_from_context
+from src.core.transport_helpers import build_mcp_tool_result, resolve_identity_from_context
 from src.core.validation_helpers import adcp_validation_boundary, safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
 
@@ -828,8 +827,7 @@ async def get_products(
     # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
     response = await _get_products_impl(req, identity)
 
-    # Return ToolResult with human-readable text and structured data
-    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
+    return build_mcp_tool_result(str(response), response)
 
 
 async def get_products_raw(

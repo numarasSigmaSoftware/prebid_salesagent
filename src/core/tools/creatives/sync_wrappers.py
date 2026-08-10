@@ -6,12 +6,12 @@ from adcp import PushNotificationConfig
 from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import ContextObject, CreativeAsset, ValidationMode
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
 from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.tool_context import ToolContext
+from src.core.transport_helpers import build_mcp_tool_result
 
 from ._sync import _sync_creatives_impl
 
@@ -70,12 +70,7 @@ async def sync_creatives(
         context=context,
         identity=identity,
     )
-    # Serialize via model_dump so the MCP structured content matches the
-    # A2A/REST wire shape: passing the model object would have fastmcp
-    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
-    # default — every unset optional would appear as an explicit null only
-    # on MCP.
-    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
+    return build_mcp_tool_result(str(response), response)
 
 
 def sync_creatives_raw(

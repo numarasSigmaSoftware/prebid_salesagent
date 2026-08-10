@@ -13,7 +13,6 @@ from typing import Any
 
 from adcp.types import ContextObject
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_tenant
@@ -24,6 +23,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListAuthorizedPropertiesRequest, ListAuthorizedPropertiesResponse
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tool_context import ToolContext
+from src.core.transport_helpers import build_mcp_tool_result
 from src.core.validation_helpers import safe_parse_json_field
 
 logger = logging.getLogger(__name__)
@@ -220,12 +220,7 @@ async def list_authorized_properties(
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _list_authorized_properties_impl(req, identity)
 
-    # Serialize via model_dump so the MCP structured content matches the
-    # A2A/REST wire shape: passing the model object would have fastmcp
-    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
-    # default — every unset optional would appear as an explicit null only
-    # on MCP.
-    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
+    return build_mcp_tool_result(str(response), response)
 
 
 def list_authorized_properties_raw(

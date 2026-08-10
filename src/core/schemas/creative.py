@@ -13,6 +13,7 @@ from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import CreativeStatus
 from adcp.types import Error as LibraryError
 from adcp.types import FormatId as LibraryFormatId
+from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import (
     ListCreativeFormatsRequest as LibraryListCreativeFormatsRequest,
 )
@@ -42,7 +43,6 @@ from adcp.types.generated_poc.creative.list_creatives_response import (
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
-from adcp.types.generated_poc.enums.task_status import TaskStatus  # TODO: no stable alias in adcp.types
 from pydantic import (
     ConfigDict,
     Field,
@@ -487,7 +487,7 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
     # the same TaskStatus default ListAccountsResponse already carries from
     # the library's ProtocolEnvelope base, so a successful sync never emits
     # a null (pre-fix) or omitted (post-fix) status on the wire.
-    status: TaskStatus = TaskStatus.completed
+    status: AdcpTaskStatus = AdcpTaskStatus.completed
 
     def model_dump(self, **kwargs):
         """Override to call child model_dump() for nested SyncCreativeResult (Pattern #4)."""

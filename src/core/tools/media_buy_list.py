@@ -14,7 +14,6 @@ from decimal import Decimal
 from typing import Annotated, Any, cast
 
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field, RootModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Session
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.tool_context import ToolContext
 from src.core.tools._media_buy_status import PERSISTED_STATUS_TO_CANONICAL, resolve_canonical_status
+from src.core.transport_helpers import build_mcp_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -346,12 +346,7 @@ async def get_media_buys(
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-    # Serialize via model_dump so the MCP structured content matches the
-    # A2A/REST wire shape: passing the model object would have fastmcp
-    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
-    # default — every unset optional would appear as an explicit null only
-    # on MCP.
-    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
+    return build_mcp_tool_result(str(response), response)
 
 
 def get_media_buys_raw(

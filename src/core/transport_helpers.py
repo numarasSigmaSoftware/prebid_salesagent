@@ -1,9 +1,12 @@
-"""Transport boundary helpers for creating ResolvedIdentity from transport-specific types.
+"""Transport boundary helpers.
 
-These functions bridge transport-specific types (FastMCP Context, ToolContext,
-A2A headers) to the transport-agnostic ResolvedIdentity used by _impl functions.
-
-Each transport boundary calls one of these helpers before invoking _impl.
+Two kinds of boundary glue live here:
+- Identity: bridging transport-specific types (FastMCP Context, ToolContext,
+  A2A headers) to the transport-agnostic ResolvedIdentity used by _impl
+  functions. Each transport boundary calls one of these helpers before
+  invoking _impl.
+- Response construction: build_mcp_tool_result(), the single sanctioned way
+  to build an MCP ToolResult (see its docstring).
 """
 
 from __future__ import annotations
@@ -13,9 +16,11 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from adcp.types import AccountReference
+    from adcp.types.base import AdCPBaseModel
 
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_http_headers
+from fastmcp.tools.tool import ToolResult
 
 from src.core.resolved_identity import ResolvedIdentity, resolve_identity
 from src.core.tenant_context import LazyTenantContext
@@ -146,3 +151,29 @@ def enrich_identity_with_account(
         account_id = resolve_account(account_ref, identity, uow.accounts)
 
     return identity.model_copy(update={"account_id": account_id})
+
+
+def build_mcp_tool_result(content: str, response: AdCPBaseModel) -> ToolResult:
+    """Build the ToolResult every MCP tool wrapper must return.
+
+    ``fastmcp.tools.tool.ToolResult.__init__`` passes ``structured_content``
+    through ``pydantic_core.to_jsonable_python()``, which serializes the
+    model's raw core schema directly and does not know about
+    ``AdCPBaseModel``'s ``exclude_none=True`` default. A2A and REST call
+    ``.model_dump()`` explicitly and correctly omit unset optional fields;
+    constructing ``ToolResult`` with the bare response model instead leaks
+    every unset optional as an explicit wire ``null`` on MCP only (verified
+    empirically across every response type in this codebase — none has a
+    schema-level ``@model_serializer`` that would make raw-pass safe).
+
+    Every MCP tool wrapper under ``src/core/tools/`` must return through this
+    helper rather than constructing ``ToolResult`` directly — this is the
+    third time this exact bug class has been fixed site-by-site (#1266,
+    #1575, and the 11 sites this helper replaces); enforced by
+    ``tests/unit/test_architecture_no_direct_toolresult_construction.py``.
+
+    Args:
+        content: Human-readable summary text for the tool result.
+        response: The AdCPBaseModel response instance to serialize.
+    """
+    return ToolResult(content=content, structured_content=response.model_dump(mode="json"))
