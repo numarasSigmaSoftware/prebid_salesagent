@@ -315,8 +315,13 @@ async def get_adcp_capabilities(
 
     summary = "\n".join(summary_parts)
 
-    # Return ToolResult with human-readable text and structured data
-    return ToolResult(content=summary, structured_content=response)
+    # Return ToolResult with human-readable text and structured data.
+    # Serialize via model_dump so the MCP structured content matches the
+    # A2A/REST wire shape: passing the model object would have fastmcp
+    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
+    # default — every unset optional would appear as an explicit null only
+    # on MCP.
+    return ToolResult(content=summary, structured_content=response.model_dump(mode="json"))
 
 
 async def get_adcp_capabilities_raw(

@@ -343,7 +343,12 @@ async def get_media_buys(
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-    return ToolResult(content=str(response), structured_content=response)
+    # Serialize via model_dump so the MCP structured content matches the
+    # A2A/REST wire shape: passing the model object would have fastmcp
+    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
+    # default — every unset optional would appear as an explicit null only
+    # on MCP.
+    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
 
 
 def get_media_buys_raw(

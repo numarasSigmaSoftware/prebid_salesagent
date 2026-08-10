@@ -220,7 +220,12 @@ async def list_authorized_properties(
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _list_authorized_properties_impl(req, identity)
 
-    return ToolResult(content=str(response), structured_content=response)
+    # Serialize via model_dump so the MCP structured content matches the
+    # A2A/REST wire shape: passing the model object would have fastmcp
+    # serialize it via pydantic_core, bypassing AdCPBaseModel's exclude_none
+    # default — every unset optional would appear as an explicit null only
+    # on MCP.
+    return ToolResult(content=str(response), structured_content=response.model_dump(mode="json"))
 
 
 def list_authorized_properties_raw(
