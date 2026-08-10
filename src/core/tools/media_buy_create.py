@@ -162,7 +162,7 @@ from src.core.tools.financial_validation import (
 
 # Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import adcp_validation_boundary, format_validation_error, package_field_path
-from src.core.webhook_validator import reject_unsafe_webhook_registration_url, webhook_url_for_log
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_registration_source_url
 from src.services.activity_feed import activity_feed
 from src.services.gam_product_config_service import GAMProductConfigService
 from src.services.targeting_capabilities import (
@@ -2045,21 +2045,10 @@ async def _create_media_buy_impl(
 
     # SSRF gate at registration — after auth so unauthenticated callers get AUTH
     # first. Must run before workflow metadata / DB writes.
-    # Use str(url): library ReportingWebhook.url is pydantic AnyUrl, not str.
-    if req.reporting_webhook:
-        rw_url = getattr(req.reporting_webhook, "url", None)
-        reject_unsafe_webhook_registration_url(
-            str(rw_url) if rw_url is not None else None,
-            field="reporting_webhook.url",
-            context=req.context,
-        )
-    if push_notification_config:
-        pnc_url = push_notification_config.get("url")
-        reject_unsafe_webhook_registration_url(
-            str(pnc_url) if pnc_url is not None else None,
-            field="push_notification_config.url",
-            context=req.context,
-        )
+    reject_unsafe_registration_source_url(req.reporting_webhook, field="reporting_webhook.url", context=req.context)
+    reject_unsafe_registration_source_url(
+        push_notification_config, field="push_notification_config.url", context=req.context
+    )
 
     # Validate setup completion (only in production, skip for testing)
     if not testing_ctx.dry_run and not testing_ctx.test_session_id:
@@ -2157,7 +2146,7 @@ async def _create_media_buy_impl(
                 logger.info(
                     "[MCP/A2A] Registering push notification config id=%s url=%s",
                     push_notification_config.get("id"),
-                    webhook_url_for_log(str(url)),
+                    redact_webhook_url_for_audit(str(url)),
                 )
                 schemes = authentication.get("schemes", []) if authentication else []
                 auth_type = schemes[0] if schemes else None

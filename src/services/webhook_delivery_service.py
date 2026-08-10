@@ -25,10 +25,11 @@ from typing import Any
 
 import httpx
 from adcp import get_adcp_spec_version
+from adcp.types import NotificationType
 
 from src.core.webhook_validator import (
+    redact_webhook_url_for_audit,
     reject_unsafe_outbound_webhook_url,
-    webhook_url_for_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,12 +239,17 @@ class WebhookDeliveryService:
                 sequence_number = self._sequence_numbers[media_buy_id]
 
             # Determine notification type per new spec
+            # Spelled from the spec enum rather than as literals: this value is
+            # PERSISTED and later queried by equality (see delivery repository's
+            # final-notification predicate), so a writer and a reader that spell
+            # it independently can desync on a spec rename without either side
+            # looking wrong.
             if is_final:
-                notification_type = "final"
+                notification_type = NotificationType.final.value
             elif is_adjusted:
-                notification_type = "adjusted"  # New in spec
+                notification_type = NotificationType.adjusted.value
             else:
-                notification_type = "scheduled"
+                notification_type = NotificationType.scheduled.value
 
             # Calculate next_expected_at if not final
             next_expected_at = None
@@ -379,7 +385,7 @@ class WebhookDeliveryService:
                 # Send to all configured webhooks
                 sent_count = 0
                 for config in configs:
-                    safe_url = webhook_url_for_log(config.url)
+                    safe_url = redact_webhook_url_for_audit(config.url)
                     # Skip auth-blocked endpoints (UC-004-EXT-G-07)
                     if isinstance(getattr(config, "auth_blocked_at", None), datetime):
                         logger.warning(
@@ -441,7 +447,9 @@ class WebhookDeliveryService:
 
     def _reject_unsafe_outbound_url(self, url: str, circuit_breaker: CircuitBreaker) -> bool:
         """Return True when outbound URL fails SSRF (caller must skip delivery)."""
-        rejected, _error_msg = reject_unsafe_outbound_webhook_url(url, log=logger, kind="Application")
+        rejected, _error_msg = reject_unsafe_outbound_webhook_url(
+            url, log=logger, kind="Application", sanitize=redact_webhook_url_for_audit
+        )
         if rejected:
             circuit_breaker.record_failure()
             return True
@@ -473,7 +481,7 @@ class WebhookDeliveryService:
         config = webhook_data["config"]
         payload = webhook_data["payload"]
         timestamp = webhook_data["timestamp"].isoformat()
-        safe_url = webhook_url_for_log(config.url)
+        safe_url = redact_webhook_url_for_audit(config.url)
 
         # Generate HMAC signature if webhook secret is configured
         webhook_secret = getattr(config, "webhook_secret", None)

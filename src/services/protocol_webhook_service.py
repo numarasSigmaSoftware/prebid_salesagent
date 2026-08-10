@@ -13,8 +13,6 @@ Application-level webhooks are configured via:
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import time
@@ -32,12 +30,11 @@ from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
 from src.core.audit_logger import get_audit_logger
-from src.core.config import get_config
 from src.core.database.database_session import get_db_session
 from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
-from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_outbound_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +88,7 @@ def _delivery_log_context(
         tenant_id=tenant_id,
         principal_id=principal_id,
         media_buy_id=media_buy_id,
-        webhook_url=_redact_url_credentials(url),
+        webhook_url=redact_webhook_url_for_audit(url),
         task_type=task_type,
         idempotency_key=idempotency_key,
         sequence_number=sequence_number,
@@ -185,67 +182,18 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
-_AUDIT_REDACTION_CONTEXT = b"protocol_webhook_service._redact_url_credentials.v4"
+def _audit_webhook_outcome(audit_logger: Any, message: str, *, success: bool = False) -> None:
+    """The one guarded audit sink for webhook delivery outcomes.
 
-
-def _redact_url_credentials(url: str) -> str:
-    """Return a non-reversible audit form of *url*, for log output AND durable storage.
-
-    Keeps only ``scheme://<redacted:key_id:hmac>`` — nothing about the buyer-supplied
-    host, port, path, query, or fragment survives. Two earlier versions of this
-    function kept the hostname on the theory that a hostname can't carry a
-    credential; that assumption is wrong for capability-style delivery URLs, where
-    the credential IS the (sub)domain (e.g. ``https://tok-9fK2z8mQ.hooks.example.com/deliver``)
-    — a private/unique or otherwise unclassifiable subdomain is exactly as
-    unconstrained as the path or query, so it gets the same treatment.
-
-    The digest is an HMAC-SHA256 (never a bare hash) keyed with a DEDICATED secret,
-    ``AppConfig.webhook_audit_hmac_key`` — deliberately not ``flask_secret_key``.
-    Reusing the session-signing key would make this correlation identifier a
-    hostage of routine session-key rotation (rotate the session key, and every
-    historical ``WebhookDeliveryLog`` row becomes unrecognizable), and
-    ``flask_secret_key`` ships a public, unvalidated dev default that a
-    misconfigured production deployment could silently inherit. The dedicated key
-    is required and length-checked in production by ``validate_configuration()``.
-    Truncated to 128 bits, so two log lines or DB rows can be recognized as the
-    same target without exposing it — but unlike an unkeyed digest, it can't be
-    matched offline against a dictionary of guessed URLs (low-entropy webhook URLs
-    are a real threat model an unkeyed hash doesn't defend against).
-
-    The key ID (``AppConfig.webhook_audit_hmac_key_id``, default ``"v1"``) is folded
-    into the HMAC input for domain separation AND written into the output in the
-    clear, so a key rotation doesn't just silently break correlation for every row
-    written under the old key — the row's own audit identifier still says which key
-    generation produced it.
-
-    ``validate_configuration()`` requires a real key in production, but a blank
-    (or whitespace-only) key is legal OUTSIDE production — the same shared
-    staging/dev environments that skip it can still hold real buyer URLs and
-    write real ``WebhookDeliveryLog`` rows, so this function must not silently
-    degrade to an HMAC keyed with an empty string: that would produce a value
-    that *looks* like a real per-URL digest while being exactly as guessable as
-    an unkeyed hash (zero secret material). Instead it emits a constant,
-    non-correlating placeholder (``scheme://<redacted>``, no digest, no key ID)
-    — honestly offering no correlation rather than a fake one.
-
-    Used both for log lines and for the value persisted to ``WebhookDeliveryLog.webhook_url``
-    (pure audit data — never read back to dial a real request). Never use this on the URL
-    passed to ``requests`` for the actual outbound call — that one needs the untouched original.
+    Six call sites open-coded ``if audit_logger:`` around a single log call. Beyond
+    the repetition, that shape is how one of them came to be missing entirely: a
+    guard that must be re-typed at each new outcome branch is a guard that will
+    eventually not be. Callers state the outcome; whether a sink exists is decided
+    here, once.
     """
-    try:
-        parsed = urlparse(url)
-        if not parsed.hostname:
-            return "REDACTED"
-        config = get_config()
-        raw_key = config.webhook_audit_hmac_key
-        if not raw_key.strip():
-            return f"{parsed.scheme}://<redacted>"
-        key_id = config.webhook_audit_hmac_key_id
-        message = _AUDIT_REDACTION_CONTEXT + b":" + key_id.encode() + b":" + url.encode()
-        digest = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()[:32]
-        return f"{parsed.scheme}://<redacted:{key_id}:{digest}>"
-    except Exception:
-        return "REDACTED"
+    if audit_logger is None:
+        return
+    (audit_logger.log_success if success else audit_logger.log_warning)(message)
 
 
 def _safe_delivery_error_message(url: str, *, reason: str) -> str:
@@ -258,11 +206,11 @@ def _safe_delivery_error_message(url: str, *, reason: str) -> str:
     request URL in their string form -- ``HTTPError.__str__()`` includes it
     verbatim, userinfo and all; ``ConnectionError``'s message includes
     host+path+query -- which would leak exactly the credentials
-    ``_redact_url_credentials()`` exists to keep out of logs and
+    ``redact_webhook_url_for_audit()`` exists to keep out of logs and
     ``WebhookDeliveryLog``. *reason* must be bounded, already-safe text (an
     exception type name, an HTTP status phrase) -- never raw exception text.
     """
-    return f"{reason} delivering webhook to {_redact_url_credentials(url)}"
+    return f"{reason} delivering webhook to {redact_webhook_url_for_audit(url)}"
 
 
 class ProtocolWebhookService:
@@ -310,6 +258,10 @@ class ProtocolWebhookService:
             push_notification_config.url,
             log=logger,
             kind="Protocol",
+            # Same redaction the success path and the durable log use: on this
+            # path the hostname can itself be the credential, so the rejection
+            # branch must not log it in the clear.
+            sanitize=redact_webhook_url_for_audit,
         )
         if rejected:
             return False
@@ -324,7 +276,7 @@ class ProtocolWebhookService:
         # must not leave a different credential in the log line.
         safe_config = {
             "url": (
-                _redact_url_credentials(push_notification_config.url)
+                redact_webhook_url_for_audit(push_notification_config.url)
                 if hasattr(push_notification_config, "url") and push_notification_config.url
                 else None
             ),
@@ -478,11 +430,20 @@ class ProtocolWebhookService:
             audit_logger = get_audit_logger("webhook", tenant_id)
             audit_logger.log_info(f"Sending {task_type} webhook for task {task_id} (sequence #{sequence_number})")
 
+        # Computed once, not per attempt: the redaction runs urlparse + get_config
+        # + an HMAC-SHA256, and `url` does not change across retries. Inlined in
+        # the log call below, all of that re-ran on every attempt, eagerly, even
+        # when the INFO line was never emitted.
+        redacted_url = redact_webhook_url_for_audit(url)
+
         for attempt in range(max_attempts):
             try:
                 logger.info(
-                    f"Sending webhook for task {task_id} to {_redact_url_credentials(url)} "
-                    f"(attempt {attempt + 1}/{max_attempts})"
+                    "Sending webhook for task %s to %s (attempt %s/%s)",
+                    task_id,
+                    redacted_url,
+                    attempt + 1,
+                    max_attempts,
                 )
 
                 def _post() -> requests.Response:
@@ -523,14 +484,13 @@ class ProtocolWebhookService:
                         completed_at=datetime.now(UTC),
                     )
 
-                    if audit_logger:
-                        audit_logger.log_warning(
-                            f"{task_type} webhook failed with non-2xx response {response.status_code}"
-                        )
+                    _audit_webhook_outcome(
+                        audit_logger, f"{task_type} webhook failed with non-2xx response {response.status_code}"
+                    )
 
                     return False
 
-                logger.info(f"Successfully sent webhook for task {task_id} (status: {response.status_code})")
+                logger.info("Successfully sent webhook for task %s (status: %s)", task_id, response.status_code)
 
                 self._write_delivery_log(
                     context=delivery_log_context,
@@ -542,11 +502,12 @@ class ProtocolWebhookService:
                 )
 
                 # Log to audit system (success)
-                if audit_logger:
-                    audit_logger.log_success(
-                        f"{task_type} webhook delivered successfully (sequence #{sequence_number}, "
-                        f"{response_time_ms}ms, {payload_size_bytes} bytes)"
-                    )
+                _audit_webhook_outcome(
+                    audit_logger,
+                    f"{task_type} webhook delivered successfully (sequence #{sequence_number}, "
+                    f"{response_time_ms}ms, {payload_size_bytes} bytes)",
+                    success=True,
+                )
 
                 return True
 
@@ -578,8 +539,7 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (failure)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed with client error {status_code}")
+                    _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed with client error {status_code}")
 
                     return False
 
@@ -617,8 +577,7 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (failure after all retries)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed after {max_attempts} attempts")
+                    _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed after {max_attempts} attempts")
 
                     return False
 
@@ -644,7 +603,9 @@ class ProtocolWebhookService:
                     )
                     await asyncio.sleep(wait_seconds)
                 else:
-                    logger.error(f"Webhook failed for task {task_id} after {max_attempts} attempts: {error_message}")
+                    logger.error(
+                        "Webhook failed for task %s after %s attempts: %s", task_id, max_attempts, error_message
+                    )
 
                     self._write_delivery_log(
                         context=delivery_log_context,
@@ -656,14 +617,15 @@ class ProtocolWebhookService:
                     )
 
                     # Log to audit system (network failure)
-                    if audit_logger:
-                        audit_logger.log_warning(f"{task_type} webhook failed with network error: {type(e).__name__}")
+                    _audit_webhook_outcome(
+                        audit_logger, f"{task_type} webhook failed with network error: {type(e).__name__}"
+                    )
 
                     return False
 
             except Exception as e:
                 error_message = _safe_delivery_error_message(url, reason=f"Unexpected error ({type(e).__name__})")
-                logger.error(f"Unexpected error sending webhook for task {task_id}: {error_message}")
+                logger.error("Unexpected error sending webhook for task %s: %s", task_id, error_message)
 
                 self._write_delivery_log(
                     context=delivery_log_context,
@@ -672,6 +634,13 @@ class ProtocolWebhookService:
                     error_message=error_message,
                     completed_at=datetime.now(UTC),
                 )
+
+                # Audit sink, matching every sibling terminal path in this method. This
+                # was the only failure branch that wrote a delivery-log row but no audit
+                # entry — and it is the branch for UNEXPECTED errors, so an operator
+                # watching the audit stream saw a clean run precisely when something
+                # unanticipated broke. The message is already the safe, redacted form.
+                _audit_webhook_outcome(audit_logger, f"{task_type} webhook failed: {error_message}")
 
                 return False
 

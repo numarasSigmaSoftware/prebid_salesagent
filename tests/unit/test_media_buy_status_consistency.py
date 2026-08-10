@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
 from adcp.types import MediaBuyStatus
 
 from src.core.tools._media_buy_status import (
@@ -237,9 +238,12 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_completed_persisted_statuses_is_the_reportable_remainder(self):
         """Pin COMPLETED_PERSISTED_STATUSES — the delivery scheduler's completed arm.
 
-        The scheduler passes SERVING_PERSISTED_STATUSES and COMPLETED_PERSISTED_STATUSES
-        into get_reportable_for_delivery, so together they must reconstitute REPORTABLE
-        exactly — a drift in either arm silently changes which buys get a final webhook.
+        The scheduler does NOT pass this constant: get_reportable_for_delivery receives
+        SERVING_PERSISTED_STATUSES and WEBHOOK_TERMINAL_PERSISTED_STATUSES ({canceled,
+        completed, rejected}). This is the completion-only subset of REPORTABLE, and its
+        reader is the e2e final-webhook helper, which needs the one persisted status a
+        completing buy lands on. Pinning it still matters: a drift in the status map
+        would silently change which buy that helper selects.
 
         Only the LITERAL assertions below have teeth. Because the constant is defined as
         ``REPORTABLE - SERVING``, the union/disjointness relations are true by
@@ -258,10 +262,14 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_webhook_terminal_statuses_cover_persistent_channel_termination(self):
         """Pin the completed/canceled/rejected persistent-channel termination set.
 
-        The spec/storyboard only mandate "final" for campaign completion
-        (optimization-reporting.mdx §Publisher Commitment) — extending it to
-        canceled/rejected is our reading, per WEBHOOK_TERMINAL_CANONICAL_STATUSES's
-        own UNGRADED comment. This is a literal pin, not a spec pin.
+        The storyboard-graded prose only mandates "final" for campaign
+        completion (optimization-reporting.mdx §Publisher Commitment), but
+        webhooks.mdx §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1
+        docs snapshot, not spec-target drift], latest snapshot at the
+        3.1.1 pin) states persistent-webhook final delivery fires after
+        completed, canceled, OR rejected — see WEBHOOK_TERMINAL_CANONICAL_STATUSES's
+        own comment. Ungraded by any storyboard found, but grounded in spec
+        prose, not just a bare reading. This is a literal pin, not a spec pin.
         """
         assert WEBHOOK_REPORTABLE_CANONICAL_STATUSES == {
             "active",
@@ -278,11 +286,13 @@ class TestCanonicalVocabularyPinnedToSdk:
     def test_webhook_terminal_statuses_match_the_pinned_sdks_lifecycle_classification(self):
         """WEBHOOK_TERMINAL_CANONICAL_STATUSES is a literal; ground it on the SDK.
 
-        Our "our reading, ungraded" extension happens to coincide with the pinned
-        SDK's own terminal classification (``adcp.server.helpers.is_terminal_status``)
-        over the canonical status vocabulary. Asserting the two AGREE catches the
-        literal drifting from that classification, without claiming the spec text
-        itself mandates the extension — the module comment already says it doesn't.
+        Our spec-grounded-but-storyboard-ungraded extension (webhooks.mdx
+        §Termination) happens to coincide with the pinned SDK's own terminal
+        classification (``adcp.server.helpers.is_terminal_status``) over the
+        canonical status vocabulary. Asserting the two AGREE catches the
+        literal drifting from that classification, without claiming any
+        storyboard exercises the extension — the module comment already says
+        it doesn't.
 
         NOT the same set as NO_MORE_DATA_STATUSES: that one additionally includes
         "failed" (a delivery-only canonical status the SDK's lifecycle classifier
@@ -687,13 +697,17 @@ class TestDeliveryErrorWarningCarriesThePayload:
             patch.object(sched, "_get_media_buy_delivery_impl", return_value=response),
             patch.object(sched, "resolve_canonical_status", return_value="active"),
         ):
-            delivered = asyncio.run(
-                sched.DeliveryWebhookScheduler()._deliver_report(
-                    MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}, is_final=False
+            # ADAPTER_TIMEOUT is a REAL failure, not the MEDIA_BUY_NOT_FOUND "no data"
+            # advisory, so the branch now raises rather than returning False: a final
+            # that could not be built must count as a batch error, not a silent skip.
+            # The warning still fires first — which is what this test grades.
+            with pytest.raises(RuntimeError, match="ADAPTER_TIMEOUT"):
+                asyncio.run(
+                    sched.DeliveryWebhookScheduler()._deliver_report(
+                        MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}, is_final=False
+                    )
                 )
-            )
 
-        assert delivered is False
         assert rendered, "the error branch must emit a warning"
         line = "\n".join(rendered)
         assert "ADAPTER_TIMEOUT" in line, f"the adapter error code must reach the log; got {line!r}"

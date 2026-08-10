@@ -31,9 +31,17 @@ _PINNED_ERROR_ENUM = (
 def _pinned_error_metadata() -> dict[str, dict[str, str]]:
     """code -> {recovery, suggestion} from the pinned AdCP error-code enum.
 
-    The pinned enum (@04f59d2d5) is the authoritative recovery classification;
-    the installed SDK ships fewer codes and diverges on several recovery values,
-    so it is NOT used here (pin-wins).
+    Preferred over the installed SDK for RECOVERY values: the SDK ships a smaller
+    standard-code subset and is documented to diverge from the spec on several
+    recovery classifications, so the spec-derived JSON wins where both have the
+    code.
+
+    It is NOT authoritative for CANONICITY, and must not be used to decide whether
+    a code exists. This tree is pinned at @04f59d2d5, which predates the v3.1.1
+    release the repo targets: it carries 64 codes against 92 released — 28 missing,
+    0 extra (see tests/helpers/pinned_schema.py, which measured it). Treating
+    absence here as "not a canonical code" would reject 28 codes that are canonical
+    at the pinned target version, and tell the author to change a correct code.
     """
     return json.loads(_PINNED_ERROR_ENUM.read_text())["enumMetadata"]
 
@@ -231,13 +239,21 @@ class TransportResult:
         """Shared code/recovery/suggestion assertion for an explicit source."""
         from tests.helpers import assert_envelope_shape
 
-        meta = _pinned_error_metadata()
-        spec = meta.get(code)
-        assert spec is not None, (
-            f"{code!r} is not a canonical AdCP error code (pinned error-code.json @04f59d2d5). "
-            "Reconcile the feature to a canonical code."
-        )
-        expected_recovery = recovery if recovery is not None else spec["recovery"]
+        spec = _pinned_error_metadata().get(code)
+        if spec is None:
+            # Absence is not evidence the code is wrong — the vendored enum predates
+            # v3.1.1 by 28 codes. What absence DOES mean is that the fixture cannot
+            # supply this code's recovery class, so the caller has to state it rather
+            # than inherit an unknown one.
+            assert recovery is not None, (
+                f"{code!r} is absent from the vendored error-code enum (@04f59d2d5), which "
+                "predates the targeted v3.1.1 by 28 codes — so this is NOT proof the code is "
+                "non-canonical. Pass recovery= explicitly (the fixture cannot supply it), or "
+                "refresh the fixture if the code is genuinely absent from the release too."
+            )
+            expected_recovery = recovery
+        else:
+            expected_recovery = recovery if recovery is not None else spec["recovery"]
 
         assert envelope is not None, (
             f"Expected a {source} rejection with {code}, but no {source}_error_envelope was captured "

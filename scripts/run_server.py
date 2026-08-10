@@ -15,6 +15,7 @@ def main():
     try:
         # Add current directory to path for imports
         sys.path.insert(0, ".")
+        from src.core.config import is_production
         from src.core.startup import initialize_application
 
         print("Initializing AdCP Sales Agent...")
@@ -31,10 +32,8 @@ def main():
     port = int(os.environ.get("ADCP_SALES_PORT", "8080"))
     host = os.environ.get("ADCP_SALES_HOST", "0.0.0.0")
 
-    # Check if we're in production (Docker or Fly.io)
-    is_production = bool(os.environ.get("FLY_APP_NAME") or os.environ.get("PRODUCTION"))
-
-    if is_production:
+    # Check if we're in production (Docker, Fly.io, or ENVIRONMENT=production)
+    if is_production():
         # In production, bind to all interfaces
         host = "0.0.0.0"
 

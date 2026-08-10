@@ -1140,6 +1140,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # Date range validation: production doesn't validate start>end
             "T-UC-004-daterange-invalid": ("date range validation (start>end) not implemented", True),
             "T-UC-004-daterange-equal": ("date range validation (start==end) not implemented", True),
+            # Graduated: T-UC-004-webhook-scheduled (fixed the DeliveryPollEnv
+            # fixture's hardcoded non-resolving buyer.example.com URL that the
+            # real SSRF hostname-resolution check started rejecting after the
+            # upstream SSRF-hardening merge; verified PASS via
+            # test_scheduled_webhook_delivery_at_configured_frequency)
             # Graduated: T-UC-004-webhook-sequence (production fixed: sequence numbers now strictly ascending)
             # Graduated: T-UC-004-webhook-circuit-halfopen (merge from main fixed circuit breaker probe timing)
             # Graduated: T-UC-004-webhook-retry-5xx (production fixed: retry count now correct)
@@ -2794,9 +2799,45 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # Scheduler-originated events do not enter through an AdCP request transport.
 # Keep these scenarios single-run instead of producing misleading A2A/MCP/REST
 # variants that all exercise the same outbound scheduler path.
+# Membership is derived from the STEP, not the scenario's subject matter: a
+# scenario belongs here when its When step EXISTS and never consults
+# ctx["transport"], so the a2a/mcp/rest copies execute byte-identical code.
+#
+# "Exists" is load-bearing. A scenario whose steps are unbound auto-xfails on
+# StepDefinitionNotFound, and to a scan that looks for a transport reference it is
+# indistinguishable from a bound step that simply has none — absence of a
+# reference reads the same as absence of a step. Routing those is wrong twice: the
+# derivation has nothing to derive from, and de-parametrizing shrinks the dormancy
+# signal from three xfails to one, making an unwired scenario look like a
+# deliberate single-run. Eight such tags were removed from this set for that reason
+# — the whole partial-data/window family: the delayed-* trio,
+# webhook-adjusted-resend, webhook-partial-data, webhook-window-update,
+# window-first-report and status-reporting-delayed. They stay parametrized until
+# their steps are wired.
+#
+# Two webhook scenarios are deliberately ABSENT for the opposite reason —
+# webhook-creds-short/valid dispatch a real create_media_buy carrying the config,
+# so their copies grade each transport's Pydantic boundary and must keep
+# multiplying.
 _TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
+    "T-UC-004-boundary-credentials",
+    "T-UC-004-partition-credentials",
+    "T-UC-004-webhook-bearer",
+    "T-UC-004-webhook-circuit-halfopen",
+    "T-UC-004-webhook-circuit-open",
+    "T-UC-004-webhook-circuit-recovery",
+    "T-UC-004-webhook-hmac",
+    "T-UC-004-webhook-no-aggregated",
+    "T-UC-004-webhook-no-config",
+    "T-UC-004-webhook-no-retry-4xx",
+    "T-UC-004-webhook-notification-type",
+    "T-UC-004-webhook-retry-5xx",
+    "T-UC-004-webhook-retry-network",
+    "T-UC-004-webhook-retry-success",
     "T-UC-004-webhook-scheduled",
     "T-UC-004-webhook-scheduler-derivation",
+    "T-UC-004-webhook-sequence",
+    "T-UC-004-webhook-ssrf-blocked",
 }
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
@@ -2839,11 +2880,15 @@ _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 
 # Send-time webhook scenarios that assert in-process mock/circuit-breaker state.
 # Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
-_NO_E2E_REST_TAGS: frozenset[str] = frozenset(
-    {
-        "T-UC-004-webhook-ssrf-blocked",
-    }
-)
+#
+# EMPTY, and not by accident: its sole entry (T-UC-004-webhook-ssrf-blocked) became
+# unreachable once that scenario was routed as transport-independent above. That
+# check returns before this one is consulted, so a scenario in BOTH sets is
+# excluded from e2e_rest by never being parametrized at all — the entry here was
+# protecting nothing while reading as though it were. Being transport-independent
+# SUBSUMES this exclusion; entries are only meaningful for scenarios that still
+# parametrize. test_no_e2e_rest_tags_are_reachable keeps that true.
+_NO_E2E_REST_TAGS: frozenset[str] = frozenset()
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:

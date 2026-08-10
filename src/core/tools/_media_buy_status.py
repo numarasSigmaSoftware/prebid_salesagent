@@ -185,15 +185,27 @@ REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_SERVING, CA
 REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in REPORTABLE_CANONICAL_STATUSES
 )
+# The completion-only subset of REPORTABLE: persisted statuses that map to canonical
+# "completed" rather than to a serving state. NOT what the delivery scheduler passes --
+# its terminal arm is WEBHOOK_TERMINAL_PERSISTED_STATUSES ({canceled, completed,
+# rejected}), of which this is the completion member. Derived here rather than in the
+# consumer so a change to the status map moves both together; the reader is the e2e
+# final-webhook helper (tests/e2e/utils.py), which needs the single deterministic
+# status a completing buy lands on.
 COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
 # Reporting webhooks are persistent channels, so "no more data will ever
 # arrive" is a broader question than the spec's completion-only "final". The
-# spec/storyboard describe "final" narrowly as campaign completion
-# (optimization-reporting.mdx §Publisher Commitment) — treating canceled and
-# rejected as terminal too is our reading of the same no-more-data invariant
-# derive_notification_type() documents, not a directly graded requirement.
-# That reading happens to match the pinned SDK's own lifecycle classification
+# storyboard-graded prose (optimization-reporting.mdx §Publisher Commitment)
+# describes "final" narrowly as campaign completion, but webhooks.mdx
+# §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1 docs snapshot,
+# not spec-target drift], latest snapshot at the 3.1.1 pin) states
+# explicitly that a persistent webhook's final delivery fires after the buy
+# reaches completed, canceled, OR rejected — so treating canceled/rejected as
+# terminal here is grounded in that spec prose, though ungraded by any
+# storyboard we found (no scenario exercises a canceled/rejected buy's
+# notification_type). That reading happens to match the pinned SDK's own
+# lifecycle classification
 # (adcp.server.helpers.is_terminal_status), which is spelled here as a literal
 # rather than imported so this module keeps its zero-adcp-import property;
 # test_media_buy_status_consistency.py pins the two against each other so a
@@ -242,12 +254,17 @@ def derive_notification_type(statuses: Iterable[str]) -> str | None:
     ``_get_media_buy_delivery_impl`` must NOT call this — the delivery webhook
     scheduler applies it when decorating the response for the wire.
 
-    UNGRADED: the schema/storyboard describe "final" narrowly as "the campaign
-    completes" (optimization-reporting.mdx §Publisher Commitment). Extending
-    "final" to the other no-more-data terminals (rejected / canceled / failed)
-    is our reading of the same "no next_expected_at when no more data"
-    invariant, not a directly graded conformance step — no storyboard exercises
-    a rejected/canceled/failed buy's notification_type.
+    UNGRADED: the storyboard-graded prose (optimization-reporting.mdx
+    §Publisher Commitment) describes "final" narrowly as "the campaign
+    completes". Extending "final" to rejected/canceled is grounded in
+    webhooks.mdx §Termination (dist/docs/3.1.0 [version-literal-ok: pre-3.1.1
+    docs snapshot, not spec-target drift], latest snapshot at the 3.1.1
+    pin), which states persistent-webhook final delivery fires after
+    completed, canceled, or rejected. Extending it further to "failed" (not
+    part of the AdCP status enum at all) has no spec text to cite — that part
+    stays our reading of the same "no next_expected_at when no more data"
+    invariant. Neither extension is a directly graded conformance step — no
+    storyboard exercises a rejected/canceled/failed buy's notification_type.
     """
     status_list = list(statuses)  # materialize once (the param may be a one-shot iterable)
     if not status_list:

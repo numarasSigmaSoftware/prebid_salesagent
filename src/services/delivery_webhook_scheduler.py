@@ -64,6 +64,53 @@ FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 PERIODIC_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 
 
+def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: object) -> bool:
+    """Whether a delivery lookup result can be reported on.
+
+    Returns True when the result is usable, False for a LEGITIMATE skip, and RAISES
+    on a real failure — mirroring ``_send_report_for_media_buy``'s documented contract,
+    which reserves False for "unsupported frequency, dedup, no data, no URL" and says a
+    failed delivery raises so the batch counts an error rather than logging a send.
+
+    Extracted from ``_deliver_report`` to keep that method under the PLR0915 statement
+    ceiling; the discrimination below is the whole reason this is not a one-liner.
+    """
+    if not isinstance(delivery_response, GetMediaBuyDeliveryResponse):
+        # %r-style detail, not %s: this branch proved the object is NOT the response
+        # model, so its type is unknown. A result that is not the model at all is none
+        # of the contract's legitimate skips — returning False here made the batch print
+        # "0 sent, 0 errors" for a terminal buy whose spec-required final could not be
+        # built, hiding the failure entirely.
+        raise RuntimeError(
+            f"Delivery lookup for media buy {media_buy.media_buy_id} returned "
+            f"{type(delivery_response).__name__}, not GetMediaBuyDeliveryResponse"
+        )
+
+    if delivery_response.errors is not None:
+        # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
+        # human-readable envelope summary ("No delivery data found for the specified
+        # period."), so "%s" of the model renders a success-shaped sentence with the
+        # error payload absent — the one diagnostic this branch exists to emit.
+        logger.warning(
+            "`Couldn't get media_delivery` for %s. We received an error in the result. errors=%s",
+            media_buy.media_buy_id,
+            delivery_response.errors,
+        )
+        # Discriminate, don't blanket-skip. The impl emits two advisory shapes here:
+        # MEDIA_BUY_NOT_FOUND when a requested buy isn't reportable — which IS the "no
+        # data" case the contract lists as a legitimate False — and SERVICE_UNAVAILABLE
+        # when the adapter actually failed. Returning False for both let a real adapter
+        # failure count as a skip; raising for both would make every no-data buy an error.
+        if any(e.code != "MEDIA_BUY_NOT_FOUND" for e in delivery_response.errors):
+            raise RuntimeError(
+                f"Delivery lookup for media buy {media_buy.media_buy_id} failed: "
+                f"{[e.code for e in delivery_response.errors]}"
+            )
+        return False
+
+    return True
+
+
 class DeliveryWebhookScheduler:
     """Scheduler for sending delivery reports via webhooks."""
 
@@ -136,10 +183,17 @@ class DeliveryWebhookScheduler:
 
                 reports_sent = 0
                 errors = 0
+                suppressed = 0
+                not_reportable = 0
 
                 for media_buy in media_buys:
                     try:
-                        # Check if this media buy has a reporting webhook configured
+                        # Check if this media buy has a reporting webhook configured.
+                        # NOT redundant with get_reportable_for_delivery's SQL
+                        # predicate: that predicate is JSON key-presence
+                        # (raw_request['reporting_webhook'] IS NOT NULL), a cheap
+                        # SQL-level pre-filter; this is Python truthiness, which
+                        # also excludes a present-but-null/false/{} value. Keep both.
                         raw_request = media_buy.raw_request or {}
                         reporting_webhook = raw_request.get("reporting_webhook")
 
@@ -154,12 +208,15 @@ class DeliveryWebhookScheduler:
                         # advisory as a warning-worthy failure.
                         canonical = resolve_canonical_status(media_buy, datetime.now(UTC).date())
                         if canonical not in WEBHOOK_REPORTABLE_CANONICAL_STATUSES:
+                            not_reportable += 1
                             continue
 
                         # Send delivery report; only count it when a webhook
                         # actually went out (dedup/frequency skips return False).
                         if await self._send_report_for_media_buy(media_buy, reporting_webhook, session):
                             reports_sent += 1
+                        else:
+                            suppressed += 1
 
                     except Exception as e:
                         logger.error(
@@ -193,7 +250,21 @@ class DeliveryWebhookScheduler:
                                 exc_info=True,
                             )
 
-                logger.info(f"Daily delivery report batch complete: {reports_sent} sent, {errors} errors")
+                # Suppressions are reported, not just sends and errors. Every skip on
+                # this path returns False — dedup, unsupported cadence, no claim won,
+                # nothing to report — so a summary of only sent+errors renders a batch
+                # that suppressed every buy identically to one with no work to do:
+                # "0 sent, 0 errors". That is the reading under which a population
+                # whose webhooks were skipped on every pass looks like a quiet, healthy
+                # scheduler. _delivery_lookup_is_usable calls out the same hazard for
+                # one branch; this closes it for the rest.
+                logger.info(
+                    "Daily delivery report batch complete: %d sent, %d suppressed, %d not reportable, %d errors",
+                    reports_sent,
+                    suppressed,
+                    not_reportable,
+                    errors,
+                )
 
         except Exception as e:
             logger.error(f"Error in daily delivery report batch: {e}", exc_info=True)
@@ -208,7 +279,18 @@ class DeliveryWebhookScheduler:
             tenant_id: The tenant ID
 
         Returns:
-            bool: True if report was triggered successfully, False otherwise
+            bool: True when a webhook was actually sent; False when the buy was
+            LEGITIMATELY skipped (no reporting webhook configured, dedup, no data).
+
+        Raises:
+            Exception: propagated from the send path. A real failure must NOT be
+                flattened into False here — the admin route already distinguishes
+                three outcomes (sent / skipped / errored) and swallowing the
+                exception collapsed the last two into one "Failed to trigger …
+                check logs" banner, telling an operator the same thing whether
+                nothing needed sending or the adapter actually broke. This mirrors
+                _send_report_for_media_buy's contract rather than re-flattening it
+                one layer up.
         """
         try:
             with get_db_session() as session:
@@ -233,8 +315,10 @@ class DeliveryWebhookScheduler:
                 # the read-check path (best-effort; #1606 for true exactly-once).
                 return await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
         except Exception as e:
+            # Log here (this frame knows the media_buy_id) then RE-RAISE, so the caller
+            # can tell a genuine failure from a legitimate skip.
             logger.error(f"Error manually triggering report for {media_buy_id}: {e}", exc_info=True)
-            return False
+            raise
 
     def _should_skip_send(
         self, delivery_repo: DeliveryRepository, media_buy: MediaBuy, *, is_final: bool, force: bool
@@ -284,7 +368,9 @@ class DeliveryWebhookScheduler:
         UPDATE then matches 0 rows and loses). The returned token is passed to
         _release_final_webhook_claim on a definitive failure/no-send so the claim doesn't
         block an immediate retry for the whole lease. Does NOT close the
-        crash-after-POST window — #1606.
+        post-POST window — #1606. That window is not crash-only: a failure of the
+        success-path ``_write_delivery_log`` (which raises) is indistinguishable
+        here from a failed send, so the claim is released and the final re-sends.
         """
         now = datetime.now(UTC)
         won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_final_webhook(
@@ -377,11 +463,30 @@ class DeliveryWebhookScheduler:
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
             raw_freq = str(reporting_webhook.get("reporting_frequency") or "daily").lower()
 
+            # Computed BEFORE the cadence gate below, which must not strand it.
+            is_final = (
+                resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
+            )
+
             # Same set the create/update capability validator rejects against. If
             # these drift, an unsupported cadence is accepted at booking and then
             # silently never sent — the acknowledged-but-never-fires state
             # validate_reporting_webhook_frequency exists to prevent.
-            if not force and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
+            #
+            # `not is_final` is load-bearing, not defensive. This gate reads
+            # reporting_frequency, and until that key was corrected it read a key
+            # raw_request never contained, so it never fired. Live, it applies to a
+            # population that predates the booking-time validator: create used to
+            # accept hourly/monthly with only a warning that they "will be ignored
+            # until implemented", and no migration normalises those rows. Skipping
+            # their PERIODIC sends is the intended behavior. Skipping their FINAL
+            # send is not — the anti-join re-selects a buy until a success-final row
+            # exists, so returning False here would mean that row is never written
+            # and the terminal notification never goes out, for the whole life of
+            # the buy. That is the exact outcome the claim/lease machinery below
+            # exists to make exactly-once rather than never, and _should_skip_send
+            # is already final-aware for the same reason.
+            if not force and not is_final and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
                 logger.warning(
                     "Skipping reporting webhook with frequency '%s' for media buy %s – "
                     "supported delivery-webhook frequencies are: %s",
@@ -390,10 +495,6 @@ class DeliveryWebhookScheduler:
                     ", ".join(sorted(SUPPORTED_REPORTING_FREQUENCIES)),
                 )
                 return False
-
-            is_final = (
-                resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
-            )
 
             # Best-effort read-only de-dup (no claim here — the atomic concurrency
             # claim is taken inside _deliver_report, just before the POST).
@@ -501,26 +602,7 @@ class DeliveryWebhookScheduler:
 
         delivery_response = _get_media_buy_delivery_impl(req, identity)
 
-        if not isinstance(delivery_response, GetMediaBuyDeliveryResponse):
-            # %r, not %s: this branch proved the object is NOT the response model, so its
-            # type is unknown (dict/None/other) — repr is unambiguous where a __str__
-            # summary would not be. (Never .model_dump() here: that AttributeErrors on a
-            # non-model and would raise from inside the error path.)
-            logger.warning(
-                "`Couldn't get media_delivery` for %s. Result is %r", media_buy.media_buy_id, delivery_response
-            )
-            return False
-
-        if delivery_response.errors is not None:
-            # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
-            # human-readable envelope summary ("No delivery data found for the specified
-            # period."), so "%s" of the model renders a success-shaped sentence with the
-            # error payload absent — the one diagnostic this branch exists to emit.
-            logger.warning(
-                "`Couldn't get media_delivery` for %s. We received an error in the result. errors=%s",
-                media_buy.media_buy_id,
-                delivery_response.errors,
-            )
+        if not _delivery_lookup_is_usable(media_buy, delivery_response):
             return False
 
         # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
@@ -556,7 +638,9 @@ class DeliveryWebhookScheduler:
         # notification_type: derived from the reported statuses — "final" when
         # every buy will never produce more data ("one final notification when
         # the campaign completes", optimization-reporting.mdx §Publisher
-        # Commitment), "scheduled" otherwise.
+        # Commitment; extended to canceled/rejected per webhooks.mdx
+        # §Termination — see derive_notification_type()'s docstring), "scheduled"
+        # otherwise.
         derived = derive_notification_type(enum_value(d.status) for d in delivery_response.media_buy_deliveries or [])
         notification_type = NotificationType(derived) if derived else None
         delivery_response.notification_type = notification_type

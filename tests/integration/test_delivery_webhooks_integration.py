@@ -29,7 +29,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tools._media_buy_status import SERVING_PERSISTED_STATUSES
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
-from tests.harness.delivery_poll import mock_webhook_post
+from tests.harness.delivery_poll import mock_send_notification, mock_webhook_post
 from tests.helpers.delivery_assertions import (
     DetachedPushConfigMatcher,
     WebhookHeadersMatcher,
@@ -207,21 +207,12 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        # Simulate successful webhook send without doing network I/O
-        return True
-
     # Patch only webhook sending
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        side_effect=fake_send_notification,
-    ) as mock_send_notification:
+    with mock_send_notification(scheduler) as mock_send:
         # Run a single batch (no need to run the full hourly loop)
         await scheduler._send_reports()
 
-        args, kwargs = mock_send_notification.await_args
+        args, kwargs = mock_send.await_args
 
         # Extract from kwargs
         metadata = kwargs.get("metadata")
@@ -241,7 +232,7 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
         result = payload.result
 
         # Webhook should have been sent exactly once
-        assert mock_send_notification.await_count == 1
+        assert mock_send.await_count == 1
         assert task_type == "media_buy_delivery"
         assert str(wire_task_type.value) == "media_buy_delivery"
         assert extracted_tenant_id == tenant_id
@@ -297,12 +288,7 @@ async def test_signed_reporting_webhook_carries_credentials_into_the_push_config
 
     scheduler = DeliveryWebhookScheduler()
 
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send_notification:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # Count and config identity checked together: a count-less read of
@@ -310,7 +296,7 @@ async def test_signed_reporting_webhook_carries_credentials_into_the_push_config
         # the LAST call still carried the right config. Concrete literals, not
         # re-derived from the fixture: the scheme->authentication_type and
         # credentials->authentication_token mapping is exactly what's graded.
-        mock_send_notification.assert_awaited_once_with(
+        mock_send.assert_awaited_once_with(
             push_notification_config=DetachedPushConfigMatcher(
                 tenant_id=tenant_id,
                 principal_id=principal_id,
@@ -431,12 +417,7 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
     )
 
     scheduler = DeliveryWebhookScheduler()
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
     (send_call,) = mock_send.await_args_list
@@ -453,7 +434,11 @@ async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reporting_frequency", ["hourly", "monthly"])
 async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_db, reporting_frequency):
-    """The scheduler reads reporting_frequency instead of silently defaulting to daily."""
+    """The scheduler reads reporting_frequency instead of silently defaulting to daily.
+
+    Mid-flight only — the terminal case is the sibling below, and asserting the skip
+    on a SERVING buy alone is what let the final-blind gate look correct.
+    """
     tenant_id, principal_id = _create_test_tenant_and_principal()
     reporting_webhook = {
         **DAILY_REPORTING_WEBHOOK,
@@ -466,15 +451,52 @@ async def test_unsupported_canonical_reporting_frequency_is_skipped(integration_
     )
 
     scheduler = DeliveryWebhookScheduler()
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
     mock_send.assert_not_awaited()
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reporting_frequency", ["hourly", "monthly"])
+async def test_unsupported_frequency_still_sends_the_final_report(integration_db, reporting_frequency):
+    """An unsupported cadence suppresses PERIODIC sends, never the terminal one.
+
+    These rows are reachable and legal: create accepted hourly/monthly with only a
+    warning that they "will be ignored until implemented", the booking-time
+    validator is new, and no migration normalises what already exists.
+
+    Skipping their final send is unrecoverable rather than merely late. The
+    scheduler's anti-join re-selects a buy until a success-final row exists, so a
+    skip here means that row is never written and the buy is re-selected and
+    re-skipped for the rest of its life — the terminal notification simply never
+    arrives. Reverting the gate to its final-blind form reddens this test and not
+    its mid-flight sibling, which is the pairing that was missing.
+    """
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    reporting_webhook = {
+        **DAILY_REPORTING_WEBHOOK,
+        "reporting_frequency": reporting_frequency,
+    }
+    # Flight is over: resolve_canonical_status derives a terminal status from the
+    # dates, which is what makes this buy's next send the FINAL one.
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        start_date=datetime(2024, 1, 1, tzinfo=UTC),
+        end_date=datetime(2024, 1, 31, tzinfo=UTC),
+        reporting_webhook=reporting_webhook,
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    with mock_send_notification(scheduler) as mock_send:
+        await scheduler._send_reports()
+
+    assert mock_send.await_count == 1, (
+        f"final report was not sent for a {reporting_frequency!r} buy past its flight end — "
+        "the cadence gate stranded the terminal notification, which no later run can recover"
+    )
 
 
 @pytest.mark.requires_db
@@ -493,17 +515,8 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        # Simulate successful webhook send without doing network I/O
-        return True
-
     with (
-        patch.object(
-            scheduler.webhook_service,
-            "send_notification",
-            new_callable=AsyncMock,
-            side_effect=fake_send_notification,
-        ) as mock_send_notification,
+        mock_send_notification(scheduler) as mock_send,
         patch("src.adapters.gam_reporting_service.GAMReportingService") as mock_reporting_service_class,
     ):
         # Set time to 3 AM
@@ -516,7 +529,7 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
             await scheduler._send_reports()
 
             # Expect there's no webhook has been called
-            assert mock_send_notification.await_count == 0
+            assert mock_send.await_count == 0
 
         # Set time to 4 AM
         with freeze_time("2025-1-1 04:00:00"):
@@ -528,10 +541,10 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
             await scheduler._send_reports()
 
             # Expect one webhook has been called
-            assert mock_send_notification.await_count == 1
+            assert mock_send.await_count == 1
 
             # Check payload of the delivery
-            args, kwargs = mock_send_notification.await_args
+            args, kwargs = mock_send.await_args
 
             payload = kwargs.get("payload")
             result = payload.result
@@ -583,10 +596,7 @@ async def test_call_get_media_buy_delivery_for_ended_campaign(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
-    with patch.object(scheduler.webhook_service, "send_notification", new_callable=AsyncMock) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # It should send a report because status is active in DB
@@ -626,15 +636,7 @@ async def test_scheduler_status_filter_includes_completed_campaigns(integration_
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
-    with patch.object(
-        scheduler.webhook_service,
-        "send_notification",
-        new_callable=AsyncMock,
-        side_effect=fake_send_notification,
-    ) as mock_send:
+    with mock_send_notification(scheduler) as mock_send:
         await scheduler._send_reports()
 
         # Webhook must be sent
@@ -665,9 +667,6 @@ async def test_scheduler_uses_simulated_path_in_testing_mode(integration_db):
 
     scheduler = DeliveryWebhookScheduler()
 
-    async def fake_send_notification(*args, **kwargs):
-        return True
-
     # Helper to inject testing_context into ResolvedIdentity
     _original_resolved_identity = ResolvedIdentity
 
@@ -680,7 +679,7 @@ async def test_scheduler_uses_simulated_path_in_testing_mode(integration_db):
             "src.core.resolved_identity.ResolvedIdentity",
             side_effect=create_test_identity,
         ),
-        patch.object(scheduler.webhook_service, "send_notification", new_callable=AsyncMock) as mock_send,
+        mock_send_notification(scheduler) as mock_send,
         patch("src.core.tools.media_buy_delivery.DeliverySimulator.calculate_simulated_metrics") as mock_sim,
     ):
         mock_sim.return_value = {"impressions": 1234, "spend": 50.0}
@@ -734,3 +733,48 @@ async def test_serving_persisted_status_is_selected_for_delivery_webhook(integra
             f"persisted status {persisted_status!r} with a reporting_webhook must be selected "
             f"exactly once by the delivery webhook scheduler (awaited: {mock_send.await_args_list!r})"
         )
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
+    """A batch that suppressed every buy must not read like one with no work.
+
+    Every skip returns False — dedup, unsupported cadence, no claim won — so a
+    summary counting only sends and errors prints "0 sent, 0 errors" whether the
+    scheduler found nothing to do or silently suppressed everything it found. An
+    operator cannot tell a healthy idle scheduler from one dropping every webhook,
+    which is how a stranded population stays invisible.
+
+    Spies the module logger rather than using caplog: caplog depends on global
+    logging state that other tests mutate, so a caplog version of this passed alone
+    and saw an empty capture inside the full suite — green for the wrong reason.
+    """
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    # Mid-flight buy on an unsupported cadence: reaches the loop, then suppresses.
+    _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook={**DAILY_REPORTING_WEBHOOK, "reporting_frequency": "hourly"},
+    )
+
+    scheduler = DeliveryWebhookScheduler()
+    summaries: list[str] = []
+
+    def capture(msg, *args, **kwargs):
+        summaries.append(msg % args if args else msg)
+
+    with (
+        patch("src.services.delivery_webhook_scheduler.logger.info", side_effect=capture),
+        mock_send_notification(scheduler) as mock_send,
+    ):
+        await scheduler._send_reports()
+
+    mock_send.assert_not_awaited()
+    batch = [m for m in summaries if "batch complete" in m]
+    assert batch, f"scheduler emitted no batch summary (saw {summaries!r})"
+    assert "0 sent" in batch[-1], batch[-1]
+    assert "1 suppressed" in batch[-1], (
+        f"the suppressed buy is invisible in the summary: {batch[-1]!r} — this line is "
+        "the only place an operator sees that work was dropped rather than absent"
+    )

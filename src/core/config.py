@@ -4,12 +4,15 @@ Provides Pydantic-based configuration classes for type-safe, validated configura
 management using environment variables.
 """
 
+import logging
 import os
 import re
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 _WEBHOOK_AUDIT_HMAC_KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,32}")
 
@@ -152,7 +155,7 @@ class AppConfig(BaseSettings):
         """Restrict to a bounded, safe format.
 
         This value is embedded verbatim into log lines and the durable
-        WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so an
+        WebhookDeliveryLog.webhook_url column (see redact_webhook_url_for_audit), so an
         unrestricted value -- colons, angle brackets, newlines, control characters,
         unbounded length -- could corrupt the audit identifier's structure or open a
         log-injection vector. It's operator-set deployment config, not buyer input,
@@ -206,19 +209,42 @@ def validate_configuration() -> None:
         # Note: GEMINI_API_KEY is optional - tenants configure their own AI keys
         # Note: SUPER_ADMIN_EMAILS is optional - per-tenant OIDC with Setup Mode is the default auth flow
 
-        if is_production():
-            stripped_hmac_key = config.webhook_audit_hmac_key.strip()
-            if not stripped_hmac_key:
-                raise ValueError(
-                    "WEBHOOK_AUDIT_HMAC_KEY must be set in production -- it keys the "
-                    "HMAC that redacts buyer-supplied webhook URLs before they reach "
-                    "logs and WebhookDeliveryLog; an unset (or whitespace-only) key "
-                    "leaves those audit identifiers matchable offline against guessed URLs."
-                )
-            if len(stripped_hmac_key) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
-                raise ValueError(
-                    f"WEBHOOK_AUDIT_HMAC_KEY must be at least {MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH} "
-                    "characters in production"
+        # Enforced only where production was DECLARED (ENVIRONMENT=production), and
+        # merely warned where it is newly INFERRED (PRODUCTION / FLY_APP_NAME).
+        #
+        # is_production() was broadened in this change so the check reaches Fly.io
+        # deployments that never set ENVIRONMENT. Raising on that newly-inferred set
+        # would stop a downstream service from booting on upgrade, for a configuration
+        # that was valid the day before and that its operator never changed -- and in
+        # an open-source project those deployments cannot be surveyed or warned ahead
+        # of time. So the newly-captured set gets a loud, actionable warning now and
+        # enforcement in a later release; the declared set is enforced immediately,
+        # because that contract was always "this is production, hold me to it".
+        stripped_hmac_key = config.webhook_audit_hmac_key.strip()
+        hmac_problem: str | None = None
+        if not stripped_hmac_key:
+            hmac_problem = (
+                "WEBHOOK_AUDIT_HMAC_KEY is not set -- it keys the HMAC that redacts "
+                "buyer-supplied webhook URLs before they reach logs and "
+                "WebhookDeliveryLog; an unset (or whitespace-only) key leaves those "
+                "audit identifiers matchable offline against guessed URLs."
+            )
+        elif len(stripped_hmac_key) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
+            hmac_problem = (
+                f"WEBHOOK_AUDIT_HMAC_KEY is shorter than the required {MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH} characters."
+            )
+
+        if hmac_problem:
+            if declares_production_explicitly():
+                raise ValueError(f"{hmac_problem} This is required in production.")
+            if is_production():
+                logger.warning(
+                    "%s This deployment is treated as production because PRODUCTION or "
+                    "FLY_APP_NAME is set, even though ENVIRONMENT is not 'production'. "
+                    "Set WEBHOOK_AUDIT_HMAC_KEY to a value of at least %d characters -- "
+                    "a future release will make this fatal.",
+                    hmac_problem,
+                    MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH,
                 )
 
         print("✅ Configuration validation passed")
@@ -243,10 +269,21 @@ def get_gam_oauth_config() -> GAMOAuthConfig:
 def is_production() -> bool:
     """Check if running in production environment.
 
-    True if any recognized production signal is present -- matching the union of
-    signals the real server bootstrap (scripts/run_server.py) and several src/core
-    modules (auth.py, logging_config.py, audit_logger.py) already treat as
-    production. A deployment that sets PRODUCTION or relies on Fly.io's
+    True if any recognized production signal is present. scripts/run_server.py,
+    src/core/auth.py, src/core/logging_config.py, and src/core/audit_logger.py
+    used to each open-code their own ``FLY_APP_NAME or PRODUCTION`` bare-presence
+    check instead of calling this function -- a bare presence check cannot see
+    that PRODUCTION=false means "explicitly off" (it reads as truthy, matching
+    a non-empty string), and never consulted ENVIRONMENT at all. All four now
+    call this function directly, closing the same truthy-vocabulary bug
+    ``_env_flag_is_true`` already fixes below, so an operator who sets
+    PRODUCTION=false to turn it off is honoured everywhere, not just here. The
+    convergence is pinned by
+    TestProductionSignalConverged.test_no_site_still_open_codes_the_bare_presence_check
+    (tests/unit/test_db_config.py) so a future edit cannot silently reintroduce
+    an open-coded copy at any of them.
+
+    A deployment that sets PRODUCTION or relies on Fly.io's
     auto-populated FLY_APP_NAME, but never explicitly sets ENVIRONMENT=production,
     used to read as non-production here even though scripts/run_server.py already
     bound it to 0.0.0.0 as production traffic -- silently skipping every
@@ -263,11 +300,56 @@ def is_production() -> bool:
         bool: True if ENVIRONMENT=production, or PRODUCTION is truthy, or
             FLY_APP_NAME is set (Fly.io sets this automatically on every deploy).
     """
-    return (
-        os.getenv("ENVIRONMENT", "development").lower() == "production"
-        or _env_flag_is_true("PRODUCTION")
-        or bool(os.environ.get("FLY_APP_NAME"))
-    )
+    return declares_production_explicitly() or (_env_flag_is_true("PRODUCTION") or bool(os.environ.get("FLY_APP_NAME")))
+
+
+def declares_production_explicitly() -> bool:
+    """True only for ENVIRONMENT=production -- the pre-existing production contract.
+
+    Separated from :func:`is_production` so a check can distinguish a deployment that
+    DECLARED itself production from one this codebase newly INFERS is production.
+
+    That distinction matters because this is an open-source project: broadening
+    is_production() reclassifies deployments that changed nothing, and a check that
+    hard-fails on the newly-inferred set would stop a downstream service from booting
+    on upgrade -- for a configuration that was correct the day before. Tightening the
+    contract for operators who explicitly set ENVIRONMENT=production is fair warning;
+    doing it to a Fly.io deployment that merely has FLY_APP_NAME populated is not.
+
+    Enforce on this predicate; WARN on the difference between it and is_production().
+
+    What the broadening actually reaches — the complete set, because a partial list
+    is what makes the reclassification look smaller than it is. Every behavior gated
+    on is_production() changes for a deployment that has FLY_APP_NAME or a truthy
+    PRODUCTION but never set ENVIRONMENT:
+
+    - ``webhook_validator._strict_mode`` — SSRF policy. HTTPS becomes REQUIRED and the
+      testing localhost bypass is withdrawn. This is the one with teeth: a Fly-only
+      deployment that delivered webhooks over plain HTTP now has them REJECTED.
+    - ``get_pydantic_extra_mode`` — forbid to ignore, so unknown request fields are
+      accepted instead of rejected.
+    - ``mcp_compat_middleware`` (two sites) — unknown fields are stripped silently, and
+      a validation failure is retried with a deep strip.
+    - ``product_conversion`` — a product missing delivery_measurement takes the adapter
+      default with an info log rather than the non-production path.
+    - ``validate_configuration`` — the webhook-audit HMAC key requirement, which is
+      warned rather than enforced for exactly this newly-inferred set (above).
+
+    Note the directions differ: the SSRF change is a tightening that can break a
+    working deployment, while the extra-mode and compat changes are loosenings. A
+    reader who only saw the loosenings would misjudge the upgrade risk.
+
+    ``scripts/run_server.py``, ``auth.py``, ``logging_config.py``, and
+    ``audit_logger.py`` also call ``is_production()`` (verbose-auth-log
+    suppression, structured-vs-basic logging format, and the audit console
+    handler), but NOT for the broadening this section documents -- for a
+    Fly-only or PRODUCTION-truthy deployment they already agreed with
+    is_production() before converging onto it (both were True). Their actual
+    behavior change is on the other axis, PRODUCTION=false and
+    ENVIRONMENT=production-alone, documented on :func:`is_production` itself.
+    Listed here only so the completeness scan above finds every caller.
+    """
+    return os.getenv("ENVIRONMENT", "development").lower() == "production"
 
 
 def get_pydantic_extra_mode() -> Literal["ignore", "forbid"]:

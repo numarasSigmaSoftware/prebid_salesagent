@@ -43,6 +43,19 @@ def _assert_unsupported_capability(result: Any, message: str, suggestion: str, *
     assert result.is_error, f"Expected error, got payload: {result.payload}"
     result.assert_wire_error(
         "UNSUPPORTED_FEATURE",
+        # Pinned explicitly rather than defaulted. Omitting it makes the harness read
+        # recovery from the vendored @04f59d2d5 corpus, which PREDATES the v3.1.1 this
+        # repo targets (tests/helpers/pinned_schema.py documents enums/error-code.json
+        # as one of the 70 files that differ) — so a corpus refresh could silently change
+        # what this "3.1.1 wire contract" test asserts.
+        #
+        # "correctable" is grounded in the AUTHORITATIVE released enum: verified against
+        # adcontextprotocol/adcp static/schemas/source/enums/error-code.json @ v3.1.1,
+        # where UNSUPPORTED_FEATURE carries recovery "correctable". Note the installed
+        # SDK's STANDARD_ERROR_CODES table says "terminal" for this code — a known
+        # SDK/spec divergence of the same class as AUTH_REQUIRED before 5.7.0. The spec
+        # enum is authoritative; the SDK table is a cross-check only.
+        recovery="correctable",
         message_substr=message,
         require_suggestion=True,
     )

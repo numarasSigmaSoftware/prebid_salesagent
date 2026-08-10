@@ -12,6 +12,7 @@ Uses real PostgreSQL database via integration_db fixture.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import (
@@ -675,3 +676,104 @@ async def test_legacy_ready_transitions_to_completed_when_end_time_passed(integr
         env.get_session().expire_all()
         row = env.get_one(MediaBuyModel, media_buy_id=buy.media_buy_id)
         assert row.status == "completed"
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_one_unprocessable_buy_does_not_strand_the_rest(integration_db):
+    """A row that fails to compute must not block every other buy's transition.
+
+    The sweep now covers the legacy serving aliases, so it reaches older rows whose
+    flight fields were written under earlier conventions. Without a per-row guard a
+    single bad row aborts the loop before ``session.commit()``, so every other buy
+    silently stays in its transitional state — the failure is invisible because the
+    outer handler logs and returns normally.
+    """
+    from unittest.mock import patch
+
+    from src.core.database.models import MediaBuy as MediaBuyModel
+    from tests.factories import MediaBuyFactory
+    from tests.harness._base import IntegrationEnv
+
+    with IntegrationEnv(tenant_id="t_strand", principal_id="p_strand") as env:
+        tenant, principal = env.setup_default_data()
+        common = {
+            "tenant": tenant,
+            "principal": principal,
+            "status": "ready",
+            "start_date": (datetime.now(UTC) - timedelta(hours=1)).date(),
+            "end_date": (datetime.now(UTC) + timedelta(days=7)).date(),
+            "start_time": datetime.now(UTC) - timedelta(hours=1),
+            "end_time": datetime.now(UTC) + timedelta(days=7),
+        }
+        bad = MediaBuyFactory(media_buy_id="mb_strand_bad", **common)
+        good = MediaBuyFactory(media_buy_id="mb_strand_good", **common)
+
+        real = MediaBuyStatusScheduler._compute_new_status
+
+        def raise_for_bad(self, media_buy, now, session):
+            if media_buy.media_buy_id == bad.media_buy_id:
+                raise ValueError("unprocessable legacy flight fields")
+            # Delegate to the REAL computation so the good row is graded by
+            # production logic, not by a stub that re-states the expectation.
+            return real(self, media_buy, now, session)
+
+        with patch.object(MediaBuyStatusScheduler, "_compute_new_status", raise_for_bad):
+            await MediaBuyStatusScheduler()._update_statuses()
+
+        env.get_session().expire_all()
+        assert env.get_one(MediaBuyModel, media_buy_id=good.media_buy_id).status == "active", (
+            "a sibling row failing to compute stranded this buy in 'ready' — the whole sweep aborted before committing"
+        )
+        assert env.get_one(MediaBuyModel, media_buy_id=bad.media_buy_id).status == "ready", (
+            "the unprocessable row must be skipped, not transitioned on a guess"
+        )
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raised", "expected_calls", "why"),
+    [
+        (ValueError("bad row data"), 3, "a row-level fault skips that row and keeps sweeping"),
+        (
+            SQLAlchemyError("connection lost"),
+            1,
+            "a session-level fault aborts the sweep: _compute_new_status queries creative "
+            "approval, so a failed statement leaves the transaction aborted and continuing "
+            "would only manufacture failures on rows that were never bad",
+        ),
+    ],
+    ids=["row-level-continues", "session-level-aborts"],
+)
+async def test_row_faults_continue_but_session_faults_abort(integration_db, raised, expected_calls, why):
+    """Grades the abort-vs-continue split directly, independent of row ordering."""
+    from unittest.mock import patch
+
+    from tests.factories import MediaBuyFactory
+    from tests.harness._base import IntegrationEnv
+
+    with IntegrationEnv(tenant_id="t_abort", principal_id="p_abort") as env:
+        tenant, principal = env.setup_default_data()
+        for i in range(3):
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id=f"mb_abort_{i}",
+                status="ready",
+                start_date=(datetime.now(UTC) - timedelta(hours=1)).date(),
+                end_date=(datetime.now(UTC) + timedelta(days=7)).date(),
+                start_time=datetime.now(UTC) - timedelta(hours=1),
+                end_time=datetime.now(UTC) + timedelta(days=7),
+            )
+
+        calls = []
+
+        def always_raise(self, media_buy, now, session):
+            calls.append(media_buy.media_buy_id)
+            raise raised
+
+        with patch.object(MediaBuyStatusScheduler, "_compute_new_status", always_raise):
+            await MediaBuyStatusScheduler()._update_statuses()
+
+        assert len(calls) == expected_calls, f"{why} (saw {len(calls)} calls: {calls})"

@@ -2,7 +2,10 @@
 
 Migrated from tests/unit/test_delivery_poll_behavioral.py — these tests use real
 PostgreSQL (via integration_db fixture) and factory_boy instead of inline @patch.
-Only the adapter is mocked (external ad server).
+The adapter (external ad server) and DNS resolution are mocked; see
+tests/harness/delivery_poll.py's module docstring for what stays real —
+notably the outbound SSRF gate itself, pinned by TestDeliveryPollEnvSsrfGate
+below.
 
 Each test targets exactly one obligation ID and follows the 6 hard rules:
 1. MUST import from src.
@@ -47,6 +50,13 @@ if TYPE_CHECKING:  # annotations only — the helpers below keep their lazy runt
     from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
     from tests.harness.delivery_poll import DeliveryPollEnv
 
+# Every test in this module drives a real PostgreSQL DeliveryPollEnv, so the
+# marker is declared once at module scope rather than copied onto each class.
+# It was per-class until four newly-added classes silently shipped without it
+# and dropped out of `-m requires_db` selection -- a module-level pytestmark
+# cannot be forgotten by the next class added to the file.
+pytestmark = pytest.mark.requires_db
+
 # ---------------------------------------------------------------------------
 # Webhook-path coverage for UC-004-ALT-WEBHOOK-PUSH-REPORTING
 #
@@ -67,6 +77,7 @@ def _serving_webhook_buy(
     mb_id: str | None = None,
     tenant: Tenant | None = None,
     principal: Principal | None = None,
+    reporting_webhook: dict[str, Any] | None = None,
 ) -> MediaBuy:
     """Create a serving buy (tenant t1 / principal p1) with a daily reporting_webhook + adapter data.
 
@@ -78,6 +89,10 @@ def _serving_webhook_buy(
     Pass ``tenant``/``principal`` to reuse them across multiple buys in one env
     (a second TenantFactory("t1") would collide on the primary key). Returns the
     MediaBuy; the adapter response is registered for its id.
+    ``reporting_webhook`` overrides the daily default for a test that needs a
+    different config (e.g. a blocked URL to drive the SSRF gate) -- mirroring
+    the BDD twin ``_setup_scheduler_buy``'s own parameter, so neither side has
+    to re-inline this whole scaffold just to vary one field.
     """
     from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
 
@@ -93,7 +108,7 @@ def _serving_webhook_buy(
         "start_date": start_date,
         "end_date": end_date,
         # Shared daily webhook config; copied to avoid aliasing the shared dict into ORM state.
-        "raw_request": {"reporting_webhook": dict(DAILY_REPORTING_WEBHOOK)},
+        "raw_request": {"reporting_webhook": dict(reporting_webhook or DAILY_REPORTING_WEBHOOK)},
     }
     if mb_id is not None:
         kwargs["media_buy_id"] = mb_id
@@ -183,6 +198,81 @@ async def _drive_failed_send(scheduler: DeliveryWebhookScheduler, env: DeliveryP
             )
 
 
+class TestDeliveryLookupFailureIsCountedNotSkipped:
+    """A failed delivery lookup must count as an error, per the method's own contract.
+
+    ``_send_report_for_media_buy`` documents False as reserved for a LEGITIMATE skip —
+    unsupported frequency, dedup, no data, no URL — and says a failed delivery raises so
+    the batch counts an error. Two error exits returned False instead, so a terminal buy
+    whose spec-required final could not be built was reported as "0 sent, 0 errors": the
+    operator saw a clean batch and no webhook.
+
+    The discrimination matters in both directions. The impl emits MEDIA_BUY_NOT_FOUND
+    when a requested buy simply isn't reportable — that IS the contract's "no data" and
+    must stay a quiet skip — and SERVICE_UNAVAILABLE when the adapter actually failed.
+    Raising on both would make every no-data buy an error; raising on neither is the bug.
+    """
+
+    async def _drive(self, env, buy, response):
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness.delivery_poll import mock_delivery_response
+
+        # AWAIT inside the context. Returning the coroutine and awaiting it outside
+        # would exit the `with` first, un-patching before the body ever runs — the
+        # real impl would execute and the test would grade nothing it intended.
+        with mock_delivery_response(response):
+            return await DeliveryWebhookScheduler()._send_report_for_media_buy(
+                buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+            )
+
+    def _error(self, code):
+        from adcp.types import Error
+
+        return Error(code=code, message=f"{code} for test")
+
+    def _response_with(self, errors):
+        """A minimally-valid delivery response carrying only the given advisories."""
+        from src.core.schemas import AggregatedTotals
+
+        return GetMediaBuyDeliveryResponse(
+            reporting_period={"start": datetime.now(UTC), "end": datetime.now(UTC)},
+            currency="USD",
+            aggregated_totals=AggregatedTotals(impressions=0.0, spend=0.0, media_buy_count=0),
+            media_buy_deliveries=[],
+            errors=errors,
+        )
+
+    @pytest.mark.asyncio
+    async def test_adapter_failure_raises_so_the_batch_counts_an_error(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_fail", principal_id="p_lookup_fail") as env:
+            buy = _serving_webhook_buy(env)
+            response = self._response_with([self._error("SERVICE_UNAVAILABLE")])
+            with pytest.raises(RuntimeError, match="failed"):
+                await self._drive(env, buy, response)
+
+    @pytest.mark.asyncio
+    async def test_not_found_advisory_stays_a_quiet_skip(self, integration_db):
+        """Negative control — raising here would make every no-data buy an error."""
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_nf", principal_id="p_lookup_nf") as env:
+            buy = _serving_webhook_buy(env)
+            response = self._response_with([self._error("MEDIA_BUY_NOT_FOUND")])
+            assert await self._drive(env, buy, response) is False
+
+    @pytest.mark.asyncio
+    async def test_non_response_result_raises(self, integration_db):
+        """Not the response model at all — none of the contract's legitimate skips."""
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t_lookup_type", principal_id="p_lookup_type") as env:
+            buy = _serving_webhook_buy(env)
+            with pytest.raises(RuntimeError, match="not GetMediaBuyDeliveryResponse"):
+                await self._drive(env, buy, None)
+
+
 def _race_two_workers(worker: Callable[[Session, threading.Barrier], bool]) -> list[bool]:
     """Run ``worker(session, barrier)`` on two OS threads released together, return both bools.
 
@@ -236,7 +326,6 @@ def _race_two_workers(worker: Callable[[Session, threading.Barrier], bool]) -> l
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestWebhookNotificationTypeScheduled:
     """Normal periodic webhook delivery sets notification_type to 'scheduled'.
 
@@ -268,7 +357,6 @@ class TestWebhookNotificationTypeScheduled:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestWebhookNotificationTypeFinal:
     """Completed campaign's webhook is 'final' and OMITS next_expected_at.
 
@@ -332,7 +420,6 @@ class TestWebhookNotificationTypeFinal:
             )
 
 
-@pytest.mark.requires_db
 class TestSimulationReachesFinalThroughRealHook:
     """A time-simulation client advancing the clock past flight end reaches 'completed'.
 
@@ -409,7 +496,6 @@ class TestSimulationReachesFinalThroughRealHook:
             assert_omits_webhook_only_fields(dumped, context="mock-time active poll")
 
 
-@pytest.mark.requires_db
 class TestFinalWebhookSurvivesStatusHandoff:
     """The spec-required FINAL webhook survives the status-scheduler -> delivery-batch handoff.
 
@@ -463,7 +549,6 @@ class TestFinalWebhookSurvivesStatusHandoff:
             assert await env.run_delivery_batch() == [], "the delivered final must not be re-sent by a later batch"
 
 
-@pytest.mark.requires_db
 class TestForceDoesNotDuplicateDeliveredFinal:
     """A manual (force=True) trigger must NOT re-send a final that was already delivered.
 
@@ -498,7 +583,6 @@ class TestForceDoesNotDuplicateDeliveredFinal:
             mock_send.assert_not_awaited()
 
 
-@pytest.mark.requires_db
 class TestConcurrentFinalWebhookClaim:
     """The final webhook is serialized across concurrent workers by an atomic claim.
 
@@ -973,7 +1057,6 @@ class TestConcurrentPeriodicWebhookClaim:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestWebhookSequenceNumber:
     """Monotonically increasing sequence_number per media buy on the webhook wire.
 
@@ -1091,7 +1174,6 @@ class TestWebhookSequenceNumber:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestWebhookNextExpectedAt:
     """next_expected_at computed for non-final webhook deliveries.
 
@@ -1127,7 +1209,6 @@ class TestWebhookNextExpectedAt:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestFailedWebhookSendRaisesNotCountedAsSent:
     """A failed webhook send (send_notification -> False) RAISES; the batch counts an error, not a "Sent".
 
@@ -1155,7 +1236,6 @@ class TestFailedWebhookSendRaisesNotCountedAsSent:
             await _drive_failed_send(scheduler, env, buy)
 
 
-@pytest.mark.requires_db
 class TestDedupSuppressesPriorFinalWebhook:
     """A prior successful webhook of ANY notification_type dedups the next non-forced send.
 
@@ -1194,7 +1274,47 @@ class TestDedupSuppressesPriorFinalWebhook:
             mock_send.assert_not_awaited()
 
 
-@pytest.mark.requires_db
+class TestFinalNotSuppressedByPriorScheduledDedupWindow:
+    """The FINAL must fire even when a "scheduled" webhook already succeeded
+    inside the 24h dedup window -- the is_final branch must decide on
+    ``has_successful_final`` alone, never falling through to the 24h check.
+
+    ``get_recent_successful_log`` (the 24h check) is NOT scoped to
+    notification_type -- it spans ANY successful send, by design, so a
+    "scheduled" success also dedups a subsequent "scheduled" attempt (see
+    TestDedupSuppressesPriorFinalWebhook). ``_should_skip_send``'s docstring
+    says the final path "fires regardless of the 24h window (so the status
+    scheduler flipping the buy to persisted 'completed' before this hourly
+    batch can't leave the spec-required final unsent)" -- precisely because a
+    buy that served earlier the same day commonly already has a same-day
+    "scheduled" success on record when it completes. Reinstating the is_final
+    branch's dropped ``return False`` (i.e. letting it fall through into the
+    24h check below) reproduces exactly that: the same-day "scheduled" success
+    silently swallows the final, with no error and no operator-visible signal.
+
+    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_sent_despite_same_day_scheduled_success(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            # An ended buy -> resolves to canonical "completed" -> its report is a final.
+            buy = _serving_webhook_buy(env, flight="completed")
+
+            # A periodic "scheduled" webhook already succeeded for this buy inside
+            # the 24h window (e.g. sent earlier the same day, while still serving).
+            _seed_delivery_log(
+                env, buy, log_id="prior-scheduled-success", status="success", notification_type="scheduled"
+            )
+
+            wires = await env.run_delivery_batch()
+
+            assert len(wires) == 1, "the final must not be suppressed by the same-day scheduled success"
+            assert wires[0]["result"]["notification_type"] == "final"
+
+
 class TestBatchContinuesPastFailedSend:
     """A failed send does NOT abort the batch — the loop continues to the rest.
 
@@ -1254,7 +1374,6 @@ class TestBatchContinuesPastFailedSend:
             )
 
 
-@pytest.mark.requires_db
 class TestPausedBuyReceivesNoDeliveryWebhook:
     """A paused buy is never sent a delivery report webhook by the batch.
 
@@ -1302,7 +1421,6 @@ class TestPausedBuyReceivesNoDeliveryWebhook:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPollOmitsWebhookOnlyFieldsOnEveryTransport:
     """The poll's actual wire body omits the webhook-only fields on MCP, A2A and REST.
 
@@ -1354,7 +1472,6 @@ class TestPollOmitsWebhookOnlyFieldsOnEveryTransport:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestNonexistentMediaBuyIdReturnsNotFoundError:
     """Requesting delivery for a nonexistent media_buy_id returns media_buy_not_found error.
 
@@ -1389,7 +1506,6 @@ class TestNonexistentMediaBuyIdReturnsNotFoundError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPartialMediaBuyIdsNotFound:
     """Mixed request: some IDs exist, some do not.
 
@@ -1444,7 +1560,6 @@ class TestPartialMediaBuyIdsNotFound:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestEqualDateRangeReturnsInvalidDateRangeError:
     """Equal start and end dates return invalid_date_range error.
 
@@ -1475,7 +1590,6 @@ class TestEqualDateRangeReturnsInvalidDateRangeError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestStartDateAfterEndDateReturnsInvalidDateRangeError:
     """Start date after end date returns invalid_date_range error.
 
@@ -1506,7 +1620,6 @@ class TestStartDateAfterEndDateReturnsInvalidDateRangeError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestInvalidDateRangeDoesNotFetchDeliveryData:
     """Invalid date range causes no delivery data to be fetched.
 
@@ -1541,7 +1654,6 @@ class TestInvalidDateRangeDoesNotFetchDeliveryData:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestAdapterUnavailableReturnsAdapterError:
     """Adapter unavailable (network error) returns adapter_error.
 
@@ -1580,7 +1692,6 @@ class TestAdapterUnavailableReturnsAdapterError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestAdapterInternalServerErrorReturnsAdapterError:
     """Adapter 500 internal server error returns adapter_error.
 
@@ -1619,7 +1730,6 @@ class TestAdapterInternalServerErrorReturnsAdapterError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestAdapterFailureAuditTrail:
     """Adapter failure is logged to the audit trail (NFR-003).
 
@@ -1671,7 +1781,6 @@ class TestAdapterFailureAuditTrail:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestAdapterErrorNoStateMutation:
     """Adapter error returns error response without modifying any state.
 
@@ -1713,7 +1822,6 @@ class TestAdapterErrorNoStateMutation:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestMultipleMediaBuyDelivery:
     """Array-based identification returns delivery for all requested media buys.
 
@@ -1775,7 +1883,6 @@ class TestMultipleMediaBuyDelivery:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestNoIdentifiersReturnAll:
     """No identifiers provided returns delivery data for ALL principal's media buys.
 
@@ -1872,7 +1979,6 @@ class TestNoIdentifiersReturnAll:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPackageLevelBreakdowns:
     """Media buy delivery includes per-package breakdowns with metrics.
 
@@ -2034,7 +2140,6 @@ class TestPackageLevelBreakdowns:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPackageDeliveryStatus:
     """Media buy status computation based on package delivery states.
 
@@ -2264,7 +2369,6 @@ class TestPackageDeliveryStatus:
         )
 
 
-@pytest.mark.requires_db
 class TestLegacyPersistedStatusNotStranded:
     """A legacy persisted status (e.g. "ready", "scheduled") must not strand the buy.
 
@@ -2323,7 +2427,6 @@ class TestLegacyPersistedStatusNotStranded:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestAggregatedTotalsMultipleBuys:
     """Aggregated totals are correctly summed across three media buys.
 
@@ -2440,7 +2543,6 @@ class TestAggregatedTotalsMultipleBuys:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestProtocolEnvelopeStatusCompleted:
     """Successful delivery query returns a well-formed response (protocol envelope).
 
@@ -2525,7 +2627,6 @@ class TestProtocolEnvelopeStatusCompleted:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestDeliverySpendComputation:
     """CPM spend computation: impressions / 1000 * rate propagates through delivery.
 
@@ -2588,7 +2689,6 @@ class TestDeliverySpendComputation:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPartialResolutionMissingIds:
     """Partial resolution returns found buys only, reports missing as errors.
 
@@ -2647,7 +2747,6 @@ class TestPartialResolutionMissingIds:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestUnpopulatedFieldsGraceful:
     """Verify unpopulated schema fields (gaps G42, G44) handled without error.
 
@@ -2773,7 +2872,6 @@ class TestUnpopulatedFieldsGraceful:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPricingOptionStringLookup:
     """Verify pricing_option_id string field is used for lookup, not integer PK.
 
@@ -2890,7 +2988,6 @@ class TestPricingOptionStringLookup:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestDeliveryMetricsFieldPresence:
     """Tests that delivery metrics include the required schema fields.
 
@@ -3030,7 +3127,6 @@ class TestDeliveryMetricsFieldPresence:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPricingOptionStringToIntComparisonRejected:
     """PricingOption string-to-integer comparison is detected and rejected.
 
@@ -3152,7 +3248,6 @@ class TestPricingOptionStringToIntComparisonRejected:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestEndToEndDeliveryMetricsCpmPricing:
     """End-to-end delivery metrics with CPM pricing.
 
@@ -3270,7 +3365,6 @@ class TestEndToEndDeliveryMetricsCpmPricing:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestEndToEndDeliveryMetricsCpcPricing:
     """End-to-end delivery metrics with CPC pricing.
 
@@ -3394,7 +3488,6 @@ class TestEndToEndDeliveryMetricsCpcPricing:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestDeliveryMetricsFlatRatePricing:
     """End-to-end delivery metrics with FLAT_RATE pricing.
 
@@ -3514,7 +3607,6 @@ class TestDeliveryMetricsFlatRatePricing:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestDeliveryResponsePreservesExtFields:
     """Delivery response should preserve ext fields from adapter.
 
@@ -3583,7 +3675,6 @@ class TestDeliveryResponsePreservesExtFields:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestCustomDateRangeBothProvided:
     """Custom date range with both start and end provided.
 
@@ -3626,7 +3717,6 @@ class TestCustomDateRangeBothProvided:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestCustomDateRangeOverridesDefault:
     """Custom date range overrides default 30-day window.
 
@@ -3668,7 +3758,6 @@ class TestCustomDateRangeOverridesDefault:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPrincipalNotFoundReturnsError:
     """When principal does not exist in DB, response contains principal_not_found error.
 
@@ -3697,7 +3786,6 @@ class TestPrincipalNotFoundReturnsError:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestNonexistentMediaBuyIdsReturnEmptyDeliveries:
     """Nonexistent media_buy_ids resolve to empty deliveries array.
 
@@ -3734,7 +3822,6 @@ class TestNonexistentMediaBuyIdsReturnEmptyDeliveries:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestCircuitBreakerReportingDelayed:
     """Open circuit breaker marks delivery status as 'reporting_delayed'.
 
@@ -3829,7 +3916,6 @@ class TestCircuitBreakerReportingDelayed:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestPartialFailureTolerance:
     """When one media buy's processing raises an exception in the outer loop,
     the response still includes delivery data for the other successful buys.
@@ -3904,7 +3990,6 @@ class TestPartialFailureTolerance:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestCpcPackageClicksDerivation:
     """Domain business rule: for CPC pricing, package clicks = floor(spend / rate).
 
@@ -3990,7 +4075,6 @@ class TestCpcPackageClicksDerivation:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestStartTimeFallbackForStatus:
     """Data migration strategy: start_time (AdCP spec field, nullable) is preferred
     over start_date (legacy NOT NULL column) when determining media buy status.
@@ -4053,7 +4137,6 @@ class TestStartTimeFallbackForStatus:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_db
 class TestReportingWebhookAuthenticationPrecedence:
     """A task-status push subscription cannot override reporting credentials."""
 
@@ -4221,3 +4304,106 @@ class TestGetReportableForDeliveryFinalAntiJoin:
             )
             reportable_ids = {mb.media_buy_id for mb in reportable}
         assert mb_id in reportable_ids
+
+
+class TestGetReportableForDeliveryRequiresReportingWebhook:
+    """get_reportable_for_delivery requires a configured reporting_webhook on
+    BOTH arms, not just the terminal one -- the serving arm previously had no
+    such predicate at all, so every serving buy (webhook-configured or not) was
+    selected and materialized, only to be discarded by the scheduler's
+    Python-side check one buy at a time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_serving_buy_with_webhook_is_selected(self, integration_db):
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="live")
+            mb_id = buy.media_buy_id
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=[]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_serving_buy_without_webhook_is_excluded(self, integration_db):
+        """The regression test for the bug: a serving buy with no reporting_webhook
+        configured must not be selected at all -- not selected-then-discarded in
+        Python, excluded at the SQL layer."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            buy = MediaBuyFactory(tenant=tenant, principal=principal, status="active")
+            mb_id = buy.media_buy_id
+            assert "reporting_webhook" not in buy.raw_request, "fixture must not configure a webhook"
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=[]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert mb_id not in reportable_ids
+
+    @pytest.mark.asyncio
+    async def test_both_arms_require_reporting_webhook(self, integration_db):
+        """One no-webhook buy per arm, one call. Written to fail if the shared
+        top-level predicate is ever re-split into a per-arm copy and one arm's
+        copy is dropped -- the exact shape of the bug this fix closes."""
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+            serving_buy = MediaBuyFactory(tenant=tenant, principal=principal, status="active")
+            terminal_buy = MediaBuyFactory(tenant=tenant, principal=principal, status="completed")
+            serving_mb_id = serving_buy.media_buy_id
+            terminal_mb_id = terminal_buy.media_buy_id
+
+            reportable = MediaBuyRepository.get_reportable_for_delivery(
+                env.get_session(), serving_statuses=["active"], terminal_statuses=["completed"]
+            )
+            reportable_ids = {mb.media_buy_id for mb in reportable}
+        assert serving_mb_id not in reportable_ids
+        assert terminal_mb_id not in reportable_ids
+
+
+class TestDeliveryPollEnvSsrfGate:
+    """DeliveryPollEnv stubs DNS resolution (tests/harness/delivery_poll.py) so a
+    real webhook send doesn't depend on live network access -- this must not
+    widen what the outbound SSRF gate accepts. A reporting_webhook URL that
+    targets a blocked destination is still refused, and the mocked DNS answer
+    is never even consulted for a literal-IP/blocked-hostname target since
+    that check runs before hostname resolution (src/core/security/url_validator.py
+    check_url_ssrf: BLOCKED_HOSTNAMES / literal-IP branch precede
+    _check_hostname_resolution's DNS call)."""
+
+    @pytest.mark.asyncio
+    async def test_blocked_destination_is_refused_not_sent(self, integration_db):
+        """A reporting_webhook pointed at the cloud-metadata IP is refused by the
+        real send-time SSRF gate; the outbound POST is never attempted."""
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+        from tests.harness.delivery_poll import mock_webhook_post
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(
+                env,
+                reporting_webhook={**DAILY_REPORTING_WEBHOOK, "url": "https://169.254.169.254/latest/meta-data/"},
+            )
+
+            scheduler = DeliveryWebhookScheduler()
+            with mock_webhook_post(scheduler) as mock_post:
+                with pytest.raises(RuntimeError, match="webhook send failed"):
+                    await scheduler._send_report_for_media_buy(
+                        buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+                    )
+            mock_post.assert_not_called()

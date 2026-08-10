@@ -23,7 +23,7 @@ from src.core.webhook_validator import (
 def _webhook_audit_hmac_key_configured():
     """Give every test in this module a real (non-blank) webhook_audit_hmac_key.
 
-    _redact_url_credentials treats a blank key as "no real secret configured" and
+    redact_webhook_url_for_audit treats a blank key as "no real secret configured" and
     emits a constant, non-correlating placeholder instead of a digest -- see its
     docstring. Most tests in this file exercise the KEYED (digest) path and would
     otherwise silently hit the placeholder path instead, since no
@@ -35,7 +35,7 @@ def _webhook_audit_hmac_key_configured():
     from src.core.config import AppConfig
 
     with patch(
-        "src.services.protocol_webhook_service.get_config",
+        "src.core.webhook_validator.get_config",
         return_value=AppConfig(webhook_audit_hmac_key="test-suite-default-hmac-key-not-a-real-secret"),
     ):
         yield
@@ -365,7 +365,7 @@ class TestWebhookAuthenticator:
 
 
 class TestRedactUrlCredentials:
-    """``_redact_url_credentials`` keeps only ``scheme://<redacted:key_id:hmac>`` --
+    """``redact_webhook_url_for_audit`` keeps only ``scheme://<redacted:key_id:hmac>`` --
     a non-reversible audit form -- before a URL reaches a log line or durable storage.
 
     Three earlier versions of this function redacted a specific carrier (userinfo,
@@ -380,15 +380,15 @@ class TestRedactUrlCredentials:
     same target without exposing it AND without being matchable offline against a
     dictionary of guessed URLs (an unkeyed hash would be). The key is deliberately
     ``AppConfig.webhook_audit_hmac_key``, not the Flask session key -- see
-    ``_redact_url_credentials``'s docstring for why reusing a session-signing key
+    ``redact_webhook_url_for_audit``'s docstring for why reusing a session-signing key
     as a durable correlation key is its own defect. The key ID is embedded in the
     output so a future key rotation doesn't silently orphan every historical row.
     """
 
     def _redact(self, url: str) -> str:
-        from src.services.protocol_webhook_service import _redact_url_credentials
+        from src.core.webhook_validator import redact_webhook_url_for_audit
 
-        return _redact_url_credentials(url)
+        return redact_webhook_url_for_audit(url)
 
     def _key_id_and_digest(self, redacted: str) -> tuple[str, str]:
         inner = redacted.removeprefix("https://<redacted:").removeprefix("http://<redacted:").removesuffix(">")
@@ -427,12 +427,12 @@ class TestRedactUrlCredentials:
 
         url = "https://example.com/hook?token=abc"
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="secret-one"),
         ):
             redacted_with_secret_one = self._redact(url)
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="secret-two"),
         ):
             redacted_with_secret_two = self._redact(url)
@@ -449,7 +449,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="a-real-secret", webhook_audit_hmac_key_id="v7"),
         ):
             redacted = self._redact("https://example.com/hook")
@@ -465,12 +465,12 @@ class TestRedactUrlCredentials:
 
         url = "https://example.com/hook?token=abc"
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v1"),
         ):
             redacted_v1 = self._redact(url)
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v2"),
         ):
             redacted_v2 = self._redact(url)
@@ -580,7 +580,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key=""),
         ):
             assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
@@ -589,7 +589,7 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key="   \t  "),
         ):
             assert self._redact("https://example.com/hook?token=abc") == "https://<redacted>"
@@ -600,10 +600,24 @@ class TestRedactUrlCredentials:
         from src.core.config import AppConfig
 
         with patch(
-            "src.services.protocol_webhook_service.get_config",
+            "src.core.webhook_validator.get_config",
             return_value=AppConfig(webhook_audit_hmac_key=""),
         ):
             assert self._redact("https://example.com/hook-a") == self._redact("https://example.com/hook-b")
+
+
+def _delivery_test_metadata() -> dict[str, str]:
+    """Shared fixed metadata for a single-media-buy delivery send, reused by every
+    test class in this module that drives a real send/log call and needs a
+    metadata dict but doesn't vary it -- single source so the 4 fixed values
+    (task_type/tenant_id/principal_id/media_buy_id) live in one place.
+    """
+    return {
+        "task_type": "media_buy_delivery",
+        "tenant_id": "tenant-1",
+        "principal_id": "principal-1",
+        "media_buy_id": "media-buy-1",
+    }
 
 
 class TestCredentialsNeverReachTheLog:
@@ -612,33 +626,73 @@ class TestCredentialsNeverReachTheLog:
     is already (correctly) excluded, the URL itself can carry the same class of secret.
     """
 
+    def _metadata(self) -> dict[str, str]:
+        return _delivery_test_metadata()
+
+    def _mock_response(self) -> MagicMock:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.raise_for_status = lambda: None
+        return mock_response
+
+    async def _send_via_retry(self, service, url: str, caplog) -> MagicMock:
+        """Drive the ``_send_with_retry_and_logging`` log site, return the outbound-POST mock."""
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=self._mock_response()) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service._send_with_retry_and_logging(
+                url=url,
+                payload={"task_id": "media-buy-1"},
+                headers={},
+                metadata=self._metadata(),
+            )
+        # Vacuity guard, pinned to THIS site. Every assertion in this class is
+        # "secret NOT in caplog.text", which an empty — or merely unrelated — caplog
+        # satisfies trivially. Asserting only that SOMETHING was logged is not enough:
+        # other INFO lines in the same block keep caplog non-empty, so silencing the
+        # line under test still passed. Verified by mutation both ways.
+        assert "Sending webhook for task" in caplog.text, (
+            "_send_with_retry_and_logging emitted no line — the not-in-log assertions below would pass "
+            f"vacuously. Captured instead: {caplog.text!r}"
+        )
+        return mock_post
+
+    async def _send_via_config(self, service, url: str, caplog) -> MagicMock:
+        """Drive the ``send_notification`` safe-config log site, return the outbound-POST mock."""
+        from src.core.database.models import PushNotificationConfig
+
+        config = PushNotificationConfig(url=url, authentication_type=None, authentication_token=None)
+        with (
+            patch.object(service, "_write_delivery_log"),
+            patch.object(service._session, "post", return_value=self._mock_response()) as mock_post,
+            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
+        ):
+            await service.send_notification(
+                push_notification_config=config,
+                payload={"task_id": "media-buy-1"},
+                metadata=self._metadata(),
+            )
+        # Vacuity guard, pinned to THIS site. Every assertion in this class is
+        # "secret NOT in caplog.text", which an empty — or merely unrelated — caplog
+        # satisfies trivially. Asserting only that SOMETHING was logged is not enough:
+        # other INFO lines in the same block keep caplog non-empty, so silencing the
+        # line under test still passed. Verified by mutation both ways.
+        assert "push_notification_config (sanitized)" in caplog.text, (
+            "send_notification's safe-config site emitted no line — the not-in-log assertions below would pass "
+            f"vacuously. Captured instead: {caplog.text!r}"
+        )
+        return mock_post
+
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_url_credentials(self, caplog):
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=credentialed_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, credentialed_url, caplog)
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
@@ -649,36 +703,11 @@ class TestCredentialsNeverReachTheLog:
 
     @pytest.mark.asyncio
     async def test_sanitized_config_log_line_omits_url_credentials(self, caplog):
-        from src.core.database.models import PushNotificationConfig
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         credentialed_url = "https://buyer:s3cr3t-password@example.com/hook"
-        config = PushNotificationConfig(
-            url=credentialed_url,
-            authentication_type=None,
-            authentication_token=None,
-        )
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service.send_notification(
-                push_notification_config=config,
-                payload={"task_id": "media-buy-1"},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_config(service, credentialed_url, caplog)
 
         assert "s3cr3t-password" not in caplog.text, f"credential leaked into the log: {caplog.text}"
         assert "buyer" not in caplog.text, f"username leaked into the log: {caplog.text}"
@@ -693,27 +722,7 @@ class TestCredentialsNeverReachTheLog:
 
         service = ProtocolWebhookService()
         username_only_url = "https://buyer-identity@example.com/hook"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=username_only_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, username_only_url, caplog)
 
         assert "buyer-identity" not in caplog.text, f"bare username leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(username_only_url, headers=ANY, timeout=ANY, allow_redirects=False, json=ANY)
@@ -721,33 +730,13 @@ class TestCredentialsNeverReachTheLog:
     @pytest.mark.asyncio
     async def test_retry_send_log_line_omits_query_credentials(self, caplog):
         """Every prior case in this class used a userinfo-only URL, so a regression that
-        replaced _redact_url_credentials with a userinfo-only implementation at THIS log
+        replaced redact_webhook_url_for_audit with a userinfo-only implementation at THIS log
         site would have passed all of them. No userinfo here -- query-only."""
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         query_credentialed_url = "https://example.com/hook?token=query-leak-retry"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service._send_with_retry_and_logging(
-                url=query_credentialed_url,
-                payload={"task_id": "media-buy-1"},
-                headers={},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_retry(service, query_credentialed_url, caplog)
 
         assert "query-leak-retry" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(
@@ -758,36 +747,11 @@ class TestCredentialsNeverReachTheLog:
     async def test_sanitized_config_log_line_omits_query_credentials(self, caplog):
         """Same regression class as above, for the OTHER log site (send_notification's
         safe_config line, which reads push_notification_config.url directly)."""
-        from src.core.database.models import PushNotificationConfig
         from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
         query_credentialed_url = "https://example.com/hook?token=query-leak-config"
-        config = PushNotificationConfig(
-            url=query_credentialed_url,
-            authentication_type=None,
-            authentication_token=None,
-        )
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "OK"
-        mock_response.raise_for_status = lambda: None
-
-        with (
-            patch.object(service, "_write_delivery_log"),
-            patch.object(service._session, "post", return_value=mock_response) as mock_post,
-            caplog.at_level(logging.INFO, logger="src.services.protocol_webhook_service"),
-        ):
-            await service.send_notification(
-                push_notification_config=config,
-                payload={"task_id": "media-buy-1"},
-                metadata={
-                    "task_type": "media_buy_delivery",
-                    "tenant_id": "tenant-1",
-                    "principal_id": "principal-1",
-                    "media_buy_id": "media-buy-1",
-                },
-            )
+        mock_post = await self._send_via_config(service, query_credentialed_url, caplog)
 
         assert "query-leak-config" not in caplog.text, f"query credential leaked into the log: {caplog.text}"
         mock_post.assert_called_once_with(
@@ -806,7 +770,7 @@ class TestFailurePathsNeverLeakCredentials:
     VERBATIM (userinfo, capability subdomain, query values, all of it, since
     it's built from response.url), and ConnectionError/Timeout messages
     include host+path+query. TestCredentialsNeverReachTheLog proves the
-    explicit `_redact_url_credentials(url)` logging call sites are safe; this
+    explicit `redact_webhook_url_for_audit(url)` logging call sites are safe; this
     class proves the EXCEPTION-DERIVED messages on the failure paths are too
     -- a fix that only touched the former would still leak every carrier the
     moment a delivery attempt failed.
@@ -839,12 +803,7 @@ class TestFailurePathsNeverLeakCredentials:
                 )
 
     def _metadata(self) -> dict[str, str]:
-        return {
-            "task_type": "media_buy_delivery",
-            "tenant_id": "tenant-1",
-            "principal_id": "principal-1",
-            "media_buy_id": "media-buy-1",
-        }
+        return _delivery_test_metadata()
 
     @pytest.mark.asyncio
     async def test_4xx_client_error_does_not_leak_credentials(self, caplog):
@@ -1006,12 +965,12 @@ class TestDurableDeliveryLogRedactsCredentials:
     is the single builder for that persisted value, so it is the point that must redact.
     """
 
-    def test_context_webhook_url_omits_userinfo(self):
+    def _build_redacted_context(self, url: str):
         from src.services.protocol_webhook_service import _delivery_log_context
 
-        context = _delivery_log_context(
+        return _delivery_log_context(
             log_id="log-1",
-            url="https://buyer:s3cr3t-password@example.com/hook",
+            url=url,
             task_type="media_buy_delivery",
             tenant_id="tenant-1",
             principal_id="principal-1",
@@ -1021,66 +980,30 @@ class TestDurableDeliveryLogRedactsCredentials:
             notification_type="scheduled",
             payload_size_bytes=100,
         )
+
+    def test_context_webhook_url_omits_userinfo(self):
+        context = self._build_redacted_context("https://buyer:s3cr3t-password@example.com/hook")
         assert context is not None
         assert "buyer" not in context.webhook_url
         assert "s3cr3t-password" not in context.webhook_url
         assert context.webhook_url.startswith("https://<redacted:")
 
     def test_context_webhook_url_omits_sensitive_query_param_values(self):
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://example.com/hook?token=leaked-in-db",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://example.com/hook?token=leaked-in-db")
         assert context is not None
         assert "leaked-in-db" not in context.webhook_url
 
     def test_context_webhook_url_omits_a_path_segment_credential(self):
         """The durable-storage counterpart of TestRedactUrlCredentials's path-segment
         case -- a provider that puts an opaque token directly in the path."""
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://example.com/hooks/path-secret-token-in-db",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://example.com/hooks/path-secret-token-in-db")
         assert context is not None
         assert "path-secret-token-in-db" not in context.webhook_url
 
     def test_context_webhook_url_omits_a_capability_subdomain_credential(self):
         """The durable-storage counterpart of TestRedactUrlCredentials's host test --
         a provider that puts the credential in the (sub)domain itself."""
-        from src.services.protocol_webhook_service import _delivery_log_context
-
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://tok-db-capability-host.example.com/hook",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://tok-db-capability-host.example.com/hook")
         assert context is not None
         assert "tok-db-capability-host" not in context.webhook_url
         assert "example.com" not in context.webhook_url
@@ -1096,21 +1019,10 @@ class TestDurableDeliveryLogRedactsCredentials:
         keyword, or reading from a stale local instead of the context) would not have been
         caught. This drives _write_delivery_log's real body.
         """
-        from src.services.protocol_webhook_service import ProtocolWebhookService, _delivery_log_context
+        from src.services.protocol_webhook_service import ProtocolWebhookService
 
         service = ProtocolWebhookService()
-        context = _delivery_log_context(
-            log_id="log-1",
-            url="https://buyer:s3cr3t-password@example.com/hook?token=also-leaked",
-            task_type="media_buy_delivery",
-            tenant_id="tenant-1",
-            principal_id="principal-1",
-            media_buy_id="media-buy-1",
-            idempotency_key=None,
-            sequence_number=1,
-            notification_type="scheduled",
-            payload_size_bytes=100,
-        )
+        context = self._build_redacted_context("https://buyer:s3cr3t-password@example.com/hook?token=also-leaked")
         assert context is not None
 
         mock_session = MagicMock()
@@ -1160,7 +1072,13 @@ class TestWebhookAuditHmacKeyProductionValidation:
     to run without it OUTSIDE production, so the enforcement has to live here,
     not in the field default."""
 
-    def _validate(self, *, webhook_audit_hmac_key: str, is_production: bool) -> None:
+    def _validate(self, *, webhook_audit_hmac_key: str, is_production: bool, declared: bool | None = None) -> None:
+        """Drive validate_configuration() for a given production shape.
+
+        ``declared`` distinguishes a deployment that set ENVIRONMENT=production from
+        one this codebase merely INFERS is production (PRODUCTION / FLY_APP_NAME).
+        Defaults to ``is_production`` so the pre-existing cases keep their meaning.
+        """
         from src.core.config import AppConfig, validate_configuration
 
         with (
@@ -1169,6 +1087,10 @@ class TestWebhookAuditHmacKeyProductionValidation:
                 return_value=AppConfig(webhook_audit_hmac_key=webhook_audit_hmac_key),
             ),
             patch("src.core.config.is_production", return_value=is_production),
+            patch(
+                "src.core.config.declares_production_explicitly",
+                return_value=is_production if declared is None else declared,
+            ),
         ):
             validate_configuration()
 
@@ -1176,19 +1098,42 @@ class TestWebhookAuditHmacKeyProductionValidation:
         self._validate(webhook_audit_hmac_key="", is_production=False)  # must not raise
 
     def test_unset_key_is_rejected_in_production(self):
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
             self._validate(webhook_audit_hmac_key="", is_production=True)
 
     def test_short_key_is_rejected_in_production(self):
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be at least"):
+        with pytest.raises(RuntimeError, match="shorter than the required"):
             self._validate(webhook_audit_hmac_key="too-short", is_production=True)
 
     def test_whitespace_only_key_is_rejected_in_production(self):
         """A whitespace-only key would satisfy `if not key` (it's a non-empty
         string) but is exactly as useless as an unset one -- the same "no real
-        secret" gap _redact_url_credentials treats as blank."""
-        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY must be set"):
+        secret" gap redact_webhook_url_for_audit treats as blank."""
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
             self._validate(webhook_audit_hmac_key="   \t\n  ", is_production=True)
+
+    def test_inferred_production_warns_instead_of_refusing_to_start(self, caplog):
+        """A deployment we newly INFER is production must not be bricked on upgrade.
+
+        is_production() was broadened to cover PRODUCTION / FLY_APP_NAME. This is an
+        open-source project: those deployments cannot be surveyed or warned ahead of
+        time, and they changed nothing — so raising here would stop a downstream
+        service from booting on a configuration that was valid the day before.
+        They get a loud, actionable warning; enforcement waits for a later release.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="src.core.config"):
+            self._validate(webhook_audit_hmac_key="", is_production=True, declared=False)
+
+        assert any("WEBHOOK_AUDIT_HMAC_KEY" in r.getMessage() for r in caplog.records), (
+            "an inferred-production deployment with no key must be warned, not silently accepted"
+        )
+
+    def test_declared_production_still_refuses(self):
+        """Negative control — the warn path must not swallow the declared case."""
+        with pytest.raises(RuntimeError, match="WEBHOOK_AUDIT_HMAC_KEY is not set"):
+            self._validate(webhook_audit_hmac_key="", is_production=True, declared=True)
 
     def test_sufficiently_long_key_is_accepted_in_production(self):
         self._validate(webhook_audit_hmac_key="x" * 32, is_production=True)  # must not raise
@@ -1201,7 +1146,7 @@ class TestWebhookAuditHmacKeyProductionValidation:
 
 class TestWebhookAuditHmacKeyIdFormatValidation:
     """webhook_audit_hmac_key_id is embedded verbatim into log lines and the durable
-    WebhookDeliveryLog.webhook_url column (see _redact_url_credentials), so it must
+    WebhookDeliveryLog.webhook_url column (see redact_webhook_url_for_audit), so it must
     be restricted to a bounded, safe format -- an operator typo or copy-paste error
     (colons, angle brackets, newlines, control characters, unbounded length)
     shouldn't be able to corrupt the audit identifier's structure or open a
@@ -1261,3 +1206,234 @@ class TestWebhookAuditHmacKeyIdFormatValidation:
         from src.core.config import AppConfig
 
         assert AppConfig().webhook_audit_hmac_key_id == "v1"
+
+
+class TestSsrfRejectionLogNeverLeaksCredentials:
+    """The SSRF-REJECTION branch must redact as hard as the success path.
+
+    ``reject_unsafe_outbound_webhook_url`` fires exactly for hostile or
+    misconfigured URLs, so it is the last place that should be laxer than the
+    paths around it -- yet it logged ``scheme://host/path`` plus the raw SSRF
+    reason while every other line in the same send path replaced host AND path
+    with a keyed digest. For a capability-style delivery URL the (sub)domain IS
+    the credential (see ``redact_webhook_url_for_audit``'s docstring), so that split
+    leaked the secret on precisely the failure path an attacker can provoke.
+
+    Two independent carriers are pinned here because closing only one still
+    leaks: the ``url=`` field (fixed by passing the caller's own sanitizer) and
+    the reason string, which embeds the hostname verbatim for the
+    ``Cannot resolve hostname: <host>`` class of failure.
+    """
+
+    # Lowercase: urlparse().hostname normalizes case, so this is the form that
+    # actually reaches a log line. Asserting on the mixed-case original would
+    # pass vacuously against an unredacted hostname.
+    CAPABILITY_SECRET = "tok-9fk2z8mqsecret"
+    CAPABILITY_URL = f"https://{CAPABILITY_SECRET}.hooks.example.com/deliver"
+
+    def _capture_rejection_log(self, caplog, **kwargs) -> str:
+        from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
+
+        logger = logging.getLogger(f"ssrf-rejection-probe-{id(self)}")
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            rejected, _error_msg = reject_unsafe_outbound_webhook_url(
+                self.CAPABILITY_URL, log=logger, kind="Probe", **kwargs
+            )
+        assert rejected, "fixture URL must actually be rejected, or this grades nothing"
+        assert caplog.text.strip(), "rejection must emit a log line, or the assertions below are vacuous"
+        return caplog.text.lower()
+
+    def test_reason_string_never_carries_the_raw_hostname(self, caplog):
+        """Shared by every caller, whatever sanitizer they pass: the SSRF reason
+        is scrubbed of the hostname before it reaches a log.
+
+        Deliberately scoped to the REASON, not the whole line, and deliberately
+        run under the LAX sanitizer: the reason scrub must hold even for a caller
+        whose ``url=`` field still renders scheme://host/path, so it cannot be
+        carried accidentally by the sanitizer the caller happens to pass. The
+        whole-line close for capability-style URLs is the sibling test below.
+        """
+        from src.core.webhook_validator import REDACTED_HOST_FOR_LOG, webhook_url_for_log
+
+        text = self._capture_rejection_log(caplog, sanitize=webhook_url_for_log)
+        assert f"cannot resolve hostname: {REDACTED_HOST_FOR_LOG.lower()}" in text
+        assert f"cannot resolve hostname: {self.CAPABILITY_SECRET}" not in text
+
+    def test_protocol_path_redacts_the_url_field_too(self, caplog):
+        """With a redacting sanitizer neither carrier survives -- the full close
+        for capability-style URLs.
+
+        Every production sender now passes this one (Protocol, Application and
+        OrderApproval alike), and ``sanitize`` is a required argument with no
+        default, so a new gate cannot silently inherit the lax form."""
+        from src.core.webhook_validator import redact_webhook_url_for_audit
+
+        text = self._capture_rejection_log(caplog, sanitize=redact_webhook_url_for_audit)
+        assert self.CAPABILITY_SECRET not in text
+        assert "hooks.example.com" not in text, "host must not survive in the url= field either"
+
+
+class TestEveryOutboundGateUsesTheRedactingSanitizer:
+    """No production SSRF gate may render a buyer-supplied URL with the lax form.
+
+    ``sanitize`` being required stops a new gate from *silently* inheriting the
+    lax sanitizer, but it cannot stop one from naming it explicitly. This pins
+    the choice itself: the rejection branch fires precisely for hostile or
+    misconfigured URLs, so it is the last place that should be laxer than the
+    success path it guards.
+    """
+
+    def test_all_production_call_sites_pass_the_strong_redactor(self):
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        offenders = []
+        for path in src.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                if name != "reject_unsafe_outbound_webhook_url":
+                    continue
+                passed = {
+                    kw.arg: getattr(kw.value, "id", None) or getattr(kw.value, "attr", None) for kw in node.keywords
+                }
+                if passed.get("sanitize") != "redact_webhook_url_for_audit":
+                    offenders.append(f"{path.relative_to(src.parent)}:{node.lineno} -> {passed.get('sanitize')!r}")
+
+        assert not offenders, "outbound SSRF gate(s) not using redact_webhook_url_for_audit:\n  " + "\n  ".join(
+            offenders
+        )
+
+    def test_the_guard_can_actually_see_a_call_site(self):
+        """Guards that scan for a pattern must be shown to find it at all --
+        otherwise an empty offender list is indistinguishable from a broken
+        matcher and the assertion above passes vacuously forever."""
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        found = sum(
+            1
+            for path in src.rglob("*.py")
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.Call)
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+            == "reject_unsafe_outbound_webhook_url"
+        )
+        assert found >= 3, f"expected the three outbound gates, matcher found {found}"
+
+
+class TestLogSanitizersAreTotal:
+    """Neither log sanitizer may raise on a buyer-supplied URL.
+
+    Both run on the logging path, frequently while an error is already being
+    handled, so a raise here replaces the failure being reported with a parse
+    error from the code reporting it. ``urlparse`` raises on malformed IPv6
+    literals, and the URL is buyer-supplied, so the input is reachable.
+    """
+
+    MALFORMED = (
+        "https://[::1",  # unterminated IPv6 literal -> urlparse raises
+        "http://[",
+        "://nohost",
+        "",
+        "   ",
+        "not-a-url",
+    )
+
+    def test_urlparse_really_does_raise_on_the_probe(self):
+        """Pins the premise: if urlparse stops raising, these guards are testing nothing."""
+        from urllib.parse import urlparse
+
+        import pytest
+
+        with pytest.raises(ValueError):
+            urlparse("https://[::1")
+
+    def test_weak_sanitizer_never_raises(self):
+        from src.core.webhook_validator import sanitize_webhook_url_for_log, webhook_url_for_log
+
+        for url in self.MALFORMED:
+            assert sanitize_webhook_url_for_log(url) is None, url
+            # The "total" helper must yield the placeholder, never propagate.
+            assert webhook_url_for_log(url) == "<unparseable-url>", url
+
+    def test_strong_redactor_never_raises(self):
+        from src.core.webhook_validator import redact_webhook_url_for_audit
+
+        for url in self.MALFORMED:
+            assert redact_webhook_url_for_audit(url) == "REDACTED", url
+
+    def test_the_ssrf_gate_returns_rejected_rather_than_raising(self):
+        """The gate is the third sibling, and the one where raising costs the most.
+
+        Its rejection branch fires precisely for hostile or malformed URLs. Raising
+        there replaces the (rejected, reason) the caller is waiting on with an
+        exception from the code doing the rejecting — so the caller never learns the
+        URL was unsafe, and a crash stands in for a refusal. Two sibling parsers in
+        this module were guarded before this one was, which is how it survived.
+        """
+        import logging
+
+        from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_outbound_webhook_url
+
+        for url in self.MALFORMED:
+            if not url.strip():
+                continue  # blank is a caller-side precondition, not an SSRF verdict
+            rejected, reason = reject_unsafe_outbound_webhook_url(
+                url, log=logging.getLogger("ssrf-totality-probe"), kind="Probe", sanitize=redact_webhook_url_for_audit
+            )
+            assert rejected is True, f"{url!r} must be REJECTED, not accepted"
+            assert reason, f"{url!r} rejected with an empty reason"
+
+
+class TestSupersededSanitizersStayOutOfProduction:
+    """The lax renderers must not come back at a production log site.
+
+    Their own docstring says the form is not credential-safe for capability-style
+    delivery URLs, where the credential IS the subdomain or the path. Every
+    production caller now uses the keyed-digest redactor. They remain only because
+    tests still pin their contract, and a helper with no production caller is
+    exactly what gets innocently reused — so this pins the absence rather than
+    trusting the docstring to be read.
+    """
+
+    SUPERSEDED = ("webhook_url_for_log", "sanitize_webhook_url_for_log")
+
+    @staticmethod
+    def _src_root():
+        from pathlib import Path
+
+        return Path(__file__).resolve().parents[2] / "src"
+
+    def test_the_scan_can_see_the_replacement_in_use(self):
+        """Guards asserting an absence must first be shown to find a presence."""
+        import re
+
+        hits = sum(
+            len(re.findall(r"\bredact_webhook_url_for_audit\s*\(", p.read_text()))
+            for p in self._src_root().rglob("*.py")
+        )
+        assert hits >= 5, f"scan found only {hits} uses of the replacement — pattern likely stale"
+
+    def test_superseded_lax_sanitizers_have_no_production_callers(self):
+        import re
+
+        offenders = []
+        for path in self._src_root().rglob("*.py"):
+            if path.name == "webhook_validator.py":
+                continue  # defines them, and webhook_url_for_log calls its own helper
+            body = path.read_text()
+            for name in self.SUPERSEDED:
+                for m in re.finditer(rf"\b{name}\s*\(", body):
+                    line = body[: m.start()].count("\n") + 1
+                    offenders.append(f"{path.name}:{line} -> {name}")
+        assert not offenders, (
+            "superseded lax sanitizer reintroduced in production:\n  "
+            + "\n  ".join(offenders)
+            + "\nUse redact_webhook_url_for_audit — the lax form leaks a capability URL's credential."
+        )

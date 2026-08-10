@@ -1,7 +1,8 @@
 """Shared validation for reporting-webhook capabilities."""
 
 from collections.abc import Iterable
-from typing import Any
+from enum import Enum
+from typing import Any, Protocol
 
 from adcp.types import ReportingWebhook
 
@@ -9,16 +10,29 @@ from src.core.exceptions import AdCPCapabilityNotSupportedError
 from src.core.reporting_capabilities import IMPLICIT_REPORTING_METRICS, SUPPORTED_REPORTING_FREQUENCIES
 
 
+class ReportingCapableProduct(Protocol):
+    """The two attributes this module reads off a product.
+
+    Stated structurally rather than as the ORM model: both production callers pass
+    ORM rows, but nothing here touches the session, and typing it as the ORM class
+    would couple a pure validator to persistence. ``Iterable[Any]`` said nothing at
+    all — this says exactly what a caller must provide.
+    """
+
+    product_id: str
+    reporting_capabilities: dict[str, Any] | None
+
+
 def _reporting_frequency(reporting_webhook: ReportingWebhook) -> str:
     return str(reporting_webhook.reporting_frequency or "").lower()
 
 
-def _normalized_values(values: Iterable[Any]) -> set[str]:
+def _normalized_values(values: Iterable[str | Enum]) -> set[str]:
     """Normalize enum or string capability values for set comparisons."""
     return {str(getattr(value, "value", value)).lower() for value in values}
 
 
-def _effective_available_metrics(values: Iterable[Any]) -> set[str]:
+def _effective_available_metrics(values: Iterable[str | Enum]) -> set[str]:
     """Return declared metrics plus the base metrics AdCP makes implicit."""
     return _normalized_values(values) | IMPLICIT_REPORTING_METRICS
 
@@ -45,7 +59,7 @@ def validate_reporting_webhook_frequency(reporting_webhook: ReportingWebhook | N
 
 def validate_reporting_webhook_product_support(
     reporting_webhook: ReportingWebhook | None,
-    products: Iterable[Any],
+    products: Iterable[ReportingCapableProduct],
     *,
     required_product_ids: Iterable[str] = (),
 ) -> None:

@@ -13,7 +13,7 @@ the lease) self-heals on a later attempt. NULL until a periodic send is
 claimed.
 
 Revision ID: db2e99013cb8
-Revises: 168914d7ca05
+Revises: b5838b839548
 Create Date: 2026-08-10 16:34:14.709497
 
 """
@@ -26,7 +26,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "db2e99013cb8"
-down_revision: str | Sequence[str] | None = "168914d7ca05"
+down_revision: str | Sequence[str] | None = "b5838b839548"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

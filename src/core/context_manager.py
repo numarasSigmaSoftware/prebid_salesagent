@@ -22,8 +22,8 @@ from src.core.database.models import Context, ObjectWorkflowMapping, WorkflowSte
 from src.core.database.models import Context as DBContext
 from src.core.exceptions import AdCPError, build_two_layer_error_envelope, normalize_to_adcp_error
 from src.core.webhook_validator import (
+    redact_webhook_url_for_audit,
     validate_webhook_task_type,
-    webhook_url_for_log,
 )
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
@@ -35,10 +35,12 @@ console = Console()
 def _log_webhook_send_outcome(config_url: str, sent: bool) -> None:
     """Log webhook delivery result; never treat ``False`` as success.
 
-    ``config_url`` is sanitized to ``scheme://host/path`` so credentials in
-    userinfo/query never reach the console (AdCP L1 SSRF log hygiene).
+    ``config_url`` is reduced to ``scheme://<redacted:key:digest>`` — host and path
+    included, not just userinfo/query. A capability-style delivery URL carries its
+    credential in the subdomain or the path, so the older scheme://host/path form
+    this once described was not safe for it.
     """
-    safe_url = webhook_url_for_log(config_url)
+    safe_url = redact_webhook_url_for_audit(config_url)
     if sent:
         console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
     else:
@@ -863,7 +865,7 @@ class ContextManager(DatabaseManager):
 
                     service = get_protocol_webhook_service()
 
-                    safe_webhook_url = webhook_url_for_log(push_notification_config.url)
+                    safe_webhook_url = redact_webhook_url_for_audit(push_notification_config.url)
                     console.print(
                         f"[cyan]📤 Sending webhook to {safe_webhook_url} for {mapping.object_type} {mapping.object_id}[/cyan]"
                     )

@@ -17,7 +17,7 @@ from sqlalchemy import select
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig, SyncJob
 from src.core.thread_registry import ThreadRegistry
-from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
+from src.core.webhook_validator import redact_webhook_url_for_audit, reject_unsafe_outbound_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +352,9 @@ def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str
 
 def _reject_unsafe_approval_webhook_url(webhook_url: str) -> bool:
     """Return True when the order-approval outbound URL fails the SSRF gate."""
-    rejected, _error_msg = reject_unsafe_outbound_webhook_url(webhook_url, log=logger, kind="OrderApproval")
+    rejected, _error_msg = reject_unsafe_outbound_webhook_url(
+        webhook_url, log=logger, kind="OrderApproval", sanitize=redact_webhook_url_for_audit
+    )
     return rejected
 
 
@@ -362,7 +364,7 @@ def _post_approval_webhook_with_retries(
     headers: dict[str, str],
 ) -> None:
     """POST the approval payload with retries; refuse open redirects."""
-    safe_url = webhook_url_for_log(webhook_url)
+    safe_url = redact_webhook_url_for_audit(webhook_url)
     max_retries = 3
     for attempt in range(max_retries):
         try:

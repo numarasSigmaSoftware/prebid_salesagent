@@ -24,3 +24,272 @@ class TestIntEnv:
         monkeypatch.setenv("TEST_INT_ENV", "not-a-number")
         with pytest.raises(ValueError, match="Invalid integer value for TEST_INT_ENV"):
             int_env("TEST_INT_ENV", "0")
+
+
+class TestProductionSignalConverged:
+    """Every site that decides "are we in production?" now calls config.is_production().
+
+    Four call sites used to decide this independently -- scripts/run_server.py,
+    src/core/auth.py, src/core/logging_config.py, and src/core/audit_logger.py --
+    each testing ``FLY_APP_NAME or PRODUCTION`` for bare presence. That silently
+    treated PRODUCTION=false (an operator explicitly disabling it) as production,
+    and never consulted ENVIRONMENT=production at all -- the exact truthy-
+    vocabulary bug is_production() itself was already fixed for
+    (see _env_flag_is_true). All four now call is_production() directly; this
+    pins the convergence so a future edit cannot silently reintroduce an
+    open-coded copy at any of them.
+    """
+
+    def test_no_site_still_open_codes_the_bare_presence_check(self):
+        """A regression back to a hand-rolled copy at any of the four sites must fail this test."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        previously_open_coded = {
+            "scripts/run_server.py",
+            "src/core/auth.py",
+            "src/core/logging_config.py",
+            "src/core/audit_logger.py",
+        }
+        still_open_coded = {
+            rel
+            for rel in previously_open_coded
+            if re.search(
+                r'os\.environ\.get\("FLY_APP_NAME"\)[^\n]*os\.environ\.get\("PRODUCTION"\)',
+                (root / rel).read_text(),
+            )
+        }
+        assert not still_open_coded, f"reverted to the open-coded bare-presence check: {still_open_coded}"
+
+    def test_is_production_correctly_handles_what_a_bare_presence_check_could_not(self, monkeypatch):
+        """The two cases a naive bare-presence check would have gotten wrong."""
+        from src.core.config import is_production
+
+        def bare_presence(env: dict) -> bool:
+            """What the four sites open-coded before converging onto is_production()."""
+            return bool(env.get("FLY_APP_NAME") or env.get("PRODUCTION"))
+
+        # PRODUCTION=false: is_production() honours the value; a presence check cannot.
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.delenv("FLY_APP_NAME", raising=False)
+        monkeypatch.setenv("PRODUCTION", "false")
+        assert is_production() is False
+        assert bare_presence({"PRODUCTION": "false"}) is True, (
+            "a naive bare-presence check would have treated an explicit PRODUCTION=false as production"
+        )
+
+        # ENVIRONMENT=production alone: production here, invisible to a presence check.
+        monkeypatch.delenv("PRODUCTION", raising=False)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert is_production() is True
+        assert bare_presence({}) is False
+
+
+class TestPinnedErrorEnumIsNotACanonicityGate:
+    """The vendored error-code enum supplies recovery; it does not decide existence.
+
+    It is pinned at @04f59d2d5 and carries 64 codes against the 92 released at the
+    targeted v3.1.1. Using absence as proof of non-canonicity rejected 28 codes that
+    are canonical at the version this repo targets, with a message telling the author
+    to change a correct code.
+    """
+
+    def _assert_shape(self, code, recovery):
+        from tests.harness.transport import TransportResult
+
+        envelope = {
+            "adcp_error": {"code": code, "message": "boom", "recovery": recovery},
+            "errors": [{"code": code, "message": "boom", "recovery": recovery, "suggestion": "s"}],
+        }
+        TransportResult._assert_error_envelope(
+            TransportResult(payload=None),
+            envelope,
+            code,
+            source="wire",
+            recovery=recovery,
+            require_suggestion=False,
+            message_substr=None,
+        )
+
+    def test_a_code_absent_from_the_vendored_enum_is_accepted_with_explicit_recovery(self):
+        """PROPOSAL_NOT_FOUND ships in the installed SDK for the targeted version but
+        is missing from the vendored tree — precisely the 28-code gap."""
+        import json
+        from pathlib import Path
+
+        pinned = json.loads(
+            (
+                Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
+            ).read_text()
+        )["enumMetadata"]
+        assert "PROPOSAL_NOT_FOUND" not in pinned, "fixture refreshed — pick another gap code"
+
+        self._assert_shape("PROPOSAL_NOT_FOUND", "terminal")  # must not raise
+
+    def test_a_code_absent_from_the_vendored_enum_still_demands_an_explicit_recovery(self):
+        """The fixture cannot supply recovery for a code it does not carry, so the
+        caller must state it rather than silently inherit an unknown value."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="Pass recovery= explicitly"):
+            self._assert_shape("PROPOSAL_NOT_FOUND", None)
+
+
+class TestBddTransportTagSetsDoNotOverlap:
+    """A tag in both routing sets makes its _NO_E2E_REST_TAGS entry dead.
+
+    pytest_generate_tests returns early for transport-independent scenarios, well
+    before the e2e_rest exclusion is consulted. So an entry appearing in both sets
+    excludes nothing — it reads as protection while being unreachable, which is
+    how the previous sole entry rotted after its scenario was routed.
+    """
+
+    @staticmethod
+    def _sets():
+        import re
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1] / "bdd" / "conftest.py").read_text()
+        ti = re.search(r"_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = \{(.*?)\n\}", src, re.S).group(1)
+        ne = re.search(r"_NO_E2E_REST_TAGS: frozenset\[str\] = frozenset\((.*?)\)\n", src, re.S).group(1)
+        return set(re.findall(r'"([\w.-]+)"', ti)), set(re.findall(r'"([\w.-]+)"', ne))
+
+    def test_the_parser_finds_the_transport_independent_set(self):
+        """Guards that scan by regex must be shown to match, or an empty overlap is
+        indistinguishable from a broken parser.
+
+        Anchored on known members rather than a count. The original floor (">= 20")
+        encoded the set's size at the moment it was written, so legitimately
+        un-routing a dormant scenario broke a test that has nothing to do with the
+        size — a guard that fails for the wrong reason trains people to adjust the
+        number, which is exactly how a real staleness would then slip through.
+        """
+        transport_independent, _ = self._sets()
+        assert transport_independent, "parser found no routed tags — regex is stale"
+        for anchor in ("T-UC-004-webhook-hmac", "T-UC-004-webhook-scheduled"):
+            assert anchor in transport_independent, (
+                f"parser did not find {anchor}, which is routed in conftest — regex is stale"
+            )
+
+    def test_no_e2e_rest_tags_are_reachable(self):
+        transport_independent, no_e2e_rest = self._sets()
+        dead = sorted(no_e2e_rest & transport_independent)
+        assert not dead, (
+            f"_NO_E2E_REST_TAGS entries {dead} are also transport-independent, so the e2e_rest "
+            "check never runs for them — remove the entry, or un-route the scenario if it must "
+            "still parametrize across transports"
+        )
+
+
+class TestBddDispatchersShareOneResultRecorder:
+    """Every BDD dispatcher must route ctx-writing through record_transport_result.
+
+    The mapping from TransportResult to ctx keys has exactly one home. A dispatcher
+    that writes its own keys does not fail loudly when it omits one: envelope
+    consumers read ctx.get("wire_error_envelope") behind an `if isinstance(...,
+    dict)` guard, so a missing key skips the assertion block and the step passes
+    having graded nothing. Delegation makes that unreachable; this keeps it true.
+    """
+
+    DISPATCHERS = ("bdd/steps/generic/_dispatch.py", "bdd/steps/generic/when_request.py")
+    RECORDER_KEYS = {
+        "result",
+        "error",
+        "wire_error_envelope",
+        "synthesized_error_envelope",
+        "response",
+        "wire_response",
+    }
+
+    @staticmethod
+    def _source(rel):
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / rel).read_text()
+
+    @staticmethod
+    def _ctx_keys(src):
+        import re
+
+        return set(re.findall(r'ctx\["(\w+)"\]\s*=', src))
+
+    def _recorder_body(self):
+        src = self._source("bdd/steps/generic/_dispatch.py")
+        body = src[src.index("def record_transport_result(") :]
+        return body.split("\ndef ")[0]
+
+    def test_the_recorder_writes_every_ctx_key(self):
+        """Pins the premise: uniform delegation to a recorder that dropped a key
+        would be consistent and still wrong."""
+        assert self._ctx_keys(self._recorder_body()) == self.RECORDER_KEYS
+
+    def test_no_dispatcher_writes_recorder_keys_itself(self):
+        # "error" is deliberately exempt: the recorder sets it from result.error,
+        # but a dispatcher's `except Exception as exc: ctx["error"] = exc` records a
+        # RAISED exception, which never had a TransportResult to derive from. Both
+        # writes are legitimate and neither can be routed through the other. The
+        # remaining five are result-derived and have exactly one source.
+        recorder_owned = self.RECORDER_KEYS - {"error"}
+        recorder_body = self._recorder_body()
+        offenders = {}
+        for rel in self.DISPATCHERS:
+            src = self._source(rel)
+            assert "record_transport_result" in src, f"{rel} does not delegate to the shared recorder"
+            hand_rolled = self._ctx_keys(src.replace(recorder_body, "")) & recorder_owned
+            if hand_rolled:
+                offenders[rel] = sorted(hand_rolled)
+        assert not offenders, (
+            f"dispatchers writing recorder-owned ctx keys directly: {offenders} — route them "
+            "through record_transport_result so a partial write cannot pass silently"
+        )
+
+
+class TestProductionConsequenceListIsComplete:
+    """declares_production_explicitly's docstring enumerates what broadening reaches.
+
+    That list is the only place an operator can see the upgrade risk, and it claims
+    to be complete. It was written naming two of six consequences — the two
+    loosenings — while omitting the SSRF tightening that can reject webhooks a
+    deployment was successfully delivering. A prose completeness claim needs a
+    mechanism, so this pins the module set rather than the wording.
+    """
+
+    EXPECTED_MODULES = {
+        "config.py",
+        "mcp_compat_middleware.py",
+        "product_conversion.py",
+        "webhook_validator.py",
+    }
+
+    @staticmethod
+    def _modules_gating_on_is_production():
+        import re
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src"
+        found = set()
+        for path in src.rglob("*.py"):
+            body = path.read_text()
+            # the call, not the import or the definition
+            if re.search(r"\bis_production\(\)", body) and "def is_production" not in body.split("\n\n")[0]:
+                if re.search(r"(?<!def )\bis_production\(\)", body):
+                    found.add(path.name)
+        return found
+
+    def test_the_scan_finds_call_sites(self):
+        assert self._modules_gating_on_is_production(), "scan found no is_production() callers — pattern stale"
+
+    def test_every_module_gating_on_is_production_is_documented(self):
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[2] / "src" / "core" / "config.py").read_text()
+        start = doc.index("What the broadening actually reaches")
+        listed_section = doc[start : start + 2000]
+
+        actual = self._modules_gating_on_is_production()
+        undocumented = sorted(m for m in actual if m.replace(".py", "") not in listed_section)
+        assert not undocumented, (
+            f"modules gate on is_production() but are absent from the enumeration: {undocumented} — "
+            "an operator reading it would underestimate what changes on upgrade"
+        )

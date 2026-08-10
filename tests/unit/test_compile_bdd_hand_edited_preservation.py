@@ -49,6 +49,15 @@ def _hand_edited_tag_lines(text: str) -> list[str]:
     return lines
 
 
+# The exact set of scenarios shipped with a @hand-edited marker, as (file, scenario id).
+# Deliberately explicit: a self-consistency check cannot notice a marker that was
+# removed, because the raw and parsed counts fall together.
+_EXPECTED_HAND_EDITED: set[tuple[str, str]] = {
+    ("BR-UC-004-deliver-media-buy-metrics.feature", "T-UC-004-webhook-scheduler-derivation"),
+    ("BR-UC-004-deliver-media-buy-metrics.feature", "T-UC-004-poll-omits-webhook-fields"),
+}
+
+
 class TestHandEditedScenariosSurviveRederive:
     """Every shipped @hand-edited scenario must parse with its tag + id and be preserved."""
 
@@ -81,6 +90,38 @@ class TestHandEditedScenariosSurviveRederive:
                 checked += 1
 
         assert checked > 0, "expected at least one shipped @hand-edited scenario to guard"
+
+    def test_hand_edited_inventory_is_exactly_the_expected_set(self):
+        """Pin WHICH scenarios are hand-edited, not just that the file is self-consistent.
+
+        The check above compares a file's raw marker count against its parsed count, so
+        deleting a ``@hand-edited`` marker decrements BOTH and the equality still holds —
+        and ``checked > 0`` stays satisfied by whatever markers survive. A silently
+        removed marker is invisible until a rederive actually runs and deletes the
+        scenario, taking its traceability row with it.
+
+        Comparing against an explicit inventory closes that: adding or removing a
+        hand-edited scenario becomes a deliberate edit here, reviewed alongside the
+        change, rather than something that disappears unnoticed.
+        """
+        found = set()
+        for feature_file in _FEATURES_DIR.glob("*.feature"):
+            text = feature_file.read_text()
+            if not _hand_edited_tag_lines(text):
+                continue
+            feature = parse_feature_file(text)
+            for scenario in feature.scenarios:
+                if "@hand-edited" in scenario.tags:
+                    found.add((feature_file.name, _scenario_id(scenario)))
+
+        assert found == _EXPECTED_HAND_EDITED, (
+            "the @hand-edited scenario inventory changed.\n"
+            f"  missing (marker removed or orphaned): {sorted(_EXPECTED_HAND_EDITED - found)}\n"
+            f"  unexpected (marker added):            {sorted(found - _EXPECTED_HAND_EDITED)}\n"
+            "A hand-edited scenario is preserved across rederive ONLY while its marker "
+            "parses onto the scenario; losing one silently drops the scenario and its "
+            "traceability row on the next compile. Update this set deliberately."
+        )
 
 
 class TestHandEditedMarkerPlacementContract:
