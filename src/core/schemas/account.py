@@ -23,6 +23,7 @@ from adcp.types import Setup as LibrarySetup
 from adcp.types import SyncAccountsRequest as LibrarySyncAccountsRequest
 from adcp.types.aliases import SyncAccountsSuccessResponse as LibrarySyncAccountsSuccess
 from adcp.types.generated_poc.core.brand_ref import BrandReference as LibraryBrandReference
+from adcp.types.generated_poc.enums.task_status import TaskStatus  # TODO: no stable alias in adcp.types
 from pydantic import ConfigDict
 
 from src.core.config import get_pydantic_extra_mode
@@ -162,6 +163,15 @@ class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSucces
     dry_run: bool | None = None
     context: LibraryContextObject | dict[str, Any] | None = None
     ext: dict[str, Any] | None = None
+
+    # SDK types `status` as `Any = None` on this generated variant (no clean
+    # single default across its success/error union). This class is the
+    # success variant only (error is never constructed — see class
+    # docstring), so `status` is unambiguously "completed"; redeclare with
+    # the same TaskStatus default ListAccountsResponse already carries from
+    # the library's ProtocolEnvelope base, so a successful sync never emits
+    # a null (pre-fix) or omitted (post-fix) status on the wire.
+    status: TaskStatus = TaskStatus.completed
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

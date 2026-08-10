@@ -42,6 +42,7 @@ from adcp.types.generated_poc.creative.list_creatives_response import (
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
+from adcp.types.generated_poc.enums.task_status import TaskStatus  # TODO: no stable alias in adcp.types
 from pydantic import (
     ConfigDict,
     Field,
@@ -481,6 +482,15 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
     # synchronously-processed sync always carries a creatives array, even all-failed
     # (#1399 R3-F2).
     creatives: list[SyncCreativeResult]  # type: ignore[assignment]
+
+    # SDK types `status` as `Any = None` on this generated variant (no clean
+    # single default across its success/error union). This class is the
+    # success variant only (error is never constructed — see class
+    # docstring), so `status` is unambiguously "completed"; redeclare with
+    # the same TaskStatus default ListAccountsResponse already carries from
+    # the library's ProtocolEnvelope base, so a successful sync never emits
+    # a null (pre-fix) or omitted (post-fix) status on the wire.
+    status: TaskStatus = TaskStatus.completed
 
     def model_dump(self, **kwargs):
         """Override to call child model_dump() for nested SyncCreativeResult (Pattern #4)."""
