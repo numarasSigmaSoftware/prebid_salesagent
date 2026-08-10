@@ -4,36 +4,12 @@ These tests ensure that scheduler modules handle edge cases in environment
 variable parsing, particularly empty strings which can cause startup crashes.
 """
 
-import importlib
 import os
 from unittest.mock import patch
 
-import src.core.database.database_session as database_session_module
 import src.services.delivery_webhook_scheduler as delivery_webhook_scheduler_module
 import src.services.media_buy_status_scheduler as media_buy_status_scheduler_module
-
-# Captured at collection time, before any test's autouse mock_all_external_dependencies
-# fixture (tests/unit/conftest.py) has patched get_db_session.
-_REAL_GET_DB_SESSION = database_session_module.get_db_session
-
-
-def _reload_with_real_db_session(module):
-    """Reload `module`, keeping its get_db_session bound to the real function.
-
-    `importlib.reload()` re-executes the module's top level, including its
-    `from ...database_session import get_db_session` binding. These tests run
-    inside the autouse DB mock, so an unguarded reload would rebind
-    get_db_session to this test's mock -- and because reload mutates the
-    module object in place (sys.modules keeps pointing at the same object),
-    that binding survives this test's teardown and corrupts every later test
-    in the process that relies on this module's real get_db_session, including
-    cross-suite runs like `make test-entity` that put unit and integration
-    tests in one process. Temporarily restoring the source to the real
-    function for just the reload closes that hole without disturbing the
-    ambient mock for anything else.
-    """
-    with patch.object(database_session_module, "get_db_session", _REAL_GET_DB_SESSION):
-        importlib.reload(module)
+from tests.unit.conftest import reload_module_with_real_db_session as _reload_with_real_db_session
 
 
 class TestDeliveryWebhookSchedulerEnvVar:

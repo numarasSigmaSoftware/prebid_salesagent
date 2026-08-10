@@ -163,6 +163,27 @@ class DeliveryWebhookScheduler:
                         )
                         errors += 1
 
+                        # This loop shares ONE session across every buy in the batch, and
+                        # _claim_final_webhook (called from _send_report_for_media_buy)
+                        # commits ON that session mid-loop. A failed flush/commit leaves
+                        # a SQLAlchemy session unusable until rolled back — Postgres
+                        # itself refuses every further statement on an aborted
+                        # transaction. Without this, one buy's DB error would silently
+                        # fail every remaining buy in the batch too (each logged as its
+                        # own unrelated-looking error), not just the one that actually
+                        # failed. Safe to call unconditionally: rolling back a session
+                        # with nothing pending is a no-op.
+                        try:
+                            session.rollback()
+                        except Exception:
+                            logger.debug(
+                                "session.rollback() itself failed after media buy %s; "
+                                "batch continues, but the session may be unusable for "
+                                "the rest of this run",
+                                media_buy.media_buy_id,
+                                exc_info=True,
+                            )
+
                 logger.info(f"Daily delivery report batch complete: {reports_sent} sent, {errors} errors")
 
         except Exception as e:

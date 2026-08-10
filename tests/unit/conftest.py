@@ -4,10 +4,36 @@ Unit test specific fixtures.
 These fixtures are only available to unit tests.
 """
 
+import importlib
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+import src.core.database.database_session as database_session_module
+
+# Captured at conftest collection time, before mock_all_external_dependencies (below)
+# has ever patched get_db_session -- see reload_module_with_real_db_session().
+_REAL_GET_DB_SESSION = database_session_module.get_db_session
+
+
+def reload_module_with_real_db_session(module):
+    """Reload `module`, keeping its get_db_session bound to the real function.
+
+    `importlib.reload()` re-executes the module's top level, including any
+    `from ...database_session import get_db_session` binding it makes. Unit
+    tests run inside mock_all_external_dependencies' autouse DB mock, so an
+    unguarded reload during a test would rebind that module's get_db_session
+    to the mock -- and because reload mutates the module object in place
+    (sys.modules keeps pointing at the same object), the binding survives that
+    test's teardown and corrupts every later test in the process that relies
+    on the module's real get_db_session, including cross-suite runs like
+    `make test-entity` that put unit and integration tests in one process.
+    Temporarily restoring the source to the real function for just the reload
+    closes that hole without disturbing the ambient mock for anything else.
+    """
+    with patch.object(database_session_module, "get_db_session", _REAL_GET_DB_SESSION):
+        importlib.reload(module)
 
 
 @pytest.fixture(autouse=True)

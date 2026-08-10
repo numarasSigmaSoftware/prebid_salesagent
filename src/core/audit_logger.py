@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from src.core.config import is_production
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuditLog
 
@@ -46,9 +47,7 @@ audit_logger.addHandler(error_handler)
 
 # In development, also log to console for debugging
 # In production, the root logger already handles console output with JSON formatting
-import os
-
-if not os.environ.get("FLY_APP_NAME") and not os.environ.get("PRODUCTION"):
+if not is_production():
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
     audit_logger.addHandler(console_handler)

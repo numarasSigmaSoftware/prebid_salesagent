@@ -31,6 +31,7 @@ from src.core.tools._media_buy_status import (
     WEBHOOK_REPORTABLE_CANONICAL_STATUSES,
     WEBHOOK_TERMINAL_CANONICAL_STATUSES,
     WEBHOOK_TERMINAL_PERSISTED_STATUSES,
+    derive_notification_type,
     resolve_canonical_status,
 )
 from src.core.tools.media_buy_list import _PERSISTED_STATUS_TO_ADCP, _compute_status
@@ -293,6 +294,43 @@ class TestCanonicalVocabularyPinnedToSdk:
         sdk_terminal = {status for status in CANONICAL_STATUSES if is_terminal_status(status)}
         assert sdk_terminal == WEBHOOK_TERMINAL_CANONICAL_STATUSES
 
+    def test_reachable_statuses_agree_on_is_final_vs_notification_type_final(self):
+        """delivery_webhook_scheduler's is_final gate and notification_type must
+        agree for every status the scheduler can actually observe.
+
+        is_final (delivery_webhook_scheduler.py's ``_send_reports``) reads
+        WEBHOOK_TERMINAL_CANONICAL_STATUSES; notification_type (derive_notification_type,
+        called from ``_deliver_report``) reads NO_MORE_DATA_STATUSES, which — per the
+        test above — additionally includes "failed" for OTHER callers
+        (webhook_delivery_service). The two sets genuinely differ by design, so this
+        does not assert they're equal — it asserts the narrower, actually load-bearing
+        invariant: for every status this scheduler's own status_filter can put in
+        front of derive_notification_type() (WEBHOOK_REPORTABLE_CANONICAL_STATUSES —
+        see ``_deliver_report``'s ``status_filter=[MediaBuyStatus(s) for s in
+        sorted(WEBHOOK_REPORTABLE_CANONICAL_STATUSES)]``), a "final" notification_type
+        implies is_final was already True, and vice versa.
+
+        Today that holds because "failed" is absent from both
+        WEBHOOK_REPORTABLE_CANONICAL_STATUSES (so it can never reach
+        derive_notification_type via this scheduler) and from
+        get_reportable_for_delivery's own SQL selection (so a failed buy's is_final
+        is never even evaluated) — two independent exclusions that happen to agree,
+        not one shared source of truth. If a future change widens
+        WEBHOOK_REPORTABLE_CANONICAL_STATUSES (or the scheduler's SQL selection) to
+        include "failed" without also updating WEBHOOK_TERMINAL_CANONICAL_STATUSES,
+        this reddens instead of silently letting a failed buy's webhook claim
+        notification_type="final" without ever taking the atomic final-send claim —
+        opening the door to duplicate "final" notifications for that buy.
+        """
+        for status in sorted(WEBHOOK_REPORTABLE_CANONICAL_STATUSES):
+            would_be_final_notification = derive_notification_type([status]) == "final"
+            is_final_gate = status in WEBHOOK_TERMINAL_CANONICAL_STATUSES
+            assert would_be_final_notification == is_final_gate, (
+                f"status {status!r}: derive_notification_type says "
+                f"final={would_be_final_notification}, is_final gate says {is_final_gate} -- "
+                "these must agree for every status reachable via the scheduler's own status_filter"
+            )
+
     def test_webhook_only_fields_grounded_on_the_pinned_sdk(self):
         """Ground WEBHOOK_ONLY_FIELDS on the PINNED SDK's schema, not a re-typed literal.
 
@@ -542,6 +580,67 @@ class TestSchedulerPassesDerivedStatusVocabulary:
             serving_statuses=["SENTINEL_SERVING"],
             terminal_statuses=["SENTINEL_TERMINAL"],
         )
+
+
+class TestSchedulerBatchIsolatesPerBuyFailures:
+    """One buy's exception must not poison the shared session for the rest of the batch.
+
+    `_send_reports` shares ONE session across every buy in the batch;
+    `_claim_final_webhook` (reached via `_send_report_for_media_buy`) commits ON
+    that session mid-loop. A failed commit leaves a SQLAlchemy session unusable
+    until rolled back — Postgres itself refuses every further statement on an
+    aborted transaction. Without an explicit rollback in the per-buy except
+    handler, buy 1's failure would silently fail buy 2 too (logged as its own
+    unrelated-looking error), even though buy 2 was never actually broken.
+    """
+
+    def test_one_buy_failing_does_not_block_the_next_buy(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        session = MagicMock()
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=session)
+        cm.__exit__ = MagicMock(return_value=False)
+
+        buy1 = SimpleNamespace(
+            media_buy_id="mb_1",
+            tenant_id="tenant_1",
+            principal_id="principal_1",
+            raw_request={"reporting_webhook": {"url": "https://buyer.example.com/reporting"}},
+        )
+        buy2 = SimpleNamespace(
+            media_buy_id="mb_2",
+            tenant_id="tenant_1",
+            principal_id="principal_1",
+            raw_request={"reporting_webhook": {"url": "https://buyer.example.com/reporting"}},
+        )
+
+        async def fake_send_report(media_buy, reporting_webhook, session, force=False):
+            if media_buy.media_buy_id == "mb_1":
+                # Simulates _claim_final_webhook's session.commit() failing --
+                # e.g. a constraint violation or transient connection error.
+                raise RuntimeError("simulated commit failure inside _claim_final_webhook")
+            return True
+
+        with (
+            patch.object(sched, "get_db_session", return_value=cm),
+            patch.object(sched.MediaBuyRepository, "get_reportable_for_delivery", return_value=[buy1, buy2]),
+            patch.object(sched, "resolve_canonical_status", return_value="active"),
+            patch.object(
+                DeliveryWebhookScheduler, "_send_report_for_media_buy", side_effect=fake_send_report
+            ) as mock_send,
+        ):
+            asyncio.run(DeliveryWebhookScheduler()._send_reports())
+
+        # buy 1's failure did not stop the loop -- buy 2 was still attempted.
+        assert mock_send.call_count == 2
+        # The session was rolled back exactly once, clearing any aborted-
+        # transaction state before buy 2's iteration begins. rollback() takes
+        # no arguments, so assert_called_once_with() (empty) is the strongest
+        # available assertion -- still stricter than bare assert_called_once(),
+        # which would also pass if rollback were ever called with arguments.
+        session.rollback.assert_called_once_with()
 
 
 class TestDeliveryErrorWarningCarriesThePayload:

@@ -5,7 +5,6 @@ by both MCP and A2A protocols.
 """
 
 import logging
-import os
 from typing import TYPE_CHECKING, Any, Union
 
 from fastmcp.server.context import Context
@@ -19,6 +18,7 @@ from fastmcp.server.dependencies import get_http_headers
 from sqlalchemy import select
 
 from src.core.auth_utils import get_principal_from_token
+from src.core.config import is_production
 from src.core.config_loader import (
     get_current_tenant,
     get_tenant_by_id,
@@ -41,7 +41,7 @@ from src.core.schemas import Principal
 logger = logging.getLogger(__name__)
 
 # Enable verbose auth logging only in development
-_VERBOSE_AUTH_LOG = not (os.environ.get("FLY_APP_NAME") or os.environ.get("PRODUCTION"))
+_VERBOSE_AUTH_LOG = not is_production()
 
 
 def get_push_notification_config_from_headers(headers: dict[str, str] | None) -> dict[str, Any] | None:
