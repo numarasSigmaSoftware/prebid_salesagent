@@ -37,10 +37,8 @@ MAX_CAMPAIGN_BUDGET: Decimal = Decimal(os.environ.get("MAX_CAMPAIGN_BUDGET_USD",
 from adcp.types import ContextObject, ReportingWebhook, TargetingOverlay
 from adcp.types import PackageUpdate as UpdatePackage
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from sqlalchemy import select
 
-from src.core.application_context import dump_adcp_response
 from src.core.exceptions import (
     AdCPAdapterError,
     AdCPAuthorizationError,
@@ -91,6 +89,7 @@ from src.core.schemas import (
     require_idempotency_key,
 )
 from src.core.testing_hooks import AdCPTestContext
+from src.core.tools._mcp import mcp_result
 from src.core.tools.creatives import _sync_creatives_impl
 from src.core.tools.financial_validation import (
     raise_if_validation_failed,
@@ -1753,7 +1752,7 @@ async def update_media_buy(
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
     response = _update_media_buy_impl(req=req, identity=identity, context_id=_ctx_id)
-    return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, context=context)
 
 
 def update_media_buy_raw(

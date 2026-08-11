@@ -44,6 +44,17 @@ COMPOSE_FILE="docker-compose.e2e.yml"
 # concurrent runs never contend; the suffix just keeps container names distinct.
 # Compose rejects uppercase project names — lowercase whatever we're given.
 export COMPOSE_PROJECT_NAME="$(printf '%s' "${COMPOSE_PROJECT_NAME:-adcp-innet-$$}" | tr '[:upper:]' '[:lower:]')"
+# The tests container runs as THIS user (docker-compose.e2e.yml `tests.user`), so
+# everything it writes into the bind-mounted repo -- test-results/, .tox/,
+# schemas/, logs -- is owned by whoever launched the run, on any host. Derived
+# here rather than written into compose: a literal uid is correct on exactly one
+# machine, and pinning the CI box's turned GitHub Actions red on `.tox`.
+#
+# Both are overridable. A host whose artifacts must stay writable by SEVERAL
+# identities (the CI box shares group `ci` across sacirunner and claudeuser)
+# exports TEST_GID to that shared group instead of taking the primary one.
+export TEST_UID="${TEST_UID:-$(id -u)}"
+export TEST_GID="${TEST_GID:-$(id -g)}"
 # The delivery-webhook scheduler runs on the SERVER (adcp-server), gated by this
 # interval. docker-compose.e2e.yml defaults it empty (scheduler off); the host
 # e2e path sets it to 5 via conftest. Mirror that so test_daily_delivery_webhook
@@ -105,24 +116,18 @@ fi
 
 RESULTS_DIR="test-results/innet_$(date +%d%m%y_%H%M)"
 mkdir -p "$RESULTS_DIR"
-REPORT_EXTRACTOR="${COMPOSE_PROJECT_NAME}-report-extractor"
 
 dc() { docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT_NAME" --profile runner "$@"; }
 
-remove_report_extractor() {
-    docker rm -f "$REPORT_EXTRACTOR" >/dev/null 2>&1 || true
-}
-
 record_gate_failure() {
     # Preserve the tox/suite status when it already failed; otherwise make a
-    # later gate failure (report extraction or security audit) fail the run.
+    # later gate failure (report collection or security audit) fail the run.
     if [ "$RC" -eq 0 ]; then
         RC="${1:-1}"
     fi
 }
 
 cleanup() {
-    remove_report_extractor
     # Per-worker e2e servers are `docker compose run` containers (not `up`), so
     # `dc down` won't remove them — do it explicitly.
     docker ps -aq --filter "name=${COMPOSE_PROJECT_NAME}-server-gw" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -141,6 +146,17 @@ dc build postgres adcp-server proxy tests
 
 # Bring up Postgres + the app server + proxy + the pinned creative-agent (and its
 # own registry Postgres). None publish host ports — all reached by service name.
+# Pre-create logs/ group-writable + setgid BEFORE adcp-server starts: it
+# bind-mounts .:/app and creates logs/audit.log at import time (uid 1001,
+# its own baked umask) -- when that umask strips the group-write bit the
+# tests container (a different uid, 1003 here) can create the dir but not
+# write into it, and every suite dies at collection with
+# `PermissionError: '/app/logs/audit.log'`. Owning it here first means
+# adcp-server writes into an already-correct dir instead of racing to
+# create it (confirmed live: sa-93d37d7c, sa-c9acaf66 both landed
+# drwxr-sr-x -- not group-writable -- and are latent failures until fixed).
+mkdir -p logs && chmod 2775 logs
+
 dc up -d postgres adcp-server proxy creative-pg creative-agent
 
 echo "Waiting for Postgres + server health (in-network)..."
@@ -216,60 +232,65 @@ echo "Running suites in-network (serial): $SUITES"
 # Capture the suite exit code without aborting under `set -e` — reports must
 # still be extracted and the security audit must still run on a suite failure.
 RC=0
+# Structural backstop, not another one-off path pin: ANY service that writes
+# into the bind-mounted repo before this point (adcp-server, the per-worker
+# gwN servers, postgres, creative-agent) can leave files/dirs non-group-
+# writable depending on its own container's umask -- same class of bug
+# regardless of which path it is (logs/audit.log today, something else
+# tomorrow). Re-sweep the whole tree writable right before the one container
+# that needs it runs, the same way salesagent-remote-run already does once
+# at sync time -- catches whatever showed up in between instead of requiring
+# another bug report + another path pinned by hand.
+chmod -R g+w . 2>/dev/null || true
+chmod -R go-w .git 2>/dev/null || true
+
 dc run --rm --use-aliases $E2E_ENV_ARGS tests tox -e "$SUITES" || RC=$?
 
-# tox writes per-suite JSON into /app/.tox, which is the `tox_data` NAMED VOLUME
-# (kept off the bind mount so venvs don't live on the slow host tree). The host
-# .tox is therefore empty — extract the reports from the volume with a throwaway
-# container before the cleanup trap runs `down -v` and removes it.
-echo "Extracting JSON reports from the tox_data volume..."
-extract_json_reports() {
-    local extraction_rc=0
+# tox writes per-suite JSON into /app/.tox, which is a plain bind-mounted dir
+# now (Aug 2026: the tox_data named volume it used to live on was removed --
+# a fresh named volume's mountpoint is always created root:root by the Docker
+# daemon regardless of the tests container's own `user:` override, which
+# permanently blocked the non-root test runner from `.tox/<env>` on every
+# single run). No throwaway extraction container needed any more -- .tox is
+# just a normal host directory, already right where $RESULTS_DIR is.
+echo "Collecting JSON reports..."
+collect_json_reports() {
+    local collection_rc=0
     local suite
     local -a expected_suites
 
-    # A suite may remove ignored/generated directories while exercising cleanup
-    # paths. Re-create the host destination at the point of use so docker cp
-    # never depends on the directory surviving the preceding test run.
+    # Re-create the host destination at the point of use: a suite may remove
+    # ignored/generated directories while exercising cleanup paths, and this
+    # copy once ate a real failure silently (a full 23-minute run finished
+    # clean with .tox/*.json all present, but test-results/ never got
+    # populated and nothing said why). Idempotent, cheap insurance.
     mkdir -p "$RESULTS_DIR"
 
-    # Keep /out in the extractor's writable container layer. A host bind mount
-    # here fails on Docker Desktop when the repository is a linked worktree:
-    # the daemon attempts to chown the mount source through the parent checkout.
-    # A stopped container remains available to `docker cp`, which crosses that
-    # boundary without asking the daemon to mount or chown the host directory.
-    if ! docker create --name "$REPORT_EXTRACTOR" \
-            --mount "type=volume,src=${COMPOSE_PROJECT_NAME}_tox_data,dst=/t,readonly" \
-            alpine sh -c \
-            'mkdir -p /out; set -- /t/*.json; [ -e "$1" ] || { echo "no JSON reports found in tox_data" >&2; exit 1; }; cp "$@" /out/' \
-            >/dev/null; then
-        echo "ERROR: could not create the JSON report extractor" >&2
-        extraction_rc=1
-    elif ! docker start -a "$REPORT_EXTRACTOR"; then
-        echo "ERROR: could not stage JSON reports from the tox_data volume" >&2
-        extraction_rc=1
-    elif ! docker cp "${REPORT_EXTRACTOR}:/out/." "$RESULTS_DIR/"; then
-        echo "ERROR: could not copy JSON reports from the extractor to $RESULTS_DIR" >&2
-        extraction_rc=1
-    else
-        IFS=',' read -r -a expected_suites <<< "$SUITES"
-        for suite in "${expected_suites[@]}"; do
-            if [ ! -f "$RESULTS_DIR/$suite.json" ]; then
-                echo "ERROR: expected report was not extracted: $suite.json" >&2
-                extraction_rc=1
-            fi
-        done
+    if ! cp .tox/*.json "$RESULTS_DIR/"; then
+        echo "ERROR: failed to copy JSON reports into $RESULTS_DIR/ -- see error above." >&2
+        echo "       Reports are still in .tox/*.json inside $(pwd) if you need them by hand." >&2
+        return 1
     fi
 
-    remove_report_extractor
-    return "$extraction_rc"
+    # A copy that succeeds having moved nothing still leaves the run
+    # ungradeable: the per-suite JSON is the authoritative pass/fail record,
+    # so a missing report is a gate failure, not a warning.
+    IFS=',' read -r -a expected_suites <<< "$SUITES"
+    for suite in "${expected_suites[@]}"; do
+        if [ ! -f "$RESULTS_DIR/$suite.json" ]; then
+            echo "ERROR: expected report was not collected: $suite.json" >&2
+            collection_rc=1
+        fi
+    done
+
+    return "$collection_rc"
 }
 
-if ! extract_json_reports; then
+if ! collect_json_reports; then
     record_gate_failure 1
 fi
 echo "Reports: $RESULTS_DIR/"
-ls -1 "$RESULTS_DIR"/*.json 2>/dev/null || echo "  (no JSON reports extracted)"
+ls -1 "$RESULTS_DIR"/*.json 2>/dev/null || echo "  (no JSON reports collected)"
 
 # Security audit (uv-secure) — runs on the HOST (scans uv.lock; no Docker). The
 # host runner runs this too; keep parity so the canonical local gate still scans

@@ -6,15 +6,14 @@ from adcp import PushNotificationConfig
 from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import ContextObject, CreativeAsset, ValidationMode
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from src.core.application_context import dump_adcp_response
 from src.core.helpers import enum_value
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import RawIdempotencyKey
 from src.core.schemas._base import require_idempotency_key
 from src.core.tool_context import ToolContext
+from src.core.tools._mcp import mcp_result
 from src.core.webhook_validator import (
     require_valid_callback_config_urls,
     validated_callback_url_scope,
@@ -101,7 +100,7 @@ async def sync_creatives(
         idempotency_key=idempotency_key,
         identity=identity,
     )
-    return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, context=context)
 
 
 def sync_creatives_raw(

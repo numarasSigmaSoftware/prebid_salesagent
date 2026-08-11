@@ -109,27 +109,25 @@ def _shell_function(name: str) -> str:
     return match.group(0)
 
 
-def test_in_network_report_extraction_avoids_host_bind_mounts():
-    """JSON reports cross Docker Desktop's worktree boundary via docker cp.
+def test_in_network_report_collection_is_a_plain_host_copy():
+    """JSON reports are copied out of the bind-mounted ``.tox`` dir, no container.
 
-    Mounting RESULTS_DIR into a throwaway container asks the Docker daemon to
-    chown a linked-worktree path and fails on macOS before any reports can be
-    copied. The tox_data source stays a named volume; the host destination must
-    only appear as the destination of ``docker cp``.
+    ``.tox`` used to be the ``tox_data`` NAMED volume, which forced a throwaway
+    container to read it — and mounting RESULTS_DIR into that container asked
+    the Docker daemon to chown a linked-worktree path, failing on macOS before
+    any report could be copied. The volume is gone (#1868): ``.tox`` is a plain
+    host directory, so the copy is a plain ``cp`` and neither the container nor
+    the bind mount that broke may come back.
     """
     runner_text = _RUNNER.read_text()
-    extraction = _shell_function("extract_json_reports")
+    collection = _shell_function("collect_json_reports")
 
-    assert "$(pwd)/${RESULTS_DIR}:/out" not in runner_text
-    assert '--mount "type=volume,src=${COMPOSE_PROJECT_NAME}_tox_data,dst=/t,readonly"' in extraction
-    assert 'docker cp "${REPORT_EXTRACTOR}:/out/." "$RESULTS_DIR/"' in extraction
-    assert 'if [ ! -f "$RESULTS_DIR/$suite.json" ]' in extraction
-    assert (
-        extraction.index('mkdir -p "$RESULTS_DIR"')
-        < extraction.index("if ! docker create")
-        < extraction.index("elif ! docker start")
-        < extraction.index("elif ! docker cp")
-    )
+    assert "$(pwd)/${RESULTS_DIR}:/out" not in runner_text, "the host bind mount that broke on macOS is back"
+    assert "${COMPOSE_PROJECT_NAME}_tox_data" not in runner_text, "the removed named volume is mounted again"
+    assert "docker create" not in runner_text, "the throwaway extraction container is back"
+    assert 'cp .tox/*.json "$RESULTS_DIR/"' in collection
+    assert 'if [ ! -f "$RESULTS_DIR/$suite.json" ]' in collection
+    assert collection.index('mkdir -p "$RESULTS_DIR"') < collection.index("cp .tox/*.json")
 
 
 @pytest.mark.parametrize(
@@ -140,7 +138,7 @@ def test_in_network_report_extraction_avoids_host_bind_mounts():
     ],
 )
 def test_later_gate_failure_never_masks_suite_status(suite_rc, gate_rc, expected):
-    """Extraction/audit failures fail green runs but preserve suite failures."""
+    """Report-collection/audit failures fail green runs but preserve suite failures."""
     runner_text = _RUNNER.read_text()
     function = _shell_function("record_gate_failure")
     proc = subprocess.run(
@@ -157,4 +155,4 @@ def test_later_gate_failure_never_masks_suite_status(suite_rc, gate_rc, expected
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == str(expected)
-    assert re.search(r"if ! extract_json_reports; then\s+record_gate_failure 1\s+fi", runner_text)
+    assert re.search(r"if ! collect_json_reports; then\s+record_gate_failure 1\s+fi", runner_text)

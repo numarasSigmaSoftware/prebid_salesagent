@@ -40,7 +40,6 @@ from fastmcp.tools.tool import ToolResult
 # applied at src.core.adcp_version.* would not reach — splitting what capabilities
 # advertises from what validate_adcp_version_pins negotiates.
 from src.core import adcp_version
-from src.core.application_context import dump_adcp_response
 from src.core.auth import get_principal_object, require_identity
 from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.helpers import enum_value
@@ -48,6 +47,7 @@ from src.core.helpers.activity_helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.tool_context import ToolContext
+from src.core.tools._mcp import mcp_result
 from src.core.validation_helpers import adcp_validation_boundary
 from src.services.targeting_capabilities import supports_property_list_filtering
 
@@ -461,12 +461,7 @@ async def get_adcp_capabilities(
 
     summary = "\n".join(summary_parts)
 
-    # Return ToolResult with human-readable text and structured data.
-    # Serialize via the response model's own model_dump so the MCP wire matches the
-    # AdCP-canonical shape REST/A2A emit — in particular it OMITS an absent `context`
-    # (INV-2: context absence echoed as absence) rather than FastMCP's object
-    # serialization, which would emit `context: null` (a present field).
-    return ToolResult(content=summary, structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, content=summary, context=context)
 
 
 async def get_adcp_capabilities_raw(
