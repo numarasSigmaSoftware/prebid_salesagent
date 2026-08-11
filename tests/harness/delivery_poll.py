@@ -235,11 +235,15 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         so a test can assert both the count and each wire ``result`` (the
         webhook-only fields live under ``result``) without hand-rolling a
         mock in the test body.
+
+        The run's ``DeliveryBatchSummary`` is stashed on ``last_batch_summary``
+        for tests grading what the batch did with the buys it did NOT send to —
+        those leave no wire body, so the returned list cannot express them.
         """
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 
         scheduler = DeliveryWebhookScheduler()
         with mock_webhook_post(scheduler) as mock_post:
-            await scheduler._send_reports()
+            self.last_batch_summary = await scheduler._send_reports()
         self.mock["post"] = mock_post
         return [call.kwargs["json"] for call in mock_post.call_args_list]

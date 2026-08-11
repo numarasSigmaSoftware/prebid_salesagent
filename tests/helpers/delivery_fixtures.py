@@ -57,14 +57,18 @@ HMAC_DAILY_REPORTING_WEBHOOK = {
 _FLIGHT_OFFSETS: dict[str, tuple[int, int]] = {
     "live": (-30, 30),  # spans today → resolves "active" → notification_type "scheduled"
     "completed": (-60, -30),  # ended before today → date-refines "completed" → "final"
+    "pending": (30, 60),  # starts after today → date-refines pre-flight → not reportable
 }
 
 
 def flight_window(phase: str, *, today: date | None = None) -> tuple[date, date]:
     """Return ``(start_date, end_date)`` for a named flight phase.
 
-    ``live`` spans today (in-flight); ``completed`` ended before today. Callers that
-    need ISO strings call ``.isoformat()`` on the returned dates.
+    ``live`` spans today (in-flight); ``completed`` ended before today;
+    ``pending`` starts after today, so a persisted-``active`` row date-refines
+    to a pre-flight canonical status the delivery batch treats as not
+    reportable. Callers that need ISO strings call ``.isoformat()`` on the
+    returned dates.
     """
     if today is None:
         today = datetime.now(UTC).date()

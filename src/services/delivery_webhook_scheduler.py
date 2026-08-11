@@ -8,6 +8,7 @@ This runs as a background task and sends reports when GAM data is fresh (after 4
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -62,6 +63,32 @@ FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
 # preventing two concurrent workers from both winning that check and both
 # sending before either has logged a result.
 PERIODIC_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
+
+
+@dataclass(frozen=True)
+class DeliveryBatchSummary:
+    """Per-run tally of what a delivery-webhook batch did with each selected buy.
+
+    The buckets PARTITION the selection: every buy the batch pulled increments
+    exactly one, so ``accounted_for`` equals ``selected``. That is what lets an
+    operator read "everything was skipped" apart from "there was nothing to do"
+    — a distinction the summary loses the moment some path exits the loop
+    without counting, since the remaining numbers still look plausible.
+
+    Returned rather than only logged so the invariant can be asserted against a
+    real batch instead of scraped from a log line.
+    """
+
+    selected: int = 0
+    sent: int = 0
+    suppressed: int = 0
+    not_reportable: int = 0
+    no_webhook_config: int = 0
+    errors: int = 0
+
+    @property
+    def accounted_for(self) -> int:
+        return self.sent + self.suppressed + self.not_reportable + self.no_webhook_config + self.errors
 
 
 def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: object) -> bool:
@@ -163,8 +190,14 @@ class DeliveryWebhookScheduler:
                 # Wait before next batch
                 await asyncio.sleep(SLEEP_INTERVAL_SECONDS)
 
-    async def _send_reports(self) -> None:
-        """Send reports for all active media buys with configured webhooks."""
+    async def _send_reports(self) -> DeliveryBatchSummary:
+        """Send reports for all active media buys with configured webhooks.
+
+        Returns the run's :class:`DeliveryBatchSummary`. The scheduler loop
+        ignores it; it exists so the partition invariant (every selected buy
+        lands in exactly one bucket) is assertable against a real batch rather
+        than read back out of a log line.
+        """
         logger.info("Starting scheduled delivery report webhook batch")
 
         try:
@@ -185,6 +218,7 @@ class DeliveryWebhookScheduler:
                 errors = 0
                 suppressed = 0
                 not_reportable = 0
+                no_webhook_config = 0
 
                 for media_buy in media_buys:
                     try:
@@ -198,6 +232,14 @@ class DeliveryWebhookScheduler:
                         reporting_webhook = raw_request.get("reporting_webhook")
 
                         if not reporting_webhook:
+                            # Counted, not a bare `continue`: this is a skip like
+                            # any other, and the summary below claims to account
+                            # for every buy the batch touched. Left uncounted, a
+                            # run whose whole population has a present-but-empty
+                            # reporting_webhook logs all-zeroes — the exact
+                            # "quiet, healthy scheduler" misreading the summary
+                            # was widened to prevent.
+                            no_webhook_config += 1
                             continue
 
                         # The status-only selection also matches pre-flight and
@@ -258,16 +300,39 @@ class DeliveryWebhookScheduler:
                 # whose webhooks were skipped on every pass looks like a quiet, healthy
                 # scheduler. _delivery_lookup_is_usable calls out the same hazard for
                 # one branch; this closes it for the rest.
-                logger.info(
-                    "Daily delivery report batch complete: %d sent, %d suppressed, %d not reportable, %d errors",
-                    reports_sent,
-                    suppressed,
-                    not_reportable,
-                    errors,
+                #
+                # The five counters PARTITION the selected buys — every iteration
+                # increments exactly one — so the total is auditable against the
+                # query and a future skip added without a counter shows up as a
+                # shortfall rather than as silence. Returned as well as logged so
+                # that is assertable; see the batch-summary partition test.
+                summary = DeliveryBatchSummary(
+                    selected=len(media_buys),
+                    sent=reports_sent,
+                    suppressed=suppressed,
+                    not_reportable=not_reportable,
+                    no_webhook_config=no_webhook_config,
+                    errors=errors,
                 )
+                logger.info(
+                    "Daily delivery report batch complete: %d sent, %d suppressed, "
+                    "%d not reportable, %d without webhook config, %d errors (of %d selected)",
+                    summary.sent,
+                    summary.suppressed,
+                    summary.not_reportable,
+                    summary.no_webhook_config,
+                    summary.errors,
+                    summary.selected,
+                )
+                return summary
 
         except Exception as e:
             logger.error(f"Error in daily delivery report batch: {e}", exc_info=True)
+
+        # The batch aborted before the per-buy loop (or while opening the session):
+        # nothing was selected and nothing was attempted, which is what an
+        # all-zero summary means. The error itself is logged above.
+        return DeliveryBatchSummary()
 
     async def trigger_report_for_media_buy_by_id(self, media_buy_id: str, tenant_id: str) -> bool:
         """Manually trigger a delivery report for a single media buy by ID.
@@ -374,7 +439,10 @@ class DeliveryWebhookScheduler:
         """
         now = datetime.now(UTC)
         won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_final_webhook(
-            media_buy.media_buy_id, now=now, stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE
+            media_buy.media_buy_id,
+            now=now,
+            stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE,
+            periodic_stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE,
         )
         session.commit()
         return now if won else None
@@ -411,7 +479,10 @@ class DeliveryWebhookScheduler:
         """
         now = datetime.now(UTC)
         won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_periodic_webhook(
-            media_buy.media_buy_id, now=now, stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE
+            media_buy.media_buy_id,
+            now=now,
+            stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE,
+            final_stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE,
         )
         session.commit()
         return now if won else None
@@ -519,9 +590,14 @@ class DeliveryWebhookScheduler:
         concurrent workers (e.g. two replicas under horizontal scaling) can
         both pass the read-only dedup checks above and both POST, each with a
         different idempotency_key, so the buyer's own idempotency dedup does
-        not catch it. Extracted from _deliver_report to keep it under the
-        statement-count guard (ADR-009 / #1610) — pure refactor, no behavior
-        change.
+        not catch it.
+
+        The two claims are mutually exclusive, so this serializes ALL delivery
+        webhook sends for a buy, not just same-type ones. ``is_final`` is
+        computed per worker from the row and date each read, so a status flip or
+        a UTC midnight rollover between two workers produces one of each — and
+        per-type columns alone would let both win. See
+        MediaBuyRepository.try_claim_final_webhook.
         """
         claim_token = (
             self._claim_final_webhook(session, media_buy)
@@ -605,18 +681,6 @@ class DeliveryWebhookScheduler:
         if not _delivery_lookup_is_usable(media_buy, delivery_response):
             return False
 
-        # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
-        # sequence + 1 (spec: "Sequential notification number ... starts at
-        # 1"). Failed/retrying sends also log the sequence they attempted;
-        # counting them — while the dedup above counts only successes —
-        # would burn numbers the buyer never received, so a buyer's
-        # first-ever webhook could start above 1. A query failure
-        # propagates and aborts this send loudly: a quiet fallback to 1
-        # would put an already-consumed sequence on the wire.
-        sequence_number = (
-            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
-        )
-
         # Set webhook-specific metadata directly on the response model.
         # These fields are webhook-only ("only present in webhook deliveries" —
         # get-media-buy-delivery-response.json @ v3.1-04f59d2d5), so the polling
@@ -666,7 +730,6 @@ class DeliveryWebhookScheduler:
         # notification_type, which the webhook-result schema marks REQUIRED -- add an
         # explicit empty-deliveries no-send guard rather than emitting that body.
 
-        delivery_response.sequence_number = sequence_number
         # TODO: Check for reporting_delayed status. Co-edit site: the shared
         # assert_partial_data_pairing oracle (tests/helpers/delivery_assertions.py)
         # pins partial_data False deliberately, so implementing real partial-data
@@ -677,16 +740,6 @@ class DeliveryWebhookScheduler:
         # partial_data reporting is implemented; setting 0 alongside partial_data
         # False put a spec-divergent field on every webhook body.
         delivery_response.unavailable_count = None
-
-        # A failed delivery does not consume its sequence number. Reuse the
-        # prior attempt's key when the scheduler retries the same logical
-        # notification in a later invocation.
-        idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
-            media_buy.media_buy_id,
-            task_type=DELIVERY_TASK_TYPE,
-            notification_type=derived,
-            sequence_number=sequence_number,
-        )
 
         # Extract webhook URL and authentication
         webhook_url = reporting_webhook.get("url")
@@ -726,6 +779,46 @@ class DeliveryWebhookScheduler:
             "media_buy_id": media_buy.media_buy_id,
         }
 
+        # Atomic concurrency claim, taken NOW — after every definitive no-send
+        # path above, so none of them ever holds a claim, and BEFORE the sequence
+        # number is allocated below. The loser skips; the winner's claim is
+        # released below on a failed send (token-guarded) so an immediate retry
+        # isn't blocked for the lease. The crash-after-POST residual is tracked
+        # in #1606.
+        claim_token = self._claim_webhook_send(session, media_buy, is_final=is_final)
+        if claim_token is None:
+            return False
+
+        # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
+        # sequence + 1 (spec: "Sequential notification number ... starts at
+        # 1"). Failed/retrying sends also log the sequence they attempted;
+        # counting them — while the dedup above counts only successes —
+        # would burn numbers the buyer never received, so a buyer's
+        # first-ever webhook could start above 1. A query failure
+        # propagates and aborts this send loudly: a quiet fallback to 1
+        # would put an already-consumed sequence on the wire.
+        #
+        # Allocated UNDER the claim. Read before it, the number was decided in a
+        # window any number of other workers could also be reading in — the claim
+        # would then serialize the POSTs while both carried the same sequence,
+        # which is not what "atomic claim" buys you. Here the claim is already
+        # held, so the value reflects every delivery committed up to this point
+        # and no concurrent sender can be between its own read and its own POST.
+        sequence_number = (
+            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
+        )
+        delivery_response.sequence_number = sequence_number
+
+        # A failed delivery does not consume its sequence number. Reuse the
+        # prior attempt's key when the scheduler retries the same logical
+        # notification in a later invocation.
+        idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
+            media_buy.media_buy_id,
+            task_type=DELIVERY_TASK_TYPE,
+            notification_type=derived,
+            sequence_number=sequence_number,
+        )
+
         # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
         # Serialize via webhook_payload(): the schema scopes aggregated_totals to
         # "API responses (get_media_buy_delivery), not webhook notifications", and
@@ -739,15 +832,6 @@ class DeliveryWebhookScheduler:
             token=reporting_webhook.get("token"),
             idempotency_key=idempotency_key,
         )
-
-        # Atomic concurrency claim, taken NOW — immediately before the POST — so
-        # the definitive no-send paths above never hold a claim. The loser skips;
-        # the winner's claim is released below on a failed send (token-guarded)
-        # so an immediate retry isn't blocked for the lease. The crash-after-POST
-        # residual is tracked in #1606.
-        claim_token = self._claim_webhook_send(session, media_buy, is_final=is_final)
-        if claim_token is None:
-            return False
 
         # Send webhook notification. ``session`` stays open here — it's reused below
         # on a failed send to release the claim — only the claim's transaction was

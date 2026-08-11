@@ -653,7 +653,9 @@ class TestConcurrentFinalWebhookClaim:
 
             def worker(session: Session, barrier: threading.Barrier) -> bool:
                 barrier.wait(timeout=5)  # release both threads together
-                won = MediaBuyRepository(session, "t1").try_claim_final_webhook(mb_id, now=now, stale_before=cutoff)
+                won = MediaBuyRepository(session, "t1").try_claim_final_webhook(
+                    mb_id, now=now, stale_before=cutoff, periodic_stale_before=cutoff
+                )
                 session.commit()
                 return won
 
@@ -753,9 +755,25 @@ class TestConcurrentFinalWebhookClaim:
             t1 = t2 - timedelta(minutes=16)  # older than the 15-min lease at t2
 
             # A wins the fresh claim at T1.
-            assert repo.try_claim_final_webhook(mb_id, now=t1, stale_before=t1 - timedelta(minutes=15)) is True
+            assert (
+                repo.try_claim_final_webhook(
+                    mb_id,
+                    now=t1,
+                    stale_before=t1 - timedelta(minutes=15),
+                    periodic_stale_before=t1 - timedelta(minutes=15),
+                )
+                is True
+            )
             # B re-claims at T2: A's T1 claim is stale by then (t1 < t2 - lease).
-            assert repo.try_claim_final_webhook(mb_id, now=t2, stale_before=t2 - timedelta(minutes=15)) is True
+            assert (
+                repo.try_claim_final_webhook(
+                    mb_id,
+                    now=t2,
+                    stale_before=t2 - timedelta(minutes=15),
+                    periodic_stale_before=t2 - timedelta(minutes=15),
+                )
+                is True
+            )
 
             # A's late release with its stale token must NOT clear B's claim.
             assert repo.release_final_webhook_claim(mb_id, claimed_at=t1) is False
@@ -895,7 +913,9 @@ class TestConcurrentPeriodicWebhookClaim:
 
             def worker(session: Session, barrier: threading.Barrier) -> bool:
                 barrier.wait(timeout=5)  # release both threads together
-                won = MediaBuyRepository(session, "t1").try_claim_periodic_webhook(mb_id, now=now, stale_before=cutoff)
+                won = MediaBuyRepository(session, "t1").try_claim_periodic_webhook(
+                    mb_id, now=now, stale_before=cutoff, final_stale_before=cutoff
+                )
                 session.commit()
                 return won
 
@@ -1013,9 +1033,25 @@ class TestConcurrentPeriodicWebhookClaim:
             t1 = t2 - timedelta(minutes=16)  # older than the 15-min lease at t2
 
             # A wins the fresh claim at T1.
-            assert repo.try_claim_periodic_webhook(mb_id, now=t1, stale_before=t1 - timedelta(minutes=15)) is True
+            assert (
+                repo.try_claim_periodic_webhook(
+                    mb_id,
+                    now=t1,
+                    stale_before=t1 - timedelta(minutes=15),
+                    final_stale_before=t1 - timedelta(minutes=15),
+                )
+                is True
+            )
             # B re-claims at T2: A's T1 claim is stale by then (t1 < t2 - lease).
-            assert repo.try_claim_periodic_webhook(mb_id, now=t2, stale_before=t2 - timedelta(minutes=15)) is True
+            assert (
+                repo.try_claim_periodic_webhook(
+                    mb_id,
+                    now=t2,
+                    stale_before=t2 - timedelta(minutes=15),
+                    final_stale_before=t2 - timedelta(minutes=15),
+                )
+                is True
+            )
 
             # A's late release with its stale token must NOT clear B's claim.
             assert repo.release_periodic_webhook_claim(mb_id, claimed_at=t1) is False
@@ -1050,6 +1086,186 @@ class TestConcurrentPeriodicWebhookClaim:
             sent = {w["result"]["media_buy_deliveries"][0]["media_buy_id"] for w in wires}
             assert sent == {buy_a.media_buy_id, buy_b.media_buy_id}
             assert all(w["result"]["notification_type"] == "scheduled" for w in wires)
+
+
+class TestClaimsAreMutuallyExclusiveAcrossTypes:
+    """A final worker and a periodic worker must not both win for the same buy.
+
+    The two claims live in different columns, so each serializes its own type and
+    neither serializes against the other. That gap is reachable rather than
+    theoretical: ``is_final`` is computed per worker from the MediaBuy row and the
+    current UTC date as THAT worker read them, so a status flip or a midnight
+    rollover landing between two workers' reads produces one of each for the same
+    buy. Both would win their own column, both would POST, and — because the
+    sequence is "max delivered + 1" and neither has delivered yet — both would
+    carry the SAME sequence_number under two different idempotency keys, which is
+    exactly the buyer-visible duplicate the claim is documented to prevent.
+    """
+
+    def test_concurrent_cross_type_claims_have_exactly_one_winner(self, integration_db):
+        """Genuine overlap: one thread races the final claim, the other the periodic.
+
+        Same two-connection ``threading.Barrier`` scaffold as the same-type races.
+        ``barrier.wait()`` returns a distinct index per thread, which is what
+        assigns the roles — so both threads are released together and only then
+        diverge, rather than one being sequenced ahead by the test itself.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            env.get_session().commit()  # ensure the buy is visible to other connections
+
+            now = datetime.now(UTC)
+            cutoff = now - timedelta(minutes=15)
+
+            def worker(session: Session, barrier: threading.Barrier) -> bool:
+                role = barrier.wait(timeout=5)  # released together; index picks the type
+                repo = MediaBuyRepository(session, "t1")
+                if role == 0:
+                    won = repo.try_claim_final_webhook(
+                        mb_id, now=now, stale_before=cutoff, periodic_stale_before=cutoff
+                    )
+                else:
+                    won = repo.try_claim_periodic_webhook(
+                        mb_id, now=now, stale_before=cutoff, final_stale_before=cutoff
+                    )
+                session.commit()
+                return won
+
+            results = _race_two_workers(worker)
+            assert sorted(results) == [False, True], (
+                "a final and a periodic worker racing the same buy must not both win — "
+                f"both POSTing would put one sequence_number on two webhooks, got {results}"
+            )
+
+    def test_a_held_periodic_claim_blocks_the_final_claim(self, integration_db):
+        """The mutual exclusion itself, without the race: holding one blocks the other.
+
+        Deterministic companion to the barrier test above — that one proves the
+        property survives genuine contention, this one names the mechanism, so a
+        failure says which of the two broke.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            session = env.get_session()
+            repo = MediaBuyRepository(session, "t1")
+
+            now = datetime.now(UTC)
+            cutoff = now - timedelta(minutes=15)
+
+            assert repo.try_claim_periodic_webhook(mb_id, now=now, stale_before=cutoff, final_stale_before=cutoff), (
+                "a free buy's periodic claim must be takeable"
+            )
+            assert not repo.try_claim_final_webhook(
+                mb_id, now=now, stale_before=cutoff, periodic_stale_before=cutoff
+            ), "a fresh periodic claim must block the final claim"
+
+            # Released, so the final is only deferred while a send is in flight —
+            # never stranded, which is what the anti-join re-selection relies on.
+            repo.release_periodic_webhook_claim(mb_id, claimed_at=now)
+            assert repo.try_claim_final_webhook(mb_id, now=now, stale_before=cutoff, periodic_stale_before=cutoff), (
+                "once the periodic claim is released the final must be takeable"
+            )
+
+    def test_a_held_final_claim_blocks_the_periodic_claim(self, integration_db):
+        """The other direction: a final in flight must stop a periodic send.
+
+        Both directions are asserted because the two claim methods carry their own
+        copy of the predicate pair — fixing one and not the other leaves the race
+        open through the remaining door.
+        """
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            repo = MediaBuyRepository(env.get_session(), "t1")
+
+            now = datetime.now(UTC)
+            cutoff = now - timedelta(minutes=15)
+
+            assert repo.try_claim_final_webhook(mb_id, now=now, stale_before=cutoff, periodic_stale_before=cutoff)
+            assert not repo.try_claim_periodic_webhook(
+                mb_id, now=now, stale_before=cutoff, final_stale_before=cutoff
+            ), "a fresh final claim must block the periodic claim"
+
+
+class TestBatchSummaryAccountsForEverySelectedBuy:
+    """The run summary's buckets partition the batch's selection.
+
+    The summary is what distinguishes "everything was skipped" from "there was
+    nothing to do". A path that leaves the loop without counting breaks that
+    quietly: the remaining numbers still look plausible, and a population whose
+    webhooks are skipped on every pass reads as an idle, healthy scheduler. The
+    `reporting_webhook`-falsy skip did exactly this.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_selected_buy_lands_in_exactly_one_bucket(self, integration_db):
+        """One batch over a population hitting three different outcomes.
+
+        Asserts the identity (buckets sum to selection) rather than each
+        bucket's value, so it keeps holding as outcomes are added — and fails
+        for any future skip that forgets to count, which is the actual defect.
+        """
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            tenant = TenantFactory(tenant_id="t1")
+            principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+
+            # Sends: in-flight, daily webhook configured.
+            _serving_webhook_buy(env, mb_id="mb-sends", tenant=tenant, principal=principal)
+
+            # No webhook config: selected by the SQL key-presence pre-filter
+            # (the key is present) but falsy in Python — the branch that used to
+            # `continue` without counting.
+            start_date, end_date = flight_window("live")
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb-empty-webhook",
+                status="active",
+                start_date=start_date,
+                end_date=end_date,
+                raw_request={"reporting_webhook": {}},
+            )
+
+            # Not reportable: selected on persisted status, but resolves outside
+            # the reportable canonical set (pre-flight).
+            pending_start, pending_end = flight_window("pending")
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb-preflight",
+                status="active",
+                start_date=pending_start,
+                end_date=pending_end,
+                raw_request={"reporting_webhook": dict(DAILY_REPORTING_WEBHOOK)},
+            )
+
+            await env.run_delivery_batch()
+            summary = env.last_batch_summary
+
+        assert summary.selected >= 3, (
+            f"expected all three seeded buys to be selected, got {summary.selected} — "
+            "the fixture is not exercising the branches under test"
+        )
+        assert summary.no_webhook_config >= 1, "the empty-webhook buy must be counted, not silently skipped"
+        assert summary.accounted_for == summary.selected, (
+            f"{summary.selected - summary.accounted_for} of {summary.selected} selected buys were "
+            f"not counted in any bucket ({summary}) — the run summary no longer describes the batch, "
+            "so an all-skipped run is indistinguishable from an idle one"
+        )
 
 
 # ---------------------------------------------------------------------------

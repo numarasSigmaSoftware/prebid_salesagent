@@ -277,11 +277,22 @@ def is_production() -> bool:
     a non-empty string), and never consulted ENVIRONMENT at all. All four now
     call this function directly, closing the same truthy-vocabulary bug
     ``_env_flag_is_true`` already fixes below, so an operator who sets
-    PRODUCTION=false to turn it off is honoured everywhere, not just here. The
-    convergence is pinned by
-    TestProductionSignalConverged.test_no_site_still_open_codes_the_bare_presence_check
-    (tests/unit/test_db_config.py) so a future edit cannot silently reintroduce
-    an open-coded copy at any of them.
+    PRODUCTION=false to turn it off is honoured everywhere, not just here.
+
+    Two admin sites converged onto this function afterwards -- the session-cookie
+    policy in ``src/admin/app.py`` and ``is_admin_production()`` in
+    ``src/admin/utils/helpers.py`` -- each of which compared PRODUCTION to a
+    literal and so never saw FLY_APP_NAME. A Fly.io deployment therefore served
+    its admin session cookie without Secure and left POST /test/auth reachable.
+
+    Convergence is NOT repo-wide: sixteen open-coded production decisions remain
+    in admin blueprints and the landing page, all presentation or deploy-shape
+    rather than security boundaries, tracked in #1819. TestProductionSignalConverged
+    (tests/unit/test_db_config.py) holds that count on a shrink-only ratchet and
+    fails on a new one anywhere, so the remainder cannot grow quietly; the two
+    security-bearing convergences above are graded behaviorally by
+    tests/unit/test_admin_session_cookie_policy.py and
+    tests/unit/test_test_auth_production_guard.py.
 
     A deployment that sets PRODUCTION or relies on Fly.io's
     auto-populated FLY_APP_NAME, but never explicitly sets ENVIRONMENT=production,
@@ -339,15 +350,31 @@ def declares_production_explicitly() -> bool:
     working deployment, while the extra-mode and compat changes are loosenings. A
     reader who only saw the loosenings would misjudge the upgrade risk.
 
-    ``scripts/run_server.py``, ``auth.py``, ``logging_config.py``, and
-    ``audit_logger.py`` also call ``is_production()`` (verbose-auth-log
-    suppression, structured-vs-basic logging format, and the audit console
-    handler), but NOT for the broadening this section documents -- for a
-    Fly-only or PRODUCTION-truthy deployment they already agreed with
-    is_production() before converging onto it (both were True). Their actual
-    behavior change is on the other axis, PRODUCTION=false and
-    ENVIRONMENT=production-alone, documented on :func:`is_production` itself.
-    Listed here only so the completeness scan above finds every caller.
+    These callers do NOT change on the broadening axis -- for a Fly-only or
+    PRODUCTION-truthy deployment they already agreed with is_production() before
+    converging onto it (both were True). Their behavior change is on the other
+    axis, PRODUCTION=false and ENVIRONMENT=production-alone, documented on
+    :func:`is_production` itself. Each is named with the behavior it gates, so
+    the completeness scan above finds every caller:
+
+    - ``scripts/run_server.py`` — overrides an explicitly-set ADCP_SALES_HOST,
+      forcing the listener onto 0.0.0.0.
+    - ``auth.py`` — verbose-auth-log suppression.
+    - ``logging_config.py`` — structured-vs-basic logging format.
+    - ``audit_logger.py`` — the audit console handler.
+
+    Listing four files against three behaviors is what previously left the host
+    override -- the one that silently discards an operator's explicit choice --
+    as the unnamed one.
+
+    Two admin callers converged onto is_production() later, and unlike the four
+    above they DO change on the broadening axis, in the tightening direction:
+
+    - ``src/admin/app.py`` — session-cookie Secure/SameSite/HttpOnly policy.
+    - ``src/admin/utils/helpers.py::is_admin_production`` — the POST /test/auth
+      404, and every admin check routed through that helper.
+
+    See their own docstrings for what was reachable before.
     """
     return os.getenv("ENVIRONMENT", "development").lower() == "production"
 

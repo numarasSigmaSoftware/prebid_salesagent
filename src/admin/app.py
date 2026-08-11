@@ -38,6 +38,7 @@ from src.admin.blueprints.signals_agents import signals_agents_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp
+from src.core.config import is_production
 from src.core.config_loader import is_single_tenant_mode
 from src.core.domain_config import (
     get_session_cookie_domain,
@@ -110,8 +111,17 @@ def create_app(config=None):
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
     app.logger.setLevel(logging.INFO)
 
-    # Configure session cookies for EventSource compatibility
-    if os.environ.get("PRODUCTION") == "true":
+    # Configure session cookies for EventSource compatibility.
+    #
+    # Gated on is_production(), not a literal PRODUCTION == "true": the else
+    # branch below serves the session cookie WITHOUT Secure, so a deployment
+    # this codebase considers production but that never set PRODUCTION -- a
+    # Fly.io deploy relying on the auto-populated FLY_APP_NAME, or one that only
+    # set ENVIRONMENT=production -- transmitted its admin session cookie over
+    # cleartext-eligible connections. The failure was silent in both directions
+    # a bare literal cannot see: PRODUCTION=false also read as "not production"
+    # only by accident of string comparison.
+    if is_production():
         app.config["SESSION_COOKIE_SECURE"] = True  # Required for SameSite=None over HTTPS
         app.config["SESSION_COOKIE_HTTPONLY"] = False  # Allow EventSource to access cookies
         app.config["SESSION_COOKIE_SAMESITE"] = "None"  # Required for EventSource cross-origin requests

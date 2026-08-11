@@ -1183,14 +1183,24 @@ Then valid (not applicable)
 ### reporting_frequency: Reporting Webhook Frequency
 **Obligation ID** CONSTR-REPORTING-FREQUENCY-01
 **Layer** schema
-**Requirement:** Enum: hourly, daily, monthly. Required in reporting_webhook. GAP: only daily implemented.
+**Requirement:** Enum: hourly, daily, monthly. Required in reporting_webhook. This seller
+supports `daily` only (`SUPPORTED_REPORTING_FREQUENCIES`) and REJECTS the others at booking
+rather than accepting them: `validate_reporting_webhook_frequency` raises
+`AdCPCapabilityNotSupportedError` from both create and update, and the supported set is
+advertised as `available_reporting_frequencies`. Accepting a cadence that never fires is the
+acknowledged-but-never-sent state that validator exists to prevent.
 **Scenario:**
 ```gherkin
 Given reporting_frequency="hourly"
-Then schema-valid but silently skipped in implementation (GAP)
+Then the request is rejected with an error naming the supported frequencies
 ```
 **Priority:** P2
 **Affected by 3.6:** No
+
+> Rows predating the booking-time validator can still carry an unsupported cadence — no
+> migration normalises them. For those the scheduler skips PERIODIC sends but still sends the
+> FINAL one, since suppressing the terminal notification would strand it for the life of the
+> buy (`delivery_webhook_scheduler._send_report_for_media_buy`).
 
 ---
 

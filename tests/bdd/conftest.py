@@ -594,25 +594,21 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 )
             )
 
-        # FIXME(salesagent-got8): E2E_REST — webhook/circuit assertions observe
-        # env.mock['post'] or CircuitBreaker state, neither of which is visible
-        # through the Docker HTTP path. Remove when an E2E webhook receiver or
-        # circuit-breaker introspection is available.
-        _UC004_E2E_WEBHOOK_INTERNAL_TAGS: set[str] = {
-            "T-UC-004-webhook-bearer",
-            "T-UC-004-webhook-hmac",
-            "T-UC-004-webhook-notification-type",
-            "T-UC-004-webhook-no-aggregated",
-            "T-UC-004-webhook-circuit-open",
-            "T-UC-004-webhook-circuit-recovery",
-            "T-UC-004-webhook-retry-success",
-            # jdy1-M4: retry/sequence observability — assert on env.mock['post']
-            # call counts / args, not visible over the Docker HTTP path.
-            "T-UC-004-webhook-retry-5xx",
-            "T-UC-004-webhook-retry-network",
-            "T-UC-004-webhook-no-retry-4xx",
-            "T-UC-004-webhook-sequence",
-        }
+        # E2E_REST — webhook/circuit assertions observe env.mock['post'] or
+        # CircuitBreaker state, neither of which is visible through the Docker
+        # HTTP path.
+        #
+        # EMPTY, and not by accident — the same rot that hollowed out
+        # _NO_E2E_REST_TAGS. All eleven former entries
+        # (webhook-bearer/hmac/notification-type/no-aggregated/circuit-open/
+        # circuit-recovery/retry-success/retry-5xx/retry-network/no-retry-4xx/
+        # sequence) are routed as transport-independent, so
+        # pytest_generate_tests never emits an e2e_rest param for them and
+        # `is_e2e_rest` below could not be True. Being transport-independent
+        # SUBSUMES this xfail; the entries read as protection while excluding
+        # nothing. Entries here are only meaningful for a webhook scenario that
+        # still parametrizes. TestBddTransportTagSetsDoNotOverlap keeps that true.
+        _UC004_E2E_WEBHOOK_INTERNAL_TAGS: set[str] = set()
         if is_e2e_rest and (marker_names & _UC004_E2E_WEBHOOK_INTERNAL_TAGS):
             item.add_marker(
                 pytest.mark.xfail(

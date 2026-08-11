@@ -457,3 +457,71 @@ class TestWebhookDeliveryLogRedactionMigration:
         webhook_url, error_message = _fetch_row(engine, row_id)
         assert webhook_url == PLACEHOLDER, "re-upgrade must leave webhook_url as the placeholder"
         assert error_message == PLACEHOLDER, "re-upgrade must leave error_message as the placeholder"
+
+    def test_sweep_completes_across_more_rows_than_one_batch(self, migration_db_fresh):
+        """More rows than _REDACT_BATCH_SIZE: the loop must iterate, then stop.
+
+        Every other test in this module seeds a handful of rows, so the sweep
+        finishes inside its FIRST batch and the loop's continuation is never
+        taken. That leaves the batching — the whole reason this migration is
+        shaped as a loop rather than one UPDATE — ungraded: a sweep that
+        redacted only the first _REDACT_BATCH_SIZE rows and returned would pass
+        all of them while leaving a real production table partly credentialed.
+
+        Seeding past the boundary is what makes the second iteration real; the
+        batch size is read from the migration module rather than restated, so
+        this keeps grading the boundary if that constant is retuned. The
+        terminating case is graded by the test completing at all — the loop
+        exits only on a zero-rowcount pass.
+        """
+        import importlib.util
+        from pathlib import Path
+
+        engine, db_url = migration_db_fresh
+
+        spec = importlib.util.spec_from_file_location(
+            "_redaction_migration_under_test",
+            Path(__file__).resolve().parents[2]
+            / "alembic"
+            / "versions"
+            / "168914d7ca05_redact_legacy_webhook_delivery_log_.py",
+        )
+        migration_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration_module)
+        batch_size = migration_module._REDACT_BATCH_SIZE
+
+        run_alembic_upgrade(db_url, PRE_REDACTION_REV)
+        _ensure_fk_parents(engine)
+
+        overflow = batch_size + 1
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO webhook_delivery_log "
+                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status, error_message) "
+                    "SELECT 'bulk-' || g, 'legacy-tenant', 'legacy-principal', 'legacy-media-buy', "
+                    "       :url, 'delivery_report', 'failed', :err "
+                    "FROM generate_series(1, :count) AS g"
+                ),
+                {"url": LEGACY_CREDENTIALED_URL, "err": LEGACY_ERROR_MESSAGE, "count": overflow},
+            )
+            conn.commit()
+
+        run_alembic_upgrade(db_url, REDACTION_REV)
+
+        with engine.connect() as conn:
+            unredacted = conn.execute(
+                text(
+                    "SELECT count(*) FROM webhook_delivery_log "
+                    "WHERE webhook_url != :placeholder "
+                    "   OR (error_message IS NOT NULL AND error_message != :placeholder)"
+                ),
+                {"placeholder": PLACEHOLDER},
+            ).scalar_one()
+            total = conn.execute(text("SELECT count(*) FROM webhook_delivery_log")).scalar_one()
+
+        assert total >= overflow, "bulk seed did not land — the boundary is not actually being crossed"
+        assert unredacted == 0, (
+            f"{unredacted} of {total} rows survived the sweep unredacted — with more than one "
+            f"batch ({batch_size}) of rows, the loop stopped before finishing the table"
+        )

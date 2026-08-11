@@ -53,8 +53,23 @@ class MediaBuyRepository:
     def tenant_id(self) -> str:
         return self._tenant_id
 
+    @staticmethod
+    def _claim_is_available(column, stale_before: datetime.datetime):
+        """A claim column is takeable when unset, or held past its lease.
+
+        One expression, used for BOTH claim columns by BOTH claim methods, so
+        "is this claim free?" cannot come to mean two different things depending
+        on which method you read.
+        """
+        return or_(column.is_(None), column < stale_before)
+
     def try_claim_final_webhook(
-        self, media_buy_id: str, *, now: datetime.datetime, stale_before: datetime.datetime
+        self,
+        media_buy_id: str,
+        *,
+        now: datetime.datetime,
+        stale_before: datetime.datetime,
+        periodic_stale_before: datetime.datetime,
     ) -> bool:
         """Atomically claim this buy's FINAL delivery webhook. True if THIS caller won.
 
@@ -67,16 +82,33 @@ class MediaBuyRepository:
         other transactions. This does NOT close the crash-after-POST duplicate window
         (the POST precedes the success-log write); a durable exactly-once final
         (outbox) is tracked in #1606.
+
+        The claim is MUTUALLY EXCLUSIVE with the periodic claim: it also requires
+        ``last_periodic_webhook_claimed_at`` to be free or past
+        ``periodic_stale_before``. Two columns that each serialize their own type
+        serialize nothing against each other, and the two types are not decided
+        from a shared snapshot -- each worker computes ``is_final`` from the
+        MediaBuy row and the current UTC date as IT read them, so a status flip or
+        a midnight rollover between two workers' reads yields one final and one
+        periodic worker for the same buy. Both would have won their own column,
+        both would have POSTed, each with a different idempotency_key (the key is
+        derived from notification_type), and both carrying the SAME
+        sequence_number -- the buyer-visible duplicate this claim exists to
+        prevent, arriving through the one door it did not cover.
+
+        Blocking is bounded: both leases are far shorter than the 24h periodic
+        dedup, so a periodic legitimately following a successful final is already
+        suppressed by that dedup, and a final that loses to an in-flight periodic
+        is re-selected by the next batch (the anti-join keeps returning the buy
+        until a successful final row exists).
         """
         claimed_id = self._session.execute(
             update(MediaBuy)
             .where(
                 MediaBuy.tenant_id == self._tenant_id,
                 MediaBuy.media_buy_id == media_buy_id,
-                or_(
-                    MediaBuy.final_webhook_claimed_at.is_(None),
-                    MediaBuy.final_webhook_claimed_at < stale_before,
-                ),
+                self._claim_is_available(MediaBuy.final_webhook_claimed_at, stale_before),
+                self._claim_is_available(MediaBuy.last_periodic_webhook_claimed_at, periodic_stale_before),
             )
             .values(final_webhook_claimed_at=now)
             .returning(MediaBuy.media_buy_id)
@@ -107,7 +139,12 @@ class MediaBuyRepository:
         return released_id is not None
 
     def try_claim_periodic_webhook(
-        self, media_buy_id: str, *, now: datetime.datetime, stale_before: datetime.datetime
+        self,
+        media_buy_id: str,
+        *,
+        now: datetime.datetime,
+        stale_before: datetime.datetime,
+        final_stale_before: datetime.datetime,
     ) -> bool:
         """Atomically claim this buy's PERIODIC delivery webhook. True if THIS caller won.
 
@@ -122,16 +159,19 @@ class MediaBuyRepository:
         check against successful send history; this claim closes the race window
         between that check and the POST, it does not replace the dedup itself.
         The caller MUST commit for the claim to be visible to other transactions.
+
+        Mutually exclusive with the final claim (it also requires
+        ``final_webhook_claimed_at`` to be free or past ``final_stale_before``) —
+        see ``try_claim_final_webhook`` for why per-type columns alone let a
+        final and a periodic worker both POST with the same sequence_number.
         """
         claimed_id = self._session.execute(
             update(MediaBuy)
             .where(
                 MediaBuy.tenant_id == self._tenant_id,
                 MediaBuy.media_buy_id == media_buy_id,
-                or_(
-                    MediaBuy.last_periodic_webhook_claimed_at.is_(None),
-                    MediaBuy.last_periodic_webhook_claimed_at < stale_before,
-                ),
+                self._claim_is_available(MediaBuy.last_periodic_webhook_claimed_at, stale_before),
+                self._claim_is_available(MediaBuy.final_webhook_claimed_at, final_stale_before),
             )
             .values(last_periodic_webhook_claimed_at=now)
             .returning(MediaBuy.media_buy_id)

@@ -52,6 +52,53 @@ class TestProductionHardBlock:
 
         assert response.status_code == 404
 
+    def test_fly_deployment_blocks_without_either_flag(self, make_auth_test_client):
+        """FLY_APP_NAME alone must block /test/auth.
+
+        Fly.io populates FLY_APP_NAME on every deploy, so a single-tenant Fly
+        deployment is production without its operator setting anything. While
+        is_admin_production() compared PRODUCTION and ENVIRONMENT to literals it
+        could not see that, and this route -- a password login accepting test
+        credentials -- answered normally on exactly the deployment style this
+        project documents. It now delegates to config.is_production(), which
+        treats FLY_APP_NAME as a production signal.
+        """
+        with make_auth_test_client(auth_setup_mode=True) as (client, _):
+            with patch.dict(
+                os.environ,
+                {
+                    "FLY_APP_NAME": "adcp-sales-agent",
+                    "PRODUCTION": "",
+                    "ENVIRONMENT": "",
+                    "ADCP_AUTH_TEST_MODE": "true",
+                },
+            ):
+                response = client.post(
+                    "/test/auth",
+                    data={"email": "test_super_admin@example.com", "password": "test123", "tenant_id": "default"},
+                )
+
+        assert response.status_code == 404
+
+    def test_explicit_production_false_does_not_block(self, make_auth_test_client):
+        """PRODUCTION=false must mean "explicitly off", not "non-empty, so true".
+
+        The literal comparison this replaced happened to get this case right; a
+        bare-presence check would not, and delegating to is_production() makes
+        the correct answer structural rather than incidental.
+        """
+        with make_auth_test_client(auth_setup_mode=True) as (client, _):
+            with patch.dict(
+                os.environ,
+                {"PRODUCTION": "false", "ENVIRONMENT": "", "FLY_APP_NAME": "", "ADCP_AUTH_TEST_MODE": "true"},
+            ):
+                response = client.post(
+                    "/test/auth",
+                    data={"email": "test_super_admin@example.com", "password": "test123", "tenant_id": "default"},
+                )
+
+        assert response.status_code != 404
+
     def test_non_production_allows_when_both_enabled(self, make_auth_test_client):
         """Production check must not block valid non-production access (regression guard).
 

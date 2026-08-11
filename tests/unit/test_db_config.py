@@ -27,18 +27,100 @@ class TestIntEnv:
 
 
 class TestProductionSignalConverged:
-    """Every site that decides "are we in production?" now calls config.is_production().
+    """The production signal converges onto config.is_production(), on a ratchet.
 
-    Four call sites used to decide this independently -- scripts/run_server.py,
-    src/core/auth.py, src/core/logging_config.py, and src/core/audit_logger.py --
-    each testing ``FLY_APP_NAME or PRODUCTION`` for bare presence. That silently
-    treated PRODUCTION=false (an operator explicitly disabling it) as production,
-    and never consulted ENVIRONMENT=production at all -- the exact truthy-
-    vocabulary bug is_production() itself was already fixed for
-    (see _env_flag_is_true). All four now call is_production() directly; this
-    pins the convergence so a future edit cannot silently reintroduce an
-    open-coded copy at any of them.
+    Six call sites now delegate: scripts/run_server.py, src/core/auth.py,
+    src/core/logging_config.py, src/core/audit_logger.py, src/admin/app.py, and
+    src/admin/utils/helpers.py::is_admin_production. The first four used to test
+    ``FLY_APP_NAME or PRODUCTION`` for bare presence, which silently treated
+    PRODUCTION=false (an operator explicitly disabling it) as production and
+    never consulted ENVIRONMENT at all -- the truthy-vocabulary bug
+    is_production() already fixed (see _env_flag_is_true). The two admin sites
+    compared PRODUCTION to a literal and so never saw FLY_APP_NAME, which left a
+    Fly-only deployment serving its admin session cookie without Secure and
+    leaving POST /test/auth reachable.
+
+    Convergence is NOT complete, and this class does not claim it is. Eighteen
+    open-coded production decisions remain, all in admin blueprints and the
+    landing page. OPEN_CODED_ALLOWANCE is the shrink-only ratchet over exactly
+    those: a new one anywhere fails immediately, and fixing one fails until its
+    allowance is lowered, so the count cannot drift back up quietly. A prose
+    claim of full convergence is what this replaces -- the previous guard
+    checked one regex against four named files and could not have seen any of
+    the eighteen.
     """
+
+    # Every remaining site that reads a production signal directly, by file.
+    # SHRINK ONLY: lower a number when you converge a site; never raise one.
+    # Counts, not line numbers, so unrelated edits above a site do not break this.
+    OPEN_CODED_ALLOWANCE = {
+        # The definition itself -- is_production() and declares_production_explicitly()
+        # are where these env vars are allowed to be read.
+        "src/core/config.py": 2,
+        # Not a production predicate: FLY_APP_NAME is consumed as a VALUE (the app
+        # name) to build the Fly.io callback URL. Converging it would be wrong.
+        "src/services/auth_config_service.py": 1,
+        # FIXME(#1819): admin/landing sites still deciding production for
+        # themselves. Each is presentation or deploy-shape (proxy headers,
+        # external URL scheme, banner copy) rather than a security boundary --
+        # the two security-bearing ones (session-cookie policy, /test/auth 404)
+        # were converged. #1819 tracks routing the rest through is_production();
+        # note its premise that these sites are untouched by this PR no longer
+        # holds for those two.
+        "src/admin/app.py": 3,
+        "src/admin/blueprints/auth.py": 6,
+        "src/admin/blueprints/authorized_properties.py": 4,
+        "src/admin/blueprints/core.py": 1,
+        "src/admin/blueprints/tenants.py": 1,
+        "src/landing/landing_page.py": 3,
+    }
+
+    SIGNAL_READ = r'os\.(?:environ\.get|getenv)\(\s*"(?:PRODUCTION|ENVIRONMENT|FLY_APP_NAME)"'
+
+    @classmethod
+    def _open_coded_counts(cls):
+        import re
+        from collections import Counter
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        pattern = re.compile(cls.SIGNAL_READ)
+        counts = Counter()
+        for sub in ("src", "scripts"):
+            for path in sorted((root / sub).rglob("*.py")):
+                found = sum(1 for line in path.read_text().splitlines() if pattern.search(line))
+                if found:
+                    counts[path.relative_to(root).as_posix()] = found
+        return counts
+
+    def test_the_scanner_matches_a_known_open_coded_site(self):
+        """An allowance table compared against a broken scanner passes by finding
+        nothing, so the scanner must be shown to match a site that exists."""
+        counts = self._open_coded_counts()
+        assert counts.get("src/core/config.py"), "scanner found no signal read in config.py — regex is stale"
+
+    def test_no_new_site_open_codes_the_production_signal(self):
+        counts = self._open_coded_counts()
+        new_files = sorted(set(counts) - set(self.OPEN_CODED_ALLOWANCE))
+        assert not new_files, (
+            f"{new_files} read PRODUCTION/ENVIRONMENT/FLY_APP_NAME directly — call "
+            "src.core.config.is_production() instead of deciding production locally"
+        )
+        grew = {f: (n, self.OPEN_CODED_ALLOWANCE[f]) for f, n in counts.items() if n > self.OPEN_CODED_ALLOWANCE[f]}
+        assert not grew, (
+            f"open-coded production checks grew (file: found vs allowed): {grew} — this ratchet only shrinks"
+        )
+
+    def test_the_allowance_has_no_stale_entries(self):
+        """A converged site whose allowance was left behind hides the next regression
+        at that file, because the ratchet still has room for one."""
+        counts = self._open_coded_counts()
+        stale = {
+            f: (counts.get(f, 0), allowed)
+            for f, allowed in self.OPEN_CODED_ALLOWANCE.items()
+            if counts.get(f, 0) < allowed
+        }
+        assert not stale, f"lower these allowances to what remains (file: found vs allowed): {stale}"
 
     def test_no_site_still_open_codes_the_bare_presence_check(self):
         """A regression back to a hand-rolled copy at any of the four sites must fail this test."""
@@ -61,6 +143,14 @@ class TestProductionSignalConverged:
             )
         }
         assert not still_open_coded, f"reverted to the open-coded bare-presence check: {still_open_coded}"
+
+    # The two security-bearing convergences are graded by BEHAVIOR, not by the
+    # shape of this file's scan, because a source-shape assertion passes for a
+    # rewrite that keeps the call and loses the effect:
+    #   tests/unit/test_admin_session_cookie_policy.py — cookie Secure/SameSite
+    #   tests/unit/test_test_auth_production_guard.py::
+    #       test_fly_deployment_blocks_without_either_flag — the /test/auth 404
+    # Both go red when their site reverts to comparing PRODUCTION to a literal.
 
     def test_is_production_correctly_handles_what_a_bare_presence_check_could_not(self, monkeypatch):
         """The two cases a naive bare-presence check would have gotten wrong."""
@@ -137,23 +227,63 @@ class TestPinnedErrorEnumIsNotACanonicityGate:
 
 
 class TestBddTransportTagSetsDoNotOverlap:
-    """A tag in both routing sets makes its _NO_E2E_REST_TAGS entry dead.
+    """A tag in both routing sets makes its e2e_rest entry dead.
 
     pytest_generate_tests returns early for transport-independent scenarios, well
-    before the e2e_rest exclusion is consulted. So an entry appearing in both sets
-    excludes nothing — it reads as protection while being unreachable, which is
-    how the previous sole entry rotted after its scenario was routed.
+    before any e2e_rest exclusion or xfail is consulted. So an entry appearing in
+    both sets excludes nothing — it reads as protection while being unreachable,
+    which is how _NO_E2E_REST_TAGS' sole entry rotted after its scenario was
+    routed, and how all eleven _UC004_E2E_WEBHOOK_INTERNAL_TAGS entries rotted
+    after the UC-004 webhook scenarios were.
+
+    Every set whose only use is gated on e2e_rest belongs in E2E_GATED_SETS. A
+    set that is checked but absent from the table is the escape hatch this guard
+    exists to close, so the table's own membership is pinned below.
     """
 
+    # name -> anchor member proving the parser matched (None for a set that is
+    # currently empty, which the parser must still resolve to an empty set
+    # rather than to a parse failure).
+    E2E_GATED_SETS = {
+        "_NO_E2E_REST_TAGS": None,
+        "_UC004_E2E_WEBHOOK_INTERNAL_TAGS": None,
+        "_UC005_E2E_FIXTURE_INJECTION_TAGS": "T-UC-005-dim-boundary",
+    }
+
     @staticmethod
-    def _sets():
-        import re
+    def _source():
         from pathlib import Path
 
-        src = (Path(__file__).resolve().parents[1] / "bdd" / "conftest.py").read_text()
-        ti = re.search(r"_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = \{(.*?)\n\}", src, re.S).group(1)
-        ne = re.search(r"_NO_E2E_REST_TAGS: frozenset\[str\] = frozenset\((.*?)\)\n", src, re.S).group(1)
-        return set(re.findall(r'"([\w.-]+)"', ti)), set(re.findall(r'"([\w.-]+)"', ne))
+        return (Path(__file__).resolve().parents[1] / "bdd" / "conftest.py").read_text()
+
+    @classmethod
+    def _tags(cls, name, src=None):
+        r"""Parse a tag set literal by balancing delimiters, not by line shape.
+
+        A ``.*?\n\}`` regex only matches a brace literal closing at column 0, so
+        it silently returns nothing for a function-local set (indented close) or
+        for ``= set()``. Returning an empty set on a parse failure is exactly the
+        false-green this guard must not have, so an unparseable name raises.
+        """
+        import re
+
+        src = cls._source() if src is None else src
+        m = re.search(rf"^\s*{re.escape(name)}\b[^=\n]*=\s*", src, re.M)
+        assert m, f"{name} not found in conftest — guard is pointed at a renamed set"
+        rest = src[m.end() :]
+        opener = next((i for i, ch in enumerate(rest) if ch in "{("), None)
+        assert opener is not None, f"{name} has no set/frozenset literal — parser is stale"
+        depth, end = 0, None
+        for i, ch in enumerate(rest[opener:], start=opener):
+            if ch in "{(":
+                depth += 1
+            elif ch in "})":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        assert end is not None, f"{name} literal is unterminated — parser is stale"
+        return set(re.findall(r'"([\w.-]+)"', rest[opener:end]))
 
     def test_the_parser_finds_the_transport_independent_set(self):
         """Guards that scan by regex must be shown to match, or an empty overlap is
@@ -165,21 +295,48 @@ class TestBddTransportTagSetsDoNotOverlap:
         size — a guard that fails for the wrong reason trains people to adjust the
         number, which is exactly how a real staleness would then slip through.
         """
-        transport_independent, _ = self._sets()
+        transport_independent = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS")
         assert transport_independent, "parser found no routed tags — regex is stale"
         for anchor in ("T-UC-004-webhook-hmac", "T-UC-004-webhook-scheduled"):
             assert anchor in transport_independent, (
                 f"parser did not find {anchor}, which is routed in conftest — regex is stale"
             )
 
-    def test_no_e2e_rest_tags_are_reachable(self):
-        transport_independent, no_e2e_rest = self._sets()
-        dead = sorted(no_e2e_rest & transport_independent)
-        assert not dead, (
-            f"_NO_E2E_REST_TAGS entries {dead} are also transport-independent, so the e2e_rest "
-            "check never runs for them — remove the entry, or un-route the scenario if it must "
-            "still parametrize across transports"
+    def test_the_parser_finds_each_e2e_gated_set(self):
+        """A named anchor proves the balanced-delimiter parse works on the
+        indented, function-local form the reachability check reads."""
+        src = self._source()
+        for name, anchor in self.E2E_GATED_SETS.items():
+            tags = self._tags(name, src)  # raises if unparseable
+            if anchor is not None:
+                assert anchor in tags, f"parser did not find {anchor} in {name} — parser is stale"
+
+    def test_every_e2e_gated_set_is_covered(self):
+        """The table must name every set whose only use is behind ``is_e2e_rest``.
+
+        Without this, adding a new gated set and forgetting the table entry
+        reproduces the original defect with a green guard.
+        """
+        import re
+
+        checked = set(re.findall(r"is_e2e_rest and \(marker_names & (\w+)\)", self._source()))
+        checked.add("_NO_E2E_REST_TAGS")  # consulted as an exclusion, not an xfail
+        missing = sorted(checked - set(self.E2E_GATED_SETS))
+        assert not missing, (
+            f"e2e_rest-gated sets {missing} are not in E2E_GATED_SETS, so their entries are "
+            "never checked for reachability — add them to the table"
         )
+
+    def test_e2e_gated_tags_are_reachable(self):
+        src = self._source()
+        transport_independent = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS", src)
+        for name in self.E2E_GATED_SETS:
+            dead = sorted(self._tags(name, src) & transport_independent)
+            assert not dead, (
+                f"{name} entries {dead} are also transport-independent, so the e2e_rest "
+                "check never runs for them — remove the entry, or un-route the scenario if it "
+                "must still parametrize across transports"
+            )
 
 
 class TestBddDispatchersShareOneResultRecorder:
@@ -285,7 +442,12 @@ class TestProductionConsequenceListIsComplete:
 
         doc = (Path(__file__).resolve().parents[2] / "src" / "core" / "config.py").read_text()
         start = doc.index("What the broadening actually reaches")
-        listed_section = doc[start : start + 2000]
+        # To the end of the enclosing docstring, not a fixed character budget: a
+        # window sized to the prose as it stood silently truncates the moment the
+        # enumeration grows, failing for a module that IS documented — the same
+        # false verdict this guard exists to prevent, pointed the other way.
+        end = doc.index('"""', start)
+        listed_section = doc[start:end]
 
         actual = self._modules_gating_on_is_production()
         undocumented = sorted(m for m in actual if m.replace(".py", "") not in listed_section)

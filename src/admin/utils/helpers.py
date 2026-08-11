@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from src.core.config import is_production
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantManagementConfig, User
 
@@ -25,12 +26,24 @@ logger = logging.getLogger(__name__)
 def is_admin_production() -> bool:
     """Return True when admin should behave in production-safe mode.
 
-    Treats both PRODUCTION=true and ENVIRONMENT=production as authoritative
-    so security-sensitive checks do not drift between deployment styles.
+    Delegates to :func:`src.core.config.is_production` so security-sensitive
+    admin checks cannot drift from the rest of the codebase's answer to "are we
+    in production?" -- which is what this docstring always promised and what the
+    hand-rolled PRODUCTION/ENVIRONMENT pair silently failed to deliver: it never
+    consulted FLY_APP_NAME, so a Fly.io deployment that relies on Fly's
+    auto-populated app name (and never sets PRODUCTION or ENVIRONMENT) did NOT
+    get production-safe mode. The concrete consequence was that POST /test/auth
+    stayed reachable there instead of returning 404 -- a test-credential login
+    route exposed on exactly the deployment style this project documents.
+
+    Delegating also picks up the truthy-vocabulary parse, so PRODUCTION=false
+    now means "explicitly off" here too rather than being compared literally.
+
+    Kept as a named admin-facing alias rather than inlining is_production() at
+    the call sites: the name states the admin blueprint's intent, and one seam
+    is what makes the non-drift property checkable.
     """
-    return (
-        os.environ.get("PRODUCTION", "").lower() == "true" or os.environ.get("ENVIRONMENT", "").lower() == "production"
-    )
+    return is_production()
 
 
 def parse_json_config(config_str):
