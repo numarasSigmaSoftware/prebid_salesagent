@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.harness.assertions import assert_rejected
+from tests.harness.assertions import assert_omits_paths, assert_rejected
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 from tests.harness.transport import Transport
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
@@ -140,13 +140,18 @@ class TestAccountReferenceRoutesTheAdapter:
         assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")
 
 
-def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_run: bool = False):
-    """Create against an account of the given mode; return the wire ``sandbox`` value.
+def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_run: bool = False) -> dict:
+    """Create against an account of the given mode; return the real wire response dict.
 
     One body for both marker classes. The live path and the dry-run path build their
     response objects at different sites in ``_create_media_buy_impl`` — the dry-run branch
     returns early, so it cannot pick up a marker attached later — and each needs its own
     oracle. Sharing the setup keeps the only difference between them the thing under test.
+
+    Returns the wire dict rather than ``wire.get("sandbox")``: callers assert presence via
+    a direct key check and absence via ``tests.harness.assertions.assert_omits_paths``, so
+    an explicit ``"sandbox": null`` on the wire fails on its own terms instead of passing
+    identically to an omitted key (``dict.get`` returns ``None`` for both).
     """
     from tests.factories import AccountFactory, AgentAccountAccessFactory
 
@@ -169,7 +174,7 @@ def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_
         assert not result.is_error, f"dispatch failed: {result.error!r}"
         wire = result.wire_response
         assert wire is not None, "no wire response captured — this assertion would grade nothing"
-        return wire.get("sandbox")
+        return wire
 
 
 class TestSandboxMarkerReachesTheBuyer:
@@ -195,7 +200,8 @@ class TestSandboxMarkerReachesTheBuyer:
 
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_sandbox_create_is_marked_on_the_wire(self, integration_db, transport):
-        assert _create_and_read_marker(transport, account_sandbox=True) is True, (
+        wire = _create_and_read_marker(transport, account_sandbox=True)
+        assert wire.get("sandbox") is True, (
             f"[{transport.value}] a create against a sandbox account carried no sandbox marker; "
             "the buyer cannot distinguish a simulated booking from one that moved real budget"
         )
@@ -203,9 +209,15 @@ class TestSandboxMarkerReachesTheBuyer:
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_live_create_is_not_marked(self, integration_db, transport):
         """Negative control — 'always mark' would pass above and mislabel real bookings."""
-        assert _create_and_read_marker(transport, account_sandbox=False) is None, (
-            f"[{transport.value}] a live response carried the sandbox marker; absent is the "
-            "correct encoding, and marking it tells the buyer a real booking was simulated"
+        wire = _create_and_read_marker(transport, account_sandbox=False)
+        assert_omits_paths(
+            wire,
+            ["sandbox"],
+            context=(
+                f"[{transport.value}] live create — absent is the correct encoding, and an "
+                "explicit null (which .get() cannot distinguish from absence) tells the buyer "
+                "a real booking was simulated just as wrongly as sandbox: true would"
+            ),
         )
 
 
@@ -241,14 +253,21 @@ class TestSandboxMarkerOnTheDryRunBranch:
     """
 
     def test_dry_run_against_a_sandbox_account_is_still_marked(self, integration_db):
-        assert _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True) is True, (
+        wire = _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True)
+        assert wire.get("sandbox") is True, (
             "a dry-run create against a sandbox account carried no sandbox marker; the "
             "early-return branch builds its own response and must set it there"
         )
 
     def test_dry_run_against_a_live_account_is_not_marked(self, integration_db):
         """Negative control — marking every dry run would pass above and misreport the mode."""
-        assert _create_and_read_marker(Transport.REST, account_sandbox=False, dry_run=True) is None, (
-            "a dry-run create against a LIVE account was marked sandbox; dry run is not "
-            "sandbox, and conflating them tells the buyer the wrong thing"
+        wire = _create_and_read_marker(Transport.REST, account_sandbox=False, dry_run=True)
+        assert_omits_paths(
+            wire,
+            ["sandbox"],
+            context=(
+                "dry-run create against a LIVE account — dry run is not sandbox, and an "
+                "explicit null (indistinguishable from absence via .get()) conflates them "
+                "just as wrongly as sandbox: true would"
+            ),
         )

@@ -15,8 +15,12 @@ from typing import TYPE_CHECKING, NamedTuple
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
 if TYPE_CHECKING:
-    # Annotation only: importing models here at runtime would pull the ORM into a
-    # helper the repositories themselves import, which is the cycle uow.py documents.
+    # Annotation only. uow.py imports sandbox_mode_for_buy from this module at
+    # module scope; if this module imported AccountRepository at RUNTIME (not just
+    # for typing), that import would need to load the repositories package, whose
+    # __init__.py imports FROM repositories.uow — the very module currently
+    # importing this one. Runtime import here would therefore cycle back into a
+    # partially-initialized uow.py. TYPE_CHECKING-only avoids it entirely.
     from src.core.database.models import MediaBuy
     from src.core.database.repositories.account import AccountRepository
 
