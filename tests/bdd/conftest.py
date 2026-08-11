@@ -352,7 +352,7 @@ _XFAIL_TAGS: dict[str, str] = {
     # it was waiting on has landed. Step dispatches the real natural-key create on the
     # wire; flips to a pass when auto-provisioning lands. BR-RULE-209 INV-8.
     "T-UC-002-sandbox-natural-key": "natural-key sandbox AUTO-PROVISIONING not implemented in create_media_buy "
-    "(ACCOUNT_NOT_FOUND without prior provisioning) — spec-production gap (salesagent-gh8p.13). "
+    "(ACCOUNT_NOT_FOUND without prior provisioning) — spec-production gap, github.com/prebid/salesagent#1914. "
     "The sandbox response marker itself IS implemented and graded.",
     # FIXME(salesagent-9vgz.1): inline creative upload not persisted in create_media_buy
     # process_and_upload_package_creatives → _sync_creatives_impl should persist

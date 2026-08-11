@@ -118,6 +118,7 @@ from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.database.models import Product as ProductModel
 from src.core.helpers import log_tool_activity
+from src.core.helpers.account_helpers import sandbox_wire_marker
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
     extract_click_url,
@@ -559,6 +560,9 @@ def _execute_adapter_media_buy_creation(
         package_pricing_info: Pricing model info per package
         principal: The Principal object (buyer/advertiser)
         testing_ctx: Optional testing context for dry-run mode
+        tenant: Tenant context, forwarded to get_adapter (identity.tenant if omitted)
+        sandbox: True when the resolved account is a sandbox account. Required,
+            no default — see get_adapter's sandbox parameter for why.
 
     Returns:
         CreateMediaBuyResponse from the adapter
@@ -590,13 +594,10 @@ def _execute_adapter_media_buy_creation(
                 for i, pkg in enumerate(response.packages):
                     # response.packages are now always Package objects
                     logger.info(f"[ADAPTER] Response package {i}: {pkg.package_id}")
-            if sandbox:
-                # AdCP 3.1.1 sandbox.mdx: "Sellers SHOULD include `sandbox: true` in
-                # success responses when processing a sandbox account request." Set here
-                # rather than in the adapter: the mock adapter also serves tenants whose
-                # ad_server is literally "mock", which is NOT a sandbox account, so the
-                # adapter cannot distinguish the two. This funnel knows the account mode.
-                response.sandbox = True
+            # Set here rather than in the adapter: the mock adapter also serves tenants
+            # whose ad_server is literally "mock", which is NOT a sandbox account, so
+            # the adapter cannot distinguish the two. This funnel knows the account mode.
+            response.sandbox = sandbox_wire_marker(sandbox)
         return response
     except Exception as adapter_error:
         import traceback
@@ -1347,7 +1348,7 @@ def push_creative_to_existing_buy(
 
             # Deferred path (no request identity): re-derive the buy's account mode so a
             # creative push against a sandbox buy never reaches a real ad server.
-            assert uow.media_buys is not None
+            # sandbox_mode_by_id asserts uow.media_buys is not None itself.
             adapter = get_adapter(
                 principal,
                 dry_run=False,
@@ -3606,8 +3607,8 @@ async def _create_media_buy_impl(
                 errors=property_list_unsupported_advisories(req.packages, adapter),
                 # This branch returns immediately, so the marker cannot be attached later
                 # as it is on the normal path: a sandbox account's success must carry it
-                # here too (AdCP 3.1.1 sandbox.mdx SHOULD).
-                sandbox=True if identity.sandbox else None,
+                # here too.
+                sandbox=sandbox_wire_marker(identity.sandbox),
             )
             return CreateMediaBuyResult(response=simulated_response, status=AdcpTaskStatus.completed.value)
 
@@ -4146,10 +4147,13 @@ async def _create_media_buy_impl(
         adcp_response = CreateMediaBuySuccess.sync_success(
             media_buy_id=response.media_buy_id,
             packages=response_packages,
-            # AdCP 3.1.1 sandbox.mdx: "Sellers SHOULD include `sandbox: true` in success
-            # responses". Carried from the adapter response because THIS object — not the
-            # adapter's — is what reaches the buyer; setting it upstream alone drops it.
-            sandbox=True if getattr(response, "sandbox", None) else None,
+            # Carried from the adapter response because THIS object — not the adapter's
+            # — is what reaches the buyer; setting it upstream alone drops it. Direct
+            # attribute access, not getattr: response is narrowed to CreateMediaBuySuccess
+            # by the isinstance check above, which declares `sandbox` as a typed field —
+            # a default-argument fallback here would be dead and could mask the field
+            # being renamed or dropped from the base type.
+            sandbox=sandbox_wire_marker(response.sandbox),
             # AdCP 3.1 preferred status; mirrors deprecated `status`. Lifecycle on
             # the wire, from the same single source that drives valid_actions
             # (spec 3.1.1 create-media-buy-response.json;

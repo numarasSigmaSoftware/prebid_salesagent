@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.core.helpers.account_helpers import (
-    account_is_sandbox,
+    _account_is_sandbox,
     partition_by_sandbox_mode,
 )
 from tests.helpers.sandbox_seam import bind_real_sandbox_seam
@@ -123,7 +123,7 @@ class TestUnresolvedAccountRefusesDispatch:
         accounts = _accounts_repo({})  # the referenced account does not exist
 
         with pytest.raises(AdCPAccountNotFoundError) as exc_info:
-            account_is_sandbox(accounts, "acc_missing")
+            _account_is_sandbox(accounts, "acc_missing")
 
         assert "sandbox mode cannot be established" in str(exc_info.value), (
             "the refusal must say why dispatch was refused, not read as a generic not-found"

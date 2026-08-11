@@ -175,7 +175,7 @@ class BuyKeyedSandboxMixin:
         Raises ``AdCPMediaBuyNotFoundError`` for an id that resolves to no row, rather
         than returning False. False here means LIVE — "dispatch this to the tenant's
         real ad server" — decided about a buy that could not be found, which is the
-        fail-OPEN shape ``account_is_sandbox`` refuses one call below for a
+        fail-OPEN shape ``_account_is_sandbox`` refuses one call below for a
         non-resolvable account. Two not-found policies a function apart is how they
         drift. Callers were safe only by ordering (media_buy_create built the adapter
         at :1349 before checking the buy existed at :1359, and was saved by a later

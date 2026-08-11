@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from adcp.types import AccountReference, AccountReferenceById
 
 from tests.harness.transport import Transport, TransportResult
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox, sandbox_modes
@@ -146,7 +145,7 @@ class TestDeliveryAccountScoping:
 class TestUnresolvableAccountRefusesOnTheWire:
     """The fail-closed refusal must reach the buyer as a typed envelope, not a 500.
 
-    ``account_is_sandbox`` raises when a buy's non-null account cannot be resolved,
+    ``_account_is_sandbox`` raises when a buy's non-null account cannot be resolved,
     rather than defaulting to live — refusing to dispatch beats guessing "live" for a
     buy that might be sandbox. Asserting that only as ``pytest.raises`` on the
     in-process exception would grade the raise but not the contract: what the buyer
@@ -196,13 +195,21 @@ class TestDeliveryAdapterModes:
     """SA-010: the account filter is not enough — assert which adapter each buy is read
     through. The scoping tests above pass on returned IDs alone, so replacing
     sandbox_by_buy[...] with False would leave them green (the mocked adapter is
-    mode-agnostic)."""
+    mode-agnostic).
 
-    def _modes_for(self, *, scoped_account: str | None):
+    Parametrized over every wire transport, not MCP alone: a constructed
+    ``AccountReference`` model — the form this class used to send — is not JSON
+    serializable on REST and is rejected by A2A's kwarg-through-JSON path, so an
+    MCP-only oracle graded nothing on two of the three transports it claimed to cover.
+    The wire-shape dict (``_ACCOUNT_REF``) is what every transport actually receives,
+    same as the scoping tests above.
+    """
+
+    def _modes_for(self, *, transport: Transport, scoped_account: str | None):
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
-        suffix = scoped_account or "none"
+        suffix = f"{scoped_account or 'none'}_{transport.value}"
         with DeliveryPollEnv(tenant_id=f"t_mode_{suffix}", principal_id=f"p_mode_{suffix}") as env:
             tenant = TenantFactory(tenant_id=f"t_mode_{suffix}")
             principal = PrincipalFactory(tenant=tenant, principal_id=f"p_mode_{suffix}")
@@ -211,25 +218,34 @@ class TestDeliveryAdapterModes:
             env.set_adapter_response(sandbox_buy.media_buy_id, impressions=1000)
             env.set_adapter_response(live_buy.media_buy_id, impressions=2000)
 
-            kwargs = {"media_buy_ids": [sandbox_buy.media_buy_id, live_buy.media_buy_id]}
+            kwargs: dict = {"media_buy_ids": [sandbox_buy.media_buy_id, live_buy.media_buy_id]}
             if scoped_account is not None:
-                kwargs["account"] = AccountReference(root=AccountReferenceById(account_id=scoped_account))
+                kwargs["account"] = {"account_id": scoped_account}
 
-            env.call_mcp(**kwargs)
+            result = env.call_via(transport, **kwargs)
+            assert not result.is_error, f"[{transport.value}] dispatch failed: {result.error!r}"
 
+            # The adapter mock is patched in-process by the harness regardless of which
+            # transport dispatched the request, so it reflects the real call made by
+            # _get_media_buy_delivery_impl on every transport.
             return env.mock["adapter"]
 
-    def test_sandbox_scoped_request_uses_only_a_sandbox_adapter(self, integration_db):
-        assert_all_sandbox(self._modes_for(scoped_account="acc_sbx"), context="sandbox-scoped delivery")
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_sandbox_scoped_request_uses_only_a_sandbox_adapter(self, integration_db, transport):
+        assert_all_sandbox(
+            self._modes_for(transport=transport, scoped_account="acc_sbx"), context="sandbox-scoped delivery"
+        )
 
-    def test_live_scoped_request_uses_only_a_live_adapter(self, integration_db):
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_live_scoped_request_uses_only_a_live_adapter(self, integration_db, transport):
         """Negative control — 'always sandbox' would pass the test above."""
-        assert_all_live(self._modes_for(scoped_account="acc_live"), context="live-scoped delivery")
+        assert_all_live(self._modes_for(transport=transport, scoped_account="acc_live"), context="live-scoped delivery")
 
-    def test_unscoped_mixed_request_uses_both_modes(self, integration_db):
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+    def test_unscoped_mixed_request_uses_both_modes(self, integration_db, transport):
         """Both buys are in play, each read through the adapter its own account dictates."""
-        modes = sandbox_modes(self._modes_for(scoped_account=None))
+        modes = sandbox_modes(self._modes_for(transport=transport, scoped_account=None))
 
         assert set(modes) == {True, False}, (
-            f"a mixed unscoped request must read each buy through its own mode, got {modes}"
+            f"[{transport.value}] a mixed unscoped request must read each buy through its own mode, got {modes}"
         )

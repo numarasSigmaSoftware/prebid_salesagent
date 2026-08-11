@@ -159,7 +159,7 @@ class TestSandboxMockAdapterConfigIsStated:
 
 
 class TestDanglingAccountReferenceIsSellerSide:
-    """``account_is_sandbox`` on a buy-keyed path: a stale id is a seller-side fault.
+    """``_account_is_sandbox`` on a buy-keyed path: a stale id is a seller-side fault.
 
     This raise is reached from update / performance / delivery / admin, where the buyer
     supplied no account reference — the id came off the seller's own
@@ -184,16 +184,21 @@ class TestDanglingAccountReferenceIsSellerSide:
         """AdCP 3.1.1 accounts-and-agents.mdx:464 pairs ACCOUNT_NOT_FOUND with
         "Check account reference, re-run sync_accounts".
 
-        Emitting the spec's code with a locally-invented remedy gives a buyer parsing
-        this code a second phrasing it has no way to anticipate. If the remedy is ever
-        judged wrong for this path, the fix is a different CODE, not a different
-        suggestion under the same one — which is exactly what this asserts.
+        Scoped to THIS raise — ``_account_is_sandbox``'s buy-keyed dangling-reference
+        path, described in the class docstring above — not a claim that every
+        ACCOUNT_NOT_FOUND raise in this module shares one remedy; the buyer-supplied
+        account_id paths (explicit account_id, natural-key lookup) carry their own,
+        different remedies for a buyer-facing miss. Emitting the spec's code with a
+        locally-invented remedy here gives a buyer parsing this code a second phrasing
+        it has no way to anticipate. If the remedy is ever judged wrong for this path,
+        the fix is a different CODE, not a different suggestion under the same one —
+        which is exactly what this asserts.
         """
         from src.core.exceptions import AdCPAccountNotFoundError
-        from src.core.helpers.account_helpers import account_is_sandbox
+        from src.core.helpers.account_helpers import _account_is_sandbox
 
         with pytest.raises(AdCPAccountNotFoundError) as exc_info:
-            account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
+            _account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
 
         assert exc_info.value.error_code == "ACCOUNT_NOT_FOUND"
         assert exc_info.value.suggestion == "Check account reference, re-run sync_accounts."
@@ -210,7 +215,7 @@ class TestDanglingAccountReferenceIsSellerSide:
 
         with patch.object(account_helpers, "logger") as spy:
             with pytest.raises(AdCPAccountNotFoundError):
-                account_helpers.account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
+                account_helpers._account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
 
         spy.warning.assert_not_called()
         assert spy.error.call_count == 1, "the dangling reference was not logged at ERROR"
@@ -229,6 +234,6 @@ class TestDanglingAccountReferenceIsSellerSide:
         repo.get_by_id.return_value = MagicMock(sandbox=True)
 
         with patch.object(account_helpers, "logger") as spy:
-            assert account_helpers.account_is_sandbox(repo, "acc_ok") is True
+            assert account_helpers._account_is_sandbox(repo, "acc_ok") is True
 
         spy.error.assert_not_called()

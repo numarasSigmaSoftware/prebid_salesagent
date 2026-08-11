@@ -143,7 +143,6 @@ def get_adapter(
         return MockAdServerAdapter(
             {
                 "enabled": True,
-                "dry_run": dry_run,
                 # Stated, not inherited. The tenant's own mock branch below defaults this
                 # to True "for safety" from AdapterConfig; this branch cannot read that
                 # row (the whole point of short-circuiting above is to touch no adapter

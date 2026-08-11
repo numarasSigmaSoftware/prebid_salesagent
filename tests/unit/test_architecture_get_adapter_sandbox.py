@@ -148,12 +148,14 @@ def _one_hop_candidates(value: ast.expr, func: ast.FunctionDef | ast.AsyncFuncti
     """What ``value`` can hold: itself, or what a local of that name is assigned in *func*.
 
     Shared by the identity and literal arms. It exists because production writes the
-    via-local form (``s = <expr>`` then ``sandbox=s``) at 7 of 12 sites, so an arm that
+    via-local form (``s = <expr>`` then ``sandbox=s``) at 4 of 12 sites, so an arm that
     inspects the call's expression directly sees a bare ``Name`` and concludes nothing.
-    The identity arm was extended to follow one hop; its sibling was not, which left
-    ``s = False; sandbox=s`` — the cheapest hard-wire, written in production's own
-    idiom — passing the literal arm at those 7 sites. One resolver now serves both, so
-    a future arm cannot inherit half the fix.
+    (7 of the 12 sites pass a bare ``Name``; 3 of those 7 are forwarded parameters,
+    which resolve to themselves by design — see below — leaving 4 that are genuinely
+    local assignments.) The identity arm was extended to follow one hop; its sibling
+    was not, which left ``s = False; sandbox=s`` — the cheapest hard-wire, written in
+    production's own idiom — passing the literal arm at those 4 sites. One resolver now
+    serves both, so a future arm cannot inherit half the fix.
 
     A bare PARAMETER deliberately resolves to itself: the mode is chosen by the caller,
     which each arm grades on its own. Following parameters would flag a forwarding
@@ -212,16 +214,27 @@ def _identity_sourced_offenders(calls: list[_AdapterCall]) -> list[str]:
     ]
 
 
+def _missing_sandbox_offenders(calls: list[_AdapterCall]) -> list[str]:
+    """Sites with no ``sandbox=`` keyword at all, and not allowlisted.
+
+    The arm applies this to the repo; its self-test applies it to a synthetic module.
+    Extracted so the two cannot diverge — same reasoning as :func:`_hard_wired_offenders`
+    and :func:`_identity_sourced_offenders`: this arm previously inlined its
+    comprehension, so neutering it to ``if False`` left every test in this file green.
+    """
+    return [
+        f"{call.path}:{call.lineno}"
+        for call in calls
+        if call.value is None and f"{call.path}:{call.lineno}" not in KNOWN_EXEMPT
+    ]
+
+
 def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
     """A call site that omits sandbox= silently dispatches sandbox buys to a real adapter."""
     calls = _get_adapter_calls()
     assert calls, "found no get_adapter() calls — the scan roots are wrong"
 
-    missing = [
-        f"{call.path}:{call.lineno}"
-        for call in calls
-        if call.value is None and f"{call.path}:{call.lineno}" not in KNOWN_EXEMPT
-    ]
+    missing = _missing_sandbox_offenders(calls)
 
     assert not missing, (
         "get_adapter() called without an explicit sandbox= decision at:\n  "
@@ -239,20 +252,25 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
 
 
 def test_guard_would_catch_a_regression() -> None:
-    """Self-test with BOTH signs, through the real collector.
+    """Self-test with BOTH signs, through the real offender lister.
 
     This previously re-implemented arm 1's predicate against a synthetic string —
-    ``any(kw.arg == "sandbox" ...)`` — so it graded ``ast``, not the guard. Neutering
-    the arm left it green. It now runs ``_adapter_calls_in`` and reads the same
-    ``value is None`` the arm reads.
+    ``any(kw.arg == "sandbox" ...)`` — so it graded ``ast``, not the guard. It later
+    moved to reading ``_adapter_calls_in`` directly, which exercises the collector but
+    not the ``missing = [...]`` comprehension the arm itself ran — neutering that
+    comprehension to ``if False`` left this test green. It now runs
+    ``_missing_sandbox_offenders``, the same function the arm calls, so neutering the
+    arm reddens its own proof.
     """
     missing = _adapter_calls_in(ast.parse("a = get_adapter(principal, dry_run=False, tenant=t)\n"), "synthetic.py")
     present = _adapter_calls_in(ast.parse("a = get_adapter(principal, sandbox=identity.sandbox)\n"), "synthetic.py")
 
     assert len(missing) == 1 and len(present) == 1, "the collector no longer finds a get_adapter call at all"
-    assert missing[0].value is None, "the collector no longer reports an absent sandbox= — arm 1 would pass vacuously"
-    assert present[0].value is not None, (
-        "the collector reports a present sandbox= as absent — arm 1 would fire on every site"
+    assert _missing_sandbox_offenders(missing), (
+        "the missing arm no longer flags an absent sandbox= — it would pass vacuously"
+    )
+    assert not _missing_sandbox_offenders(present), (
+        "the missing arm flags a present sandbox= as absent — it would fire on every site"
     )
 
 
@@ -344,7 +362,7 @@ def test_literal_arm_catches_both_the_inline_and_the_via_local_form() -> None:
     This previously asserted ``isinstance(_value(tree), ast.Constant)`` — its own copy
     of the predicate — so it stayed green when the arm's comprehension condition was
     neutered, and it never exercised the via-local form at all. That form is the one
-    production writes at 7 of 12 sites, and it is where the arm was blind: ``s = False``
+    production writes at 4 of 12 sites, and it is where the arm was blind: ``s = False``
     followed by ``sandbox=s`` is a hard-wired live dispatch the guard passed.
     """
 
@@ -359,7 +377,7 @@ def test_literal_arm_catches_both_the_inline_and_the_via_local_form() -> None:
         "the literal arm no longer catches an inline constant"
     )
     assert _flags("def f():\n    s = False\n    return get_adapter(p, sandbox=s)\n"), (
-        "the literal arm does not follow a local assignment — this is how it was blind at 7 of 12 sites"
+        "the literal arm does not follow a local assignment — this is how it was blind at 4 of 12 sites"
     )
     assert not _flags("def f(identity):\n    return get_adapter(p, sandbox=identity.sandbox)\n"), (
         "the literal arm flags a legitimate identity-keyed derivation"
@@ -402,9 +420,16 @@ def test_every_exemption_names_a_real_call_site() -> None:
     would ever flag — it forwards a parameter, which the arm does not resolve — so the
     file read as if that path were reviewed and exempted when it was simply invisible.
     Stale entries are how an allowlist grows without anyone deciding to grow it.
+
+    ``literal_sites`` is computed through ``_hard_wires_sandbox`` — the same one-hop
+    resolver the arm itself uses — not a raw ``isinstance(call.value, ast.Constant)``.
+    Both LITERAL_EXEMPT entries happen to be inline today, so the two checks agree; a
+    future exemption written in production's own via-local idiom (``s = False;
+    sandbox=s``) would resolve to a bare ``Name`` under the raw check and be reported
+    stale even though the arm correctly matches and exempts it.
     """
     calls = _get_adapter_calls()
-    literal_sites = {call.site for call in calls if isinstance(call.value, ast.Constant)}
+    literal_sites = {call.site for call in calls if _hard_wires_sandbox(call)}
     identity_sites = {
         call.site for call in calls if call.value is not None and _resolves_to_identity_sandbox(call.value, call.func)
     }

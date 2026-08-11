@@ -140,6 +140,83 @@ def _creative(creative_id: str = "c1", name: str = "Test", **overrides) -> dict:
 
 
 @pytest.mark.requires_db
+class TestSyncCreativesSandboxMarkerTransport:
+    """AdCP 3.1.1 sandbox.mdx SHOULD: a sync_creatives response carries sandbox: true
+    when scoped to a sandbox account. identity.sandbox is populated here (unlike
+    media_buy_create's request-scoped identity) via enrich_identity_with_account in
+    both sync_wrappers entry points before _sync_creatives_impl runs — the property
+    that made this a genuine one-liner marker (issue #1874 tracks the remaining
+    routed operations that cannot be, because their response types either have no
+    sandbox field or need a per-buy rule).
+
+    Uses ``to_account_reference`` to build a real typed ``AccountReference`` rather
+    than a raw dict: unlike the wire transports (MCP/REST), which validate the
+    request body through a Pydantic-typed parameter and coerce a dict automatically,
+    this harness's IMPL and A2A dispatch call ``_sync_creatives_impl`` /
+    ``sync_creatives_raw`` directly with no such boundary, so a raw dict reaches
+    ``enrich_identity_with_account`` unconverted and fails on ``.root`` access. The
+    same typed object works everywhere: REST's ``build_rest_body`` model_dumps it
+    for the JSON body, and MCP's in-memory client accepts it as a tool argument.
+    """
+
+    @staticmethod
+    def _seed_account(env, tenant, principal, *, account_id: str, sandbox: bool) -> None:
+        from tests.factories import AccountFactory, AgentAccountAccessFactory
+
+        AccountFactory(tenant=tenant, account_id=account_id, sandbox=sandbox)
+        # Resolution enforces agent access; without the grant the request fails
+        # authorization before the marker is ever reached.
+        AgentAccountAccessFactory(
+            tenant_id=tenant.tenant_id,
+            principal_id=principal.principal_id,
+            account_id=account_id,
+        )
+
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_sandbox_scoped_sync_carries_the_marker(self, integration_db, transport):
+        from src.core.schema_helpers import to_account_reference
+
+        suffix = transport.value
+        with CreativeSyncEnv(tenant_id=f"t_sbxmark_{suffix}", principal_id=f"p_sbxmark_{suffix}") as env:
+            tenant, principal = env.setup_default_data()
+            self._seed_account(env, tenant, principal, account_id="acc_sbx", sandbox=True)
+
+            result = env.call_via(
+                transport,
+                creatives=[_creative(creative_id=f"c_sbx_{suffix}")],
+                account=to_account_reference({"account_id": "acc_sbx"}),
+            )
+
+        assert result.is_success, f"[{suffix}] dispatch failed: {result.error!r}"
+        assert_envelope(result, transport)
+        assert result.payload.sandbox is True, (
+            f"[{suffix}] sandbox-scoped sync_creatives must carry sandbox: true, got {result.payload.sandbox!r}"
+        )
+
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_live_scoped_sync_omits_the_marker(self, integration_db, transport):
+        """Negative control — 'always sandbox: true' would pass the test above."""
+        from src.core.schema_helpers import to_account_reference
+
+        suffix = transport.value
+        with CreativeSyncEnv(tenant_id=f"t_livemark_{suffix}", principal_id=f"p_livemark_{suffix}") as env:
+            tenant, principal = env.setup_default_data()
+            self._seed_account(env, tenant, principal, account_id="acc_live", sandbox=False)
+
+            result = env.call_via(
+                transport,
+                creatives=[_creative(creative_id=f"c_live_{suffix}")],
+                account=to_account_reference({"account_id": "acc_live"}),
+            )
+
+        assert result.is_success, f"[{suffix}] dispatch failed: {result.error!r}"
+        assert result.payload.sandbox is None, (
+            f"[{suffix}] live-scoped sync_creatives must omit the sandbox marker "
+            f"(None, not False, per AdCP 3.1.1), got {result.payload.sandbox!r}"
+        )
+
+
+@pytest.mark.requires_db
 class TestSyncUpsertReturnsUpdatedTransport:
     """Re-syncing an existing creative returns action="updated" with changes list.
 

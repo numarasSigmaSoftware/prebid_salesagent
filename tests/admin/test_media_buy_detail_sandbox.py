@@ -92,7 +92,7 @@ def _sandbox_spy(monkeypatch) -> MagicMock:
     through ``assert_all_sandbox`` / ``assert_all_live``. The hand-rolled recorder this
     replaced dropped the helper's non-bool guard, so ``sandbox=None`` — falsy, but not an
     explicit live decision — satisfied ``assert not any(seen)`` as though the route had
-    decided correctly. Latent only because ``account_is_sandbox`` coerces with ``bool()``;
+    decided correctly. Latent only because ``_account_is_sandbox`` coerces with ``bool()``;
     the helper exists so that stays true by construction rather than by luck.
 
     Patched at the SOURCE module: the route imports get_adapter inside the request

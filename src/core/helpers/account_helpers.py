@@ -14,12 +14,11 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from adcp.types import AccountReference, AccountReferenceById, AccountReferenceByNaturalKey
 
-from src.core.database.repositories.account import AccountRepository
-
 if TYPE_CHECKING:
     # Annotation only: importing models here at runtime would pull the ORM into a
     # helper the repositories themselves import, which is the cycle uow.py documents.
     from src.core.database.models import MediaBuy
+    from src.core.database.repositories.account import AccountRepository
 
 from src.core.exceptions import (
     AdCPAccountAmbiguousError,
@@ -107,17 +106,28 @@ def sandbox_mode_for_buy(accounts: AccountRepository, media_buy: MediaBuy | None
     Two kinds of caller need this and only one of them can hold a UoW:
     ``BuyKeyedSandboxMixin.sandbox_mode`` delegates here for UoW holders, and paths that
     hold a raw session (the admin detail route) call it directly. Before this existed
-    they open-coded ``account_is_sandbox(repo, buy.account_id)`` instead, which is the
+    they open-coded ``_account_is_sandbox(repo, buy.account_id)`` instead, which is the
     same decision expressed twice — and the shape that let five call sites drift into
     three different forms of the same question.
 
-    The None-buy and unresolvable-account policies are ``account_is_sandbox``'s; see its
+    The None-buy and unresolvable-account policies are ``_account_is_sandbox``'s; see its
     docstring for why those two cases are deliberately not symmetric.
     """
-    return account_is_sandbox(accounts, media_buy.account_id if media_buy is not None else None)
+    return _account_is_sandbox(accounts, media_buy.account_id if media_buy is not None else None)
 
 
-def account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> bool:
+def sandbox_wire_marker(is_sandbox: bool | None) -> bool | None:
+    """AdCP 3.1.1 sandbox.mdx: sellers SHOULD include ``sandbox: true`` in success
+    responses when processing a sandbox account request. ``None``, not ``False``, when
+    not sandbox — the spec asks for the field's presence to signal sandbox, not for an
+    explicit live/non-sandbox assertion. Shared so every success-response builder that
+    sets this marker (media_buy_create, sync_creatives) makes the same True/False-vs-None
+    call rather than each re-deciding it.
+    """
+    return True if is_sandbox else None
+
+
+def _account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> bool:
     """Sandbox mode of an account, for paths that have no ResolvedIdentity.
 
     Deferred execution (the approval executor, creative push, admin routes) runs after
@@ -213,7 +223,7 @@ def partition_by_sandbox_mode[T](
     for item in items:
         account_id = account_id_of(item)
         if account_id not in mode_cache:
-            mode_cache[account_id] = account_is_sandbox(accounts, account_id)
+            mode_cache[account_id] = _account_is_sandbox(accounts, account_id)
         (sandbox_items if mode_cache[account_id] else live_items).append(item)
 
     return sandbox_items, live_items

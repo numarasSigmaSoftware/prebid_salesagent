@@ -715,9 +715,11 @@ async def _get_products_impl(
                 # never called on this path, so the flag is never populated regardless of the
                 # account the buyer sent. Written as the literal it always was, rather than an
                 # expression that reads like a live decision. GetProductsWholesaleRequest.account
-                # exists in the pinned schema and is accepted but never resolved — routing a
-                # sandbox get_products to the mock is tracked separately, and stating False here
-                # does not change behaviour, only what the next reader believes.
+                # exists in the pinned schema but is not exposed on any transport — the MCP
+                # signature, get_products_raw, _get_products_impl, and REST GetProductsBody all
+                # omit it, so no buyer can name a sandbox account here today. Routing a sandbox
+                # get_products to the mock is tracked separately, and stating False here does
+                # not change behaviour, only what the next reader believes.
                 sandbox=False,
             )
 

@@ -409,11 +409,6 @@ def _update_media_buy_impl(
             # ``adcp.server.helpers.MEDIA_BUY_STATE_MACHINE`` for the source of truth.
             _current_mb = uow.media_buys.get_by_id(media_buy_id_to_use)
             _current_status = _current_mb.status if _current_mb else ""
-            # update_media_buy is addressed by media_buy_id and carries no account
-            # reference, so identity.sandbox is structurally False here. The mode must
-            # come from the buy being mutated, or a sandbox buy hits the live adapter.
-            # Passing the already-fetched row avoids a second lookup.
-            _mb_sandbox = uow.sandbox_mode(_current_mb)
             if is_terminal_status(_current_status):
                 raise AdCPGoneError(
                     f"Cannot update media buy in terminal state: {_current_status}",
@@ -423,6 +418,15 @@ def _update_media_buy_impl(
                         f"Create a new media buy to run a new campaign."
                     ),
                 )
+
+            # update_media_buy is addressed by media_buy_id and carries no account
+            # reference, so identity.sandbox is structurally False here. The mode must
+            # come from the buy being mutated, or a sandbox buy hits the live adapter.
+            # Passing the already-fetched row avoids a second lookup. Derived after the
+            # terminal-state check: a terminal buy with a dangling account_id should
+            # reject as INVALID_STATE, not pay an account lookup that could raise
+            # ACCOUNT_NOT_FOUND for a buy that was never going through the adapter anyway.
+            _mb_sandbox = uow.sandbox_mode(_current_mb)
 
             _requested = _requested_actions(req)
             _allowed = set(valid_actions_for_status(_current_status))
