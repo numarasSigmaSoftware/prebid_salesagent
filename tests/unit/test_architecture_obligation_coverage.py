@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit._architecture_helpers import assert_violations_match_allowlist
+
 OBLIGATIONS_DIR = Path(__file__).resolve().parents[2] / "docs" / "test-obligations"
 INTEGRATION_DIR = Path(__file__).resolve().parents[2] / "tests" / "integration"
 UNIT_DIR = Path(__file__).resolve().parents[2] / "tests" / "unit"
@@ -296,4 +298,263 @@ class TestObligationCoverage:
             f"({expected_allowlist_size}). Update the allowlist with:\n"
             f"  python scripts/tag_obligation_ids.py && "
             f"regenerate obligation_coverage_allowlist.json"
+        )
+
+
+def _schema_layer_obligation_ids() -> set[str]:
+    """Obligation IDs declared ``**Layer** schema``.
+
+    The sibling of the behavioral collector above, which filtered
+    ``**Layer** behavioral`` and so left every schema-layer obligation ungraded. A
+    ``Covers:`` tag added to one of those was decoration: deleting it reddened
+    nothing, which is how CONSTR-REPORTING-FREQUENCY-01 could be described as
+    covered while nothing checked it.
+    """
+    ids: set[str] = set()
+    for md in sorted(OBLIGATIONS_DIR.glob("*.md")):
+        lines = md.read_text().splitlines()
+        for i, line in enumerate(lines):
+            m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
+            if m and i + 1 < len(lines) and "**Layer** schema" in lines[i + 1]:
+                ids.add(m.group(1))
+    return ids
+
+
+# Schema-layer obligations with no ``Covers:`` tag today. SHRINK ONLY.
+#
+# 131 of the 327 schema obligations ALREADY carried Covers: tags that
+# nothing graded; ratcheting the 196 uncovered ones turns those into enforced
+# coverage in one step, and makes removing any of their tags fail. Adding an entry
+# here is adding an ungraded obligation and is not allowed; it only shrinks.
+SCHEMA_LAYER_UNCOVERED_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "BR-RULE-005-01",
+        "BR-RULE-006-01",
+        "BR-RULE-007-01",
+        "BR-RULE-011-01",
+        "BR-RULE-012-01",
+        "BR-RULE-018-01",
+        "BR-RULE-039-01",
+        "BR-RULE-045-01",
+        "BR-RULE-051-01",
+        "BR-RULE-062-01",
+        "BR-RULE-064-01",
+        "BR-RULE-069-01",
+        "CONSTR-ADCP-DOMAIN-01",
+        "CONSTR-ADVERTISING-POLICIES-01",
+        "CONSTR-APPROVAL-MODE-01",
+        "CONSTR-ASSET-TYPES-FILTER-01",
+        "CONSTR-ASYNC-RESPONSE-GET-PRODUCTS-01",
+        "CONSTR-AVAILABLE-METRIC-01",
+        "CONSTR-BATCH-FREQUENCY-01",
+        "CONSTR-BILLING-01",
+        "CONSTR-BRAND-MANIFEST-POLICY-01",
+        "CONSTR-BUDGET-AMOUNT-01",
+        "CONSTR-CAPABILITIES-FEATURES-01",
+        "CONSTR-CHANNELS-01",
+        "CONSTR-CONTENT-STANDARDS-CALIBRATION-EXEMPLARS-01",
+        "CONSTR-CONTENT-STANDARDS-SCOPE-01",
+        "CONSTR-CONTEXT-ECHO-01",
+        "CONSTR-CREATIVE-AGENT-ASSET-TYPE-01",
+        "CONSTR-CREATIVE-AGENT-FORMAT-TYPE-01",
+        "CONSTR-CREATIVE-SORT-FIELD-01",
+        "CONSTR-CREATIVE-STATUS-01",
+        "CONSTR-DAILY-SPEND-CAP-01",
+        "CONSTR-DELIVERY-DATE-RANGE-01",
+        "CONSTR-DELIVERY-MODE-01",
+        "CONSTR-DELIVERY-TYPE-01",
+        "CONSTR-DRY-RUN-PREVIEW-01",
+        "CONSTR-END-TIME-01",
+        "CONSTR-EVENT-TYPE-01",
+        "CONSTR-FEEDBACK-SOURCE-01",
+        "CONSTR-FORMAT-ID-STRUCTURE-01",
+        "CONSTR-FORMAT-TYPE-FILTER-01",
+        "CONSTR-GET-MEDIA-BUY-DELIVERY-REQUEST-01",
+        "CONSTR-GET-PRODUCTS-RESPONSE-01",
+        "CONSTR-IS-RESPONSIVE-FILTER-01",
+        "CONSTR-LIST-CREATIVES-FIELDS-01",
+        "CONSTR-MEASUREMENT-PERIOD-01",
+        "CONSTR-MEDIA-BUY-01",
+        "CONSTR-MEDIA-BUY-IDENTIFICATION-01",
+        "CONSTR-METRIC-TYPE-01",
+        "CONSTR-MINIMUM-SPEND-01",
+        "CONSTR-PACING-01",
+        "CONSTR-PACKAGE-01",
+        "CONSTR-PERF-FEEDBACK-CREATIVE-ID-01",
+        "CONSTR-PERF-FEEDBACK-PACKAGE-ID-01",
+        "CONSTR-PERFORMANCE-INDEX-01",
+        "CONSTR-PREVIEW-OUTPUT-FORMAT-01",
+        "CONSTR-PRICING-OPTION-01",
+        "CONSTR-PRICING-OPTION-XOR-01",
+        "CONSTR-PRODUCT-01",
+        "CONSTR-PRODUCT-MIN-CARDINALITY-01",
+        "CONSTR-PROPERTY-LIST-BASE-PROPERTIES-01",
+        "CONSTR-PROPERTY-LIST-FILTERS-01",
+        "CONSTR-PROPERTY-LIST-PAGINATION-01",
+        "CONSTR-PROPERTY-TYPE-01",
+        "CONSTR-PROTOCOLS-01",
+        "CONSTR-PUBLISHER-DOMAINS-FILTER-01",
+        "CONSTR-SAMPLING-METHOD-01",
+        "CONSTR-SI-TERMINATION-REASON-01",
+        "CONSTR-SI-TRANSACTION-ACTION-01",
+        "CONSTR-SIGNAL-CATALOG-TYPES-FILTER-01",
+        "CONSTR-SIGNAL-DELIVER-TO-01",
+        "CONSTR-SIGNAL-MAX-CPM-FILTER-01",
+        "CONSTR-SIGNAL-MAX-RESULTS-01",
+        "CONSTR-SIGNAL-MIN-COVERAGE-FILTER-01",
+        "CONSTR-SIGNAL-SPEC-01",
+        "CONSTR-SORT-DIRECTION-01",
+        "CONSTR-STATUS-FILTER-01",
+        "CONSTR-TARGETING-01",
+        "CONSTR-TASK-STATUS-01",
+        "CONSTR-TASK-TYPE-01",
+        "CONSTR-TASKS-SORT-FIELD-01",
+        "CONSTR-VALIDATION-MODE-01",
+        "CONSTR-WCAG-LEVEL-01",
+        "CONSTR-WEBHOOK-CREDENTIALS-01",
+        "UC-002-ALT-ASAP-START-TIMING-04",
+        "UC-002-ALT-ASAP-START-TIMING-05",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-05",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-07",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-08",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-09",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-10",
+        "UC-002-ALT-PROPOSAL-BASED-MEDIA-11",
+        "UC-002-ALT-WITH-INLINE-CREATIVES-04",
+        "UC-002-CC-MINIMUM-SPEND-PER-01",
+        "UC-002-CC-MINIMUM-SPEND-PER-03",
+        "UC-002-CC-MINIMUM-SPEND-PER-04",
+        "UC-002-CC-SCHEMA-COMPLIANCE-01",
+        "UC-002-CC-SCHEMA-COMPLIANCE-02",
+        "UC-002-CC-SCHEMA-COMPLIANCE-03",
+        "UC-002-EXT-A-02",
+        "UC-002-EXT-A-03",
+        "UC-002-EXT-B-02",
+        "UC-002-EXT-B-03",
+        "UC-002-EXT-C-01",
+        "UC-002-EXT-C-03",
+        "UC-002-EXT-C-05",
+        "UC-002-EXT-D-03",
+        "UC-002-EXT-D-04",
+        "UC-002-EXT-E-02",
+        "UC-002-EXT-F-03",
+        "UC-002-EXT-F-04",
+        "UC-002-EXT-F-05",
+        "UC-002-EXT-G-02",
+        "UC-002-EXT-G-03",
+        "UC-002-EXT-H-01",
+        "UC-002-EXT-H-04",
+        "UC-002-EXT-K-02",
+        "UC-002-EXT-M-02",
+        "UC-002-EXT-M-04",
+        "UC-002-EXT-N-03",
+        "UC-002-EXT-N-05",
+        "UC-002-MAIN-06",
+        "UC-002-MAIN-08",
+        "UC-002-MAIN-11",
+        "UC-002-MAIN-12",
+        "UC-002-MAIN-13",
+        "UC-002-MAIN-16",
+        "UC-002-MAIN-18",
+        "UC-002-SHARED-IMPLEMENTATION-PATTERN-01",
+        "UC-002-UPG-08",
+        "UC-003-ALT-PAUSE-RESUME-CAMPAIGN-04",
+        "UC-003-ALT-UPLOAD-INLINE-CREATIVES-03",
+        "UC-003-EXT-G-02",
+        "UC-004-MAIN-07",
+        "UC-004-MAIN-08",
+        "UC-005-EXT-A-02",
+        "UC-005-EXT-B-06",
+        "UC-005-EXT-B-07",
+        "UC-005-EXT-B-08",
+        "UC-005-EXT-B-09",
+        "UC-005-EXT-B-10",
+        "UC-005-EXT-B-11",
+        "UC-005-EXT-B-12",
+        "UC-005-EXT-B-13",
+        "UC-005-EXT-B-14",
+        "UC-005-EXT-B-15",
+        "UC-005-EXT-B-16",
+        "UC-005-MAIN-MCP-08",
+        "UC-005-MAIN-MCP-09",
+        "UC-007-EXT-C-01",
+        "UC-007-EXT-C-03",
+        "UC-007-EXT-C-04",
+        "UC-007-MAIN-MCP-01",
+        "UC-007-MAIN-MCP-04",
+        "UC-007-MAIN-MCP-08",
+        "UC-007-MAIN-MCP-09",
+        "UC-007-SCHEMA-01",
+        "UC-007-SCHEMA-02",
+        "UC-008-EXT-B-03",
+        "UC-008-MAIN-MCP-03",
+        "UC-008-MAIN-MCP-04",
+        "UC-008-MAIN-MCP-05",
+        "UC-008-MAIN-MCP-06",
+        "UC-009-MAIN-MCP-05",
+        "UC-009-MAIN-MCP-06",
+        "UC-009-SCHEMA-02",
+        "UC-009-SCHEMA-03",
+        "UC-010-EXT-E-01",
+        "UC-010-MAIN-MCP-03",
+        "UC-010-MAIN-MCP-04",
+        "UC-010-SCHEMA-01",
+        "UC-010-SCHEMA-02",
+        "UC-011-EXT-D-02",
+        "UC-011-EXT-E-01",
+        "UC-011-EXT-G-01",
+        "UC-011-EXT-G-02",
+        "UC-011-EXT-G-03",
+        "UC-011-EXT-G-04",
+        "UC-011-MAIN-03",
+        "UC-011-MAIN-05",
+        "UC-011-MAIN-08",
+        "UC-011-MAIN-12",
+        "UC-011-MAIN-16",
+        "UC-011-SCHEMA-02",
+        "UC-011-SCHEMA-03",
+        "UC-011-SCHEMA-04",
+        "UC-011-SCHEMA-05",
+        "UC-012-EXT-A-01",
+        "UC-012-EXT-A-07",
+        "UC-012-EXT-C-05",
+        "UC-012-SCHEMA-03",
+        "UC-012-SCHEMA-04",
+        "UC-013-EXT-A-08",
+        "UC-013-EXT-B-01",
+        "UC-013-EXT-B-09",
+        "UC-013-SCHEMA-06",
+    }
+)
+
+
+class TestSchemaLayerObligationsAreRatcheted:
+    """Schema-layer obligations are graded too, on a shrink-only ratchet."""
+
+    def test_the_collector_finds_schema_obligations(self):
+        """A collector matching nothing would make every assertion below vacuous."""
+        ids = _schema_layer_obligation_ids()
+        assert len(ids) > 100, f"expected hundreds of schema-layer obligations, found {len(ids)}"
+
+    def test_schema_layer_coverage_matches_the_ratchet(self):
+        """Both directions in one assertion, via the shared helper.
+
+        The "stale entries" half is what makes a ``Covers:`` tag load-bearing: an
+        obligation that gained coverage must leave the allowlist, so deleting its tag
+        later cannot silently return it to the allowed set. Without that half the tag
+        is decoration again — the exact defect this class closes.
+
+        Routed through ``assert_violations_match_allowlist`` rather than a hand-rolled
+        pair of set-diffs; ``test_architecture_no_handrolled_allowlist_diff`` enforces
+        that, and caught this guard doing it by hand on the first draft.
+        """
+        uncovered = {(o,) for o in _schema_layer_obligation_ids() - _get_covered_obligations()}
+        assert_violations_match_allowlist(
+            uncovered,
+            {(o,) for o in SCHEMA_LAYER_UNCOVERED_ALLOWLIST},
+            fix_hint=(
+                "a NEW entry means a schema-layer obligation has no `Covers:` tag — add one to the "
+                "test that grades it rather than extending the allowlist, which only shrinks. "
+                "A STALE entry means it is now covered — remove it, so dropping that tag fails here."
+            ),
         )

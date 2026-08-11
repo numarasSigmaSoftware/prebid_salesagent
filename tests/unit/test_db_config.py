@@ -40,14 +40,14 @@ class TestProductionSignalConverged:
     Fly-only deployment serving its admin session cookie without Secure and
     leaving POST /test/auth reachable.
 
-    Convergence is NOT complete, and this class does not claim it is. Eighteen
+    Convergence is NOT complete, and this class does not claim it is. Sixteen
     open-coded production decisions remain, all in admin blueprints and the
     landing page. OPEN_CODED_ALLOWANCE is the shrink-only ratchet over exactly
     those: a new one anywhere fails immediately, and fixing one fails until its
     allowance is lowered, so the count cannot drift back up quietly. A prose
     claim of full convergence is what this replaces -- the previous guard
     checked one regex against four named files and could not have seen any of
-    the eighteen.
+    the sixteen.
     """
 
     # Every remaining site that reads a production signal directly, by file.
@@ -126,6 +126,90 @@ class TestProductionSignalConverged:
             if counts.get(f, 0) < allowed
         }
         assert not stale, f"lower these allowances to what remains (file: found vs allowed): {stale}"
+
+    # SITES the ratchet allows must each carry their FIXME. CLAUDE.md requires a
+    # `# FIXME(#<issue>)` at the SOURCE location of every allowlisted violation, and
+    # the markers were placed once in this table instead -- where the next person
+    # editing src/admin/blueprints/auth.py cannot see them. Placing them was an
+    # instance fix; this is what stops them drifting apart again, since a new site
+    # added with an allowance bump and no marker would otherwise pass.
+    FIXME_MARKER = "FIXME(#1819)"
+
+    # Files whose allowance is NOT an open-coded violation awaiting convergence, so
+    # a FIXME there would be wrong. Reasons mirror the table's own comments.
+    FIXME_EXEMPT = {
+        "src/core/config.py": "the definition itself -- these reads are where the signal is allowed",
+        "src/services/auth_config_service.py": "FLY_APP_NAME consumed as a value, not as a production predicate",
+    }
+
+    def test_every_allowlisted_site_carries_its_fixme_marker(self):
+        """Marker count must EQUAL the allowance, per file.
+
+        Equality, not presence: one marker on a six-site file reads as "this file is
+        tracked" while five sites stay unannotated, which is the same
+        looks-covered-but-isn't shape the allowlist exists to prevent.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        mismatched = {}
+        for rel, allowed in self.OPEN_CODED_ALLOWANCE.items():
+            if rel in self.FIXME_EXEMPT:
+                continue
+            markers = (root / rel).read_text().count(self.FIXME_MARKER)
+            if markers != allowed:
+                mismatched[rel] = {"markers": markers, "allowed": allowed}
+        assert not mismatched, (
+            f"{self.FIXME_MARKER} markers do not match the allowance (file: markers vs allowed): "
+            f"{mismatched} -- CLAUDE.md requires one at each allowlisted source location, so a "
+            "reader of that file learns the site is tracked without consulting this table"
+        )
+
+    def test_the_fixme_exemptions_still_have_allowances(self):
+        """An exemption for a file that left the table hides the next real violation."""
+        orphaned = sorted(set(self.FIXME_EXEMPT) - set(self.OPEN_CODED_ALLOWANCE))
+        assert not orphaned, f"these files are FIXME-exempt but no longer allowlisted: {orphaned}"
+
+    def test_the_documented_remaining_count_matches_the_scan(self):
+        """Both prose statements of "how many remain" must equal the computed number.
+
+        They had drifted three ways at once -- this docstring said "Eighteen",
+        config.py said "sixteen", and the scanner found 16. A number restated in
+        prose in two files is exactly the falsifiable comment these commits set out
+        to remove, so it is derived here rather than re-checked by eye.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        remaining = sum(n for f, n in self.OPEN_CODED_ALLOWANCE.items() if f not in self.FIXME_EXEMPT)
+        words = {
+            10: "ten",
+            11: "eleven",
+            12: "twelve",
+            13: "thirteen",
+            14: "fourteen",
+            15: "fifteen",
+            16: "sixteen",
+            17: "seventeen",
+            18: "eighteen",
+            19: "nineteen",
+            20: "twenty",
+        }
+        word = words.get(remaining)
+        assert word, f"extend the number-word table for {remaining}"
+
+        scanned = sum(n for f, n in self._open_coded_counts().items() if f not in self.FIXME_EXEMPT)
+        assert scanned == remaining, (
+            f"the allowance table totals {remaining} un-converged sites but the scanner finds "
+            f"{scanned} -- the table is stale"
+        )
+
+        for rel, label in (("tests/unit/test_db_config.py", "this file"), ("src/core/config.py", "config.py")):
+            text = (root / rel).read_text().lower()
+            assert word in text, (
+                f"{label} no longer states the remaining count as {word!r} ({remaining} sites) -- "
+                "update the prose; a stale count here is the exact defect this test exists for"
+            )
 
     def test_no_site_still_open_codes_the_bare_presence_check(self):
         """A regression back to a hand-rolled copy at any of the four sites must fail this test."""
@@ -383,13 +467,6 @@ class TestProductionConsequenceListIsComplete:
     deployment was successfully delivering. A prose completeness claim needs a
     mechanism, so this pins the module set rather than the wording.
     """
-
-    EXPECTED_MODULES = {
-        "config.py",
-        "mcp_compat_middleware.py",
-        "product_conversion.py",
-        "webhook_validator.py",
-    }
 
     @staticmethod
     def _modules_gating_on_is_production():

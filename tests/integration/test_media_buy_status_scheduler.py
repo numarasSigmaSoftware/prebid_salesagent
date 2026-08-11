@@ -836,3 +836,63 @@ async def test_status_sweep_summary_accounts_for_every_selected_buy(integration_
             f"unchanged={summary.unchanged} no_flight_window={summary.no_flight_window} "
             f"errors={summary.errors}) — some path left the loop without counting"
         )
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db):
+    """A sweep that transitioned nothing must still say what it looked at.
+
+    The twin of test_batch_summary_distinguishes_suppressed_from_idle on the
+    delivery scheduler. The summary line used to be wrapped in
+    ``if updated_count > 0``, so a sweep over any number of rows that needed no
+    transition emitted NOTHING — indistinguishable in the log from a sweep that
+    selected nothing at all. An operator cannot tell a healthy idle scheduler from
+    one whose whole population is stuck.
+
+    The counters were already graded by the partition test; this grades the LINE,
+    which is the part an operator actually reads. Without it, re-wrapping the log
+    in its old condition leaves the suite green — the code was swept and the test
+    was not, which is the shape this whole round is about.
+
+    Spies the module logger rather than using caplog, for the reason the sibling
+    records: caplog depends on global logging state other tests mutate, so a
+    caplog version passes alone and captures nothing in the full suite.
+    """
+    from unittest.mock import patch
+
+    from tests.factories import MediaBuyFactory
+    from tests.harness._base import IntegrationEnv
+
+    with IntegrationEnv(tenant_id="t_sweep_log", principal_id="p_sweep_log") as env:
+        tenant, principal = env.setup_default_data()
+        # Already active mid-flight: selected, needs no transition.
+        MediaBuyFactory(
+            tenant=tenant,
+            principal=principal,
+            media_buy_id="mb_sweep_noop",
+            status="active",
+            start_date=(datetime.now(UTC) - timedelta(hours=1)).date(),
+            end_date=(datetime.now(UTC) + timedelta(days=7)).date(),
+            start_time=datetime.now(UTC) - timedelta(hours=1),
+            end_time=datetime.now(UTC) + timedelta(days=7),
+        )
+
+        lines: list[str] = []
+
+        def capture(msg, *args, **kwargs):
+            lines.append(msg % args if args else msg)
+
+        with patch("src.services.media_buy_status_scheduler.logger.info", side_effect=capture):
+            summary = await MediaBuyStatusScheduler()._update_statuses()
+
+        assert summary.updated == 0, f"seeding no longer produces a no-op sweep (updated={summary.updated})"
+        sweep = [line for line in lines if "Status sweep:" in line]
+        assert sweep, (
+            f"a sweep that changed nothing emitted no summary line (saw {lines!r}) — "
+            "silence here is indistinguishable from having selected nothing"
+        )
+        assert "1 unchanged" in sweep[-1], f"the selected-but-unchanged buy is invisible in the summary: {sweep[-1]!r}"
+        assert "of 1 selected" in sweep[-1], (
+            f"the summary must report against the selection, not just the buckets: {sweep[-1]!r}"
+        )

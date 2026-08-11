@@ -168,7 +168,6 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-003-main": "implementation_date, budget, sandbox not populated in update response — spec-production gap",
     "T-UC-003-alt-timing": "implementation_date not populated in update response — spec-production gap",
     # FIXME(salesagent-ghgx): UC-003 pause — sandbox flag not populated in update response
-    "T-UC-003-alt-pause": "sandbox not populated in pause response — spec-production gap",
     # FIXME(salesagent-ghgx): UC-003 optimization_goals — affected_packages empty in response
     "T-UC-003-alt-optimization-goals": "affected_packages not populated for optimization_goals changes — spec-production gap",
     # FIXME(salesagent-javy): UC-003 ext-t — invoice_recipient authorization (BR-RULE-214) not implemented;
@@ -192,8 +191,6 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-005-inv-031-1-holds": "adcp 3.12: type filter removed — combined type+asset_types AND filter not possible",
     "T-UC-005-inv-031-1-violated": "adcp 3.12: type filter removed — combined type+asset_types AND filter not possible",
     "T-UC-005-inv-031-2-holds": "adcp 3.12: type field removed — sort by type then name not possible",
-    "T-UC-005-inv-049-1-holds": "adcp 3.12: type filter removed from ListCreativeFormatsRequest",
-    "T-UC-005-inv-049-1-violated": "adcp 3.12: type filter removed from ListCreativeFormatsRequest",
     # Un-graduated: T-UC-005-sandbox-happy — sandbox=True not set on response (all transports)
     "T-UC-005-sandbox-happy": "sandbox mode not implemented in list_creative_formats response — spec-production gap",
     # Un-graduated: T-UC-005-sandbox-validation — sandbox validation not triggered (all transports)
@@ -316,7 +313,6 @@ _XFAIL_TAGS: dict[str, str] = {
     # Schema-level validate_pricing_option() enforces XOR but _validate_pricing_model_selection()
     # works at ORM level (is_fixed + rate + price_guidance) and doesn't check for both/neither.
     "T-UC-002-inv-006-3": "pricing XOR invariant (both set) not validated in create flow — spec-production gap",
-    "T-UC-002-inv-006-4": "pricing XOR invariant (neither set) error lacks suggestion field — spec-production gap",
     # RESOLVED(salesagent-bo6): budget positivity validation now works — removed stale xfail T-UC-002-inv-008-2
     # FIXME(salesagent-9vgz.27): ASAP case sensitivity error code mismatch
     # Production: Pydantic rejects "ASAP" → ValidationError, spec expects INVALID_REQUEST.
@@ -694,9 +690,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # T-UC-003-ext-m / -ext-m-unsupported pass; xfails removed.
             # T-UC-003-ext-n moved to a dedicated STRICT xfail below (production gap).
             # Graduated: T-UC-003-ext-o (rczc: adapter failure returns correct shape on all 4 transports)
-            "T-UC-003-ext-q-rejected": "production doesn't reject updates to terminal-status media buys",
-            "T-UC-003-ext-q-canceled": "production doesn't reject updates to terminal-status media buys",
-            "T-UC-003-ext-q-completed": "production doesn't reject updates to terminal-status media buys",
             "T-UC-003-ext-r-keyword": "production doesn't validate keyword operation conflicts",
             "T-UC-003-ext-r-negative": "production doesn't validate negative keyword conflicts",
         }
@@ -1124,10 +1117,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         _UC004_XFAIL_TAGS: dict[str, tuple[str, bool]] = {
             # Empty array validation: schema allows [] but spec says reject
             "T-UC-004-identify-empty": ("empty media_buy_ids=[] not rejected by schema", True),
-            "T-UC-004-identify-buyer-refs-empty": (
-                "buyer_refs removed in adcp 3.12 — empty buyer_refs=[] is now an unknown field, silently ignored",
-                True,
-            ),
             # Invalid status filter: NOT a production gap — the generic
             # 'with {request_params}' When step shadows the specific
             # status_filter step and parses 'status_filter "X"' (no '=') to {},
@@ -2290,7 +2279,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "T-UC-026-alt-keyword-remove-noop",
             "T-UC-026-alt-negative-keyword-add",
             "T-UC-026-alt-negative-keyword-remove-noop",
-            "T-UC-026-alt-dedup",
             # Graduated: T-UC-026-alt-dedup-crossbuy (all 4 transports pass)
             # Extension error scenarios — error codes/suggestions not implemented
             # Graduated: T-UC-026-ext-a (all 4 transports pass)
@@ -2309,7 +2297,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "T-UC-026-ext-i",
             # Invariant scenarios — production validation gaps
             # Graduated: T-UC-026-inv-194-1 (all 4 transports pass)
-            "T-UC-026-inv-194-2",
             "T-UC-026-inv-195-1",
             "T-UC-026-inv-195-2",
             # Graduated: T-UC-026-inv-195-3 (rczc: bid_price ceiling semantics pass all 4 transports)
