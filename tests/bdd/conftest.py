@@ -321,11 +321,24 @@ _XFAIL_TAGS: dict[str, str] = {
     # FIXME(salesagent-9vgz.27): ASAP case sensitivity error code mismatch
     # Production: Pydantic rejects "ASAP" → ValidationError, spec expects INVALID_REQUEST.
     "T-UC-002-inv-013-5": "INVALID_REQUEST error code not implemented for wrong-case ASAP — spec-production gap",
-    # FIXME(salesagent-9vgz.94): sandbox mode not implemented in create_media_buy
-    # CreateMediaBuyResult has no sandbox field; no sandbox suppression logic exists.
-    # sandbox-production passes vacuously (sandbox absent from response by default).
-    "T-UC-002-sandbox-happy": "sandbox mode not implemented in create_media_buy — spec-production gap",
-    "T-UC-002-sandbox-validation": "sandbox mode not implemented in create_media_buy — spec-production gap",
+    # Sandbox mode IS implemented in create_media_buy — the reason these two carried
+    # ("CreateMediaBuyResult has no sandbox field; no sandbox suppression logic exists")
+    # is no longer true. A sandbox account reference selects the mock adapter before any
+    # AdapterConfig read, and the response carries `sandbox: true`, graded on real wire
+    # bytes across mcp/a2a/rest by
+    # tests/integration/test_create_media_buy_account_wire.py::TestSandboxMarkerReachesTheBuyer
+    # (and ::TestSandboxMarkerOnTheDryRunBranch for the early-return path).
+    #
+    # These two are ALSO not parked by these entries: they xfail earlier, at the UC-002
+    # harness gate ("harness not yet wired for non-extension scenarios"), so deleting them
+    # changes nothing today. Kept with an accurate reason so whoever wires that harness
+    # inherits a true statement instead of a resolved gap — a reason that asserts
+    # something already fixed is how a scenario stays parked after the work it waited on
+    # landed. Whether they then pass is a harness question, not a production one.
+    "T-UC-002-sandbox-happy": "UC-002 harness not wired for this scenario; the sandbox marker and "
+    "adapter suppression it grades ARE implemented — re-check when the harness reaches it",
+    "T-UC-002-sandbox-validation": "UC-002 harness not wired for this scenario; sandbox validation "
+    "is production validation (no separate path) — re-check when the harness reaches it",
     # FIXME(salesagent-gh8p.13 / production-gap bead): natural-key sandbox resolution
     # without prior provisioning is unimplemented. _resolve_by_natural_key
     # (account_helpers.py:110) requires the sandbox account to already exist —
