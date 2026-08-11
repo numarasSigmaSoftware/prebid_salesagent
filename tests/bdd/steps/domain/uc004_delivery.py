@@ -1074,6 +1074,7 @@ def when_boundary_daily_breakdown(ctx: dict, value: str) -> None:
 @when(parsers.parse("the Buyer Agent requests delivery metrics with account {value}"))
 def when_partition_account(ctx: dict, value: str) -> None:
     """Partition test: account value."""
+    _seed_decoy_buy_on_another_account(ctx, value)
     _seed_valid_account_if_named(ctx, value)
     _dispatch_partition(ctx, "account", value)
 
@@ -1081,6 +1082,7 @@ def when_partition_account(ctx: dict, value: str) -> None:
 @when(parsers.parse("the Buyer Agent requests delivery metrics at account boundary {value}"))
 def when_boundary_account(ctx: dict, value: str) -> None:
     """Boundary test: account value."""
+    _seed_decoy_buy_on_another_account(ctx, value)
     _seed_valid_account_if_named(ctx, value)
     _dispatch_partition(ctx, "account", value)
 
@@ -2696,6 +2698,8 @@ def _delivery_boundary_handler(ctx: dict, field: str, expected: str) -> bool:
         assert resp is not None, f"Expected delivery response for valid '{field}' boundary"
         deliveries = getattr(resp, "media_buy_deliveries", None) or []
         assert deliveries, f"Valid '{field}' boundary: expected non-empty media_buy_deliveries"
+        if field.strip().lower() == "account":
+            _assert_account_scope(ctx, deliveries)
     return True
 
 
@@ -2715,6 +2719,14 @@ def _assert_valid_content(ctx: dict, field: str) -> None:
                     assert actual_status in requested_filter, (
                         f"Status filter violation: got status '{actual_status}' but filter requested {requested_filter}"
                     )
+
+    elif field == "account":
+        # The live Then step for the account rows lands here, not on the generic
+        # boundary handler — so the scope assertion has to be in both places or it
+        # grades nothing. Same helper, two dispatch paths.
+        deliveries = getattr(resp, "media_buy_deliveries", None) or []
+        assert deliveries, f"Valid {field}: expected non-empty deliveries"
+        _assert_account_scope(ctx, deliveries)
 
     elif field == "resolution":
         deliveries = getattr(resp, "media_buy_deliveries", None) or []
@@ -3010,6 +3022,11 @@ def _ensure_media_buy_in_db(
     # Record what THIS scenario created, so a later account association can be scoped to
     # exactly these buys rather than sweeping every unassociated buy in the tenant.
     ctx.setdefault("scenario_media_buy_ids", []).append(mb_id)
+    # The OWNER too: a later step that needs a comparable buy (the account-scope decoy)
+    # must use this principal, not the env's. Ownership filtering runs before the account
+    # filter, so a decoy owned by anyone else is removed for the wrong reason and its
+    # absence from the response proves nothing about scoping.
+    ctx.setdefault("scenario_buy_principal_key", principal_key)
 
 
 def _parse_request_params(params_str: str) -> dict[str, Any]:
@@ -3132,6 +3149,98 @@ def _associate_scenario_buys_with(ctx: dict, account_id: str) -> None:
         )
 
     env.associate_buys_with_account(buy_ids, account_id)
+
+
+_DECOY_ACCOUNT_ID = "acc_decoy_other_account"
+_DECOY_BUY_ID = "mb-decoy-other-account"
+
+
+def _seed_decoy_buy_on_another_account(ctx: dict, value: str) -> None:
+    """Create a buy on a DIFFERENT account, so account scoping has something to exclude.
+
+    Without it the account rows assert only that ``media_buy_deliveries`` is non-empty.
+    That check can fail when scoping is too TIGHT and can never fail when scoping is
+    ABSENT — and absent is the direction the query change moved. Deleting
+    ``account_id=identity.account_id`` from the delivery query left the whole UC-004
+    module green, because a scenario with one buy cannot tell "scoped correctly" from
+    "not scoped at all".
+
+    The decoy is owned by the same principal, so ownership filtering does not remove it
+    and only the account filter can. It is recorded in ctx for the Then step, which
+    asserts both directions: excluded when the request names an account, PRESENT when the
+    account field is omitted. The second half is what proves the exclusion comes from
+    scoping rather than from the decoy never having been visible.
+    """
+    env = ctx.get("env")
+    if env is None or not hasattr(env, "_session"):
+        return
+
+    ctx["account_boundary_named"] = value.strip() not in ("(field absent)", "(omitted)", "(not provided)")
+    if ctx.get("account_decoy_buy_id"):
+        return
+
+    tenant = ctx.get("db_tenant")
+    # The scenario's OWN buy owner — see the note where this key is recorded. Using the
+    # env's principal instead produced a decoy that ownership filtering removed before
+    # the account filter ever saw it, so the exclusion assertion passed while grading
+    # nothing (the omitted-field control caught it).
+    owner = ctx.get(ctx.get("scenario_buy_principal_key", ""))
+    if tenant is None or owner is None:
+        raise AssertionError(
+            "cannot seed the account-scope decoy buy: db_tenant or the scenario buy's "
+            "principal is missing (the media-buy Given must run first). Skipping silently "
+            "would leave the account assertion unable to fail in the direction that matters."
+        )
+
+    from tests.bdd.steps.generic._account_resolution import seed_account_with_access
+    from tests.factories import MediaBuyFactory
+
+    seed_account_with_access(
+        tenant,
+        owner,
+        account_id=_DECOY_ACCOUNT_ID,
+        status="active",
+        brand_domain="decoy-corp.example",
+        operator="decoy-corp.example",
+    )
+    MediaBuyFactory(tenant=tenant, principal=owner, media_buy_id=_DECOY_BUY_ID, status="active")
+    env.associate_buys_with_account([_DECOY_BUY_ID], _DECOY_ACCOUNT_ID)
+    # The decoy needs adapter data for the same reason the scenario's own buy does: a
+    # targeted buy whose adapter read fails degrades into errors[] rather than appearing
+    # in media_buy_deliveries. Without it the decoy is missing from an UNSCOPED response
+    # too, and "excluded when an account is named" would prove nothing.
+    env.set_adapter_response(media_buy_id=_DECOY_BUY_ID)
+    ctx["account_decoy_buy_id"] = _DECOY_BUY_ID
+
+
+def _assert_account_scope(ctx: dict, deliveries: list) -> None:
+    """The account filter returns the named account's buys and no others.
+
+    AdCP 3.1.1 defines ``account`` on get_media_buy_delivery as a FILTER
+    ("Filter delivery data to a specific account" —
+    dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json), so this grades the
+    filter in both directions against a decoy buy on another account.
+    """
+    decoy = ctx.get("account_decoy_buy_id")
+    assert decoy, (
+        "no decoy buy was seeded for an account row — the scope assertion below would "
+        "grade nothing. _seed_decoy_buy_on_another_account must run in the When step."
+    )
+    returned = {getattr(d, "media_buy_id", None) for d in deliveries}
+    if ctx.get("account_boundary_named"):
+        assert decoy not in returned, (
+            f"the request named an account, but delivery for {decoy!r} — which belongs to a "
+            f"different account — came back too (returned: {sorted(str(r) for r in returned)}). "
+            "A sandbox-scoped request that pulls in another account's buys reads it through "
+            "that account's adapter, which is the scoping hole this filter closes."
+        )
+    else:
+        assert decoy in returned, (
+            f"the account field was omitted, so every buy the principal owns should be "
+            f"returned, but {decoy!r} is missing (returned: {sorted(str(r) for r in returned)}). "
+            "Without this the exclusion above could pass because the decoy is never visible "
+            "at all, which would grade nothing."
+        )
 
 
 def _seed_valid_account_if_named(ctx: dict, value: str) -> None:
