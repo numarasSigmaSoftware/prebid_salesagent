@@ -373,10 +373,10 @@ Source: BR-UC-004-alt-webhook.md
 **Layer** behavioral
 **Given** a daily reporting frequency
 **When** a scheduled delivery is sent
-**Then** `next_expected_at` is the start of the next UTC day — strictly ahead of the current delivery and at most 24 hours after it
+**Then** for the **delivery-webhook scheduler** emitter, `next_expected_at` is the start of the next UTC day — strictly ahead of the current delivery and at most 24 hours after it
 **Business Rule** Alt-webhook step 6, POST-S10
 **Priority** P2
-**Note** Previously read "approximately 24 hours after current delivery", which no emitter on this path has ever produced: the scheduler computes `utc_flight_start(today + 1 day)`, so a delivery sent at 23:50 UTC carries a `next_expected_at` ten minutes later. The drift survived because the covering tests asserted date-time *shape* only; `assert_next_expected_at_is_next_utc_midnight` now grades the instant.
+**Note** Previously read "approximately 24 hours after current delivery" unscoped. Two emitters disagree, and the obligation had silently picked one: the scheduler computes `utc_flight_start(today + 1 day)` (so a 23:50 UTC delivery carries a `next_expected_at` ten minutes later), while `webhook_delivery_service` emits `now + next_expected_interval_seconds` — approximately 24 hours. The drift survived either way because the covering tests asserted date-time *shape* only; `assert_next_expected_at_is_next_utc_midnight` now grades the instant for the scheduler emitter. Which semantics is correct is a spec question, NOT settled here — tracked with the wider emitter convergence in [#1624](https://github.com/prebid/salesagent/issues/1624). Related, same issue: the scheduler promises the next UTC midnight while `_should_skip_send` dedups on a 24h rolling window from the last successful send, so a late-evening send promises a notification that dedup then suppresses.
 
 #### Scenario: Webhook payload signed with HMAC-SHA256
 **Obligation ID** UC-004-ALT-WEBHOOK-PUSH-REPORTING-07

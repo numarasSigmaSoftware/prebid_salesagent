@@ -254,11 +254,25 @@ def assert_next_expected_at_is_next_utc_midnight(payload: dict, *, context: str)
     ONLY: a value can be a perfectly-shaped date-time and still name the wrong
     instant, so shape alone leaves the cadence itself ungraded.
 
-    UC-004-ALT-WEBHOOK-PUSH-REPORTING-06 read "approximately 24 hours after
-    current delivery" — behaviour no emitter on this path has. The scheduler
-    computes ``utc_flight_start(today + 1 day)``, so the gap is 0-24h: a
-    delivery sent at 23:50 UTC gets a next_expected_at ten minutes later. The
-    obligation was corrected to match the emitter; this pins it.
+    Scoped to the SCHEDULER emitter. UC-004-ALT-WEBHOOK-PUSH-REPORTING-06 read
+    "approximately 24 hours after current delivery", which the scheduler does
+    not do: it computes ``utc_flight_start(today + 1 day)``, so the gap is
+    0-24h and a delivery sent at 23:50 UTC gets a next_expected_at ten minutes
+    later.
+
+    That wording was NOT describing nothing. ``webhook_delivery_service``
+    emits ``now + next_expected_interval_seconds`` (the harness passes
+    86400.0), i.e. approximately 24 hours — so the obligation matched the
+    OTHER emitter. Do not read the correction as "the obligation was wrong";
+    read it as "the two emitters disagree, and the obligation had silently
+    picked one". Which semantics is correct needs a spec decision, tracked in
+    #1624; do NOT apply this rule to the webhook_delivery_service payload
+    until that lands.
+
+    A second tension the scheduler side carries, also for #1624: it promises
+    the next UTC midnight while ``_should_skip_send`` dedups on a 24h rolling
+    window from the last successful send, so a 23:50 UTC send promises a
+    notification ten minutes later that dedup then suppresses for ~24h.
 
     Asserted as an INSTANT (exact UTC midnight, strictly ahead, at most 24h
     out) rather than as a gap from a test-side clock. A gap assertion would

@@ -112,12 +112,27 @@ dump_server_logs() {
     # EXIT trap has already deleted them by the time the step runs, so such a
     # step matches nothing and prints nothing while still reporting success —
     # which reads as "no logs were produced" rather than "we looked too late".
+    # Two passes per container, because a plain tail does not find the failure.
+    # The first attempt used --tail 400 and captured 17:34:44-17:35:27 while the
+    # failures were at 17:31:42: the scheduler logs an INFO line every
+    # DELIVERY_WEBHOOK_INTERVAL seconds (5 in the e2e stack), so a fixed tail is
+    # mostly heartbeat and the interesting window has already scrolled off. The
+    # filtered pass is therefore the one that matters; the raw tail is the
+    # fallback for a failure whose signature isn't in the pattern.
     local c
     for c in $(docker ps -a --format '{{.Names}}' \
         | grep -E "^${COMPOSE_PROJECT_NAME}-(adcp-server-[0-9]+|server(-gw[0-9]+)?)$" || true); do
-        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::server logs: $c"; fi
-        echo "----- $c -----"
-        docker logs --tail 400 "$c" 2>&1 || true
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::server errors: $c"; fi
+        echo "----- $c (filtered: tracebacks + errors, whole log) -----"
+        # -A 30 so a Traceback header carries its frames, not just the header.
+        docker logs "$c" 2>&1 \
+            | grep -E -A 30 'Traceback \(most recent call last\)|ERROR|CRITICAL|Exception|500 Internal Server Error' \
+            | tail -600 || echo "(no error-shaped lines matched)"
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi
+
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::server tail: $c"; fi
+        echo "----- $c (raw tail) -----"
+        docker logs --tail 3000 "$c" 2>&1 || true
         if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi
     done
 }

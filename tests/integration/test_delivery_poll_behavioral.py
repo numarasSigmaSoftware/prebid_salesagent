@@ -840,6 +840,101 @@ class TestConcurrentFinalWebhookClaim:
 
 
 @pytest.mark.requires_db
+class TestClaimIsReleasedWhenPreSendWorkRaises:
+    """Everything between the committed claim and the POST must release the claim on a raise.
+
+    Allocating ``sequence_number`` under the claim (rather than ~130 lines ahead of
+    it) put three raise-capable calls between the COMMITTED claim and the ``try``
+    that owns its release: the sequence read, the idempotency-key read, and the
+    payload build. A failure in any of them left the claim held for the full lease
+    with no release — and because the two claims are mutually exclusive, a stranded
+    FINAL claim also blocks the buy's PERIODIC sends, so one raise stalled both
+    types until the lease aged out.
+
+    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-04
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_raise_before_the_send_releases_both_claim_axes(self, integration_db):
+        """A sequence-read failure releases the final claim and leaves the periodic claim takeable."""
+        from unittest.mock import patch
+
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            mb_id = buy.media_buy_id
+            scheduler = DeliveryWebhookScheduler()
+
+            # Fail the FIRST raise-capable call after the claim. Patched on the
+            # repository class, so this exercises the real scheduler control flow
+            # rather than a stubbed scheduler method.
+            with patch.object(
+                DeliveryRepository, "get_max_sequence_number", side_effect=RuntimeError("sequence read failed")
+            ):
+                with pytest.raises(RuntimeError, match="sequence read failed"):
+                    await scheduler._send_report_for_media_buy(
+                        buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+                    )
+
+            session = env.get_session()
+            session.expire_all()
+            refreshed = MediaBuyRepository(session, "t1").get_by_id(mb_id)
+            assert refreshed.final_webhook_claimed_at is None, (
+                "a raise between the claim and the POST must release the final claim, "
+                "not strand the buy for the full lease"
+            )
+            # The mutual-exclusion term means a leaked FINAL claim also blocks the
+            # PERIODIC one, so assert the second axis is genuinely free — the leak's
+            # real blast radius, which a final-only assertion would miss.
+            assert refreshed.last_periodic_webhook_claimed_at is None
+            now = datetime.now(UTC)
+            assert MediaBuyRepository(session, "t1").try_claim_periodic_webhook(
+                mb_id, now=now, stale_before=now, final_stale_before=now
+            ), "a released final claim must leave the periodic claim immediately takeable"
+
+    @pytest.mark.asyncio
+    async def test_losing_the_claim_allocates_no_sequence_number(self, integration_db):
+        """A worker that loses the claim must not read a sequence number at all.
+
+        This is the ordering oracle for "sequence allocated UNDER the claim". Move
+        the allocation back above the claim and this reddens: a loser would reach
+        ``get_max_sequence_number`` before discovering it lost. Asserting the
+        ordering behaviorally — through who calls what — rather than by re-deriving
+        the scheduler's own line order, which would grade nothing.
+        """
+        from unittest.mock import patch
+
+        from src.core.database.repositories.delivery import DeliveryRepository
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            # A concurrent worker already holds a fresh claim, so this call loses it.
+            session = env.get_session()
+            buy.final_webhook_claimed_at = datetime.now(UTC)
+            session.commit()
+
+            scheduler = DeliveryWebhookScheduler()
+            with patch.object(
+                DeliveryRepository, "get_max_sequence_number", wraps=DeliveryRepository.get_max_sequence_number
+            ) as spy:
+                sent = await scheduler._send_report_for_media_buy(
+                    buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
+                )
+
+            assert sent is False, "a worker that loses the claim must not report a send"
+            assert spy.call_count == 0, (
+                "a losing worker allocated a sequence number — the allocation is above the "
+                "claim again, which lets a stale read survive across the claim window"
+            )
+
+
+@pytest.mark.requires_db
 class TestConcurrentPeriodicWebhookClaim:
     """Periodic (non-final) webhooks are ALSO serialized across concurrent workers.
 

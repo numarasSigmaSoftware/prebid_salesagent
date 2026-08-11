@@ -641,12 +641,21 @@ class DeliveryWebhookScheduler:
         (no delivery data, no URL, or the claim was lost to a concurrent worker);
         RAISES on a failed send so the batch counts an error.
 
-        The atomic CLAIM — final or periodic, per ``is_final`` — is taken here,
-        immediately before the POST — so the no-send checks above it never hold a
-        claim — and is RELEASED (token-guarded) if the send fails or the claim is
-        lost, so an immediate retry isn't blocked for the whole lease. A
-        successful POST keeps the claim; the crash-after-POST duplicate window is
-        the best-effort residual tracked in #1606.
+        The atomic CLAIM — final or periodic, per ``is_final`` — is taken after
+        the no-send checks (so those never hold a claim) and BEFORE the sequence
+        allocation, so the number is read under it. It is NOT taken "immediately
+        before the POST": the sequence read, the idempotency-key read and the
+        payload build all run while it is held, and each of them can raise. All
+        of them therefore sit inside the ``try`` that RELEASES the claim
+        (token-guarded), so a raise anywhere between the claim and the POST frees
+        the buy instead of stranding it for the lease — which, with the two claims
+        mutually exclusive, would have stalled BOTH notification types for that
+        buy, not just this one. Graded by
+        ``TestClaimIsReleasedWhenPreSendWorkRaises``; narrowing that ``try`` back
+        to the POST alone reddens it.
+
+        A successful POST keeps the claim; the crash-after-POST duplicate window
+        is the best-effort residual tracked in #1606.
         """
         # Reporting period for daily frequency: yesterday (full day).
         start_date_obj = datetime.now(UTC).date() - timedelta(days=1)
@@ -789,55 +798,62 @@ class DeliveryWebhookScheduler:
         if claim_token is None:
             return False
 
-        # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
-        # sequence + 1 (spec: "Sequential notification number ... starts at
-        # 1"). Failed/retrying sends also log the sequence they attempted;
-        # counting them — while the dedup above counts only successes —
-        # would burn numbers the buyer never received, so a buyer's
-        # first-ever webhook could start above 1. A query failure
-        # propagates and aborts this send loudly: a quiet fallback to 1
-        # would put an already-consumed sequence on the wire.
+        # EVERYTHING below runs under the claim, so it all belongs inside the try
+        # that releases it. The sequence read, the idempotency-key read and the
+        # payload build can each raise; before this block covered them, such a
+        # raise left the claim COMMITTED and unreleased, stranding the buy for the
+        # full lease — and, because the two claims are now mutually exclusive, that
+        # stranded BOTH notification types, not just this one.
         #
-        # Allocated UNDER the claim. Read before it, the number was decided in a
-        # window any number of other workers could also be reading in — the claim
-        # would then serialize the POSTs while both carried the same sequence,
-        # which is not what "atomic claim" buys you. Here the claim is already
-        # held, so the value reflects every delivery committed up to this point
-        # and no concurrent sender can be between its own read and its own POST.
-        sequence_number = (
-            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
-        )
-        delivery_response.sequence_number = sequence_number
-
-        # A failed delivery does not consume its sequence number. Reuse the
-        # prior attempt's key when the scheduler retries the same logical
-        # notification in a later invocation.
-        idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
-            media_buy.media_buy_id,
-            task_type=DELIVERY_TASK_TYPE,
-            notification_type=derived,
-            sequence_number=sequence_number,
-        )
-
-        # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
-        # Serialize via webhook_payload(): the schema scopes aggregated_totals to
-        # "API responses (get_media_buy_delivery), not webhook notifications", and
-        # this is the exclusion seam (it also drops None fields, preserving the
-        # final-omits-next_expected_at contract).
-        media_buy_delivery_payload = create_mcp_webhook_payload(
-            task_id=media_buy.media_buy_id,
-            task_type=DELIVERY_TASK_TYPE,
-            result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
-            status=AdcpTaskStatus.completed,
-            token=reporting_webhook.get("token"),
-            idempotency_key=idempotency_key,
-        )
-
-        # Send webhook notification. ``session`` stays open here — it's reused below
-        # on a failed send to release the claim — only the claim's transaction was
-        # committed above (for cross-connection visibility, see _claim_final_webhook /
+        # ``session`` stays open here — it's reused by the handler below to release
+        # the claim — only the claim's transaction was committed above (for
+        # cross-connection visibility, see _claim_final_webhook /
         # _claim_periodic_webhook).
         try:
+            # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
+            # sequence + 1 (spec: "Sequential notification number ... starts at
+            # 1"). Failed/retrying sends also log the sequence they attempted;
+            # counting them — while the dedup above counts only successes —
+            # would burn numbers the buyer never received, so a buyer's
+            # first-ever webhook could start above 1. A query failure
+            # propagates and aborts this send loudly: a quiet fallback to 1
+            # would put an already-consumed sequence on the wire.
+            #
+            # Allocated UNDER the claim. Read before it, the number was decided in a
+            # window any number of other workers could also be reading in — the claim
+            # would then serialize the POSTs while both carried the same sequence,
+            # which is not what "atomic claim" buys you. Here the claim is already
+            # held, so the value reflects every delivery committed up to this point
+            # and no concurrent sender can be between its own read and its own POST.
+            sequence_number = (
+                delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
+            )
+            delivery_response.sequence_number = sequence_number
+
+            # A failed delivery does not consume its sequence number. Reuse the
+            # prior attempt's key when the scheduler retries the same logical
+            # notification in a later invocation.
+            idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
+                media_buy.media_buy_id,
+                task_type=DELIVERY_TASK_TYPE,
+                notification_type=derived,
+                sequence_number=sequence_number,
+            )
+
+            # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
+            # Serialize via webhook_payload(): the schema scopes aggregated_totals to
+            # "API responses (get_media_buy_delivery), not webhook notifications", and
+            # this is the exclusion seam (it also drops None fields, preserving the
+            # final-omits-next_expected_at contract).
+            media_buy_delivery_payload = create_mcp_webhook_payload(
+                task_id=media_buy.media_buy_id,
+                task_type=DELIVERY_TASK_TYPE,
+                result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
+                status=AdcpTaskStatus.completed,
+                token=reporting_webhook.get("token"),
+                idempotency_key=idempotency_key,
+            )
+
             delivered = await self.webhook_service.send_notification(
                 push_notification_config=push_notification_config, payload=media_buy_delivery_payload, metadata=metadata
             )
