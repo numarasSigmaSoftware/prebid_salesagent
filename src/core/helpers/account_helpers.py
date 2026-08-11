@@ -8,6 +8,7 @@ beads: salesagent-8n4
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -29,6 +30,8 @@ from src.core.exceptions import (
     AdCPAuthorizationError,
 )
 from src.core.resolved_identity import ResolvedIdentity
+
+logger = logging.getLogger(__name__)
 
 
 class ResolvedAccount(NamedTuple):
@@ -140,10 +143,48 @@ def account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> b
 
     account = accounts.get_by_id(account_id)
     if account is None:
+        # DELIBERATE DEVIATION, recorded rather than silent.
+        #
+        # ACCOUNT_NOT_FOUND is a buyer-directed code: AdCP 3.1.1
+        # `dist/docs/3.1.1/building/by-layer/L2/accounts-and-agents.mdx:464` pairs it
+        # with "account_id doesn't exist or agent lacks access" and the remedy "Check
+        # account reference, re-run sync_accounts". Neither half applies HERE. This path
+        # is reached from buy-keyed operations (update, performance, delivery, admin)
+        # where the buyer supplied NO account reference at all — the id came off the
+        # seller's own `media_buys.account_id`, so a dangling value is seller-side data
+        # integrity, not a buyer mistake, and no buyer action can repair it.
+        # CONFIGURATION_ERROR is the declared class for that ("the buyer cannot fix it,
+        # retrying will not help, reporting to the seller's operator is the only
+        # remediation").
+        #
+        # ACCOUNT_NOT_FOUND is kept anyway: recovery is `terminal` under both candidates,
+        # so no buyer's autonomous behaviour changes, and switching would move the wire
+        # status from 404 to 5xx for a condition whose reachability is very low — the
+        # composite FK cannot orphan a row, and `sync_accounts --delete_missing` only
+        # closes accounts. Carrying the spec's canonical suggestion verbatim is the
+        # consistent choice once the code is the spec's: a buyer parsing
+        # ACCOUNT_NOT_FOUND gets the remedy the spec documents for it, rather than a
+        # second, site-specific phrasing of the same code. The MESSAGE, which is free
+        # text, is where the seller-side nature is stated.
+        #
+        # Logged at ERROR with a stack rather than left to the boundary. As a typed
+        # AdCPError this reaches `record_boundary_error`, which logs typed errors at
+        # WARNING with no traceback — correct for buyer mistakes, wrong for a
+        # data-integrity fault that no buyer caused and only an operator can fix.
+        logger.error(
+            "Dangling account reference: media buy row points at account_id=%r in tenant %r, "
+            "which does not resolve. Refusing to dispatch because sandbox mode cannot be "
+            "established; this is seller-side data integrity, not a buyer error.",
+            account_id,
+            accounts.tenant_id,
+            stack_info=True,
+        )
         raise AdCPAccountNotFoundError(
             f"Account '{account_id}' referenced by this operation could not be resolved; "
-            "refusing to dispatch because sandbox mode cannot be established.",
-            suggestion="Verify the account still exists and is accessible to this tenant.",
+            "refusing to dispatch because sandbox mode cannot be established. The reference "
+            "is stored on the media buy, so this is a seller-side data condition rather than "
+            "a problem with the request.",
+            suggestion="Check account reference, re-run sync_accounts.",
         )
     return bool(account.sandbox)
 

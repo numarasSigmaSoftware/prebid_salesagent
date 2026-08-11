@@ -156,3 +156,79 @@ class TestSandboxMockAdapterConfigIsStated:
         from src.adapters.mock_ad_server import MockAdServer
 
         assert isinstance(self._sandbox_adapter(), MockAdServer)
+
+
+class TestDanglingAccountReferenceIsSellerSide:
+    """``account_is_sandbox`` on a buy-keyed path: a stale id is a seller-side fault.
+
+    This raise is reached from update / performance / delivery / admin, where the buyer
+    supplied no account reference — the id came off the seller's own
+    ``media_buys.account_id``. So the condition is data integrity on the seller's side,
+    not a buyer mistake, and the two things that follow from that are pinned here.
+
+    The code stays ``ACCOUNT_NOT_FOUND`` deliberately (recovery is ``terminal`` either
+    way, and CONFIGURATION_ERROR would move the wire status to 5xx for a condition the
+    composite FK makes barely reachable). That decision is only defensible while the
+    suggestion is the spec's own for that code and the telemetry is not buyer-grade;
+    both are asserted, because a later edit could quietly undo either.
+    """
+
+    @staticmethod
+    def _accounts_repo_missing(account_id: str = "acc_gone") -> MagicMock:
+        repo = MagicMock()
+        repo.tenant_id = "t1"
+        repo.get_by_id.return_value = None
+        return repo
+
+    def test_suggestion_is_the_specs_canonical_remedy_for_this_code(self) -> None:
+        """AdCP 3.1.1 accounts-and-agents.mdx:464 pairs ACCOUNT_NOT_FOUND with
+        "Check account reference, re-run sync_accounts".
+
+        Emitting the spec's code with a locally-invented remedy gives a buyer parsing
+        this code a second phrasing it has no way to anticipate. If the remedy is ever
+        judged wrong for this path, the fix is a different CODE, not a different
+        suggestion under the same one — which is exactly what this asserts.
+        """
+        from src.core.exceptions import AdCPAccountNotFoundError
+        from src.core.helpers.account_helpers import account_is_sandbox
+
+        with pytest.raises(AdCPAccountNotFoundError) as exc_info:
+            account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
+
+        assert exc_info.value.error_code == "ACCOUNT_NOT_FOUND"
+        assert exc_info.value.suggestion == "Check account reference, re-run sync_accounts."
+
+    def test_the_fault_is_logged_at_error_not_left_to_the_boundary(self) -> None:
+        """Typed AdCPErrors reach ``record_boundary_error``, which logs WARNING with no
+        traceback — right for a buyer mistake, wrong for a corruption only an operator
+        can fix. Spying the module logger rather than using caplog: other tests leave
+        global logging state behind, so a capture-based assertion can silently see
+        nothing and pass.
+        """
+        from src.core.exceptions import AdCPAccountNotFoundError
+        from src.core.helpers import account_helpers
+
+        with patch.object(account_helpers, "logger") as spy:
+            with pytest.raises(AdCPAccountNotFoundError):
+                account_helpers.account_is_sandbox(self._accounts_repo_missing(), "acc_gone")
+
+        spy.warning.assert_not_called()
+        assert spy.error.call_count == 1, "the dangling reference was not logged at ERROR"
+        _fmt, *args = spy.error.call_args.args
+        assert "acc_gone" in args, "the log does not name the unresolvable account id"
+        assert spy.error.call_args.kwargs.get("stack_info") is True, (
+            "no stack was captured, so an operator gets the severity but not the call path"
+        )
+
+    def test_a_resolvable_account_neither_raises_nor_logs(self) -> None:
+        """Negative control: an unconditional log or raise would satisfy the above."""
+        from src.core.helpers import account_helpers
+
+        repo = MagicMock()
+        repo.tenant_id = "t1"
+        repo.get_by_id.return_value = MagicMock(sandbox=True)
+
+        with patch.object(account_helpers, "logger") as spy:
+            assert account_helpers.account_is_sandbox(repo, "acc_ok") is True
+
+        spy.error.assert_not_called()
