@@ -2241,79 +2241,30 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
                     break
 
-        # --- UC-019: e2e_rest xfails for datetime-mock-dependent tests ---
-        # These scenarios use `And today is "<date>"` which patches datetime
-        # in-process. The patch has no effect on Docker — real datetime.now()
-        # is used, so status assertions fail.
-        if is_e2e_rest and any(t.startswith("T-UC-019") for t in marker_names):
-            _UC019_E2E_DATETIME_TAGS: set[str] = {
-                "T-UC-019-partition-status",
-                "T-UC-019-boundary-status",
-                "T-UC-019-inv-150-2",
-                "T-UC-019-inv-150-4",
-                "T-UC-019-inv-150-5",
-                # Default filter test creates flight dates relative to mock_today
-                # (default 2026-03-15), making both buys "completed" on real date.
-                "T-UC-019-inv-151-1",
-            }
-            _UC019_E2E_MOCK_TAGS: set[str] = {
-                # Adapter mock (get_adapter patch) has no effect in Docker.
-                "T-UC-019-partition-snapshot",
-                "T-UC-019-boundary-snapshot",
-            }
-            # Graduated e2e_rest examples that pass despite datetime/mock concern:
-            # These variants have expected status=completed, which matches the
-            # real date (all flight dates are in the past).
-            _UC019_E2E_DT_GRADUATED = {
-                ("T-UC-019-partition-status", "post_flight"),
-                ("T-UC-019-boundary-status", "day after end_date"),
-                ("T-UC-019-boundary-status", "start_date equals end_date and today is day after"),
-            }
-            _dt_graduated = any(tag in marker_names and substr in nodeid for tag, substr in _UC019_E2E_DT_GRADUATED)
-            _inv150_5_graduated = "T-UC-019-inv-150-5" in marker_names  # all examples pass
-            if marker_names & _UC019_E2E_DATETIME_TAGS and not _dt_graduated and not _inv150_5_graduated:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason="e2e_rest: datetime.now() mock has no effect in Docker — status computed from real date",
-                        strict=False,
-                    )
-                )
-            _UC019_E2E_MOCK_GRADUATED = {
-                ("T-UC-019-partition-snapshot", "supported_but_unavailable"),
-                # Only "snapshot null" passes on e2e_rest: Docker's mock adapter
-                # has no test media buy data, so get_packages_snapshot returns None,
-                # and production maps that to SNAPSHOT_TEMPORARILY_UNAVAILABLE —
-                # matching the expected outcome. Other variants FAIL because:
-                # - "snapshot returned"/"all packages" expect real snapshot data
-                # - "does not support" expects UNSUPPORTED but mock says supported=True
-                ("T-UC-019-boundary-snapshot", "snapshot null"),
-            }
-            _mock_graduated = any(tag in marker_names and substr in nodeid for tag, substr in _UC019_E2E_MOCK_GRADUATED)
-            if marker_names & _UC019_E2E_MOCK_TAGS and not _mock_graduated:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason="e2e_rest: adapter mock has no effect in Docker — snapshot data not controllable",
-                        strict=False,
-                    )
-                )
-            # Un-graduated: T-UC-019-inv-154-tenant returns empty response on e2e_rest
-            # because in-process fixture data doesn't populate Docker DB.
-            if "T-UC-019-inv-154-tenant" in marker_names:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason="e2e_rest: cross-principal isolation test returns empty set — "
-                        "in-process fixtures don't populate Docker DB",
-                        strict=False,
-                    )
-                )
-            # Graduated: T-UC-019-inv-152-1/2/5 (salesagent-kgmm: creative approval data seeded)
-            # — only in-process transports graduated; e2e_rest still fails (below).
-
-            # principal_scoping_boundary error cases are excluded on e2e_rest
-            # (handled by the REST+e2e_rest block below, outside this if-block).
-
-            # Graduated: T-UC-019-inv-152-1, T-UC-019-inv-152-2, T-UC-019-inv-152-5
-            # (salesagent-pzqp: creative approval data now visible to e2e_rest Docker)
+        # --- UC-019: no e2e_rest xfails, because there are no e2e_rest params ---
+        #
+        # A ~68-line block of is_e2e_rest-gated xfails lived here (two tag sets,
+        # _UC019_E2E_DATETIME_TAGS and _UC019_E2E_MOCK_TAGS, plus their graduated
+        # tuples). Every line of it was unreachable: _NO_REST_UC_TAG_PREFIXES
+        # contains "T-UC-019-", so parametrization above replaces the transport
+        # list with [A2A, MCP] and never appends E2E_REST for these scenarios.
+        # is_e2e_rest is therefore never true for a UC-019 item, and the whole
+        # block was dead. Confirmed empirically:
+        # `BDD_E2E_ENABLED=true pytest tests/bdd/test_uc019_query_media_buys.py
+        # --collect-only` -> 484 collected, 0 carrying an e2e_rest param.
+        #
+        # This is the same rot that had already hollowed out _NO_E2E_REST_TAGS and
+        # _UC004_E2E_WEBHOOK_INTERNAL_TAGS: a set stays populated and reads as live
+        # coverage after the routing that fed it was removed one layer up. The
+        # reachability guard does not catch this variant — it models deadness only
+        # as overlap with _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, not as "the gate is
+        # unreachable because parametrization never produces the param". Deriving
+        # gated sets from the AST and modelling both mechanisms is tracked
+        # separately; deleting the dead block is not blocked on that.
+        #
+        # If UC-019 ever gains a REST route and leaves _NO_REST_UC_TAG_PREFIXES,
+        # the xfail knowledge is in this file's history at the commit that removed
+        # it — do not re-add it speculatively.
 
         # --- UC-026: xfails for spec-production gaps ---
         # Transport wiring done (a3xo: MediaBuyDualEnv routes updates correctly).

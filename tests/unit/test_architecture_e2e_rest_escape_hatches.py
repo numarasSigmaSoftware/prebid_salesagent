@@ -86,7 +86,18 @@ EXPECTED_XFAIL_ROUTES: tuple[str, ...] = (
     "is_e2e_rest and 'T-UC-004-daterange-end-only' in marker_names",
     "is_e2e_rest and 'T-UC-005-empty-catalog' in marker_names",
     "is_e2e_rest and 'Unknown string not in enum' in nodeid",
-    "is_e2e_rest and any((t.startswith('T-UC-019') for t in marker_names))",
+    # REMOVED — and NOT because the scenarios were fixed. The UC-019
+    # datetime/adapter-mock block this route guarded was UNREACHABLE, so it never
+    # routed anything around the ledger in the first place:
+    # _NO_REST_UC_TAG_PREFIXES contains "T-UC-019-", so parametrization replaces
+    # the transport list with [A2A, MCP] and never appends E2E_REST for these
+    # scenarios — is_e2e_rest is never true for a UC-019 item. Confirmed
+    # empirically (BDD_E2E_ENABLED=true ... --collect-only -> 484 collected, 0
+    # carrying an e2e_rest param) and behaviorally (UC-019 reports an identical
+    # 124 passed / 360 xfailed with the block present and with it deleted).
+    # This is the same rot that hollowed out _NO_E2E_REST_TAGS and
+    # _UC004_E2E_WEBHOOK_INTERNAL_TAGS: a populated set keeps reading as live
+    # coverage after the routing that fed it moved one layer up.
     "is_e2e_rest and marker_names & _UC004_E2E_WEBHOOK_INTERNAL_TAGS",
     "is_e2e_rest and marker_names & _UC005_E2E_FIXTURE_INJECTION_TAGS",
     "is_e2e_rest and tag in uc005_filter_e2e_untestable",

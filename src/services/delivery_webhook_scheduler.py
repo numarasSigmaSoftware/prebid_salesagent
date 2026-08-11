@@ -858,13 +858,29 @@ class DeliveryWebhookScheduler:
                 push_notification_config=push_notification_config, payload=media_buy_delivery_payload, metadata=metadata
             )
             if not delivered:
-                # send_notification returns False (never raises) on permanent
-                # 4xx / exhausted retries and has already written the failed
-                # WebhookDeliveryLog row. Raise so the batch counts an error
-                # instead of logging "Sent" for a webhook the buyer never got.
+                # send_notification returns False (never raises) for FOUR distinct
+                # outcomes, and collapses them into one bool this caller cannot
+                # tell apart:
+                #   1. no URL configured        -> no HTTP attempt, NO log row
+                #   2. rejected by the SSRF gate -> no HTTP attempt, NO log row
+                #   3. permanent 4xx             -> HTTP attempted, log row written
+                #   4. retries exhausted         -> HTTP attempted, log row written
+                #
+                # An earlier revision of this comment asserted 3/4 unconditionally
+                # ("has already written the failed WebhookDeliveryLog row") and the
+                # message sent the reader to "the HTTP failure detail". On 1 and 2
+                # there is no log row and no HTTP failure to find, so an operator
+                # hunting a delivery that never lands was pointed at evidence that
+                # does not exist.
+                #
+                # Say only what is known here. Distinguishing them properly means
+                # giving send_notification a typed outcome instead of a bool —
+                # a change across every caller (A2A, MCP, task webhooks), tracked
+                # in #1624 rather than widened into this PR.
                 raise RuntimeError(
                     f"Delivery report webhook send failed for media buy {media_buy.media_buy_id} "
-                    "(see webhook service logs for the HTTP failure detail)"
+                    "(webhook service reported failure; if no HTTP attempt is logged, the URL was "
+                    "missing or rejected by the SSRF gate — those paths write no WebhookDeliveryLog row)"
                 )
         except Exception:
             # Definitive failure: release our claim (token-guarded) so an
