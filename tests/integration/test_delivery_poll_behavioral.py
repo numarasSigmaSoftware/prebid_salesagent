@@ -1294,6 +1294,7 @@ class TestClaimsAreMutuallyExclusiveAcrossTypes:
             ), "a fresh final claim must block the periodic claim"
 
 
+@pytest.mark.requires_db
 class TestBatchSummaryAccountsForEverySelectedBuy:
     """The run summary's buckets partition the batch's selection.
 
