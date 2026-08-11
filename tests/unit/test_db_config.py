@@ -181,54 +181,21 @@ class TestProductionSignalConverged:
         assert bare_presence({}) is False
 
 
-class TestPinnedErrorEnumIsNotACanonicityGate:
-    """The vendored error-code enum supplies recovery; it does not decide existence.
-
-    It is pinned at @04f59d2d5 and carries 64 codes against the 92 released at the
-    targeted v3.1.1. Using absence as proof of non-canonicity rejected 28 codes that
-    are canonical at the version this repo targets, with a message telling the author
-    to change a correct code.
-    """
-
-    def _assert_shape(self, code, recovery):
-        from tests.harness.transport import TransportResult
-
-        envelope = {
-            "adcp_error": {"code": code, "message": "boom", "recovery": recovery},
-            "errors": [{"code": code, "message": "boom", "recovery": recovery, "suggestion": "s"}],
-        }
-        TransportResult._assert_error_envelope(
-            TransportResult(payload=None),
-            envelope,
-            code,
-            source="wire",
-            recovery=recovery,
-            require_suggestion=False,
-            message_substr=None,
-        )
-
-    def test_a_code_absent_from_the_vendored_enum_is_accepted_with_explicit_recovery(self):
-        """PROPOSAL_NOT_FOUND ships in the installed SDK for the targeted version but
-        is missing from the vendored tree — precisely the 28-code gap."""
-        import json
-        from pathlib import Path
-
-        pinned = json.loads(
-            (
-                Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
-            ).read_text()
-        )["enumMetadata"]
-        assert "PROPOSAL_NOT_FOUND" not in pinned, "fixture refreshed — pick another gap code"
-
-        self._assert_shape("PROPOSAL_NOT_FOUND", "terminal")  # must not raise
-
-    def test_a_code_absent_from_the_vendored_enum_still_demands_an_explicit_recovery(self):
-        """The fixture cannot supply recovery for a code it does not carry, so the
-        caller must state it rather than silently inherit an unknown value."""
-        import pytest
-
-        with pytest.raises(AssertionError, match="Pass recovery= explicitly"):
-            self._assert_shape("PROPOSAL_NOT_FOUND", None)
+# REMOVED: TestPinnedErrorEnumIsNotACanonicityGate.
+#
+# It guarded a workaround, and the workaround's premise is gone. The class
+# existed because tests/harness/transport.py sourced error-code metadata from
+# the vendored fixture tree pinned at @04f59d2d5, which carried 64 codes against
+# the 92 released at the targeted v3.1.1. Treating absence there as "not a
+# canonical code" would have rejected 28 codes that ARE canonical, so the
+# harness deliberately did not, and these tests pinned that leniency.
+#
+# #1868 repointed the harness at the SDK's own schema tree, where the installed
+# adcp version IS the pin. Absence from that enum now genuinely means the code is
+# not canonical, so the harness asserts it -- and the leniency these tests
+# required is exactly what upstream removed on purpose. Keeping them would pin a
+# behavior the codebase no longer has, against a fixture the harness no longer
+# reads.
 
 
 class TestBddTransportTagSetsDoNotOverlap:

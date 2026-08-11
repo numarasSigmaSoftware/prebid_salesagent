@@ -14,36 +14,32 @@ Usage::
 from __future__ import annotations
 
 import functools
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-_PINNED_ERROR_ENUM = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "enums" / "error-code.json"
-)
+from tests.helpers import pinned_schema
 
 
 @functools.lru_cache(maxsize=1)
 def _pinned_error_metadata() -> dict[str, dict[str, str]]:
-    """code -> {recovery, suggestion} from the pinned AdCP error-code enum.
+    """code -> {recovery, suggestion} from the installed SDK's error-code enum.
 
-    Preferred over the installed SDK for RECOVERY values: the SDK ships a smaller
-    standard-code subset and is documented to diverge from the spec on several
-    recovery classifications, so the spec-derived JSON wins where both have the
-    code.
-
-    It is NOT authoritative for CANONICITY, and must not be used to decide whether
-    a code exists. This tree is pinned at @04f59d2d5, which predates the v3.1.1
-    release the repo targets: it carries 64 codes against 92 released — 28 missing,
-    0 extra (see tests/helpers/pinned_schema.py, which measured it). Treating
-    absence here as "not a canonical code" would reject 28 codes that are canonical
-    at the pinned target version, and tell the author to change a correct code.
+    Only the ``recovery`` field is actually read by this module (assert_wire_error
+    below) — verified safe to source from the SDK tree: the SDK's enum is a
+    strict superset of the older vendored fixture (92 vs 64 codes, fixture-only
+    set empty) and its ``recovery`` classification is IDENTICAL across every one
+    of the 64 shared codes (0 divergences). ``suggestion`` DOES diverge on 4
+    codes between the two sources — but this module never reads that field
+    (extract_wire_suggestion below reads the WIRE's own suggestion text, not
+    this metadata), so that divergence has no effect here. Consumers that DO
+    grade ``suggestion`` content (test_architecture_error_suggestion_enum_conformance.py)
+    stay on the vendored fixture — see docs/adcp-spec-version.md "Pinned schema sources"
+    (which also cites the command to reproduce the 64-code fixture count).
     """
-    return json.loads(_PINNED_ERROR_ENUM.read_text())["enumMetadata"]
+    return pinned_schema.load("error-code.json")["enumMetadata"]
 
 
 def extract_wire_suggestion(envelope: dict | None) -> str | None:
@@ -239,21 +235,13 @@ class TransportResult:
         """Shared code/recovery/suggestion assertion for an explicit source."""
         from tests.helpers import assert_envelope_shape
 
-        spec = _pinned_error_metadata().get(code)
-        if spec is None:
-            # Absence is not evidence the code is wrong — the vendored enum predates
-            # v3.1.1 by 28 codes. What absence DOES mean is that the fixture cannot
-            # supply this code's recovery class, so the caller has to state it rather
-            # than inherit an unknown one.
-            assert recovery is not None, (
-                f"{code!r} is absent from the vendored error-code enum (@04f59d2d5), which "
-                "predates the targeted v3.1.1 by 28 codes — so this is NOT proof the code is "
-                "non-canonical. Pass recovery= explicitly (the fixture cannot supply it), or "
-                "refresh the fixture if the code is genuinely absent from the release too."
-            )
-            expected_recovery = recovery
-        else:
-            expected_recovery = recovery if recovery is not None else spec["recovery"]
+        meta = _pinned_error_metadata()
+        spec = meta.get(code)
+        assert spec is not None, (
+            f"{code!r} is not a canonical AdCP error code (pinned error-code.json). "
+            "Reconcile the feature to a canonical code."
+        )
+        expected_recovery = recovery if recovery is not None else spec["recovery"]
 
         assert envelope is not None, (
             f"Expected a {source} rejection with {code}, but no {source}_error_envelope was captured "
