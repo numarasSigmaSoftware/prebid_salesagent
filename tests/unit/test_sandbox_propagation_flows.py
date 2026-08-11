@@ -23,6 +23,7 @@ from src.core.helpers.account_helpers import (
     account_is_sandbox,
     partition_by_sandbox_mode,
 )
+from tests.helpers.sandbox_seam import bind_real_sandbox_seam
 
 
 def _accounts_repo(modes: dict[str, bool | None]) -> MagicMock:
@@ -77,16 +78,10 @@ def _seam_for(accounts: MagicMock, buys: MagicMock) -> MagicMock:
     Binds production's own methods rather than reimplementing the derivation, so
     these stay oracles for the seam and not for a copy of it.
     """
-    from types import MethodType
-
-    from src.core.database.repositories.uow import BuyKeyedSandboxMixin
-
     uow = MagicMock()
     uow.accounts = accounts
     uow.media_buys = buys
-    uow.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, uow)
-    uow.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, uow)
-    return uow
+    return bind_real_sandbox_seam(uow)
 
 
 class TestSingleBuyDerivation:

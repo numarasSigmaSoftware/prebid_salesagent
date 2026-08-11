@@ -101,6 +101,23 @@ def _enclosing_function(tree: ast.Module, call: ast.Call):
     return best
 
 
+def _adapter_calls_in(tree: ast.Module, rel: str) -> list[_AdapterCall]:
+    """Every ``get_adapter()`` call in one parsed module.
+
+    Split out from the filesystem walk so the self-tests can drive the REAL extraction
+    over a synthetic module. A self-test that re-implements the extraction against a
+    string grades its own copy: neutering an arm's predicate left two such tests green,
+    which from the outside is indistinguishable from the arm working.
+    """
+    found: list[_AdapterCall] = []
+    for call in iter_call_expressions(tree, "get_adapter"):
+        value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+        func = _enclosing_function(tree, call)
+        site = f"{rel}::{func.name}" if func is not None else rel
+        found.append(_AdapterCall(rel, call.lineno, site, func, value))
+    return found
+
+
 def _get_adapter_calls() -> list[_AdapterCall]:
     """Every ``get_adapter()`` call under SCAN_ROOTS, with its enclosing function.
 
@@ -113,13 +130,86 @@ def _get_adapter_calls() -> list[_AdapterCall]:
             tree = safe_parse(path)
             if tree is None:
                 continue
-            rel = str(path.relative_to(REPO_ROOT))
-            for call in iter_call_expressions(tree, "get_adapter"):
-                value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
-                func = _enclosing_function(tree, call)
-                site = f"{rel}::{func.name}" if func is not None else rel
-                found.append(_AdapterCall(rel, call.lineno, site, func, value))
+            found.extend(_adapter_calls_in(tree, str(path.relative_to(REPO_ROOT))))
     return found
+
+
+def _is_identity_attr(node: ast.expr) -> bool:
+    """``identity.sandbox``, ``self.identity.sandbox``, ``ctx.identity.sandbox`` ..."""
+    if not (isinstance(node, ast.Attribute) and node.attr == "sandbox"):
+        return False
+    base = node.value
+    if isinstance(base, ast.Name):
+        return base.id == "identity"
+    return isinstance(base, ast.Attribute) and base.attr == "identity"
+
+
+def _one_hop_candidates(value: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> list[ast.expr]:
+    """What ``value`` can hold: itself, or what a local of that name is assigned in *func*.
+
+    Shared by the identity and literal arms. It exists because production writes the
+    via-local form (``s = <expr>`` then ``sandbox=s``) at 7 of 12 sites, so an arm that
+    inspects the call's expression directly sees a bare ``Name`` and concludes nothing.
+    The identity arm was extended to follow one hop; its sibling was not, which left
+    ``s = False; sandbox=s`` — the cheapest hard-wire, written in production's own
+    idiom — passing the literal arm at those 7 sites. One resolver now serves both, so
+    a future arm cannot inherit half the fix.
+
+    A bare PARAMETER deliberately resolves to itself: the mode is chosen by the caller,
+    which each arm grades on its own. Following parameters would flag a forwarding
+    function whose argument is already correct at its only source.
+    """
+    if not (isinstance(value, ast.Name) and func is not None):
+        return [value]
+    assigned: list[ast.expr] = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            if any(isinstance(tgt, ast.Name) and tgt.id == value.id for tgt in node.targets):
+                assigned.append(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == value.id and node.value is not None:
+                assigned.append(node.value)
+    return assigned or [value]
+
+
+def _hard_wires_sandbox(call: _AdapterCall) -> bool:
+    """True when every expression this site's ``sandbox=`` can hold is a constant.
+
+    ``all``, not ``any``: a local initialised to a literal and then reassigned from the
+    account is not hard-wired, and flagging it would push contributors toward the
+    allowlist to silence a false positive — the one pressure a shrink-only allowlist
+    cannot absorb.
+    """
+    if call.value is None:
+        return False
+    return all(isinstance(candidate, ast.Constant) for candidate in _one_hop_candidates(call.value, call.func))
+
+
+def _hard_wired_offenders(calls: list[_AdapterCall]) -> list[str]:
+    """Sites whose ``sandbox=`` is hard-wired and not allowlisted.
+
+    The arm applies this to the repo; its self-test applies it to a synthetic module.
+    Extracted so the two cannot diverge: while the arm inlined this comprehension, its
+    self-test asserted on ``ast`` directly, and neutering the comprehension to ``if
+    False`` left every test in this file green — the arm and its proof were independent.
+    """
+    return [
+        f"{call.path}:{call.lineno}" for call in calls if _hard_wires_sandbox(call) and call.site not in LITERAL_EXEMPT
+    ]
+
+
+def _identity_sourced_offenders(calls: list[_AdapterCall]) -> list[str]:
+    """Sites reading ``identity.sandbox`` where the request carries no account reference.
+
+    Same extraction, same reason, as :func:`_hard_wired_offenders`.
+    """
+    return [
+        f"{call.path}:{call.lineno} (in {call.func.name if call.func else '<module>'})"
+        for call in calls
+        if call.value is not None
+        and call.site not in IDENTITY_KEYED_SITES
+        and _resolves_to_identity_sandbox(call.value, call.func)
+    ]
 
 
 def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
@@ -149,11 +239,20 @@ def test_every_get_adapter_call_decides_sandbox_explicitly() -> None:
 
 
 def test_guard_would_catch_a_regression() -> None:
-    """Mutation self-test: the detector must actually flag a call missing sandbox=."""
-    tree = ast.parse("adapter = get_adapter(principal, dry_run=False, tenant=tenant)\n")
-    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
-    assert not any(kw.arg == "sandbox" for kw in call.keywords), (
-        "the detector's own predicate no longer distinguishes a sandbox-less call — this guard would pass vacuously"
+    """Self-test with BOTH signs, through the real collector.
+
+    This previously re-implemented arm 1's predicate against a synthetic string —
+    ``any(kw.arg == "sandbox" ...)`` — so it graded ``ast``, not the guard. Neutering
+    the arm left it green. It now runs ``_adapter_calls_in`` and reads the same
+    ``value is None`` the arm reads.
+    """
+    missing = _adapter_calls_in(ast.parse("a = get_adapter(principal, dry_run=False, tenant=t)\n"), "synthetic.py")
+    present = _adapter_calls_in(ast.parse("a = get_adapter(principal, sandbox=identity.sandbox)\n"), "synthetic.py")
+
+    assert len(missing) == 1 and len(present) == 1, "the collector no longer finds a get_adapter call at all"
+    assert missing[0].value is None, "the collector no longer reports an absent sandbox= — arm 1 would pass vacuously"
+    assert present[0].value is not None, (
+        "the collector reports a present sandbox= as absent — arm 1 would fire on every site"
     )
 
 
@@ -166,35 +265,11 @@ def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.A
     and reverting a module to the original defect in its own idiom did not redden it.
     Resolving one assignment hop is what makes the arm able to fail at all.
 
-    A bare PARAMETER deliberately does not match: the mode is chosen by the caller, which
-    the arm grades on its own. Following parameters would flag a forwarding function whose
-    argument is already correct at its only source.
+    ``any``, not ``all``: a local assigned from the identity on ANY branch reads the
+    unenriched flag on that branch, which is the defect regardless of what the other
+    branches do.
     """
-
-    def _is_identity_attr(node: ast.expr) -> bool:
-        # identity.sandbox, self.identity.sandbox, ctx.identity.sandbox ...
-        if not (isinstance(node, ast.Attribute) and node.attr == "sandbox"):
-            return False
-        base = node.value
-        if isinstance(base, ast.Name):
-            return base.id == "identity"
-        return isinstance(base, ast.Attribute) and base.attr == "identity"
-
-    if _is_identity_attr(value):
-        return True
-    if not (isinstance(value, ast.Name) and func is not None):
-        return False
-    # One hop: find the local's assignment inside the same function.
-    for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            targets = [tgt.id for tgt in node.targets if isinstance(tgt, ast.Name)]
-            if value.id in targets and _is_identity_attr(node.value):
-                return True
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == value.id and node.value is not None:
-                if _is_identity_attr(node.value):
-                    return True
-    return False
+    return any(_is_identity_attr(candidate) for candidate in _one_hop_candidates(value, func))
 
 
 def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
@@ -206,13 +281,7 @@ def test_only_account_carrying_paths_source_sandbox_from_identity() -> None:
     injecting the defect at the approval executor or the admin route left the guard
     green at exactly the sites the message told the reader were covered.
     """
-    offenders = [
-        f"{call.path}:{call.lineno} (in {call.func.name if call.func else '<module>'})"
-        for call in _get_adapter_calls()
-        if call.value is not None
-        and call.site not in IDENTITY_KEYED_SITES
-        and _resolves_to_identity_sandbox(call.value, call.func)
-    ]
+    offenders = _identity_sourced_offenders(_get_adapter_calls())
 
     assert not offenders, (
         "sandbox= resolves to identity.sandbox on a path that does not carry an account "
@@ -231,15 +300,16 @@ def test_identity_arm_catches_both_the_inline_and_the_via_local_form() -> None:
     inline form could never fire. A negative case is included because an arm that flags
     everything is as useless as one that flags nothing.
     """
-    inline = ast.parse("def f(identity):\n    return get_adapter(p, sandbox=identity.sandbox)\n")
-    via_local = ast.parse("def f(identity):\n    s = identity.sandbox\n    return get_adapter(p, sandbox=s)\n")
-    via_self = ast.parse("def f(self):\n    s = self.identity.sandbox\n    return get_adapter(p, sandbox=s)\n")
-    derived = ast.parse("def f(uow, mb):\n    s = uow.sandbox_mode(mb)\n    return get_adapter(p, sandbox=s)\n")
+    inline = "def f(identity):\n    return get_adapter(p, sandbox=identity.sandbox)\n"
+    via_local = "def f(identity):\n    s = identity.sandbox\n    return get_adapter(p, sandbox=s)\n"
+    via_self = "def f(self):\n    s = self.identity.sandbox\n    return get_adapter(p, sandbox=s)\n"
+    derived = "def f(uow, mb):\n    s = uow.sandbox_mode(mb)\n    return get_adapter(p, sandbox=s)\n"
 
-    def _flags(tree: ast.Module) -> bool:
-        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "get_adapter")
-        value = next(kw.value for kw in call.keywords if kw.arg == "sandbox")
-        return _resolves_to_identity_sandbox(value, _enclosing_function(tree, call))
+    def _flags(source: str) -> bool:
+        calls = _adapter_calls_in(ast.parse(source), "synthetic.py")
+        assert len(calls) == 1, f"expected one get_adapter call in:\n{source}"
+        # Through the arm's own offender lister, so neutering the arm reddens this.
+        return bool(_identity_sourced_offenders(calls))
 
     assert _flags(inline), "the arm no longer catches the inline identity.sandbox form"
     assert _flags(via_local), "the arm does not follow a local assignment — this is how it was inert"
@@ -256,11 +326,7 @@ def test_no_call_site_hard_wires_the_sandbox_mode() -> None:
     they get different arms: this one rejects a constant unless the site is listed in
     LITERAL_EXEMPT with a written reason.
     """
-    offenders = [
-        f"{call.path}:{call.lineno}"
-        for call in _get_adapter_calls()
-        if isinstance(call.value, ast.Constant) and call.site not in LITERAL_EXEMPT
-    ]
+    offenders = _hard_wired_offenders(_get_adapter_calls())
 
     assert not offenders, (
         "get_adapter() called with a hard-wired sandbox= literal at:\n  "
@@ -272,23 +338,41 @@ def test_no_call_site_hard_wires_the_sandbox_mode() -> None:
     )
 
 
-def test_literal_arm_would_catch_a_hard_wired_site() -> None:
-    """Self-test with BOTH signs: the detector must flag a literal and pass a derivation.
+def test_literal_arm_catches_both_the_inline_and_the_via_local_form() -> None:
+    """Self-test through the real predicate, on both idioms and both signs.
 
-    The existing self-test at the top re-implements arm 1's predicate against a
-    synthetic string rather than calling the detector, and covers only one sign. An
-    arm that never fires and an arm with no true positive read identically from the
-    outside — green.
+    This previously asserted ``isinstance(_value(tree), ast.Constant)`` — its own copy
+    of the predicate — so it stayed green when the arm's comprehension condition was
+    neutered, and it never exercised the via-local form at all. That form is the one
+    production writes at 7 of 12 sites, and it is where the arm was blind: ``s = False``
+    followed by ``sandbox=s`` is a hard-wired live dispatch the guard passed.
     """
-    flagged = ast.parse("a = get_adapter(p, sandbox=False)\n")
-    derived = ast.parse("a = get_adapter(p, sandbox=identity.sandbox)\n")
 
-    def _value(tree: ast.Module) -> ast.expr | None:
-        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
-        return next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+    def _flags(source: str) -> bool:
+        calls = _adapter_calls_in(ast.parse(source), "synthetic.py")
+        assert len(calls) == 1, f"expected one get_adapter call in:\n{source}"
+        # Through the arm's own offender lister, not just the predicate: neutering the
+        # arm must redden its proof.
+        return bool(_hard_wired_offenders(calls))
 
-    assert isinstance(_value(flagged), ast.Constant), "the literal arm no longer recognises a constant"
-    assert not isinstance(_value(derived), ast.Constant), "the literal arm would flag a legitimate derivation"
+    assert _flags("def f():\n    return get_adapter(p, sandbox=False)\n"), (
+        "the literal arm no longer catches an inline constant"
+    )
+    assert _flags("def f():\n    s = False\n    return get_adapter(p, sandbox=s)\n"), (
+        "the literal arm does not follow a local assignment — this is how it was blind at 7 of 12 sites"
+    )
+    assert not _flags("def f(identity):\n    return get_adapter(p, sandbox=identity.sandbox)\n"), (
+        "the literal arm flags a legitimate identity-keyed derivation"
+    )
+    assert not _flags("def f(uow, mb):\n    s = uow.sandbox_mode(mb)\n    return get_adapter(p, sandbox=s)\n"), (
+        "the literal arm flags a legitimate buy-keyed derivation"
+    )
+    assert not _flags(
+        "def f(cond, identity):\n    s = False\n    if cond:\n        s = identity.sandbox\n    return get_adapter(p, sandbox=s)\n"
+    ), (
+        "a local reassigned from the account is not hard-wired; flagging it would push contributors "
+        "toward the allowlist to silence a false positive"
+    )
 
 
 def test_exemptions_are_function_scoped_not_module_scoped() -> None:

@@ -37,10 +37,6 @@ def _raise_not_found(media_buy_id: str):
 
 def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMock:
     """A UoW stub whose accounts/media_buys repos answer from the given maps."""
-    from types import MethodType
-
-    from src.core.database.repositories.uow import BuyKeyedSandboxMixin
-
     uow = MagicMock()
     uow.accounts.get_by_id.side_effect = lambda aid: _account(accounts[aid]) if aid in accounts else None
     uow.media_buys.get_by_id.side_effect = lambda mid: _buy(mid, buys[mid]) if mid in buys else None
@@ -49,12 +45,7 @@ def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMo
     uow.media_buys.get_by_id_or_raise.side_effect = lambda mid, **_kw: (
         _buy(mid, buys[mid]) if mid in buys else _raise_not_found(mid)
     )
-    # Bind the REAL seam methods onto the stub. A MagicMock would return a MagicMock
-    # for sandbox_mode_by_id(), which is not a bool and would grade nothing; binding
-    # production's own methods means these tests still exercise the real derivation,
-    # just against mocked repositories.
-    uow.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, uow)
-    uow.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, uow)
+    bind_real_sandbox_seam(uow)
     uow.__enter__.return_value = uow
     uow.__exit__.return_value = False
     return uow
@@ -62,6 +53,7 @@ def _uow_with(accounts: dict[str, bool], buys: dict[str, str | None]) -> MagicMo
 
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 from tests.helpers.sandbox_assertions import sandbox_modes as _sandbox_kwargs
+from tests.helpers.sandbox_seam import bind_real_sandbox_seam
 
 
 class TestPerformancePath:

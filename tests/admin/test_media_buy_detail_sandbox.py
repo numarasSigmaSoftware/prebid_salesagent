@@ -16,10 +16,13 @@ session, and that session's lifetime is itself load-bearing here (routing this t
 UoW would close it under the route and 500 the page).
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from src.admin.app import create_app
 from tests.factories import AccountFactory, MediaBuyFactory, PrincipalFactory, TenantFactory
+from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 
 app = create_app()
 
@@ -82,46 +85,47 @@ def _seed(factory_session, *, sandbox: bool) -> str:
     return tenant.tenant_id, buy.media_buy_id
 
 
-def _sandbox_args(monkeypatch) -> list[bool]:
-    """Record the sandbox= of every get_adapter the route builds."""
-    seen: list[bool] = []
-    # Patched at the SOURCE module: the route imports get_adapter inside the request
-    # handler, so it is never an attribute of the blueprint module and patching there
-    # silently no-ops (AttributeError at best, a spy that records nothing at worst).
+def _sandbox_spy(monkeypatch) -> MagicMock:
+    """Spy recording every get_adapter the route builds, for the shared assertions.
+
+    Returns the MagicMock rather than a bare ``list[bool]`` so the assertions below run
+    through ``assert_all_sandbox`` / ``assert_all_live``. The hand-rolled recorder this
+    replaced dropped the helper's non-bool guard, so ``sandbox=None`` — falsy, but not an
+    explicit live decision — satisfied ``assert not any(seen)`` as though the route had
+    decided correctly. Latent only because ``account_is_sandbox`` coerces with ``bool()``;
+    the helper exists so that stays true by construction rather than by luck.
+
+    Patched at the SOURCE module: the route imports get_adapter inside the request
+    handler, so it is never an attribute of the blueprint module and patching there
+    silently no-ops (AttributeError at best, a spy that records nothing at worst).
+    """
     import src.core.helpers.adapter_helpers as helpers
 
-    real = helpers.get_adapter
-
-    def spy(*args, **kwargs):
-        assert "sandbox" in kwargs, "the route built an adapter without deciding the mode"
-        seen.append(kwargs["sandbox"])
-        return real(*args, **kwargs)
-
+    spy = MagicMock(side_effect=helpers.get_adapter)
     monkeypatch.setattr(helpers, "get_adapter", spy)
-    return seen
+    return spy
 
 
 def test_sandbox_buy_detail_reads_through_the_simulator(client, factory_session, monkeypatch):
     tenant_id, media_buy_id = _seed(factory_session, sandbox=True)
-    seen = _sandbox_args(monkeypatch)
+    spy = _sandbox_spy(monkeypatch)
     _auth(client, tenant_id)
 
-    client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
+    resp = client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
 
-    assert seen, "the metrics block never ran — the assertion below would be vacuous"
-    assert all(seen), (
-        f"the admin detail route built a LIVE adapter for a sandbox buy (modes={seen}); "
-        "an operator viewing the page would read its delivery from the tenant's real ad server"
-    )
+    # A 500 after the adapter was built leaves the mode assertion passing on a page the
+    # operator never sees, so the status is asserted rather than discarded.
+    assert resp.status_code == 200, f"the detail page did not render (status={resp.status_code})"
+    assert_all_sandbox(spy, context="admin media-buy detail for a sandbox buy")
 
 
 def test_live_buy_detail_reads_through_the_real_adapter(client, factory_session, monkeypatch):
     """Negative control — 'always sandbox' would silently show simulated delivery for real buys."""
     tenant_id, media_buy_id = _seed(factory_session, sandbox=False)
-    seen = _sandbox_args(monkeypatch)
+    spy = _sandbox_spy(monkeypatch)
     _auth(client, tenant_id)
 
-    client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
+    resp = client.get(f"/tenant/{tenant_id}/media-buy/{media_buy_id}")
 
-    assert seen, "the metrics block never ran — the assertion below would be vacuous"
-    assert not any(seen), f"a live buy's delivery was read through the simulator (modes={seen})"
+    assert resp.status_code == 200, f"the detail page did not render (status={resp.status_code})"
+    assert_all_live(spy, context="admin media-buy detail for a live buy")

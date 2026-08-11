@@ -38,6 +38,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from tests.harness._base import BaseTestEnv
+from tests.helpers.sandbox_seam import bind_real_sandbox_seam
 
 _MODULE = "src.core.tools.media_buy_update"
 _DB_MODULE = "src.core.database.database_session"
@@ -137,16 +138,7 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         _default_account.sandbox = False
         self._uow_instance.accounts.get_by_id.return_value = _default_account
 
-        # Bind the REAL buy-keyed sandbox seam onto the mocked UoW. Left as a MagicMock
-        # it would hand get_adapter a non-bool, so adapter-mode assertions would grade
-        # nothing; binding production's own methods keeps them exercising the real
-        # derivation against these mocked repositories.
-        from types import MethodType
-
-        from src.core.database.repositories.uow import BuyKeyedSandboxMixin
-
-        self._uow_instance.sandbox_mode = MethodType(BuyKeyedSandboxMixin.sandbox_mode, self._uow_instance)
-        self._uow_instance.sandbox_mode_by_id = MethodType(BuyKeyedSandboxMixin.sandbox_mode_by_id, self._uow_instance)
+        bind_real_sandbox_seam(self._uow_instance)
 
         # The *_or_raise repository helpers delegate to the plain getters and raise
         # the typed not-found when absent. Wiring the mock the same way lets tests

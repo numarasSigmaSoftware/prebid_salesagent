@@ -84,6 +84,7 @@ from tests.helpers.idempotency_seeds import (
     seed_principal,
 )
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox, sandbox_modes
+from tests.helpers.sandbox_seam import bind_real_sandbox_seam
 
 __all__ = [
     # Auth helpers
@@ -92,6 +93,7 @@ __all__ = [
     "assert_all_live",
     "assert_all_sandbox",
     "assert_envelope_shape",
+    "bind_real_sandbox_seam",
     "sandbox_modes",
     "assert_no_raw_validation_leak",
     # Idempotency cache seeding

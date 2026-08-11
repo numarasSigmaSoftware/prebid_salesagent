@@ -1165,9 +1165,32 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # Graduated: T-UC-004-webhook-circuit-halfopen (merge from main fixed circuit breaker probe timing)
             # Graduated: T-UC-004-webhook-retry-5xx (production fixed: retry count now correct)
             # Graduated: T-UC-004-webhook-retry-network (ebb527c6 fixed the off-by-one)
-            # Sandbox: not yet in delivery _impl
-            "T-UC-004-sandbox-happy": ("sandbox mode not implemented in delivery", True),
-            "T-UC-004-sandbox-validation": ("sandbox mode not implemented in delivery", True),
+            # Sandbox: HALF implemented in delivery, so the reason these carried
+            # ("sandbox mode not implemented in delivery") is no longer true — and a
+            # reason that asserts a gap already closed is how a scenario stays parked
+            # after the work it waited on landed. Same correction as the UC-002 pair.
+            #
+            # Implemented: per-buy adapter selection. partition_by_sandbox_mode resolves
+            # each targeted buy's account and each partition reads through its own
+            # adapter, so a sandbox buy's metrics come from the simulator and never reach
+            # the tenant's real ad server. Graded by
+            # tests/integration/test_sandbox_delivery_account_scoping.py.
+            #
+            # NOT implemented: the `sandbox: true` response marker these scenarios also
+            # assert. One delivery response can span both modes (the partition is per-buy),
+            # so a single top-level flag needs a decided rule rather than a line — #1874.
+            # Both scenarios assert the marker AND the suppression, so they still fail as
+            # a whole and the strict xfail remains correct.
+            "T-UC-004-sandbox-happy": (
+                "delivery routes sandbox buys to the mock adapter; the `sandbox: true` response "
+                "marker is still open (mixed-mode rule undecided) — #1874",
+                True,
+            ),
+            "T-UC-004-sandbox-validation": (
+                "delivery routes sandbox buys to the mock adapter; the `sandbox: true` response "
+                "marker is still open (mixed-mode rule undecided) — #1874",
+                True,
+            ),
         }
         for tag, (reason, strict) in _UC004_XFAIL_TAGS.items():
             if tag in marker_names:
