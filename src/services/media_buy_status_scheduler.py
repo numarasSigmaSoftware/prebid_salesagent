@@ -16,6 +16,7 @@ vocabulary so they match what the read tools report.
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -35,6 +36,68 @@ logger = logging.getLogger(__name__)
 
 # Configurable via env var - default 60 seconds
 STATUS_CHECK_INTERVAL_SECONDS = int(os.getenv("MEDIA_BUY_STATUS_CHECK_INTERVAL") or "60")
+
+
+@dataclass
+class StatusSweepSummary:
+    """Per-run tally of what a status sweep did with each selected buy.
+
+    The sibling of ``DeliveryBatchSummary`` in ``delivery_webhook_scheduler``, and
+    for the same reason: the buckets PARTITION the selection, so every selected buy
+    increments exactly one and ``accounted_for`` equals ``selected``.
+
+    This scheduler previously counted only transitions and logged nothing at all
+    when there were none — the exact "quiet, healthy scheduler" misreading the
+    delivery summary was widened to prevent, left unswept one file over. A sweep
+    that selected a thousand rows and changed none emitted no line, which is
+    indistinguishable from a sweep that selected nothing.
+
+    ``no_flight_window`` is currently UNREACHABLE and is expected to stay 0: see
+    ``_NoFlightWindow``. It is a named bucket rather than a silent path so that if
+    the schema ever loosens, the rows land somewhere countable instead of
+    reopening the hole.
+
+    Returned rather than only logged so the partition invariant can be asserted
+    against a real sweep instead of scraped from a log line.
+    """
+
+    selected: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    no_flight_window: int = 0
+    errors: int = 0
+
+    @property
+    def accounted_for(self) -> int:
+        return self.updated + self.unchanged + self.no_flight_window + self.errors
+
+
+class _NoFlightWindow:
+    """Sentinel for "this row has no resolvable flight window".
+
+    ``_compute_new_status`` returned a bare ``None`` for that AND for "no change
+    needed", so the caller could not tell them apart. They are different facts:
+    "no change" is the healthy steady state, while a row with no resolvable start
+    or end can NEVER transition and would be re-selected on every sweep forever.
+
+    UNREACHABLE TODAY, and deliberately kept anyway. ``MediaBuy.start_date`` and
+    ``MediaBuy.end_date`` are both ``nullable=False`` (models.py:911-912), and
+    ``_compute_new_status`` falls back to them whenever ``start_time``/``end_time``
+    are unset, so neither branch can fire against the current schema — the two
+    ``return None``s this replaces were not silently dropping rows, contrary to how
+    a reading of the loop alone suggests. No test seeds this bucket, because no
+    test CAN: the NOT NULL constraint rejects the row. Kept because the cost is a
+    named bucket, and the alternative is that a future nullable-ing of either
+    column reopens the hole silently.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_FLIGHT_WINDOW"
+
+
+NO_FLIGHT_WINDOW = _NoFlightWindow()
 
 # PENDING_PERSISTED_STATUSES / LEGACY_SERVING_ALIASES (imported): the pre-serving
 # states this scheduler promotes, and the legacy serving aliases it migrates to the
@@ -89,10 +152,15 @@ class MediaBuyStatusScheduler:
                 # Wait before next check
                 await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
 
-    async def _update_statuses(self) -> None:
-        """Check and update media buy statuses based on flight dates."""
+    async def _update_statuses(self) -> StatusSweepSummary:
+        """Check and update media buy statuses based on flight dates.
+
+        Returns the run's :class:`StatusSweepSummary`. Returned rather than only
+        logged so the partition invariant (every selected buy lands in exactly one
+        bucket) can be asserted against a real sweep.
+        """
         now = datetime.now(UTC)
-        updated_count = 0
+        summary = StatusSweepSummary()
 
         try:
             with get_db_session() as session:
@@ -104,6 +172,7 @@ class MediaBuyStatusScheduler:
                 media_buys = MediaBuyRepository.get_all_by_statuses(
                     session, sorted(PENDING_PERSISTED_STATUSES | SERVING_PERSISTED_STATUSES)
                 )
+                summary.selected = len(media_buys)
 
                 for media_buy in media_buys:
                     # One unprocessable row must not strand every other buy's transition.
@@ -126,26 +195,55 @@ class MediaBuyStatusScheduler:
                             f"Skipping status update for media buy {media_buy.media_buy_id}: {e}",
                             exc_info=True,
                         )
+                        summary.errors += 1
+                        continue
+
+                    if new_status is NO_FLIGHT_WINDOW:
+                        # Counted, not a bare `continue`: this row can never
+                        # transition, so it is re-selected on every sweep forever.
+                        # Silently skipping it made an unbounded population of stuck
+                        # rows indistinguishable from an idle scheduler.
+                        summary.no_flight_window += 1
                         continue
 
                     if new_status and new_status != media_buy.status:
                         old_status = media_buy.status
-                        media_buy.status = new_status
-                        updated_count += 1
+                        media_buy.status = str(new_status)
+                        summary.updated += 1
                         logger.info(f"Updated media buy {media_buy.media_buy_id} status: {old_status} -> {new_status}")
+                    else:
+                        summary.unchanged += 1
 
-                if updated_count > 0:
+                if summary.updated > 0:
                     session.commit()
-                    logger.info(f"Updated {updated_count} media buy status(es)")
+
+                # Logged UNCONDITIONALLY, against the selection. The previous line
+                # only fired when something changed, so a sweep that skipped every
+                # row it selected emitted nothing at all -- the same "quiet, healthy
+                # scheduler" misreading the delivery batch summary was widened to
+                # prevent, in the sibling this PR also touches.
+                logger.info(
+                    "Status sweep: %d updated, %d unchanged, %d without a flight window, %d errors (of %d selected)",
+                    summary.updated,
+                    summary.unchanged,
+                    summary.no_flight_window,
+                    summary.errors,
+                    summary.selected,
+                )
 
         except Exception as e:
             logger.error(f"Failed to update media buy statuses: {e}", exc_info=True)
 
-    def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
+        return summary
+
+    def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> "str | None | _NoFlightWindow":
         """Compute the new status for a media buy based on flight dates.
 
         Returns:
-            New status string if change needed, None otherwise.
+            New status string if a change is needed; ``None`` if the row is
+            already correct; ``NO_FLIGHT_WINDOW`` if no start or end could be
+            resolved, which is a STUCK row rather than a settled one and is
+            counted separately by the caller.
         """
         # Get start and end times (prefer start_time/end_time over start_date/end_date)
         start_time: datetime | None = None
@@ -159,7 +257,7 @@ class MediaBuyStatusScheduler:
             start_time = utc_flight_start(media_buy.start_date)  # type: ignore[arg-type]
 
         if start_time is None:
-            return None  # No start time defined
+            return NO_FLIGHT_WINDOW  # No start time defined -> cannot ever transition
 
         end_time: datetime | None = None
         if media_buy.end_time:
@@ -172,7 +270,7 @@ class MediaBuyStatusScheduler:
             end_time = utc_flight_end(media_buy.end_date)  # type: ignore[arg-type]
 
         if end_time is None:
-            return None  # No end time defined
+            return NO_FLIGHT_WINDOW  # No end time defined -> cannot ever transition
 
         current_status = media_buy.status
 

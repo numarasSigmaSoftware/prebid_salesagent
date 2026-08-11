@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from adcp.types import ContextObject, PushNotificationConfig, ReportingWebhook, TaskType
 
-from src.core.config import get_config, is_production
+from src.core.config import MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH, get_config, is_production
 from src.core.exceptions import AdCPValidationError
 from src.core.security.url_validator import check_url_ssrf
 
@@ -190,7 +190,19 @@ def redact_webhook_url_for_audit(url: str) -> str:
             return "REDACTED"
         config = get_config()
         raw_key = config.webhook_audit_hmac_key
-        if not raw_key.strip():
+        # STRENGTH, not mere presence. This guarded `not raw_key.strip()` only, so a
+        # 1-character key still produced a full `<redacted:v1:<32 hex>>` — a value
+        # that LOOKS like a real keyed digest while being trivially brute-forced back
+        # to the URL it came from, which is the one thing this function exists to
+        # prevent. MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH was enforced only in
+        # validate_configuration(), which RAISES solely under
+        # declares_production_explicitly() and merely WARNS under is_production() —
+        # so a deployment that infers production rather than declaring it could reach
+        # here with a too-short key and never be stopped.
+        #
+        # Degrading to the same honest placeholder as the empty case is deliberate: a
+        # weak key must not buy a stronger-LOOKING output than no key at all.
+        if len(raw_key.strip()) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH:
             return f"{parsed.scheme}://<redacted>"
         key_id = config.webhook_audit_hmac_key_id
         message = _AUDIT_REDACTION_CONTEXT + b":" + key_id.encode() + b":" + url.encode()

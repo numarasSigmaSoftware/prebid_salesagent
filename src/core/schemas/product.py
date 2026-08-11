@@ -18,6 +18,7 @@ from adcp.types import ReportingCapabilities as LibraryReportingCapabilities
 from pydantic import ConfigDict, Field, model_validator
 
 from src.core.config import get_pydantic_extra_mode
+from src.core.reporting_capabilities import build_daily_reporting_capabilities
 from src.core.schemas._base import (
     FormatId,
     NestedModelSerializerMixin,
@@ -34,15 +35,17 @@ def _default_reporting_capabilities() -> LibraryReportingCapabilities:
     validated default rather than leaving the attribute None and fabricating a
     value at serialization time. Returns a fresh instance per call — the field's
     default_factory — so no lists are shared between products.
+
+    Built through ``build_daily_reporting_capabilities`` rather than hand-writing
+    the six values. This function used to restate them, so "what this seller's
+    daily reporting looks like" had two homes that were field-identical by
+    coincidence: the seller-owned builder, and this default. R0801 cannot see
+    that — one is a constructor call, the other a dict literal fed to
+    ``model_validate`` — so the drift would have been silent, and the two are
+    consumed together (test factories build capabilities with the builder while
+    production products carry this default).
     """
-    return LibraryReportingCapabilities(
-        available_reporting_frequencies=["daily"],
-        expected_delay_minutes=1440,
-        timezone="UTC",
-        supports_webhooks=False,
-        available_metrics=["impressions"],
-        date_range_support="date_range",
-    )
+    return LibraryReportingCapabilities.model_validate(build_daily_reporting_capabilities(supports_webhooks=False))
 
 
 class ProductCard(LibraryProductCard):

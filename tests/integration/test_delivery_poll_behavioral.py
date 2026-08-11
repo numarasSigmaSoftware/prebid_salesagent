@@ -861,7 +861,11 @@ class TestClaimIsReleasedWhenPreSendWorkRaises:
 
         from src.core.database.repositories.delivery import DeliveryRepository
         from src.core.database.repositories.media_buy import MediaBuyRepository
-        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from src.services.delivery_webhook_scheduler import (
+            FINAL_WEBHOOK_CLAIM_LEASE,
+            PERIODIC_WEBHOOK_CLAIM_LEASE,
+            DeliveryWebhookScheduler,
+        )
         from tests.harness import DeliveryPollEnv
 
         with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
@@ -892,8 +896,19 @@ class TestClaimIsReleasedWhenPreSendWorkRaises:
             # real blast radius, which a final-only assertion would miss.
             assert refreshed.last_periodic_webhook_claimed_at is None
             now = datetime.now(UTC)
+            # Cutoffs are the PRODUCTION ones (scheduler.py passes
+            # now - FINAL_WEBHOOK_CLAIM_LEASE), not `now`. An earlier revision passed
+            # final_stale_before=now, which made this assertion vacuous: a leaked final
+            # claim written microseconds earlier is already `< now`, so the
+            # cross-column term counted it as stale and the periodic claim succeeded
+            # whether or not the leak was fixed. Verified by inducing the leak — the
+            # assertion still passed. With the real lease the term can actually fail,
+            # which is the blast radius this is here to grade.
             assert MediaBuyRepository(session, "t1").try_claim_periodic_webhook(
-                mb_id, now=now, stale_before=now, final_stale_before=now
+                mb_id,
+                now=now,
+                stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE,
+                final_stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE,
             ), "a released final claim must leave the periodic claim immediately takeable"
 
     @pytest.mark.asyncio

@@ -428,12 +428,12 @@ class TestRedactUrlCredentials:
         url = "https://example.com/hook?token=abc"
         with patch(
             "src.core.webhook_validator.get_config",
-            return_value=AppConfig(webhook_audit_hmac_key="secret-one"),
+            return_value=AppConfig(webhook_audit_hmac_key="secret-one-" + "0" * 32),
         ):
             redacted_with_secret_one = self._redact(url)
         with patch(
             "src.core.webhook_validator.get_config",
-            return_value=AppConfig(webhook_audit_hmac_key="secret-two"),
+            return_value=AppConfig(webhook_audit_hmac_key="secret-two-" + "0" * 32),
         ):
             redacted_with_secret_two = self._redact(url)
         assert redacted_with_secret_one != redacted_with_secret_two, (
@@ -450,7 +450,7 @@ class TestRedactUrlCredentials:
 
         with patch(
             "src.core.webhook_validator.get_config",
-            return_value=AppConfig(webhook_audit_hmac_key="a-real-secret", webhook_audit_hmac_key_id="v7"),
+            return_value=AppConfig(webhook_audit_hmac_key="a-real-secret-" + "0" * 32, webhook_audit_hmac_key_id="v7"),
         ):
             redacted = self._redact("https://example.com/hook")
         key_id, _digest = self._key_id_and_digest(redacted)
@@ -466,12 +466,12 @@ class TestRedactUrlCredentials:
         url = "https://example.com/hook?token=abc"
         with patch(
             "src.core.webhook_validator.get_config",
-            return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v1"),
+            return_value=AppConfig(webhook_audit_hmac_key="same-secret-" + "0" * 32, webhook_audit_hmac_key_id="v1"),
         ):
             redacted_v1 = self._redact(url)
         with patch(
             "src.core.webhook_validator.get_config",
-            return_value=AppConfig(webhook_audit_hmac_key="same-secret", webhook_audit_hmac_key_id="v2"),
+            return_value=AppConfig(webhook_audit_hmac_key="same-secret-" + "0" * 32, webhook_audit_hmac_key_id="v2"),
         ):
             redacted_v2 = self._redact(url)
         _key_id_1, digest_1 = self._key_id_and_digest(redacted_v1)
@@ -1436,4 +1436,66 @@ class TestSupersededSanitizersStayOutOfProduction:
             "superseded lax sanitizer reintroduced in production:\n  "
             + "\n  ".join(offenders)
             + "\nUse redact_webhook_url_for_audit — the lax form leaks a capability URL's credential."
+        )
+
+
+class TestRedactionRequiresKeyStrengthNotJustPresence:
+    """A too-short key must degrade to the placeholder, not to a real-looking digest.
+
+    The guard was ``if not raw_key.strip()`` — presence only. A 1-character key
+    therefore produced a full ``<redacted:v1:<32 hex>>``: a value that LOOKS like a
+    keyed digest while being trivially brute-forced back to the URL it came from,
+    which is exactly what this redaction exists to prevent. Low-entropy webhook
+    URLs are the stated threat model, so a weak key is close to no key.
+
+    ``MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH`` was enforced only in
+    ``validate_configuration()``, which RAISES solely under
+    ``declares_production_explicitly()`` and merely WARNS under ``is_production()``.
+    So a deployment that INFERS production (FLY_APP_NAME / PRODUCTION, the very set
+    this PR broadened ``is_production()`` to cover) could reach the redactor with a
+    short key and never be stopped.
+
+    Boundary-parametrized rather than spot-checked: the off-by-one at exactly
+    MIN-1 / MIN is the whole contract.
+    """
+
+    def _redact(self, key: str) -> str:
+        from unittest.mock import MagicMock, patch
+
+        import src.core.webhook_validator as wv
+
+        cfg = MagicMock(webhook_audit_hmac_key=key, webhook_audit_hmac_key_id="v1")
+        with patch.object(wv, "get_config", return_value=cfg):
+            return wv.redact_webhook_url_for_audit("https://tok-9fK2z8mQ.hooks.example.com/deliver")
+
+    @pytest.mark.parametrize(
+        "key,label",
+        [
+            ("", "empty"),
+            ("   ", "whitespace-only"),
+            ("x", "single character"),
+        ],
+    )
+    def test_a_weak_key_yields_the_honest_placeholder(self, key, label):
+        from src.core.config import MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH
+
+        assert len(key.strip()) < MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH, "test data no longer weak"
+        assert self._redact(key) == "https://<redacted>", (
+            f"a {label} key must degrade to the constant placeholder — a weak key must "
+            "not buy a stronger-looking output than no key at all"
+        )
+
+    def test_the_boundary_is_the_configured_minimum(self):
+        """MIN-1 degrades, MIN digests. Derived from the constant, not a literal."""
+        from src.core.config import MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH
+
+        just_short = self._redact("k" * (MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH - 1))
+        just_enough = self._redact("k" * MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH)
+
+        assert just_short == "https://<redacted>", (
+            f"a key one character below MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH "
+            f"({MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH}) must not produce a digest, got {just_short}"
+        )
+        assert just_enough.startswith("https://<redacted:v1:"), (
+            f"a key at exactly the minimum must still produce a keyed digest, got {just_enough}"
         )

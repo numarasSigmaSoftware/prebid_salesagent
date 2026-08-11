@@ -777,3 +777,62 @@ async def test_row_faults_continue_but_session_faults_abort(integration_db, rais
             await MediaBuyStatusScheduler()._update_statuses()
 
         assert len(calls) == expected_calls, f"{why} (saw {len(calls)} calls: {calls})"
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_status_sweep_summary_accounts_for_every_selected_buy(integration_db):
+    """The sweep summary's buckets partition its selection.
+
+    The sibling invariant to ``TestBatchSummaryAccountsForEverySelectedBuy`` in
+    test_delivery_poll_behavioral.py. The summary is what distinguishes "every row
+    was skipped" from "there was nothing to do", and a path that leaves the loop
+    without counting breaks that quietly — the remaining numbers still look
+    plausible. Before this, only transitions were counted and the log line fired
+    only when ``updated > 0``, so a sweep that selected rows and changed none
+    emitted nothing at all.
+
+    Asserts the identity (buckets sum to selection) rather than each bucket's
+    value, so it keeps holding as outcomes are added.
+
+    ``no_flight_window`` is NOT seeded here, and cannot be: MediaBuy.start_date and
+    end_date are both NOT NULL, so ``_compute_new_status`` always resolves a window
+    and that bucket is unreachable against the current schema (see
+    ``_NoFlightWindow``). Seeding it fails at INSERT, which is the honest reason
+    this asserts over the reachable buckets only.
+    """
+    from tests.factories import MediaBuyFactory
+    from tests.harness._base import IntegrationEnv
+
+    with IntegrationEnv(tenant_id="t_sweep_sum", principal_id="p_sweep_sum") as env:
+        tenant, principal = env.setup_default_data()
+        common = {"tenant": tenant, "principal": principal}
+        mid_flight = {
+            "start_date": (datetime.now(UTC) - timedelta(hours=1)).date(),
+            "end_date": (datetime.now(UTC) + timedelta(days=7)).date(),
+            "start_time": datetime.now(UTC) - timedelta(hours=1),
+            "end_time": datetime.now(UTC) + timedelta(days=7),
+        }
+
+        # updated: mid-flight legacy alias -> active
+        MediaBuyFactory(media_buy_id="mb_sweep_update", status="ready", **mid_flight, **common)
+        # unchanged: already active mid-flight
+        MediaBuyFactory(media_buy_id="mb_sweep_unchanged", status="active", **mid_flight, **common)
+
+        summary = await MediaBuyStatusScheduler()._update_statuses()
+
+        assert summary.selected >= 2, (
+            f"expected both seeded buys to be selected, got {summary.selected} — "
+            "the seeding no longer exercises the sweep"
+        )
+        assert summary.updated >= 1 and summary.unchanged >= 1, (
+            f"expected the sweep to hit both a transition and a no-op "
+            f"(updated={summary.updated} unchanged={summary.unchanged}) — "
+            "a partition assertion over one bucket proves nothing"
+        )
+        assert summary.accounted_for == summary.selected, (
+            f"buckets do not partition the selection: selected={summary.selected} "
+            f"accounted_for={summary.accounted_for} (updated={summary.updated} "
+            f"unchanged={summary.unchanged} no_flight_window={summary.no_flight_window} "
+            f"errors={summary.errors}) — some path left the loop without counting"
+        )
