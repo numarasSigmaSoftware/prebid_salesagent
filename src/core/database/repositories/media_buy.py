@@ -296,17 +296,6 @@ class MediaBuyRepository:
             stmt = stmt.where(MediaBuy.status.in_(statuses))
         return list(self._session.scalars(stmt).all())
 
-    def get_active(self) -> list[MediaBuy]:
-        """Get all active media buys for the tenant."""
-        return list(
-            self._session.scalars(
-                select(MediaBuy).where(
-                    MediaBuy.tenant_id == self._tenant_id,
-                    MediaBuy.status.in_(["active", "approved"]),
-                )
-            ).all()
-        )
-
     # ------------------------------------------------------------------
     # Package queries — tenant isolation through MediaBuy FK join
     # ------------------------------------------------------------------
