@@ -374,18 +374,11 @@ jobs:
           # than as contention. 2 fits the runner (4 CPU); locally on 4 CPU it
           # provisions both stacks, stays green, and cuts the leg from 220s to 143s.
           E2E_WORKERS: 2
-      # The e2e_rest failures that matter are HTTP 500s raised INSIDE a server
-      # container, and the runner log only ever shows the client's view of them.
-      # Without this the next reader gets "Expected success but got HTTP 500" and
-      # no traceback, which is what made the last one undiagnosable off-box.
-      - name: Server logs (on failure)
-        if: failure()
-        run: |
-          for c in $(docker ps -a --format '{{.Names}}' | grep -E 'server(-gw[0-9]+)?$' || true); do
-            echo "::group::$c"
-            docker logs --tail 400 "$c" 2>&1 || true
-            echo "::endgroup::"
-          done
+      # Server-container logs on failure are dumped by run_all_tests.sh's own
+      # EXIT trap (dump_server_logs), not by a step here. A step at this point
+      # runs AFTER that trap has removed the containers, so it matches nothing
+      # and prints nothing while still succeeding — the shape that made the
+      # last in-network failure undiagnosable off-box.
       - name: Cleanup Docker services
         if: always()
         run: docker compose -f docker-compose.e2e.yml down -v 2>/dev/null || true

@@ -102,7 +102,34 @@ mkdir -p "$RESULTS_DIR"
 
 dc() { docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT_NAME" --profile runner "$@"; }
 
+dump_server_logs() {
+    # The e2e_rest failures that matter are HTTP 500s raised INSIDE a server
+    # container; the runner log only ever shows the client's view of them
+    # ("Request failed: HTTP 500"), with no traceback.
+    #
+    # This MUST live here, inside the trap, ahead of the removal below. A
+    # workflow step placed after this script cannot see these containers: the
+    # EXIT trap has already deleted them by the time the step runs, so such a
+    # step matches nothing and prints nothing while still reporting success —
+    # which reads as "no logs were produced" rather than "we looked too late".
+    local c
+    for c in $(docker ps -a --format '{{.Names}}' \
+        | grep -E "^${COMPOSE_PROJECT_NAME}-(adcp-server-[0-9]+|server(-gw[0-9]+)?)$" || true); do
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::server logs: $c"; fi
+        echo "----- $c -----"
+        docker logs --tail 400 "$c" 2>&1 || true
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi
+    done
+}
+
 cleanup() {
+    # The status that fired this trap: `exit $RC` on the normal path, or
+    # set -e's status on an early abort. Captured first — anything below
+    # would overwrite it.
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        dump_server_logs
+    fi
     # Per-worker e2e servers are `docker compose run` containers (not `up`), so
     # `dc down` won't remove them — do it explicitly.
     docker ps -aq --filter "name=${COMPOSE_PROJECT_NAME}-server-gw" | xargs -r docker rm -f >/dev/null 2>&1 || true
