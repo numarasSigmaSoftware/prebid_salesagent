@@ -399,7 +399,18 @@ class TestProductionConsequenceListIsComplete:
         src = Path(__file__).resolve().parents[2] / "src"
         found = set()
         for path in src.rglob("*.py"):
-            body = path.read_text()
+            # CODE only. Scanning the raw text counted a module that merely NAMES
+            # is_production() in a comment as one that GATES on it, which is a
+            # different claim -- the enumeration this feeds documents what changes
+            # behaviorally on upgrade, and a comment changes nothing. Surfaced by
+            # the FIXME(#1819) annotations, which say "route through
+            # src.core.config.is_production()" at each open-coded site: those sites
+            # are precisely the ones NOT gating on it yet.
+            #
+            # Line-level comment stripping, not tokenize: a `#` inside a string
+            # literal would truncate that line, which can only ever LOSE a match
+            # here, and every real call site is a bare statement or condition.
+            body = "\n".join(line.split("#", 1)[0] for line in path.read_text().splitlines())
             # the call, not the import or the definition
             if re.search(r"\bis_production\(\)", body) and "def is_production" not in body.split("\n\n")[0]:
                 if re.search(r"(?<!def )\bis_production\(\)", body):

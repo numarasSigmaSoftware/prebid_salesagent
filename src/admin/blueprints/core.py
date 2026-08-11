@@ -177,6 +177,7 @@ def render_super_admin_index():
             )
 
     # Get environment info for URL generation
+    # FIXME(#1819): open-coded production signal — route through src.core.config.is_production()
     is_production = os.environ.get("PRODUCTION") == "true"
     mcp_port = int(os.environ.get("ADCP_SALES_PORT", 8080)) if not is_production else None
 

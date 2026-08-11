@@ -37,6 +37,7 @@ def _determine_base_url(virtual_host: str | None = None) -> str:
         Base URL for generating endpoint URLs
     """
     # Check if we're in production
+    # FIXME(#1819): open-coded production signal — route through src.core.config.is_production()
     if os.getenv("PRODUCTION") == "true":
         if virtual_host:
             return f"https://{virtual_host}"
@@ -256,6 +257,7 @@ def generate_tenant_landing_page(tenant: dict, virtual_host: str | None = None) 
         is_external_domain = virtual_host and not is_sales_agent_domain(virtual_host)
         if is_external_domain and tenant_subdomain:
             # External domain: Point admin to tenant subdomain
+            # FIXME(#1819): open-coded production signal — route through src.core.config.is_production()
             if os.getenv("PRODUCTION") == "true":
                 admin_url = f"{get_tenant_url(tenant_subdomain)}/admin/"
             else:
@@ -279,6 +281,7 @@ def generate_tenant_landing_page(tenant: dict, virtual_host: str | None = None) 
         "adcp_docs_url": "https://adcontextprotocol.org",
         # Virtual host info
         "virtual_host": virtual_host,
+        # FIXME(#1819): open-coded production signal — route through src.core.config.is_production()
         "is_production": os.getenv("PRODUCTION") == "true",
         # Additional context
         "page_title": f"{tenant.get('name', 'Publisher')} Sales Agent",

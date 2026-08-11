@@ -702,11 +702,16 @@ class DeliveryWebhookScheduler:
         # reconciliation tracked in #1624.
         #
         # The body emitted here is governed by media-buy-delivery-webhook-result.json
-        # (@ 3.1.0, the release the schema entered — the v3.1-04f59d2d5 ref above
-        # predates it and does not contain that file, and it is not among the
-        # vendored fixtures under tests/fixtures/adcp_schemas_pinned/, so it is not
-        # graded offline). It lists notification_type in `required` — the constraint
-        # the zero-deliveries note below reasons about.
+        # (@ 3.1.0, the release the schema entered). It lists notification_type in
+        # `required` — the constraint the zero-deliveries note below reasons about.
+        #
+        # That constraint IS graded offline now, contrary to an earlier revision of
+        # this comment which said the file "is not among the vendored fixtures ...
+        # so it is not graded offline". That was true of the vendored tree; #1868
+        # repointed tests/helpers/pinned_schema.py at the SDK's own adcp/_schemas/,
+        # where the file resolves. test_scheduler_webhook_body_is_schema_valid
+        # validates a real scheduler body against it, so "required" and the
+        # webhook-only omissions are checked rather than only described here.
         #
         # notification_type: derived from the reported statuses — "final" when
         # every buy will never produce more data ("one final notification when

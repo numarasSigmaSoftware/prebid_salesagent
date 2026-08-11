@@ -572,8 +572,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # Graduated e2e_rest: inv-031-1-violated, inv-049-3-violated,
             # inv-049-4-violated, inv-049-4-nodim (pass with strong assertions)
             "T-UC-005-inv-031-2-holds",
-            "T-UC-005-inv-049-1-holds",
-            "T-UC-005-inv-049-1-violated",
+            # REMOVED: "T-UC-005-inv-049-1-holds" / "T-UC-005-inv-049-1-violated".
+            # Neither tag appears on any scenario in tests/bdd/features/**, so both
+            # excluded nothing — the same rot as the emptied _NO_E2E_REST_TAGS and
+            # _UC004_E2E_WEBHOOK_INTERNAL_TAGS, arriving by a third route: not a
+            # scenario that was re-routed, but a tag that no longer exists at all.
+            # The remaining 12 entries were each confirmed present in a feature file.
             "T-UC-005-inv-049-2-holds",
             "T-UC-005-inv-049-2-violated",
             "T-UC-005-inv-049-3-holds",

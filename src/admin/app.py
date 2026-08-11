@@ -118,11 +118,19 @@ def create_app(config=None):
     # access cookies" / "required for EventSource cross-origin requests". Neither
     # holds: EventSource sends cookies itself under the browser's own rules and
     # JS never reads them, nothing in src/admin, templates or static reads
-    # document.cookie, the one EventSource reference left in the tree records
-    # that it was REPLACED by polling, and no CORS/cross-origin config exists for
-    # this app. So the pair bought nothing while costing XSS (a readable session
-    # cookie) and CSRF (SameSite=None sends the cookie on cross-site requests)
-    # protection.
+    # document.cookie, and the one EventSource reference left in the tree records
+    # that it was REPLACED by polling. So the pair bought nothing while costing
+    # XSS (a readable session cookie) and CSRF (SameSite=None sends the cookie on
+    # cross-site requests) protection.
+    #
+    # One CORS header DOES exist — blueprints/activity_stream.py sets
+    # `Access-Control-Allow-Origin: *` on the SSE route. An earlier revision of
+    # this comment claimed no cross-origin config existed at all, which is wrong
+    # and falsifiable in one grep. It does not change the conclusion: a wildcard
+    # ACAO cannot be combined with credentials, so a browser refuses to send the
+    # session cookie cross-origin to that route whatever SameSite says. The
+    # header would need an explicit origin plus Allow-Credentials to make
+    # SameSite=None load-bearing, and it has neither.
     #
     # That was invisible while this branch was gated on a bare PRODUCTION
     # literal, because deploys reaching it were the ones that had opted in. Once
@@ -297,6 +305,7 @@ def create_app(config=None):
             f"/admin{request.full_path}" if not request.full_path.startswith("/admin") else request.full_path
         )
 
+        # FIXME(#1819): open-coded production signal — route through src.core.config.is_production()
         if os.environ.get("PRODUCTION") == "true":
             redirect_url = f"{get_tenant_url(tenant_subdomain)}{path_with_admin}"
         else:

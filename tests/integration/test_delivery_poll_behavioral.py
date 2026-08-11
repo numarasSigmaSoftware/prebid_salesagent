@@ -4740,3 +4740,38 @@ class TestDeliveryPollEnvSsrfGate:
                         buy, buy.raw_request["reporting_webhook"], env.get_session(), force=True
                     )
             mock_post.assert_not_called()
+
+
+@pytest.mark.requires_db
+class TestSchedulerWebhookBodyIsSchemaValid:
+    """The scheduler's outbound body is graded against its governing schema.
+
+    ``media-buy-delivery-webhook-result.json`` was cited in prose four times in
+    delivery_webhook_scheduler.py and validated zero times, on the stated premise
+    that the file "is not among the vendored fixtures ... so it is not graded
+    offline". #1868 falsified that: pinned_schema.py now resolves from the SDK's
+    own adcp/_schemas/ tree, where the file exists.
+
+    This grades two things the module previously only asserted in comments — that
+    ``notification_type`` is REQUIRED (so the zero-deliveries reasoning has a real
+    constraint behind it), and that the webhook-only fields the scheduler attaches
+    are schema-legal on this path, which is the other half of the poll-omission
+    contract in ``assert_omits_webhook_only_fields``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_scheduler_webhook_body_is_schema_valid(self, integration_db):
+        from tests.harness import DeliveryPollEnv
+        from tests.helpers.pinned_schema import load, validate_against_pinned_schema
+
+        schema_file = "media-buy/media-buy-delivery-webhook-result.json"
+        assert "notification_type" in load(schema_file).get("required", []), (
+            "the schema no longer marks notification_type required — the scheduler's "
+            "zero-deliveries reasoning depends on it; reconcile before relaxing this"
+        )
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env)
+            wire = await env.send_delivery_webhook(buy)
+
+            validate_against_pinned_schema(schema_file, wire["result"])

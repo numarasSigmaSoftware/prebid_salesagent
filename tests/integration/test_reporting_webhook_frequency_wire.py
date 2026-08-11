@@ -71,6 +71,11 @@ def _assert_unsupported_capability(result: Any, message: str, suggestion: str, *
 
 
 class TestCreateReportingWebhookFrequencyWire:
+    """Create rejects a cadence this seller cannot fulfil, on every wire.
+
+    Covers: CONSTR-REPORTING-FREQUENCY-01
+    """
+
     @pytest.fixture
     def env_with_product(self, integration_db):
         from tests.harness.media_buy_create import MediaBuyCreateEnv
@@ -176,6 +181,14 @@ class TestCreateReportingWebhookFrequencyWire:
 
 
 class TestUpdateReportingWebhookFrequencyWire:
+    """Update rejects a cadence this seller cannot fulfil, on every wire.
+
+    The create/update symmetry the obligation names — an unsupported cadence must
+    not slip in through the update path after create rejected it.
+
+    Covers: CONSTR-REPORTING-FREQUENCY-01
+    """
+
     @pytest.fixture
     def env_with_media_buy(self, integration_db):
         from tests.bdd.conftest import _setup_existing_media_buy
