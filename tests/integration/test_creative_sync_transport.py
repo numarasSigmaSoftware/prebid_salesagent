@@ -145,9 +145,9 @@ class TestSyncCreativesSandboxMarkerTransport:
     when scoped to a sandbox account. identity.sandbox is populated here (unlike
     media_buy_create's request-scoped identity) via enrich_identity_with_account in
     both sync_wrappers entry points before _sync_creatives_impl runs — the property
-    that made this a genuine one-liner marker (issue #1874 tracks the remaining
-    routed operations that cannot be, because their response types either have no
-    sandbox field or need a per-buy rule).
+    that made this a genuine one-liner marker (issue #1918 tracks the remaining
+    routed operations that cannot carry it, because their response types either have
+    no sandbox field or need a per-buy rule).
 
     Uses ``to_account_reference`` to build a real typed ``AccountReference`` rather
     than a raw dict: unlike the wire transports (MCP/REST), which validate the
@@ -157,6 +157,17 @@ class TestSyncCreativesSandboxMarkerTransport:
     ``enrich_identity_with_account`` unconverted and fails on ``.root`` access. The
     same typed object works everywhere: REST's ``build_rest_body`` model_dumps it
     for the JSON body, and MCP's in-memory client accepts it as a tool argument.
+
+    Parametrized over all four transports, but only MCP and REST cross a REAL wire
+    for the marker: ``CreativeSyncEnv.call_a2a`` calls ``sync_creatives_raw`` directly
+    rather than driving ``AdCPRequestHandler.on_message_send`` — its own docstring
+    notes the real A2A handler (``_handle_sync_creatives_skill``) has a pre-existing
+    bug constructing ``CreativeAsset`` from raw dicts (#1175) that this harness routes
+    around. So A2A here exercises the same in-process ``_sync_creatives_impl`` call as
+    IMPL, not real Task/Artifact serialization — useful regression coverage of the
+    marker-setting logic itself, but not wire-shape coverage. Both dispatchers leave
+    ``TransportResult.wire_response`` unset (``env._last_wire_response`` is only
+    populated by ``_run_a2a_handler``, which this path bypasses).
     """
 
     @staticmethod
@@ -195,7 +206,18 @@ class TestSyncCreativesSandboxMarkerTransport:
 
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_live_scoped_sync_omits_the_marker(self, integration_db, transport):
-        """Negative control — 'always sandbox: true' would pass the test above."""
+        """Negative control — 'always sandbox: true' would pass the test above.
+
+        Asserts on the real wire body (``result.wire_response``), not the parsed
+        ``payload``: ``payload.sandbox is None`` is satisfied identically by an
+        omitted key OR an explicit ``"sandbox": null`` — Pydantic can't tell them
+        apart on a nullable field, and the pinned schema types ``sandbox`` as
+        boolean with no null variant, so an explicit null would itself be a defect
+        this assertion must catch. IMPL and A2A leave ``wire_response`` unset in this
+        harness (see the class docstring — A2A bypasses the real handler), so both
+        assert on the payload instead — there ``None`` IS the ground truth, not a
+        re-serialization of one.
+        """
         from src.core.schema_helpers import to_account_reference
 
         suffix = transport.value
@@ -210,10 +232,20 @@ class TestSyncCreativesSandboxMarkerTransport:
             )
 
         assert result.is_success, f"[{suffix}] dispatch failed: {result.error!r}"
-        assert result.payload.sandbox is None, (
-            f"[{suffix}] live-scoped sync_creatives must omit the sandbox marker "
-            f"(None, not False, per AdCP 3.1.1), got {result.payload.sandbox!r}"
-        )
+        assert_envelope(result, transport)
+
+        if transport in (Transport.IMPL, Transport.A2A):
+            assert result.payload.sandbox is None, (
+                f"[{suffix}] live-scoped sync_creatives must omit the sandbox marker "
+                f"(None, not False, per AdCP 3.1.1), got {result.payload.sandbox!r}"
+            )
+        else:
+            wire = result.wire_response
+            assert wire is not None, f"[{suffix}] no wire response captured — this assertion would grade nothing"
+            assert "sandbox" not in wire, (
+                f"[{suffix}] live-scoped sync_creatives must OMIT the sandbox key on the wire "
+                f"(not send an explicit null), got sandbox={wire.get('sandbox')!r} in {wire!r}"
+            )
 
 
 @pytest.mark.requires_db

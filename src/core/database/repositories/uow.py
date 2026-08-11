@@ -43,6 +43,7 @@ from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.helpers.account_helpers import sandbox_mode_for_buy
 
 if TYPE_CHECKING:
     from src.core.database.models import MediaBuy
@@ -159,10 +160,6 @@ class BuyKeyedSandboxMixin:
         that case. A buy whose non-null account cannot be resolved raises
         ``AdCPAccountNotFoundError`` rather than silently defaulting to live.
         """
-        # Lazy by necessity: account_helpers imports repositories.account, which
-        # executes repositories/__init__ -> uow, so a module-scope import here cycles.
-        from src.core.helpers.account_helpers import sandbox_mode_for_buy
-
         assert self.accounts is not None
         return sandbox_mode_for_buy(self.accounts, media_buy)
 

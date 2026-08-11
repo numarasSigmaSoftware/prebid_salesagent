@@ -419,15 +419,6 @@ def _update_media_buy_impl(
                     ),
                 )
 
-            # update_media_buy is addressed by media_buy_id and carries no account
-            # reference, so identity.sandbox is structurally False here. The mode must
-            # come from the buy being mutated, or a sandbox buy hits the live adapter.
-            # Passing the already-fetched row avoids a second lookup. Derived after the
-            # terminal-state check: a terminal buy with a dangling account_id should
-            # reject as INVALID_STATE, not pay an account lookup that could raise
-            # ACCOUNT_NOT_FOUND for a buy that was never going through the adapter anyway.
-            _mb_sandbox = uow.sandbox_mode(_current_mb)
-
             _requested = _requested_actions(req)
             _allowed = set(valid_actions_for_status(_current_status))
             # Only enforce state machine for statuses defined in the spec.
@@ -479,6 +470,16 @@ def _update_media_buy_impl(
                 )
 
             principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)
+
+            # update_media_buy is addressed by media_buy_id and carries no account
+            # reference, so identity.sandbox is structurally False here. The mode must
+            # come from the buy being mutated, or a sandbox buy hits the live adapter.
+            # Passing the already-fetched row avoids a second lookup. Derived here,
+            # after both the terminal-state and the action-guard checks above: a
+            # rejected update should reject on INVALID_STATE, not pay an account lookup
+            # that could raise ACCOUNT_NOT_FOUND for a buy that was never going through
+            # the adapter anyway.
+            _mb_sandbox = uow.sandbox_mode(_current_mb)
 
             adapter = get_adapter(
                 principal,

@@ -1083,10 +1083,26 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 "compatible assignment — assigned_to is empty (BR-RULE-039 INV-5)"
             ),
             # T-UC-006-rule-037-inv5: e2e_rest only — handled below with transport check
-            # Sandbox: sync_creatives does not set sandbox=true on response
+            # Sandbox marker IS implemented in sync_creatives — the reason this carried
+            # ("sync_creatives does not set sandbox=true on response") is no longer true.
+            # identity.sandbox is populated via enrich_identity_with_account in
+            # sync_wrappers.py and the response carries sandbox=true, graded on real
+            # wire bytes across mcp/rest by
+            # tests/integration/test_creative_sync_transport.py::TestSyncCreativesSandboxMarkerTransport.
+            #
+            # This scenario is ALSO not parked by this entry: it xfails earlier, at the
+            # UC-006 harness gate (marker_names & {"account", "creative-invariant",
+            # "BR-RULE-034", "webhook-ssrf"} — @sandbox is not in that set), so deleting
+            # this entry changes nothing today. Even past that gate, given_sandbox_account
+            # (given_auth.py:66) seeds no Account row and no ctx["account_ref"], so
+            # identity.sandbox would still resolve False (#1875, dormant sandbox Given).
+            # Kept with an accurate reason so whoever wires the harness inherits a true
+            # statement instead of a resolved gap.
             "T-UC-006-sandbox-happy": (
-                "SPEC-PRODUCTION GAP: sync_creatives does not set sandbox=true on "
-                "response for sandbox accounts (BR-RULE-209 INV-4)"
+                "UC-006 harness not wired for this scenario (no marker in the gate's "
+                "allowlist), and given_sandbox_account seeds no real Account (#1875) — "
+                "the sandbox marker itself IS implemented and graded; re-check when the "
+                "harness reaches it"
             ),
             # Sandbox: invalid format_id does not trigger validation error at _impl level
             "T-UC-006-sandbox-validation": (

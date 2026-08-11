@@ -183,7 +183,6 @@ def get_adapter(
                 selected_adapter = adapter_type
                 logger.info(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
             if adapter_type == "mock":
-                adapter_config["dry_run"] = config_row.mock_dry_run or False
                 # Default to True (require approval) for safety
                 adapter_config["manual_approval_required"] = (
                     config_row.mock_manual_approval_required

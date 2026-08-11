@@ -150,12 +150,19 @@ def _one_hop_candidates(value: ast.expr, func: ast.FunctionDef | ast.AsyncFuncti
     Shared by the identity and literal arms. It exists because production writes the
     via-local form (``s = <expr>`` then ``sandbox=s``) at 4 of 12 sites, so an arm that
     inspects the call's expression directly sees a bare ``Name`` and concludes nothing.
-    (7 of the 12 sites pass a bare ``Name``; 3 of those 7 are forwarded parameters,
-    which resolve to themselves by design — see below — leaving 4 that are genuinely
-    local assignments.) The identity arm was extended to follow one hop; its sibling
-    was not, which left ``s = False; sandbox=s`` — the cheapest hard-wire, written in
-    production's own idiom — passing the literal arm at those 4 sites. One resolver now
-    serves both, so a future arm cannot inherit half the fix.
+    (7 of the 12 sites pass a bare ``Name``; 2 of those 7 are forwarded parameters,
+    which resolve to themselves by design — see below. A third — media_buy_list.py's
+    ``for partition, partition_is_sandbox in (...)`` loop target — also resolves to
+    itself, but NOT by design: this resolver only walks ``ast.Assign``/``ast.AnnAssign``,
+    so a for-loop target is invisible to it regardless of what it holds. The literal at
+    that site is correct today (one adapter per mode), so this is not currently an
+    unguarded hard-wire — but a future for/with/walrus-bound hard-wire at that shape
+    would be invisible to both arms. Resolver-coverage gap, not fixed here. That leaves
+    4 sites that are genuinely local assignments.) The identity arm was extended to
+    follow one hop; its sibling was not, which left ``s = False; sandbox=s`` — the
+    cheapest hard-wire, written in production's own idiom — passing the literal arm at
+    those 4 sites. One resolver now serves both, so a future arm cannot inherit half
+    the fix.
 
     A bare PARAMETER deliberately resolves to itself: the mode is chosen by the caller,
     which each arm grades on its own. Following parameters would flag a forwarding
