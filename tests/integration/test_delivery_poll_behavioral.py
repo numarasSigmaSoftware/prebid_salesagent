@@ -33,6 +33,7 @@ from src.core.schemas import GetMediaBuyDeliveryResponse
 from tests.harness.delivery_poll import mock_send_notification
 from tests.helpers.delivery_assertions import (
     DetachedPushConfigMatcher,
+    assert_next_expected_at_is_next_utc_midnight,
     assert_next_expected_at_shape,
     assert_omits_webhook_only_fields,
     assert_partial_data_pairing,
@@ -1414,6 +1415,11 @@ class TestWebhookNextExpectedAt:
             # the BDD/e2e graders (a date-only or empty-string regression slips past
             # `is not None`).
             assert_next_expected_at_shape(wire["result"], present=True, context="scheduled webhook wire")
+            # The cadence itself, not just the shape: a well-formed date-time at the
+            # wrong instant satisfied every previous grader here, which is how the
+            # obligation kept claiming "~24 hours" against an emitter that has always
+            # produced the next UTC midnight (0-24h out).
+            assert_next_expected_at_is_next_utc_midnight(wire["result"], context="scheduled webhook wire")
             assert_partial_data_pairing(wire["result"], context="scheduled webhook wire")
 
             response = env.call_impl(media_buy_ids=[buy.media_buy_id])

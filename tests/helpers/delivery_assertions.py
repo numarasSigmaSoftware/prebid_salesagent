@@ -245,3 +245,39 @@ def assert_next_expected_at_shape(payload: dict, *, present: bool, context: str)
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         raise AssertionError(f"{context}: next_expected_at is not a parseable date-time: {value!r}") from None
+
+
+def assert_next_expected_at_is_next_utc_midnight(payload: dict, *, context: str) -> None:
+    """Assert a daily-cadence ``next_expected_at`` is the START of the next UTC day.
+
+    Sibling of ``assert_next_expected_at_shape``, which grades well-formedness
+    ONLY: a value can be a perfectly-shaped date-time and still name the wrong
+    instant, so shape alone leaves the cadence itself ungraded.
+
+    UC-004-ALT-WEBHOOK-PUSH-REPORTING-06 read "approximately 24 hours after
+    current delivery" — behaviour no emitter on this path has. The scheduler
+    computes ``utc_flight_start(today + 1 day)``, so the gap is 0-24h: a
+    delivery sent at 23:50 UTC gets a next_expected_at ten minutes later. The
+    obligation was corrected to match the emitter; this pins it.
+
+    Asserted as an INSTANT (exact UTC midnight, strictly ahead, at most 24h
+    out) rather than as a gap from a test-side clock. A gap assertion would
+    have to re-derive the emitter's own expression to stay green — which
+    grades nothing — and would flake when the test's clock and the emitter's
+    fall on opposite sides of a midnight rollover.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    value = payload["next_expected_at"]
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None, f"{context}: next_expected_at must be tz-aware, got naive {value!r}"
+    parsed = parsed.astimezone(UTC)
+
+    assert (parsed.hour, parsed.minute, parsed.second, parsed.microsecond) == (0, 0, 0, 0), (
+        f"{context}: next_expected_at must be the start of a UTC day (00:00:00), got {value!r}"
+    )
+    now = datetime.now(UTC)
+    assert now < parsed <= now + timedelta(hours=24), (
+        f"{context}: next_expected_at must be the NEXT UTC midnight — strictly ahead of now and "
+        f"no more than 24h out — got {value!r} against now={now.isoformat()}"
+    )

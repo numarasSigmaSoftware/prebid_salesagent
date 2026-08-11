@@ -373,9 +373,10 @@ Source: BR-UC-004-alt-webhook.md
 **Layer** behavioral
 **Given** a daily reporting frequency
 **When** a scheduled delivery is sent
-**Then** `next_expected_at` is approximately 24 hours after current delivery
+**Then** `next_expected_at` is the start of the next UTC day — strictly ahead of the current delivery and at most 24 hours after it
 **Business Rule** Alt-webhook step 6, POST-S10
 **Priority** P2
+**Note** Previously read "approximately 24 hours after current delivery", which no emitter on this path has ever produced: the scheduler computes `utc_flight_start(today + 1 day)`, so a delivery sent at 23:50 UTC carries a `next_expected_at` ten minutes later. The drift survived because the covering tests asserted date-time *shape* only; `assert_next_expected_at_is_next_utc_midnight` now grades the instant.
 
 #### Scenario: Webhook payload signed with HMAC-SHA256
 **Obligation ID** UC-004-ALT-WEBHOOK-PUSH-REPORTING-07
