@@ -2178,14 +2178,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     strict=False,
                 )
             )
-        if (is_rest or is_e2e_rest) and "T-UC-019-partition-principal-invalid" in marker_names:
-            if "identity_missing" in nodeid:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason="HTTP transport: auth error suggestion says 'authenticate' not 'authentication' — spec-production gap",
-                        strict=False,
-                    )
-                )
+        # REMOVED: an (is_rest or is_e2e_rest) gate on
+        # "T-UC-019-partition-principal-invalid". No feature file defines that tag.
+        # It was not renamed to @T-UC-019-partition-principal, whose Examples are
+        # principal_with_media_buys / principal_with_no_media_buys -- not the
+        # missing_principal_id / principal_not_found this routing named. The scenario
+        # was deleted, and @T-UC-019-boundary-principal now covers "principal_id is
+        # null" with a concrete expected outcome (soft AUTH_REQUIRED), i.e. the gap
+        # this xfailed was implemented. Re-pointing it at the surviving tag would
+        # xfail scenarios that pass today and mask their next regression.
 
         # --- UC-019: parametrization-specific xfails for partially-passing scenarios ---
         # These scenario outlines have some parametrizations that pass (graduated)
@@ -2222,11 +2223,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             ),
             # Graduated: identity_missing (impl/a2a/mcp) — only missing_principal_id
             # and principal_not_found still fail.
-            (
-                "T-UC-019-partition-principal-invalid",
-                {"missing_principal_id", "principal_not_found"},
-                "UC-019: principal_id missing/not-found not implemented",
-            ),
         ]
         if any(t.startswith("T-UC-019") for t in marker_names):
             for tag, substrings, reason in _UC019_PARAM_XFAIL:

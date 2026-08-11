@@ -62,16 +62,77 @@ def _tag_is_defined(tag: str, texts: list[str]) -> bool:
     return any(pattern.search(text) for text in texts)
 
 
-def _tag_collections(source: str) -> dict[str, set[str]]:
-    """Every module- or block-level collection of scenario tags, by variable name.
+INLINE_LABEL = "<inline gate / not in a named collection>"
 
-    AST rather than regex: these are declared as set literals, frozensets, tuples and
-    dict keys, at module scope and nested inside ``pytest_collection_modifyitems``,
-    and a regex tuned to one of those shapes silently skips the others — the exact
-    failure mode #1923 records for the sibling guard's discovery.
+
+def _is_tag_constant(node: ast.AST) -> bool:
+    """A WHOLE scenario tag, as opposed to a prefix or a sentence that starts with one.
+
+    Two exclusions, both structural rather than by enumeration:
+
+    * A tag never contains whitespace. Several xfail reasons begin with the tag they
+      describe ("T-UC-002-inv-015-6 create_media_buy harness wiring is tracked in
+      #1652"), and reporting those as routed tags would make this guard cry wolf on
+      prose.
+    * A bare UC prefix ("T-UC-019", "T-UC-003-ext-") is matched with ``startswith``,
+      so "does this exact tag exist" is the wrong question — the same reason
+      ``PREFIX_COLLECTIONS`` exists for named collections. Detected at the use site
+      below, since a prefix is only identifiable by how it is consumed.
     """
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith(TAG_PREFIX)
+        and not any(ch.isspace() for ch in node.value)
+    )
+
+
+def _startswith_arguments(tree: ast.AST) -> set[int]:
+    """Node ids of constants passed to ``.startswith(...)`` — prefixes, not tags."""
+    return {
+        id(arg)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "startswith"
+        for arg in node.args
+        if isinstance(arg, ast.Constant)
+    }
+
+
+def _tag_collections(source: str) -> dict[str, set[str]]:
+    """EVERY scenario tag written anywhere in the file, labelled by where it sits.
+
+    Enumerates tag CONSTANTS, not tag-collection SHAPES. The first version of this
+    function modelled shapes — ``literal_eval`` of a named assignment, plus a special
+    case for ``frozenset(...)`` — and so scanned 183 of the 270 tags in conftest.py.
+    It missed two whole categories:
+
+    * members nested inside tuples/lists (``_UC019_PARAM_XFAIL`` and ten siblings are
+      lists of tuples, so the top-level members are tuples, not strings, and the
+      ``isinstance(m, str)`` filter dropped all 61 of their tags);
+    * bare literals in ``if "T-UC-..." in marker_names`` gates, which belong to no
+      collection at all — 30 sites.
+
+    A live orphan (``T-UC-019-partition-principal-invalid``) sat in both categories
+    while this guard reported 9/9 green. Its own docstring had named that failure
+    ("a regex tuned to one of those shapes silently skips the others") and its
+    self-test enumerated four shapes against a file that declares more. Zero
+    violations meant the matcher was too narrow, not that nothing was wrong.
+
+    Walking constants removes the shape question entirely: a tag is a tag wherever it
+    is written, and a NEW declaration style cannot open a hole. Names are recovered
+    only to make the failure message point somewhere useful.
+    """
+    tree = ast.parse(source)
     collections: dict[str, set[str]] = {}
-    for node in ast.walk(ast.parse(source)):
+    claimed: set[int] = set()
+
+    # Statement-level strings are docstrings/prose, not routing. A tag NAMED in a
+    # docstring must not be reported as routed.
+    documentation = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr) and _is_tag_constant(n.value)}
+    # Prefixes consumed by startswith() are not whole tags -- see _is_tag_constant.
+    documentation |= _startswith_arguments(tree)
+
+    for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign):
             target, value = node.target, node.value
         elif isinstance(node, ast.Assign):
@@ -82,26 +143,17 @@ def _tag_collections(source: str) -> dict[str, set[str]]:
         name = getattr(target, "id", None)
         if not name or value is None:
             continue
-        # frozenset({...}) / set({...}) are CALLS, not literals, so literal_eval
-        # alone silently skips them — which is precisely the "models one declaration
-        # form" blind spot this guard exists to stop being acceptable. Caught by the
-        # planted-orphan self-test below, which passed against the first version of
-        # this scanner because the set it planted into was a frozenset() call.
-        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in {"frozenset", "set"}:
-            value = value.args[0] if value.args else ast.Set(elts=[])
-        try:
-            literal = ast.literal_eval(value)
-        except (ValueError, TypeError, SyntaxError):
-            continue  # computed at runtime — not a literal tag list
-        if isinstance(literal, dict):
-            members = literal.keys()
-        elif isinstance(literal, set | frozenset | list | tuple):
-            members = literal
-        else:
-            continue
-        tags = {m for m in members if isinstance(m, str) and m.startswith(TAG_PREFIX)}
-        if tags:
-            collections.setdefault(name, set()).update(tags)
+        for child in ast.walk(value):
+            if _is_tag_constant(child) and id(child) not in documentation:
+                collections.setdefault(name, set()).add(child.value)
+                claimed.add(id(child))
+
+    # Anything not inside a named assignment: inline `in marker_names` gates, call
+    # arguments, comprehensions. Unlabelled but still routed, so still checked.
+    for node in ast.walk(tree):
+        if _is_tag_constant(node) and id(node) not in claimed and id(node) not in documentation:
+            collections.setdefault(INLINE_LABEL, set()).add(node.value)
+
     return collections
 
 
@@ -121,26 +173,54 @@ class TestBddTagSetsReferenceRealScenarios:
         assert texts, f"no feature files under {FEATURES_DIR} — the orphan test would flag everything"
 
     @pytest.mark.parametrize(
-        "declaration",
+        "declaration,label",
         [
-            pytest.param('_PLANTED: set[str] = {"T-UC-999-planted"}', id="set-literal"),
-            pytest.param('_PLANTED: frozenset[str] = frozenset({"T-UC-999-planted"})', id="frozenset-call"),
-            pytest.param('_PLANTED = ("T-UC-999-planted",)', id="tuple"),
-            pytest.param('_PLANTED = {"T-UC-999-planted": "reason"}', id="dict-keys"),
+            pytest.param('_P: set[str] = {"T-UC-999-p"}', "_P", id="set-literal"),
+            pytest.param('_P: frozenset[str] = frozenset({"T-UC-999-p"})', "_P", id="frozenset-call"),
+            pytest.param('_P = ("T-UC-999-p",)', "_P", id="tuple"),
+            pytest.param('_P = {"T-UC-999-p": "reason"}', "_P", id="dict-keys"),
+            pytest.param('_P = [("T-UC-999-p", "why", True)]', "_P", id="list-of-tuples"),
+            pytest.param('_P = {"T-UC-999-p"} | OTHER', "_P", id="set-union"),
+            pytest.param('_P = {"a": {"T-UC-999-p"}}', "_P", id="nested-dict-value"),
+            pytest.param('if "T-UC-999-p" in marker_names:\n    pass', INLINE_LABEL, id="inline-gate"),
+            pytest.param('item.add_marker(x) if "T-UC-999-p" in m else None', INLINE_LABEL, id="inline-expr"),
         ],
     )
-    def test_the_scanner_sees_every_declaration_form(self, declaration):
-        """A scanner that models ONE declaration form is an escape hatch.
+    def test_the_scanner_sees_every_way_a_tag_can_be_written(self, declaration, label):
+        """Nine forms, all live in conftest.py, all reachable.
 
-        The first version of this guard used ``ast.literal_eval`` alone, so
-        ``frozenset({...})`` — a Call, not a literal — was invisible: a planted
-        orphan in ``_NO_E2E_REST_TAGS`` passed. Each form below is live in
-        conftest.py today, so each is parametrized rather than asserted once.
+        The previous self-test enumerated four and the scanner modelled four, so the
+        test agreed with the bug: list-of-tuples rows, inline gates and set-unions all
+        smuggled tags past it, and 87 of 270 tags went unchecked. Enumerating forms is
+        why this now walks CONSTANTS instead — a tenth form cannot open a hole.
         """
         found = _tag_collections(declaration)
-        assert found.get("_PLANTED") == {"T-UC-999-planted"}, (
-            f"scanner missed this declaration form, so a tag set written this way is "
-            f"never checked: {declaration!r} -> {found}"
+        assert found.get(label) == {"T-UC-999-p"}, (
+            f"scanner missed this form, so a tag written this way is never checked: {declaration!r} -> {found}"
+        )
+
+    def test_a_tag_named_only_in_a_docstring_is_not_routing(self):
+        """Prose about a tag is not a route, and must not be reported as one."""
+        assert not _tag_collections('"""See T-UC-999-p for context."""')
+
+    def test_the_scanner_reaches_every_tag_in_conftest(self):
+        """Coverage of the SCAN itself: every T-UC- constant must be attributed.
+
+        The measurement that exposed the previous version. Without it the guard can
+        silently narrow again and still report green — a matcher that sees a subset
+        finds no violations in the part it cannot see.
+        """
+        source = CONFTEST.read_text()
+        tree = ast.parse(source)
+        prefixes = _startswith_arguments(tree)
+        # Same predicate the scanner uses: whole tags only, excluding startswith
+        # prefixes and prose. Comparing against RAW constants would fail for the
+        # things deliberately not checked, which is a different claim.
+        every = {n.value for n in ast.walk(tree) if _is_tag_constant(n) and id(n) not in prefixes}
+        scanned = set().union(*_tag_collections(source).values())
+        assert every - scanned == set(), (
+            f"{len(every - scanned)} of {len(every)} tags in conftest.py are invisible to this "
+            f"guard, so nothing checks them: {sorted(every - scanned)[:10]}"
         )
 
     def test_exact_matching_rejects_a_prefix_collision(self):

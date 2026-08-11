@@ -79,7 +79,16 @@ EXPECTED_XFAIL_ROUTES: tuple[str, ...] = (
     "'T-UC-004-dim-sortby-fallback' in marker_names and is_e2e_rest",
     "(is_rest or is_e2e_rest) and 'T-UC-019-boundary-principal' in marker_names",
     "(is_rest or is_e2e_rest) and 'T-UC-019-ext-a' in marker_names",
-    "(is_rest or is_e2e_rest) and 'T-UC-019-partition-principal-invalid' in marker_names",
+    # REMOVED as an ORPHAN, not as a fixed scenario: no feature file defines
+    # T-UC-019-partition-principal-invalid, so this route matched nothing. It is not
+    # a rename of @T-UC-019-partition-principal, whose Examples are
+    # principal_with_media_buys / principal_with_no_media_buys rather than the
+    # missing_principal_id / principal_not_found it named; @T-UC-019-boundary-principal
+    # now covers "principal_id is null" with a concrete expected outcome, so the gap it
+    # xfailed was implemented. Found by
+    # test_architecture_bdd_tag_sets_reference_real_scenarios once that guard was
+    # widened to walk tag CONSTANTS rather than model collection shapes -- the shape
+    # matcher saw 183 of 270 tags and reported green.
     "_samp_is_named and (is_rest or is_e2e_rest)",
     "is_e2e_rest",
     "is_e2e_rest and 'T-UC-002-nfr-001-enforcement' in marker_names",
