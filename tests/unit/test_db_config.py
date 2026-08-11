@@ -61,13 +61,18 @@ class TestProductionSignalConverged:
         # name) to build the Fly.io callback URL. Converging it would be wrong.
         "src/services/auth_config_service.py": 1,
         # FIXME(#1819): admin/landing sites still deciding production for
-        # themselves. Each is presentation or deploy-shape (proxy headers,
-        # external URL scheme, banner copy) rather than a security boundary --
-        # the two security-bearing ones (session-cookie policy, /test/auth 404)
-        # were converged. #1819 tracks routing the rest through is_production();
-        # note its premise that these sites are untouched by this PR no longer
-        # holds for those two.
-        "src/admin/app.py": 3,
+        # themselves. #1819 tracks routing the rest through is_production(); note
+        # its premise that these sites are untouched by this PR no longer holds
+        # for the ones converged here.
+        #
+        # app.py went 3 -> 1: besides the session-cookie policy, the two proxy
+        # gates (PREFERRED_URL_SCHEME, and WerkzeugProxyFix/FlyHeadersMiddleware)
+        # converged too. Those are NOT merely deploy-shape -- they decide whether
+        # to TRUST forwarded proto headers, and on a Fly-only deploy the literal's
+        # false branch left wsgi.url_scheme "http" while the cookie above it was
+        # already marked Secure: the two halves of "are we behind an HTTPS proxy?"
+        # disagreeing on one deployment.
+        "src/admin/app.py": 1,
         "src/admin/blueprints/auth.py": 6,
         "src/admin/blueprints/authorized_properties.py": 4,
         "src/admin/blueprints/core.py": 1,

@@ -367,12 +367,23 @@ def declares_production_explicitly() -> bool:
     override -- the one that silently discards an operator's explicit choice --
     as the unnamed one.
 
-    Two admin callers converged onto is_production() later, and unlike the four
-    above they DO change on the broadening axis, in the tightening direction:
+    Admin callers converged onto is_production() later, and unlike the four
+    above they DO change behavior on the broadening axis:
 
-    - ``src/admin/app.py`` — session-cookie Secure/SameSite/HttpOnly policy.
+    - ``src/admin/app.py`` — session-cookie policy, and proxy-header trust
+      (``PREFERRED_URL_SCHEME`` + ``WerkzeugProxyFix``/``FlyHeadersMiddleware``).
     - ``src/admin/utils/helpers.py::is_admin_production`` — the POST /test/auth
       404, and every admin check routed through that helper.
+
+    Do NOT restate that as uniformly "the tightening direction" — an earlier
+    revision of this docstring did, and it was wrong. Broadening moved
+    newly-included deploys to ``Secure=True`` (tightening) while the SAME branch
+    set ``HttpOnly=False`` and ``SameSite="None"`` — loosening on two axes, since
+    those deploys had been taking the development branch's ``HttpOnly=True`` +
+    ``Lax``. The cookie branch now keeps HttpOnly/SameSite at the development
+    values, so the direction claim holds today; it holds because that was fixed,
+    not because broadening can only tighten. Argue any future caller added here
+    on its own behavior.
 
     See their own docstrings for what was reachable before.
     """

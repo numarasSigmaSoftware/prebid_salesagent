@@ -51,7 +51,19 @@ class TestSessionCookieSecureFollowsProductionSignal:
         config = app_config_under_env(**signal)
 
         assert config["SESSION_COOKIE_SECURE"] is True
-        assert config["SESSION_COOKIE_SAMESITE"] == "None"
+        # HttpOnly and SameSite must not LOOSEN as a side effect of a deploy being
+        # pulled into this branch. They were HTTPONLY=False + SAMESITE="None",
+        # justified by an EventSource requirement that does not exist: nothing in
+        # src/admin, templates or static reads document.cookie, EventSource sends
+        # cookies itself without JS reading them, the one EventSource reference
+        # left records that it was REPLACED by polling, and there is no
+        # cross-origin config. Broadening is_production() would then have moved
+        # Fly-only deploys from the development branch's True + "Lax" to False +
+        # "None" — transport security gained, XSS and CSRF protection lost, in the
+        # same step. The previous revision of this test pinned "None", so it would
+        # have stayed green through exactly that.
+        assert config["SESSION_COOKIE_HTTPONLY"] is True
+        assert config["SESSION_COOKIE_SAMESITE"] == "Lax"
 
     def test_development_keeps_the_cookie_usable_over_http(self, app_config_under_env):
         """The regression guard for the above: no signal must still take the
@@ -59,7 +71,25 @@ class TestSessionCookieSecureFollowsProductionSignal:
         config = app_config_under_env()
 
         assert config["SESSION_COOKIE_SECURE"] is False
+        assert config["SESSION_COOKIE_HTTPONLY"] is True
         assert config["SESSION_COOKIE_SAMESITE"] == "Lax"
+
+    @pytest.mark.parametrize("axis", ["SESSION_COOKIE_HTTPONLY", "SESSION_COOKIE_SAMESITE"])
+    def test_production_never_loosens_a_non_transport_axis(self, app_config_under_env, axis):
+        """Production must not be WEAKER than development on any non-transport axis.
+
+        Stated as a relation between the two branches rather than as two literals,
+        so it keeps holding if the development defaults are ever retuned. Only
+        SECURE is expected to differ, and only in the strengthening direction.
+        """
+        dev = app_config_under_env()
+        prod = app_config_under_env(FLY_APP_NAME="adcp-sales-agent")
+
+        assert prod[axis] == dev[axis], (
+            f"{axis} differs between development and production ({dev[axis]!r} -> {prod[axis]!r}); "
+            "production may only differ from development by being stricter, and only on SECURE"
+        )
+        assert prod["SESSION_COOKIE_SECURE"] is True and dev["SESSION_COOKIE_SECURE"] is False
 
     def test_explicitly_disabled_production_is_honoured(self, app_config_under_env):
         """PRODUCTION=false means "off". A bare-presence check would read the

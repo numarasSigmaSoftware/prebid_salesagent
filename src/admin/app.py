@@ -111,7 +111,28 @@ def create_app(config=None):
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
     app.logger.setLevel(logging.INFO)
 
-    # Configure session cookies for EventSource compatibility.
+    # Configure session cookies.
+    #
+    # HTTPONLY/SAMESITE are deliberately the SAME as the development branch. They
+    # were HTTPONLY=False + SAMESITE="None", justified as "allow EventSource to
+    # access cookies" / "required for EventSource cross-origin requests". Neither
+    # holds: EventSource sends cookies itself under the browser's own rules and
+    # JS never reads them, nothing in src/admin, templates or static reads
+    # document.cookie, the one EventSource reference left in the tree records
+    # that it was REPLACED by polling, and no CORS/cross-origin config exists for
+    # this app. So the pair bought nothing while costing XSS (a readable session
+    # cookie) and CSRF (SameSite=None sends the cookie on cross-site requests)
+    # protection.
+    #
+    # That was invisible while this branch was gated on a bare PRODUCTION
+    # literal, because deploys reaching it were the ones that had opted in. Once
+    # is_production() brought FLY_APP_NAME/ENVIRONMENT deploys in, they would
+    # have MOVED from HTTPONLY=True + Lax to False + None — gaining transport
+    # security and losing two other axes in the same step.
+    #
+    # SAMESITE="Lax" is safe for the OAuth callbacks: both /auth/google/callback
+    # and /auth/gam/callback are GET routes and nothing requests a form_post
+    # response mode, and Lax sends cookies on top-level GET navigation.
     #
     # Gated on is_production(), not a literal PRODUCTION == "true": the else
     # branch below serves the session cookie WITHOUT Secure, so a deployment
@@ -122,9 +143,9 @@ def create_app(config=None):
     # a bare literal cannot see: PRODUCTION=false also read as "not production"
     # only by accident of string comparison.
     if is_production():
-        app.config["SESSION_COOKIE_SECURE"] = True  # Required for SameSite=None over HTTPS
-        app.config["SESSION_COOKIE_HTTPONLY"] = False  # Allow EventSource to access cookies
-        app.config["SESSION_COOKIE_SAMESITE"] = "None"  # Required for EventSource cross-origin requests
+        app.config["SESSION_COOKIE_SECURE"] = True  # HTTPS-only transport for the session cookie
+        app.config["SESSION_COOKIE_HTTPONLY"] = True  # Not readable from JS (nothing reads it)
+        app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # Not sent on cross-site requests; OAuth GET callbacks still work
         # Use root path so session works for both /admin/* and /auth/* (OAuth callbacks)
         app.config["SESSION_COOKIE_PATH"] = "/"
         # Only set cookie domain in multi-tenant mode for subdomain sharing
@@ -164,8 +185,15 @@ def create_app(config=None):
     app.jinja_env.filters["from_json"] = from_json_filter
     app.jinja_env.filters["markdown"] = markdown_filter
 
-    # Trust proxy headers in production
-    if os.environ.get("PRODUCTION") == "true":
+    # Trust proxy headers in production.
+    #
+    # is_production(), not a PRODUCTION literal, for the same reason as the cookie
+    # block: a Fly-only deploy took the literal's false branch. That left the
+    # session cookie marked Secure (above) while wsgi.url_scheme stayed "http",
+    # so Flask built external URLs as http:// and could not see that the edge had
+    # terminated TLS — the two halves of "are we behind an HTTPS proxy?"
+    # disagreeing on the same deployment.
+    if is_production():
         app.config["PREFERRED_URL_SCHEME"] = "https"
         # Force external URLs to use HTTPS
         app.config["SERVER_NAME"] = None  # Let Flask detect from request
@@ -175,8 +203,9 @@ def create_app(config=None):
     if config:
         app.config.update(config)
 
-    # Apply proxy fixes for production
-    if os.environ.get("PRODUCTION") == "true":
+    # Apply proxy fixes for production (same signal as PREFERRED_URL_SCHEME above —
+    # WerkzeugProxyFix is what actually makes wsgi.url_scheme follow the edge).
+    if is_production():
         # Create a middleware to copy Fly.io headers to standard headers
         # Fly sends Fly-Forwarded-Proto but Werkzeug expects X-Forwarded-Proto
         class FlyHeadersMiddleware:
