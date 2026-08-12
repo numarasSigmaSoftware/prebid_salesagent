@@ -119,9 +119,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Gener
                 f"{report.longrepr}\n\n"
                 "This scenario's tag appears in a *_WIRED set in tests/bdd/conftest.py, which "
                 "declares it bound to a harness and therefore required to RUN. It was NOT "
-                "auto-xfailed. Either bind the missing step / implement the stub, or remove the "
-                "tag from the wired set — a wired scenario that cannot execute is dormant "
-                "coverage, and dormant coverage reads as green."
+                "auto-xfailed. Bind the missing step, or implement the stub.\n\n"
+                "Do NOT resolve this by deleting the tag from the wired set. For UC-002 that "
+                "one-line edit turns this guard green and silently restores the dormancy it "
+                "exists to prevent, because the UC-002 catch-all in _harness_env is "
+                "pytest.xfail (UC-010's raises, so it happens to be safe there — the "
+                "difference is not something a reader should have to know). The wired sets are "
+                "pinned shrink-only by test_wired_sets_never_shrink; removing a tag is a "
+                "deliberate change that must edit that baseline too."
             )
             return
 
@@ -2870,17 +2875,32 @@ _UC010_CAPABILITY_FILTER_WIRED: set[str] = {
 
 
 def _wired_scenario_tags() -> frozenset[str]:
-    """Every tag declared bound to a harness env, across all use cases.
+    """Every tag declared bound to a harness env, DERIVED from this module.
 
-    Single source for the makereport guard above. A tag listed here is a promise
-    that the scenario executes; the guard turns a broken promise into a failure
-    instead of a silent xfail. Add new *_WIRED sets here when you add them.
+    Single source for the makereport guard above. A tag in one of these sets is
+    a promise that the scenario executes; the guard turns a broken promise into
+    a failure instead of a silent xfail.
+
+    Derived by scanning this module's globals for ``*_WIRED`` rather than
+    listing four names, because the previous version's completeness rule was a
+    docstring sentence ("Add new *_WIRED sets here when you add them") with no
+    test behind it — the same shape as the defects this guard was added for. A
+    new ``*_WIRED`` set now joins by existing.
+
+    NOT covered, stated plainly rather than implied:
+
+    - ``"context" in marker_names`` and ``_is_brand_shorthand_media_buy(...)``
+      also bind an env in ``_harness_env``, and neither is a ``*_WIRED`` set.
+      Unbinding a ``@context`` step yields xfails, not failures.
+    - UC-003's ``_UC003_TARGETING_OVERLAY`` is function-local, so it is not a
+      module global and cannot be discovered here.
+
+    Those are separate binding mechanisms, not missing entries. Promoting them
+    to module-level ``*_WIRED`` sets is how they would join; see
+    ``test_wired_union_is_derived_not_enumerated`` for the completeness oracle.
     """
-    return frozenset(
-        _UC002_IDEMPOTENCY_WIRED
-        | _UC002_MANUAL_APPROVAL_WIRED
-        | _UC010_VERSION_NEGOTIATION_WIRED
-        | _UC010_CAPABILITY_FILTER_WIRED
+    return frozenset().union(
+        *(value for name, value in globals().items() if name.endswith("_WIRED") and isinstance(value, set))
     )
 
 
