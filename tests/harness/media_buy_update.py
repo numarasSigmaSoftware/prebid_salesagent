@@ -35,13 +35,52 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 
 from tests.harness._base import BaseTestEnv
 from tests.helpers.sandbox_seam import bind_real_sandbox_seam
 
 _MODULE = "src.core.tools.media_buy_update"
 _DB_MODULE = "src.core.database.database_session"
+
+
+class _DetachAfterCommit:
+    """Makes ``uow.sandbox_mode()`` raise DetachedInstanceError once tripped.
+
+    ``_update_media_buy_impl`` has three known session-commit boundaries —
+    ``ctx_manager.get_or_create_context``, ``ctx_manager.create_workflow_step``, and
+    ``resolve_principal_or_raise`` (via ``get_principal_object``) — each of which
+    would expire ``_current_mb`` in a real session. A mocked UoW never actually
+    detaches anything, so a regression that moves the ``sandbox_mode`` call back past
+    any of the three (the exact defect that shipped and was only caught by the
+    integration/BDD suites, not ``tox -e unit``) passes silently here. Wiring this
+    trap's ``trip()`` as a ``side_effect`` on all three closes that gap: reading
+    ``account_id`` (inside ``sandbox_mode``) after any of them now raises the same
+    error class a real session would, so the ordering constraint has a unit-level
+    oracle instead of living only in a comment.
+    """
+
+    def __init__(self) -> None:
+        self.tripped = False
+
+    def trip(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.tripped = True
+        return DEFAULT
+
+    def guard(self, real_sandbox_mode: Any) -> Any:
+        def _wrapped(media_buy: Any) -> Any:
+            if self.tripped:
+                from sqlalchemy.orm.exc import DetachedInstanceError
+
+                raise DetachedInstanceError(
+                    "Instance <MediaBuy> is not bound to a Session; attribute refresh "
+                    "operation cannot proceed (simulated by the test harness — a "
+                    "commit boundary ran before this sandbox_mode() call)"
+                )
+            return real_sandbox_mode(media_buy)
+
+        return _wrapped
+
 
 # UpdateMediaBuyRequest fields that the flat update wrappers (update_media_buy_raw /
 # update_media_buy MCP) do not accept as parameters. MediaBuyDualEnv pops these from
@@ -139,6 +178,8 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         self._uow_instance.accounts.get_by_id.return_value = _default_account
 
         bind_real_sandbox_seam(self._uow_instance)
+        self._detach = _DetachAfterCommit()
+        self._uow_instance.sandbox_mode = self._detach.guard(self._uow_instance.sandbox_mode)
 
         # The *_or_raise repository helpers delegate to the plain getters and raise
         # the typed not-found when absent. Wiring the mock the same way lets tests
@@ -206,19 +247,28 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         default_cl.min_package_budget = Decimal("0")
         self._uow_instance.currency_limits.get_for_currency.return_value = default_cl
 
-        # Principal
+        # Principal. side_effect=self._detach.trip runs on every call and returns
+        # DEFAULT, so return_value below still supplies the actual result — see
+        # _DetachAfterCommit: get_principal_object is the callee inside
+        # resolve_principal_or_raise, one of the three known commit boundaries.
         self.mock["principal"].return_value = MagicMock(
             principal_id=self._principal_id,
             name="Test Principal",
             platform_mappings={},
         )
+        self.mock["principal"].side_effect = self._detach.trip
 
-        # Context manager: workflow step
+        # Context manager: workflow step. Both calls are commit boundaries in
+        # production (see _DetachAfterCommit); side_effect trips the detach guard
+        # while return_value (unaffected — side_effect returns DEFAULT) still
+        # supplies the mocked result.
         mock_step = MagicMock()
         mock_step.step_id = "step_001"
         mock_ctx_mgr_instance = MagicMock()
         mock_ctx_mgr_instance.get_or_create_context.return_value = MagicMock(context_id="ctx_001")
+        mock_ctx_mgr_instance.get_or_create_context.side_effect = self._detach.trip
         mock_ctx_mgr_instance.create_workflow_step.return_value = mock_step
+        mock_ctx_mgr_instance.create_workflow_step.side_effect = self._detach.trip
         self.mock["ctx_mgr"].return_value = mock_ctx_mgr_instance
 
         # Adapter: no manual approval by default

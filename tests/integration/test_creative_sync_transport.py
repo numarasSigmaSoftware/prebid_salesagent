@@ -26,8 +26,10 @@ from src.core.database.models import Creative as DBCreative
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError
 from tests.factories.creative_asset import build_assets, image_spec, text_spec
 from tests.harness import CreativeSyncEnv, Transport, assert_envelope, make_identity
-from tests.harness.assertions import assert_omits_paths
+from tests.harness.assertions import assert_wire_omits_unset
 from tests.helpers.creative_test_helpers import assert_stored_creative_assets, creative_payload
+
+_SYNC_CREATIVES_SCHEMA = "creative/sync-creatives-response.json"
 
 
 def _error_messages(errors: list | None) -> list[str]:
@@ -216,9 +218,10 @@ class TestSyncCreativesSandboxMarkerTransport:
         Asserts on the real wire body (``result.wire_response``), not the parsed
         ``payload``: ``payload.sandbox is None`` is satisfied identically by an
         omitted key OR an explicit ``"sandbox": null`` — Pydantic can't tell them
-        apart on a nullable field, and the pinned schema types ``sandbox`` as
-        boolean with no null variant, so an explicit null would itself be a defect
-        this assertion must catch.
+        apart on a nullable field. ``assert_wire_omits_unset`` additionally validates
+        the full response against the pinned schema, which types ``sandbox`` boolean
+        with no null variant — so an explicit null fails as a TYPE violation, not
+        just a hand-listed key check.
 
         Branches on ``result.wire_response is not None`` rather than a hardcoded
         transport list: IMPL never has a wire, and A2A doesn't in THIS harness (see
@@ -252,13 +255,8 @@ class TestSyncCreativesSandboxMarkerTransport:
             )
 
         if result.wire_response is not None:
-            assert_omits_paths(
-                result.wire_response,
-                ["sandbox"],
-                context=(
-                    f"[{suffix}] live-scoped sync_creatives — absent is correct (None, not False, "
-                    "per AdCP 3.1.1), and an explicit null would tell the buyer the wrong thing"
-                ),
+            assert_wire_omits_unset(
+                result, schema=_SYNC_CREATIVES_SCHEMA, absent_paths=["sandbox"], transport=transport
             )
         else:
             assert result.payload.sandbox is None, (

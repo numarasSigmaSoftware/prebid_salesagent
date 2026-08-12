@@ -448,6 +448,11 @@ def _update_media_buy_impl(
             # DetachedInstanceError. This is the only window that is both past the
             # state guards and ahead of every commit boundary — do not move this
             # call past any of the three without moving this comment with it.
+            # An ACCOUNT_NOT_FOUND/CONFIGURATION_ERROR raised for a dangling
+            # account_id still fires here with `step` unset (None) — like the
+            # sibling pre-step guards above, it records no workflow-step audit
+            # entry and fires no buyer-facing status="failed" push, since
+            # audit_workflow_step_failure_ctx has nothing to mark failed yet.
             _mb_sandbox = uow.sandbox_mode(_current_mb)
 
             # Extract testing context early (needed for dry_run check)

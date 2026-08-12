@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.harness.assertions import assert_omits_paths, assert_rejected
+from tests.harness.assertions import assert_rejected, assert_wire_omits_unset
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 from tests.harness.transport import Transport
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
@@ -140,18 +140,23 @@ class TestAccountReferenceRoutesTheAdapter:
         assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")
 
 
-def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_run: bool = False) -> dict:
-    """Create against an account of the given mode; return the real wire response dict.
+_CREATE_MEDIA_BUY_SCHEMA = "media-buy/create-media-buy-response.json"
+
+
+def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_run: bool = False):
+    """Create against an account of the given mode; return the real TransportResult.
 
     One body for both marker classes. The live path and the dry-run path build their
     response objects at different sites in ``_create_media_buy_impl`` — the dry-run branch
     returns early, so it cannot pick up a marker attached later — and each needs its own
     oracle. Sharing the setup keeps the only difference between them the thing under test.
 
-    Returns the wire dict rather than ``wire.get("sandbox")``: callers assert presence via
-    a direct key check and absence via ``tests.harness.assertions.assert_omits_paths``, so
-    an explicit ``"sandbox": null`` on the wire fails on its own terms instead of passing
-    identically to an omitted key (``dict.get`` returns ``None`` for both).
+    Returns the ``TransportResult``, not a bare value: callers assert presence via a
+    direct wire-dict key check and absence via
+    ``tests.harness.assertions.assert_wire_omits_unset``, which additionally validates
+    the full response against the pinned schema — catching an explicit ``"sandbox":
+    null`` as a TYPE violation (the schema declares the field boolean, no null variant),
+    not just a hand-listed key absence.
     """
     from tests.factories import AccountFactory, AgentAccountAccessFactory
 
@@ -172,9 +177,8 @@ def _create_and_read_marker(transport: Transport, *, account_sandbox: bool, dry_
             po_number=f"MARKER-{'DRY-' if dry_run else ''}{transport.value}",
         )
         assert not result.is_error, f"dispatch failed: {result.error!r}"
-        wire = result.wire_response
-        assert wire is not None, "no wire response captured — this assertion would grade nothing"
-        return wire
+        assert result.wire_response is not None, "no wire response captured — this assertion would grade nothing"
+        return result
 
 
 class TestSandboxMarkerReachesTheBuyer:
@@ -200,8 +204,8 @@ class TestSandboxMarkerReachesTheBuyer:
 
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_sandbox_create_is_marked_on_the_wire(self, integration_db, transport):
-        wire = _create_and_read_marker(transport, account_sandbox=True)
-        assert wire.get("sandbox") is True, (
+        result = _create_and_read_marker(transport, account_sandbox=True)
+        assert result.wire_response.get("sandbox") is True, (
             f"[{transport.value}] a create against a sandbox account carried no sandbox marker; "
             "the buyer cannot distinguish a simulated booking from one that moved real budget"
         )
@@ -209,16 +213,12 @@ class TestSandboxMarkerReachesTheBuyer:
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_live_create_is_not_marked(self, integration_db, transport):
         """Negative control — 'always mark' would pass above and mislabel real bookings."""
-        wire = _create_and_read_marker(transport, account_sandbox=False)
-        assert_omits_paths(
-            wire,
-            ["sandbox"],
-            context=(
-                f"[{transport.value}] live create — absent is the correct encoding, and an "
-                "explicit null (which .get() cannot distinguish from absence) tells the buyer "
-                "a real booking was simulated just as wrongly as sandbox: true would"
-            ),
-        )
+        result = _create_and_read_marker(transport, account_sandbox=False)
+        # assert_wire_omits_unset also validates the full response against the pinned
+        # schema, which types sandbox boolean with no null variant — so an explicit
+        # "sandbox": null (which .get() cannot distinguish from absence) fails as a
+        # schema violation, not just a hand-listed key check.
+        assert_wire_omits_unset(result, schema=_CREATE_MEDIA_BUY_SCHEMA, absent_paths=["sandbox"], transport=transport)
 
 
 class TestSandboxMarkerOnTheDryRunBranch:
@@ -253,21 +253,17 @@ class TestSandboxMarkerOnTheDryRunBranch:
     """
 
     def test_dry_run_against_a_sandbox_account_is_still_marked(self, integration_db):
-        wire = _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True)
-        assert wire.get("sandbox") is True, (
+        result = _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True)
+        assert result.wire_response.get("sandbox") is True, (
             "a dry-run create against a sandbox account carried no sandbox marker; the "
             "early-return branch builds its own response and must set it there"
         )
 
     def test_dry_run_against_a_live_account_is_not_marked(self, integration_db):
         """Negative control — marking every dry run would pass above and misreport the mode."""
-        wire = _create_and_read_marker(Transport.REST, account_sandbox=False, dry_run=True)
-        assert_omits_paths(
-            wire,
-            ["sandbox"],
-            context=(
-                "dry-run create against a LIVE account — dry run is not sandbox, and an "
-                "explicit null (indistinguishable from absence via .get()) conflates them "
-                "just as wrongly as sandbox: true would"
-            ),
+        result = _create_and_read_marker(Transport.REST, account_sandbox=False, dry_run=True)
+        # Schema-validated: an explicit "sandbox": null fails as a type violation
+        # (boolean, no null variant), not just a hand-listed absence check.
+        assert_wire_omits_unset(
+            result, schema=_CREATE_MEDIA_BUY_SCHEMA, absent_paths=["sandbox"], transport=Transport.REST
         )
