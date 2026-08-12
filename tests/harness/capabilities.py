@@ -46,9 +46,15 @@ class CapabilitiesEnv(IntegrationEnv):
         return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
 
     def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
-        """GET /api/v1/capabilities — no request body (unlike the POST discovery routes)."""
-        client, _identity = self._prepare_rest_request(kwargs)
-        return client.get(endpoint)
+        """GET /api/v1/capabilities — no request body (unlike the POST discovery routes).
+
+        Forwards the auth headers ``_prepare_rest_request`` builds: a presented-token
+        seam selects the real production dependency path and is carried ONLY by those
+        headers, so dropping them here would silently send the request unauthenticated
+        and grade the wrong path.
+        """
+        client, _identity, headers = self._prepare_rest_request(kwargs)
+        return client.get(endpoint, headers=headers)
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetAdcpCapabilitiesResponse:
         """Parse REST JSON into GetAdcpCapabilitiesResponse."""
