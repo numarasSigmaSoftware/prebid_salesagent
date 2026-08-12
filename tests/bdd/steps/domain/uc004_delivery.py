@@ -39,15 +39,30 @@ def _parse_json_list(text: str) -> list[str]:
     return json.loads(text)
 
 
-def _webhook_payload_from_call(call: Any) -> dict[str, Any]:
-    """Decode a webhook payload from the production byte-body POST seam."""
+def _webhook_body_from_call(call: Any) -> dict[str, Any]:
+    """Decode the raw JSON body from the production byte-body POST seam."""
     call_kwargs = call[1]
     if "body" in call_kwargs:
-        payload = json.loads(call_kwargs["body"])
+        body = json.loads(call_kwargs["body"])
     else:
-        payload = call_kwargs.get("json") or call_kwargs.get("data") or {}
-    assert isinstance(payload, dict), f"Webhook payload must be an object, got {payload!r}"
-    return payload
+        body = call_kwargs.get("json") or call_kwargs.get("data") or {}
+    assert isinstance(body, dict), f"Webhook body must be an object, got {body!r}"
+    return body
+
+
+def _webhook_payload_from_call(call: Any) -> dict[str, Any]:
+    """Decode one POST into the delivery report the scenarios assert on.
+
+    The wire body is the AdCP webhook envelope from the SDK's
+    ``create_mcp_webhook_payload``; the report lives in its ``result`` member.
+    Unwrapping here keeps the rule in one place for every per-call consumer —
+    reading ``sequence_number`` or ``media_buy_deliveries`` off the envelope
+    silently yields ``None``/``[]`` rather than failing loudly. A body without
+    ``result`` is returned unchanged.
+    """
+    body = _webhook_body_from_call(call)
+    result = body.get("result")
+    return result if isinstance(result, dict) else body
 
 
 def _webhook_media_buy_ids(payload: dict[str, Any]) -> list[str]:
@@ -63,22 +78,89 @@ def _webhook_media_buy_ids(payload: dict[str, Any]) -> list[str]:
     return media_buy_ids
 
 
-def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
-    """Extract the JSON payload from the most recent webhook POST call."""
+def _get_last_webhook_envelope(ctx: dict) -> dict[str, Any]:
+    """Return the raw JSON body of the most recent webhook POST."""
     mock_post = ctx["env"].mock["post"]
     assert mock_post.called, "No webhook POST was made"
     last_call = mock_post.call_args_list[-1]
-    payload = _webhook_payload_from_call(last_call)
-    assert payload, f"Webhook POST had no JSON payload: {last_call[1]}"
-    return payload
+    envelope = _webhook_body_from_call(last_call)
+    assert envelope, f"Webhook POST had no JSON payload: {last_call[1]}"
+    return envelope
 
 
-def _get_last_webhook_headers(ctx: dict) -> dict[str, str]:
+def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
+    """Return the delivery report from the most recent webhook POST.
+
+    The body on the wire is the AdCP webhook ENVELOPE — ``task_id``,
+    ``task_type``, ``status``, ``operation_id``, ``idempotency_key``,
+    ``timestamp`` and ``result`` — built by the SDK's
+    ``create_mcp_webhook_payload``. Everything the scenarios call "the payload"
+    (``notification_type``, ``sequence_number``, ``media_buy_deliveries``,
+    ``reporting_period``) is the ``result`` member, so unwrap it once here
+    instead of at every Then-step. Use `_get_last_webhook_envelope` for
+    envelope-level fields.
+
+    A body without ``result`` is returned unchanged, so a flat payload still
+    reads correctly.
+    """
+    envelope = _get_last_webhook_envelope(ctx)
+    result = envelope.get("result")
+    return result if isinstance(result, dict) else envelope
+
+
+class _Headers(dict):
+    """HTTP headers with case-insensitive lookup.
+
+    RFC 7230 field names are case-insensitive, so a scenario asking for
+    ``X-ADCP-Signature`` is satisfied by the ``X-AdCP-Signature`` production
+    emits. Pinning one spelling would fail on a purely cosmetic change while
+    saying the signature is missing. Iteration and ``keys()`` keep the wire
+    casing so failure messages show what was actually sent.
+    """
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        return key.casefold() in {k.casefold() for k in self.keys()}
+
+    def get(self, key: str, default: Any = None) -> Any:  # type: ignore[override]
+        folded = key.casefold()
+        for name, value in self.items():
+            if name.casefold() == folded:
+                return value
+        return default
+
+    def __getitem__(self, key: str) -> Any:
+        sentinel = object()
+        value = self.get(key, sentinel)
+        if value is sentinel:
+            raise KeyError(key)
+        return value
+
+
+def _get_last_webhook_raw_body(ctx: dict) -> bytes:
+    """Return the exact body bytes of the most recent webhook POST.
+
+    The legacy HMAC profile signs ``{unix_timestamp}.{raw_json_body}`` over the
+    bytes actually written to the wire. Re-serializing the decoded payload to
+    check a signature is the exact failure the spec calls out — a signer and a
+    checker that both re-serialize can agree with each other while disagreeing
+    with what the receiver sees.
+    """
+    mock_post = ctx["env"].mock["post"]
+    assert mock_post.called, "No webhook POST was made"
+    call_kwargs = mock_post.call_args_list[-1][1]
+    body = call_kwargs.get("body")
+    assert isinstance(body, bytes), f"Expected the POST to carry raw body bytes, got {type(body).__name__}"
+    return body
+
+
+def _get_last_webhook_headers(ctx: dict) -> _Headers:
     """Extract headers from the most recent webhook POST call."""
     mock_post = ctx["env"].mock["post"]
     assert mock_post.called, "No webhook POST was made"
     call_kwargs = mock_post.call_args_list[-1][1]
-    return call_kwargs.get("headers", {})
+    return _Headers(call_kwargs.get("headers", {}))
 
 
 def _collect_all_packages(resp: Any) -> list[Any]:
@@ -354,11 +436,25 @@ _WEBHOOK_URL = "https://buyer.example.com/webhook"
 _CONFIG_VALIDATION_WEBHOOK_URL = "https://example.com/webhook"
 
 
+def _ensure_webhook_media_buy(ctx: dict, mb_id: str) -> None:
+    """Create the media buy these Given steps assert into existence.
+
+    "a media buy <id> with an active reporting_webhook" is the whole setup for
+    several scenarios, and the delivery path resolves the reporting_webhook off
+    the media buy row itself — so without the row there is nothing to configure
+    and no POST is ever attempted. Owned by the env's principal because that is
+    the identity `call_send` delivers under.
+    """
+    env = ctx["env"]
+    _ensure_media_buy_in_db(ctx, mb_id, getattr(env, "_principal_id", "buyer-001"))
+
+
 def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     """Shared: configure an active webhook for a media buy.
 
-    Also persists PushNotificationConfig to DB when running inside an
-    integration env (CircuitBreakerEnv) so send_delivery_webhook can find it.
+    Persists both channels when running inside an integration env
+    (CircuitBreakerEnv): the PushNotificationConfig row, and the
+    reporting_webhook on the media buy that the delivery path reads.
     """
     ctx.setdefault("webhook_config", {})[mb_id] = {
         "url": _WEBHOOK_URL,
@@ -366,6 +462,7 @@ def _set_active_webhook(ctx: dict, mb_id: str) -> None:
     }
     env = ctx["env"]
     if getattr(env, "_session", None) is not None:
+        _ensure_webhook_media_buy(ctx, mb_id)
         _persist_webhook_config_if_needed(ctx, env)
 
 
@@ -392,6 +489,68 @@ def _auth_scheme_to_db_fields(scheme: str | None, ctx: dict) -> dict[str, Any]:
     return fields
 
 
+def _reporting_webhook_payload(ctx: dict, mb_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``reporting_webhook`` block production reads off the media buy.
+
+    Shape matches what `create_media_buy` persists into ``raw_request`` and what
+    `_send_webhook_enhanced` destructures: ``url``, ``reporting_frequency`` and
+    an optional ``authentication`` with ``schemes``/``credentials``. The Gherkin
+    scheme spellings ("HMAC-SHA256", "Bearer") are the canonical constants, and
+    ``is_auth_scheme`` compares case-insensitively, so they pass through as-is.
+    """
+    webhook: dict[str, Any] = {
+        "url": mb_cfg.get("url", _WEBHOOK_URL),
+        "reporting_frequency": ctx.get("reporting_frequency", "daily"),
+    }
+    scheme = mb_cfg.get("auth_scheme")
+    if scheme:
+        normalized = scheme.lower()
+        credentials = None
+        if normalized in {"hmac-sha256", "hmac_sha256", "hmac"}:
+            credentials = ctx.get("webhook_secret")
+        elif normalized == "bearer":
+            credentials = ctx.get("webhook_bearer_token")
+        if credentials:
+            webhook["authentication"] = {"schemes": [scheme], "credentials": credentials}
+    return webhook
+
+
+def _sync_reporting_webhook_to_media_buys(ctx: dict, env: Any) -> None:
+    """Write each configured webhook onto its media buy's ``raw_request``.
+
+    Reporting webhooks are a separate channel from task-status
+    ``push_notification_config``: `_send_webhook_enhanced` resolves the typed
+    ``reporting_webhook`` persisted on the media buy and returns False without
+    posting when it is absent. Seeding only the PushNotificationConfig row
+    therefore produces no POST at all, which surfaces as "No webhook POST was
+    made" in every delivery Then-step rather than as a setup error.
+
+    Re-runnable, because a scenario's credential Given ("the shared secret is a
+    valid 32+ character string") lands after the one that names the scheme, and
+    a media buy created after the webhook step is re-synced by
+    `_ensure_media_buy_in_db`.
+    """
+    from sqlalchemy import select
+
+    from src.core.database.models import MediaBuy
+
+    session = env._session
+    changed = False
+    for mb_id, mb_cfg in ctx.get("webhook_config", {}).items():
+        if not mb_cfg.get("active"):
+            continue
+        media_buy = session.scalars(select(MediaBuy).filter_by(tenant_id=env._tenant_id, media_buy_id=mb_id)).first()
+        if media_buy is None:
+            continue  # Created later; _ensure_media_buy_in_db re-syncs then.
+        # Rebind rather than mutate: JSONType only persists a new value.
+        raw_request = dict(media_buy.raw_request or {})
+        raw_request["reporting_webhook"] = _reporting_webhook_payload(ctx, mb_cfg)
+        media_buy.raw_request = raw_request
+        changed = True
+    if changed:
+        session.commit()
+
+
 def _persist_webhook_config_if_needed(ctx: dict, env: Any) -> None:
     """Idempotently create or update the PushNotificationConfig DB row.
 
@@ -401,6 +560,10 @@ def _persist_webhook_config_if_needed(ctx: dict, env: Any) -> None:
     Sister-task ``salesagent-oy9`` ensured the
     ``push_notification_configs`` table exists per-test, so this is safe to
     call from any Given step.
+
+    Also syncs the reporting_webhook onto the media buy itself — that is the
+    channel the delivery path actually reads (see
+    `_sync_reporting_webhook_to_media_buys`).
     """
     from sqlalchemy import select
 
@@ -437,6 +600,7 @@ def _persist_webhook_config_if_needed(ctx: dict, env: Any) -> None:
                 changed = True
         if changed:
             session.commit()
+        _sync_reporting_webhook_to_media_buys(ctx, env)
         return
 
     from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
@@ -456,6 +620,7 @@ def _persist_webhook_config_if_needed(ctx: dict, env: Any) -> None:
         is_active=True,
         **auth_fields,
     )
+    _sync_reporting_webhook_to_media_buys(ctx, env)
 
 
 @given(parsers.parse('a media buy "{mb_id}" with an active reporting_webhook configured'))
@@ -504,6 +669,7 @@ def given_webhook_auth_scheme(ctx: dict, mb_id: str, scheme: str) -> None:
     wh["url"] = _WEBHOOK_URL
     env = ctx["env"]
     if getattr(env, "_session", None) is not None:
+        _ensure_webhook_media_buy(ctx, mb_id)
         _persist_webhook_config_if_needed(ctx, env)
 
 
@@ -923,9 +1089,8 @@ def when_deliver_three_reports(ctx: dict, mb_id: str) -> None:
 @when("the system attempts to deliver a webhook report")
 def when_attempt_webhook(ctx: dict) -> None:
     """System attempts webhook delivery."""
-    env = ctx["env"]
     try:
-        ctx["webhook_result"] = env.call_deliver()
+        ctx["webhook_result"] = _call_webhook_service(ctx)
     except Exception as exc:
         ctx["error"] = exc
 
@@ -944,7 +1109,7 @@ def when_evaluate_circuit_breaker(ctx: dict) -> None:
     if cb is not None:
         ctx["cb_can_attempt"] = cb.can_attempt()
     try:
-        ctx["circuit_result"] = env.call_send()
+        ctx["circuit_result"] = _call_webhook_service(ctx)
     except Exception as exc:
         ctx["error"] = exc
 
@@ -955,7 +1120,7 @@ def when_deliver_probe_reports(ctx: dict, n: int) -> None:
     env = ctx["env"]
     successful_probes = 0
     for _ in range(n):
-        result = env.call_send()
+        result = _call_webhook_service(ctx)
         assert result is True, f"Expected recovery probe {successful_probes + 1} to succeed"
         successful_probes += 1
     ctx["probe_count"] = successful_probes
@@ -964,9 +1129,8 @@ def when_deliver_probe_reports(ctx: dict, n: int) -> None:
 @when("the system delivers a webhook report with retry")
 def when_deliver_with_retry(ctx: dict) -> None:
     """System delivers webhook with retry on failure."""
-    env = ctx["env"]
     try:
-        ctx["webhook_result"] = env.call_send()
+        ctx["webhook_result"] = _call_webhook_service(ctx)
     except Exception as exc:
         ctx["error"] = exc
 
@@ -1751,23 +1915,35 @@ def then_no_retry(ctx: dict) -> None:
 
 @then("the system should log the authentication rejection")
 def then_log_auth_rejection(ctx: dict) -> None:
-    """Assert the system logged the authentication rejection.
+    """Assert the system logged the authorization rejection.
 
     CircuitBreakerEnv captures WARNING+ log records from the webhook delivery
-    service. This step verifies a log record about the 401/client error was
-    emitted during the delivery attempt.
+    service. This step verifies a record about the non-retryable client error
+    was emitted during the delivery attempt.
+
+    The scenario drives 403 rather than 401: AdCP 3.1.1 exempts 401 on a
+    persistent channel from the no-retry invariant (see the feature file's
+    citation), so production retries it and the delivery is not rejected at all.
     """
     env = ctx["env"]
     # 1. Confirm delivery failed (precondition)
     success = _extract_webhook_success(ctx)
     assert success is False, f"Expected webhook delivery to fail on auth rejection, got success={success!r}"
 
-    # 2. Verify auth rejection was logged
-    log_records = getattr(env, "captured_logs", None) or ctx.get("captured_logs")
+    # 2. Verify the rejection was logged. `is None` rather than a truthiness
+    #    check: an EMPTY capture means the handler is attached and nothing was
+    #    logged, which is a real assertion failure below, not a missing harness
+    #    capability — conflating them reports the wrong defect.
+    log_records = getattr(env, "captured_logs", None)
+    if log_records is None:
+        log_records = ctx.get("captured_logs")
     assert log_records is not None, "CircuitBreakerEnv.captured_logs not available — harness must capture logs"
-    found_auth_log = any("client error" in r.lower() or "401" in r or "unauthorized" in r.lower() for r in log_records)
+    found_auth_log = any(
+        "non-retryable" in r.lower() or "client error" in r.lower() or "403" in r or "forbidden" in r.lower()
+        for r in log_records
+    )
     assert found_auth_log, (
-        f"Expected a WARNING log record about auth rejection (401/client error/unauthorized), "
+        f"Expected a WARNING log record about the rejection (non-retryable/client error/403/forbidden), "
         f"but captured {len(log_records)} records: {log_records[:5]}"
     )
 
@@ -1832,7 +2008,7 @@ def then_deliveries_suppressed(ctx: dict) -> None:
     calls_before = post_mock.call_count
 
     # Attempt a delivery while breaker is open — it should be suppressed
-    result = env.call_send()
+    result = _call_webhook_service(ctx)
     assert result is False, f"Expected delivery to be suppressed (return False) while CB is open, got {result!r}"
     assert post_mock.call_count == calls_before, (
         f"Expected no new POST calls while CB is open (suppressed), "
@@ -1965,18 +2141,27 @@ def then_hmac_header(ctx: dict, header: str) -> None:
     assert re.match(r"^[0-9a-f]{1,}$", stripped), f"Header {header!r} is not a hex-encoded HMAC: {value!r}"
 
 
-@then(parsers.parse('the request should include header "{header}" with ISO timestamp'))
+@then(parsers.parse('the request should include header "{header}" with unix timestamp'))
 def then_timestamp_header(ctx: dict, header: str) -> None:
-    """Assert timestamp header is present and contains a valid ISO 8601 datetime."""
-    from datetime import datetime as _dt
+    """Assert the timestamp header carries Unix seconds, as legacy HMAC requires.
 
+    AdCP 3.1.1's legacy HMAC-SHA256 fallback specifies
+    ``X-ADCP-Timestamp: <unix timestamp in seconds>`` and signs
+    ``{unix_timestamp}.{raw_json_body}``. The header therefore has to be the
+    exact seconds string that went into the signature — an ISO rendering would
+    not verify against it, which is what the sibling concatenation step checks.
+    """
     headers = _get_last_webhook_headers(ctx)
     assert header in headers, f"Expected header {header!r} but got: {list(headers.keys())}"
     value = headers[header]
-    try:
-        _dt.fromisoformat(value)
-    except (ValueError, TypeError) as exc:
-        raise AssertionError(f"Header {header!r} is not a valid ISO 8601 timestamp: {value!r}") from exc
+    assert isinstance(value, str) and value.isdigit(), (
+        f"Header {header!r} must be Unix seconds per the legacy HMAC profile, got {value!r}"
+    )
+    # Sanity-bound the epoch so a counter or millisecond value cannot pass:
+    # 1_000_000_000 is 2001-09-09, 4_000_000_000 is 2096-10-02.
+    assert 1_000_000_000 < int(value) < 4_000_000_000, (
+        f"Header {header!r} is not a plausible Unix-seconds timestamp: {value!r}"
+    )
 
 
 @then('the HMAC should be computed over "timestamp.payload" concatenation')
@@ -1984,18 +2169,16 @@ def then_hmac_computation(ctx: dict) -> None:
     """Assert HMAC signature is reproduced by signing timestamp.payload with the secret."""
     import hashlib
     import hmac as hmac_lib
-    import json as json_lib
 
     headers = _get_last_webhook_headers(ctx)
-    payload = _get_last_webhook_payload(ctx)
     timestamp = headers.get("X-ADCP-Timestamp") or headers.get("X-Webhook-Timestamp", "")
     raw_sig = headers.get("X-ADCP-Signature") or headers.get("X-Webhook-Signature", "")
     signature = raw_sig.removeprefix("sha256=")
     assert signature, "Expected HMAC signature header to be present and non-empty"
     signing_secret: str = ctx.get("webhook_secret", "")
     assert signing_secret, "Test setup must store webhook_secret in ctx['webhook_secret']"
-    payload_str = json_lib.dumps(payload, sort_keys=True, separators=(",", ":"))
-    message = f"{timestamp}.{payload_str}".encode()
+    # Sign the bytes production actually sent, not a re-serialization of them.
+    message = f"{timestamp}.".encode() + _get_last_webhook_raw_body(ctx)
     expected = hmac_lib.new(signing_secret.encode(), message, hashlib.sha256).hexdigest()
     assert signature == expected, f"HMAC signature mismatch: got {signature!r}, expected {expected!r}"
 
@@ -2999,16 +3182,27 @@ def _ensure_media_buy_in_db(
 
     from datetime import date as _date
 
+    from sqlalchemy import select
+
+    from src.core.database.models import Principal, Tenant
     from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
 
-    # Ensure tenant exists
-    if "db_tenant" not in ctx:
-        ctx["db_tenant"] = TenantFactory(tenant_id=ctx.get("tenant_id", "test_tenant"))
+    session = env._session
+    tenant_id = ctx.get("tenant_id", "test_tenant")
 
-    # Ensure principal exists
+    # Adopt the row the env already created rather than re-creating it: this
+    # helper is reachable from Given steps that run after the env has seeded its
+    # own tenant/principal, and a blind factory call collides on the PK.
+    if "db_tenant" not in ctx:
+        existing_tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+        ctx["db_tenant"] = existing_tenant or TenantFactory(tenant_id=tenant_id)
+
     principal_key = f"db_principal_{owner}"
     if principal_key not in ctx:
-        ctx[principal_key] = PrincipalFactory(
+        existing_principal = session.scalars(
+            select(Principal).filter_by(tenant_id=tenant_id, principal_id=owner)
+        ).first()
+        ctx[principal_key] = existing_principal or PrincipalFactory(
             tenant=ctx["db_tenant"],
             principal_id=owner,
         )
@@ -3026,6 +3220,10 @@ def _ensure_media_buy_in_db(
         mb_kwargs["end_date"] = _date.fromisoformat(end_date)
 
     MediaBuyFactory(**mb_kwargs)
+
+    # The webhook Given may have run before this buy existed, in which case the
+    # sync there skipped it.
+    _sync_reporting_webhook_to_media_buys(ctx, env)
 
 
 def _parse_request_params(params_str: str) -> dict[str, Any]:

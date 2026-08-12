@@ -254,8 +254,13 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
     And the shared secret is a valid 32+ character string
     When the system delivers a webhook report for "mb-001"
     Then the request should include header "X-ADCP-Signature" with hex-encoded HMAC
-    And the request should include header "X-ADCP-Timestamp" with ISO timestamp
+    And the request should include header "X-ADCP-Timestamp" with unix timestamp
     And the HMAC should be computed over "timestamp.payload" concatenation
+    # LOCAL DIVERGENCE (mirror upstream): generated as "ISO timestamp". AdCP
+    # 3.1.1 legacy HMAC-SHA256 fallback specifies
+    # `X-ADCP-Timestamp: <unix timestamp in seconds>`, and the signed message is
+    # `{unix_timestamp}.{raw_json_body}` — so the header must carry the exact
+    # seconds string that was signed. An ISO value here could not verify.
     # POST-S8: Buyer can verify report authenticity
     # BR-RULE-029 INV-1: monotonically increasing sequence (signing is precondition)
     # Webhook auth: traces to SR-NFR-005
@@ -321,12 +326,19 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
   @T-UC-004-webhook-no-retry-4xx @async @extension @ext-g @webhook-reliability @invariant @BR-RULE-029
   Scenario: Webhook delivery does not retry on 4xx response
     Given a media buy "mb-001" with an active reporting_webhook
-    And the webhook endpoint returns 401 Unauthorized
+    And the webhook endpoint returns 403 Forbidden
     When the system attempts to deliver a webhook report
     Then the system should not retry the delivery
     And the system should log the authentication rejection
     And the webhook should be marked as failed
     # BR-RULE-029 INV-4: 4xx -> no retry (client error)
+    # LOCAL DIVERGENCE (mirror upstream): generated as 401, which is the one 4xx
+    # AdCP 3.1.1 exempts from this invariant. Persistent channel contract, Auth
+    # renewal: "If a seller's fire receives a 401 from the receiver, the seller
+    # SHOULD treat this as a transient receiver-side configuration error: retry
+    # per the standard schedule ... and do not auto-disable the webhook." A
+    # reporting_webhook is a persistent channel, so 401 must retry and cannot
+    # grade INV-4. 403 exercises the same invariant without the exemption.
 
   @T-UC-004-webhook-circuit-open @async @extension @ext-g @webhook-reliability @nfr @nfr-005
   Scenario: Persistent webhook failures open circuit breaker
