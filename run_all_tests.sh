@@ -55,11 +55,6 @@ export COMPOSE_PROJECT_NAME="$(printf '%s' "${COMPOSE_PROJECT_NAME:-adcp-innet-$
 # exports TEST_GID to that shared group instead of taking the primary one.
 export TEST_UID="${TEST_UID:-$(id -u)}"
 export TEST_GID="${TEST_GID:-$(id -g)}"
-# The delivery-webhook scheduler runs on the SERVER (adcp-server), gated by this
-# interval. docker-compose.e2e.yml defaults it empty (scheduler off); the host
-# e2e path sets it to 5 via conftest. Mirror that so test_daily_delivery_webhook
-# gets a report. Compose interpolates this into the adcp-server service env.
-export DELIVERY_WEBHOOK_INTERVAL="${DELIVERY_WEBHOOK_INTERVAL:-5}"
 # Argument contract — back-compat with the historical MODE words so the
 # pre-existing callers (Makefile quality-full/test-full, docs) keep working:
 #   (no arg) | ci                 -> all six suites, in-network (the default)
@@ -77,10 +72,46 @@ case "${1:-ci}" in
     *) SUITES="$1" ;;
 esac
 
+# The delivery-webhook scheduler runs on the SERVER (adcp-server), gated by this
+# interval; compose interpolates it into that service's env and defaults it EMPTY
+# (scheduler off). Only the `e2e` suite needs it running: test_daily_delivery_webhook
+# waits for a real tick. The host e2e path sets it to 5 itself via tests/e2e/conftest.py;
+# in-network, this is what feeds the server.
+#
+# Scoped to that suite rather than exported unconditionally, because a running
+# scheduler DEADLOCKS the bdd_e2e leg. Its selection query takes media_buys then
+# webhook_delivery_log (the correlated anti-join over successful `final` sends);
+# the per-scenario fixture reset issues TRUNCATE ... CASCADE, which needs
+# AccessExclusiveLock and reaches those tables in the opposite order. Postgres kills
+# one side:
+#
+#   Process A waits for AccessShareLock     on webhook_delivery_log; blocked by B
+#   Process B waits for AccessExclusiveLock on media_buys;           blocked by A
+#
+# Neither side is wrong alone; they cannot run concurrently. At a 5s interval the
+# tick lands inside a truncate window often enough to fail roughly half of runs,
+# striking a different scenario each time — which is why it read as flaky-and-
+# unexplained until the server-log dump in cleanup() captured the DeadlockDetected.
+#
+# bdd_e2e does not grade the background tick: its delivery scenarios drive
+# send_delivery_webhook in-process. So scoping removes one side of the inversion
+# without weakening coverage. Retry-on-deadlock was rejected — it would treat a
+# test-infrastructure lock conflict as a production concern and hide the next real one.
+#
+# Token-exact: ",e2e," must not match ",bdd_e2e,".
+case ",${SUITES:-}," in
+    *,e2e,*) export DELIVERY_WEBHOOK_INTERVAL="${DELIVERY_WEBHOOK_INTERVAL:-5}" ;;
+    *) export DELIVERY_WEBHOOK_INTERVAL="${DELIVERY_WEBHOOK_INTERVAL:-}" ;;
+esac
+
 # Testability seam: resolve the argument contract and exit BEFORE any Docker
 # call so tests/unit/test_run_all_tests_contract.py can assert it without a stack.
 if [ -n "${RUN_ALL_TESTS_RESOLVE_ONLY:-}" ]; then
-    if [ "$DELEGATE" = 1 ]; then echo "RESOLVED delegate-host: $*"; else echo "RESOLVED suites=$SUITES"; fi
+    if [ "$DELEGATE" = 1 ]; then
+        echo "RESOLVED delegate-host: $*"
+    else
+        echo "RESOLVED suites=$SUITES scheduler_interval=${DELIVERY_WEBHOOK_INTERVAL:-<off>}"
+    fi
     exit 0
 fi
 
