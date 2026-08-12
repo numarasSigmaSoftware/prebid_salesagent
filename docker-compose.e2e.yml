@@ -238,6 +238,13 @@ services:
       # (the bare `-n auto` would otherwise spawn ~17 app-loading workers -> OOM).
       PYTEST_XDIST_AUTO_NUM_WORKERS: "${PYTEST_XDIST_AUTO_NUM_WORKERS:-1}"
       ADCP_TESTING: "true"
+      # The send-time SSRF gate and the connect-time pinning adapter now share
+      # ONE predicate (ADCP_ALLOW_PRIVATE_WEBHOOKS) so they cannot disagree.
+      # ADCP_TESTING alone no longer unlocks private egress — a staging deploy
+      # that serves real buyers can carry it. In-process suites in this runner
+      # post to the compose-network receiver, so the runner opts in explicitly,
+      # exactly as the server above does.
+      ADCP_ALLOW_PRIVATE_WEBHOOKS: "true"
       ADCP_AUTH_TEST_MODE: "true"
       ADCP_TEST_CONTROL_TOKEN: ${ADCP_TEST_CONTROL_TOKEN:-}
       CREATE_SAMPLE_DATA: "true"

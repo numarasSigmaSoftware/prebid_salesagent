@@ -201,6 +201,35 @@ def supported_adcp_versions() -> tuple[str, ...]:
     return ADVERTISED_ADCP_VERSIONS
 
 
+def wire_adcp_version() -> str:
+    """The single release-precision value to stamp on an outbound payload.
+
+    Outbound stamps must come from the same advertisement negotiation reads,
+    not from the installed SDK's spec pin. ``get_adcp_spec_version()`` returns
+    PATCH precision (``"3.1.1"``), and ``core/version-envelope.json`` is
+    release precision (MAJOR.MINOR) — so this agent's own ``_RELEASE_PIN_RE``
+    rejects the value some outbound payloads were stamping. A buyer echoing
+    our own ``adcp_version`` back at us would have been answered
+    VERSION_UNSUPPORTED.
+
+    The highest advertised release is chosen: ``supported_adcp_versions()`` is
+    an unordered advertisement, and the newest release is what a peer should
+    see us speaking.
+    """
+    releases = _supported_releases()
+    newest = max(
+        releases,
+        key=lambda pin: (
+            _numeric_component_key(pin.major),
+            _numeric_component_key(pin.minor),
+            # A release beats its own prereleases: "3.1" > "3.1-beta.1".
+            pin.prerelease is None,
+            pin.prerelease or "",
+        ),
+    )
+    return newest.raw
+
+
 def derived_versions_from_sdk_pin() -> tuple[str, ...]:
     """Release-precision versions derived from the INSTALLED SDK's spec pin.
 

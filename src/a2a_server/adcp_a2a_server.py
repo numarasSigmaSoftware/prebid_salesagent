@@ -54,7 +54,7 @@ from adcp.types.base import AdCPBaseModel
 from google.protobuf import json_format, struct_pb2
 from pydantic import BaseModel
 
-from src.core.adcp_version import validate_adcp_version_pins
+from src.core.adcp_version import validate_adcp_version_pins, wire_adcp_version
 from src.core.application_context import dump_adcp_response
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import AUTH_REQUIRED_SUGGESTION
@@ -2560,15 +2560,13 @@ def create_agent_card() -> AgentCard:
     server_url = get_a2a_server_url() or "http://localhost:8091/a2a"
 
     from a2a.types import AgentCapabilities, AgentSkill
-    from adcp import get_adcp_spec_version
 
     # Get sales agent version from package metadata or pyproject.toml
     sales_agent_version = get_version()
 
     # Create AdCP extension (AdCP 2.5 spec)
-    # As of adcp 2.12.1, get_adcp_spec_version() returns the protocol version (e.g., "2.5.0")
     # Previously it returned the schema version (e.g., "v1"), but this was fixed upstream
-    protocol_version = get_adcp_spec_version()
+    protocol_version = wire_adcp_version()
     adcp_extension = AgentExtension(
         uri=f"https://adcontextprotocol.org/schemas/{protocol_version}/protocols/adcp-extension.json",
         description="AdCP protocol version and supported domains",

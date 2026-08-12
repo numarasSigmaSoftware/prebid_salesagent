@@ -133,11 +133,18 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
         call_args = mock_post.call_args
 
         # Check new payload structure (PR #86 - no wrapper, direct payload)
-        # Version should match what's reported by the adcp library
-        from adcp import get_adcp_spec_version
+        # The stamped version is RELEASE precision (MAJOR.MINOR) per
+        # core/version-envelope.json — NOT the SDK's patch-precision spec pin
+        # ("3.1.1"), which this agent's own inbound _RELEASE_PIN_RE rejects.
+        # Asserted against the advertisement + the real parser rather than
+        # against wire_adcp_version(), so both sides cannot drift together.
+        from src.core.adcp_version import _parse_release_pin, supported_adcp_versions
 
         payload = json.loads(call_args.kwargs["body"])
-        assert payload["adcp_version"] == get_adcp_spec_version()
+        assert _parse_release_pin(payload["adcp_version"]) is not None, (
+            f"outbound adcp_version {payload['adcp_version']!r} is not release precision"
+        )
+        assert payload["adcp_version"] in supported_adcp_versions()
         assert payload["notification_type"] == "scheduled"
         assert payload["is_adjusted"] is False  # NEW in PR #86
         assert payload["sequence_number"] == 1

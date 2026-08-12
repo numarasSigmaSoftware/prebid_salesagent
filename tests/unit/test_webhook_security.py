@@ -642,3 +642,116 @@ class TestPinnedOutboundClient:
             timeout=10.0,
         )
         mock_sleep.assert_not_awaited()
+
+
+class TestPinningAdapterIsActuallyMounted:
+    """The pinning adapter is REACHED by a real send, not merely defined.
+
+    Every other test in this file constructs ``PinningHTTPAdapter()`` directly
+    and grades its behavior. None of them grade that
+    ``create_pinned_webhook_session`` mounts it — so deleting the two
+    ``session.mount(...)`` lines left `tests/unit -k "webhook or ssrf or
+    delivery"` at 658 passed while silently restoring unpinned, re-resolving
+    egress on both delivery services.
+
+    No mocks: the assertions go through requests' own adapter registry and its
+    real ``Session.send()`` dispatch.
+    """
+
+    def test_both_schemes_resolve_to_the_pinning_adapter(self):
+        from src.core.security.webhook_http import PinningHTTPAdapter, create_pinned_webhook_session
+
+        session = create_pinned_webhook_session()
+
+        assert isinstance(session.get_adapter("https://buyer.example.com/cb"), PinningHTTPAdapter)
+        assert isinstance(session.get_adapter("http://buyer.example.com/cb"), PinningHTTPAdapter)
+
+    def test_proxy_env_is_ignored_so_pinning_cannot_be_bypassed(self):
+        from src.core.security.webhook_http import create_pinned_webhook_session
+
+        assert create_pinned_webhook_session().trust_env is False
+
+    def test_a_real_send_reaches_the_adapter_and_is_refused(self):
+        """Drives requests' real dispatch, not the adapter in isolation.
+
+        ``.invalid`` is reserved by RFC 6761 and never resolves, so an
+        UNMOUNTED session fails with a DNS/ConnectionError instead — which is
+        exactly the discrimination this test needs, and it needs no network
+        either way. Embedded credentials are the adapter's FIRST check, so the
+        refusal happens before any resolution attempt.
+        """
+        import pytest as _pytest
+        import requests
+
+        from src.core.security.webhook_http import UnsafeWebhookTargetError, create_pinned_webhook_session
+
+        session = create_pinned_webhook_session()
+
+        with _pytest.raises(UnsafeWebhookTargetError):
+            session.post("https://user:pw@nonexistent.invalid/cb", data=b"{}", timeout=5)
+
+        # And prove the discrimination is real: a plain session reaches the
+        # network layer instead of the guard.
+        with _pytest.raises(requests.exceptions.RequestException) as plain:
+            requests.Session().post("https://user:pw@nonexistent.invalid/cb", data=b"{}", timeout=5)
+        assert not isinstance(plain.value, UnsafeWebhookTargetError)
+
+
+class TestPrivateTargetOptInIsSingleSourced:
+    """Send-time gate and connect-time adapter read ONE predicate.
+
+    They used to read two: ``validate_outbound_webhook_url`` keyed on
+    ``ADCP_TESTING`` while ``PinningHTTPAdapter`` keyed on
+    ``ADCP_ALLOW_PRIVATE_WEBHOOKS``. Setting either alone made them contradict
+    each other in one direction or the other — a send the gate approved and
+    the socket refused, or a target the gate refused that the adapter would
+    have dialled. Neither direction was detectable from one gate's tests.
+    """
+
+    _LOOPBACK = "http://127.0.0.1:9999/webhook"
+
+    @staticmethod
+    def _clear(monkeypatch):
+        for var in ("ADCP_TESTING", "ADCP_ALLOW_PRIVATE_WEBHOOKS", "ENVIRONMENT", "PRODUCTION", "FLY_APP_NAME"):
+            monkeypatch.delenv(var, raising=False)
+
+    def _both_gates_allow_private(self) -> tuple[bool, bool]:
+        """(send-time verdict, connect-time verdict) for the same target."""
+        from src.core.security import webhook_http
+        from src.core.webhook_validator import WebhookURLValidator
+
+        send_ok, _ = WebhookURLValidator.validate_outbound_webhook_url(self._LOOPBACK)
+        connect_allows_private = webhook_http._allow_private_webhook_targets()
+        return send_ok, connect_allows_private
+
+    def test_the_dedicated_flag_opens_both_gates(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ADCP_ALLOW_PRIVATE_WEBHOOKS", "true")
+
+        send_ok, connect_ok = self._both_gates_allow_private()
+
+        assert send_ok is True and connect_ok is True, f"gates disagree: send={send_ok} connect={connect_ok}"
+
+    def test_no_flag_closes_both_gates(self, monkeypatch):
+        self._clear(monkeypatch)
+
+        send_ok, connect_ok = self._both_gates_allow_private()
+
+        assert send_ok is False and connect_ok is False, f"gates disagree: send={send_ok} connect={connect_ok}"
+
+    def test_adcp_testing_alone_does_not_open_either_gate(self, monkeypatch):
+        """The exact divergence that existed: ADCP_TESTING opened only the send gate.
+
+        A staging deployment serving real buyers can carry ADCP_TESTING, which
+        is why ``_allow_private_webhook_targets``'s docstring records that
+        gating on "not production" was too broad and this dedicated flag
+        replaced it. Honouring ADCP_TESTING here would re-open exactly that.
+        """
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ADCP_TESTING", "true")
+
+        send_ok, connect_ok = self._both_gates_allow_private()
+
+        assert send_ok is False and connect_ok is False, (
+            f"ADCP_TESTING alone must not unlock private egress: send={send_ok} connect={connect_ok}"
+        )

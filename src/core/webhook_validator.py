@@ -385,8 +385,19 @@ class WebhookURLValidator:
         (``validate_outbound_webhook_url``). When ``ADCP_TESTING=true``,
         localhost/loopback are allowed for capture servers. Production
         requires HTTPS.
+
+        Embedded credentials are rejected here as well as in the send-time and
+        testing validators. This method was the one sibling of the three that
+        omitted the check — not exploitable today, because
+        ``reject_unsafe_webhook_registration_url`` happens to run the wrapper
+        first, but a direct caller of this classmethod would have registered a
+        ``https://user:pw@host/cb`` callback without complaint. A validator
+        that is weaker than its siblings only stays safe while every caller
+        takes the longer path.
         """
-        allow_localhost = _adcp_testing()
+        if webhook_url_has_embedded_credentials(url):
+            return False, "URL must not contain embedded credentials"
+        allow_localhost = _allow_private_webhook_targets()
         is_valid, error = check_url_ssrf(
             url,
             resolve_dns=False,
@@ -396,8 +407,24 @@ class WebhookURLValidator:
 
     @classmethod
     def validate_outbound_webhook_url(cls, url: str) -> tuple[bool, str]:
-        """Send-time SSRF gate (full DNS), with localhost allowance under ADCP_TESTING."""
-        if _adcp_testing():
+        """Send-time SSRF gate (full DNS), with the shared private-target allowance.
+
+        Keyed on ``_allow_private_webhook_targets`` — the SAME predicate the
+        connect-time pinning adapter uses — so the two gates cannot disagree.
+        They previously did: this one keyed on ``ADCP_TESTING`` while the
+        adapter keyed on ``ADCP_ALLOW_PRIVATE_WEBHOOKS``, so setting either one
+        alone produced a contradiction in one direction or the other (send
+        allowed then connect refused, or vice versa).
+
+        ``ADCP_TESTING`` alone deliberately no longer unlocks private egress:
+        ``_allow_private_webhook_targets``'s own docstring records that gating
+        on "not production" was the too-broad approach the dedicated flag
+        replaced, and a staging deploy that serves real buyers can carry
+        ADCP_TESTING. The HTTPS-required axis stays on ``_strict_mode`` — that
+        is a different question from "may this target be private", and the two
+        are only coupled inside the adapter for its own resolution call.
+        """
+        if _allow_private_webhook_targets():
             return cls.validate_for_testing(url, allow_localhost=True)
         return cls.validate_webhook_url(url)
 

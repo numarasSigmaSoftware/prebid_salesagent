@@ -25,8 +25,8 @@ from enum import Enum
 from typing import Any
 
 import requests
-from adcp import get_adcp_spec_version
 
+from src.core.adcp_version import wire_adcp_version
 from src.core.bounded_executor import SyncThreadPoolBulkhead
 from src.core.database.repositories.push_notification_config import PushNotificationTarget
 from src.core.database.repositories.uow import PushNotificationConfigUoW
@@ -276,7 +276,7 @@ class WebhookDeliveryService:
 
             # Build AdCP compliant payload with new fields
             delivery_payload = {
-                "adcp_version": get_adcp_spec_version(),
+                "adcp_version": wire_adcp_version(),
                 "notification_type": notification_type,
                 "is_adjusted": is_adjusted,  # New field for late data
                 "sequence_number": sequence_number,
