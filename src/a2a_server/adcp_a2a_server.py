@@ -2573,15 +2573,21 @@ def create_agent_card() -> AgentCard:
     # Get sales agent version from package metadata or pyproject.toml
     sales_agent_version = get_version()
 
-    # Create AdCP extension (AdCP 2.5 spec)
-    # Previously it returned the schema version (e.g., "v1"), but this was fixed upstream
-    protocol_version = wire_adcp_version()
+    # Two DIFFERENT versions, deliberately. The extension URI is a schema PATH
+    # (dist/schemas/3.1.1/...), which exists at patch precision; the advertised
+    # `adcp_version` is a NEGOTIATION value a buyer will pin on its next
+    # request, and the wire envelope is release precision. Advertising the
+    # patch version there told buyers to pin "3.1.1", which this agent's own
+    # _RELEASE_PIN_RE then rejects with VERSION_UNSUPPORTED.
+    from adcp import get_adcp_spec_version
+
+    schema_version = get_adcp_spec_version()
     adcp_extension = AgentExtension(
-        uri=f"https://adcontextprotocol.org/schemas/{protocol_version}/protocols/adcp-extension.json",
+        uri=f"https://adcontextprotocol.org/schemas/{schema_version}/protocols/adcp-extension.json",
         description="AdCP protocol version and supported domains",
         params=_dict_to_struct(
             {
-                "adcp_version": protocol_version,
+                "adcp_version": wire_adcp_version(),
                 "protocols_supported": ["media_buy"],  # Only media_buy protocol is currently supported
             }
         ),
