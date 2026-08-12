@@ -204,20 +204,34 @@ _LOGGER_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "e
 def _raw_buyer_channel_hits(tree) -> list[str]:
     """Buyer-controlled values reaching a ``logger.*`` call unsanitized.
 
-    A DENY-RAW rule, not a name allowlist. The earlier matcher recognized only
-    the identifier ``e`` and only ``config``/``target`` as attribute bases, so
-    it was blind to ~10 of the 11 shapes that actually occur — ``exc``/``err``,
-    ``str(e)``, ``{payload}``, an aliased local, ``self.config.url``,
-    ``extra={}`` values, the ``%``-operator, ``.format()``, and a
-    ``self.logger`` base. A raw site inside its own scan set left it green,
-    which is the failure mode this rewrite closes.
+    HYBRID, and the distinction is load-bearing — read it before trusting a
+    green result. This docstring previously claimed "a DENY-RAW rule, not a
+    name allowlist" over code that was an allowlist for every branch, which is
+    how sixteen raw-URL sites passed. Only ONE of the three branches is
+    actually deny-by-default:
 
-    Recognized channels: any name bound by an enclosing ``except ... as X``,
-    the conventional exception spellings, the request-payload spellings, and
-    ``<anything>.url`` / ``.text`` / ``.body``. ``str(...)``/``repr(...)`` are
-    unwrapped first — they format, they do not sanitize. A value wrapped in
-    ``scrub_control_chars(...)`` / ``log_safe(...)`` is NOT flagged, and neither
-    are shape-only reads (``len(...)``, ``sorted(x.keys())``), which is the
+    - ``ast.Call`` — DENY-BY-DEFAULT. Any call that is not in
+      ``_SANITIZING_OR_SAFE_CALLS`` / ``_URL_SANITIZING_CALLS`` is flagged, so
+      ``thing.model_dump()`` and ``params.get(...)`` are caught without being
+      enumerated. A URL-valued argument wrapped in a merely control-char
+      scrubber is ALSO flagged: a scrub keeps ``?token=`` and userinfo, so it
+      does not sanitize a URL (see ``_URL_SANITIZING_CALLS``).
+    - ``ast.Attribute`` — ALLOWLIST, keyed on ``_BUYER_ATTRS``. ``config.url``
+      is caught; ``config.secret`` is NOT.
+    - ``ast.Name`` — ALLOWLIST, keyed on the exception / payload / buyer-id /
+      URL name sets. ``url`` and ``endpoint`` are caught; a URL bound to
+      ``cb`` or ``dest`` is NOT.
+
+    So the two allowlist branches are only as good as their name sets, and a
+    buyer value under an unlisted spelling slips. Deny-by-default is not
+    available there without flagging every bare name in every logger call,
+    which would be unusable; widening the sets when a new spelling appears is
+    the accepted maintenance cost. ``test_oracle_matcher_recognizes_every_
+    interpolation_form`` pins both the covered shapes and, explicitly, the
+    known gaps — so a reader cannot mistake the gaps for coverage.
+
+    ``str(...)``/``repr(...)`` are unwrapped first — they format, they do not
+    sanitize. Shape-only reads (``len(...)``, ``sorted(x.keys())``) are the
     sanctioned way to log a buyer dict.
     """
     import ast
@@ -450,6 +464,17 @@ class TestWebhookLogScrubCoverage:
             ("shape-only dict read", 'logger.info("skill %s keys: %s", name, sorted(parameters.keys()))', 0),
             ("count-only read", 'logger.info("delivering %s items", len(payload))', 0),
             ("non-logger call", 'notifier.warning(f"delivery to {config.url}")', 0),
+            # ── KNOWN GAPS, pinned as gaps ──────────────────────────────────
+            # The Name and Attribute branches are allowlists (see the matcher
+            # docstring), so a buyer value under an unlisted spelling is NOT
+            # caught. These expect 0 hits because that is what the matcher
+            # does — not because the shapes are safe. They exist so the gap is
+            # visible and testable rather than implied, and so widening a name
+            # set flips a documented expectation instead of silently changing
+            # behaviour.
+            ("GAP: URL bound to an unlisted local", 'logger.warning(f"to {cb}")', 0),
+            ("GAP: URL bound to another unlisted local", 'logger.warning("to %s", dest)', 0),
+            ("GAP: unlisted buyer attribute", 'logger.warning(f"{config.secret}")', 0),
         ],
     )
     def test_oracle_matcher_recognizes_every_interpolation_form(self, form, source, expected):
