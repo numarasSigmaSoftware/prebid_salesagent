@@ -97,6 +97,34 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Gener
 
         from tests.harness._realize import E2EUnsupportedSetup
 
+        # A scenario listed in a *_WIRED set is DECLARED to be bound to a harness,
+        # so it must actually execute. Auto-xfailing one turns a broken binding
+        # into a green run: the scenario reports as xfail (which pytest counts as
+        # a pass), the aggregate looks healthy, and nothing is being graded.
+        #
+        # This is not hypothetical. Two UC-010 scenarios sat dormant behind
+        # exactly this hook because their generated When line said
+        # "get_adcp_capabilities MCP tool with adcp_version" while the step
+        # registered "get_adcp_capabilities with adcp_version" — one missing
+        # literal, six dead Then steps, three places claiming the behavior was
+        # covered, and a permanently green suite.
+        #
+        # Only the two dormancy causes are refused. E2EUnsupportedSetup stays
+        # auto-xfail: it is a declared, reasoned impl-only setup gap on
+        # e2e_rest, not a binding that silently failed.
+        if call.excinfo.errisinstance((StepDefinitionNotFoundError, NotImplementedError)) and (
+            {marker.name for marker in item.iter_markers()} & _wired_scenario_tags()
+        ):
+            report.longrepr = (
+                f"{report.longrepr}\n\n"
+                "This scenario's tag appears in a *_WIRED set in tests/bdd/conftest.py, which "
+                "declares it bound to a harness and therefore required to RUN. It was NOT "
+                "auto-xfailed. Either bind the missing step / implement the stub, or remove the "
+                "tag from the wired set — a wired scenario that cannot execute is dormant "
+                "coverage, and dormant coverage reads as green."
+            )
+            return
+
         if call.excinfo.errisinstance(StepDefinitionNotFoundError):
             report.outcome = "skipped"
             report.wasxfail = f"Step definition not found: {call.excinfo.value}"
@@ -2839,6 +2867,21 @@ _UC010_CAPABILITY_FILTER_WIRED: set[str] = {
     "T-UC-010-local-capability-filter-empty-v311",
     "T-UC-010-local-capability-filter-unsupported-v311",
 }
+
+
+def _wired_scenario_tags() -> frozenset[str]:
+    """Every tag declared bound to a harness env, across all use cases.
+
+    Single source for the makereport guard above. A tag listed here is a promise
+    that the scenario executes; the guard turns a broken promise into a failure
+    instead of a silent xfail. Add new *_WIRED sets here when you add them.
+    """
+    return frozenset(
+        _UC002_IDEMPOTENCY_WIRED
+        | _UC002_MANUAL_APPROVAL_WIRED
+        | _UC010_VERSION_NEGOTIATION_WIRED
+        | _UC010_CAPABILITY_FILTER_WIRED
+    )
 
 
 def _is_brand_shorthand_media_buy(marker_names: set[str]) -> bool:

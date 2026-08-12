@@ -147,8 +147,15 @@ class ProtocolWebhookService:
 
         # Log sanitized config (exclude sensitive authentication_token)
         safe_config = {
+            # The dict is named `safe_config` and deliberately omits
+            # authentication_token — a buyer's callback URL routinely carries its
+            # own bearer in the query string (`?token=...`), so it cannot go in
+            # raw. redact_webhook_url keeps only scheme/authority, dropping
+            # credentials, query AND path.
             "url": (
-                redact_webhook_url(push_notification_config.url) if hasattr(push_notification_config, "url") else None
+                scrub_control_chars(redact_webhook_url(push_notification_config.url))
+                if hasattr(push_notification_config, "url")
+                else None
             ),
             "authentication_type": (
                 push_notification_config.authentication_type

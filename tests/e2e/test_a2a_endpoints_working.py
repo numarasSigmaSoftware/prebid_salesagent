@@ -18,6 +18,8 @@ import requests
 from a2a.types import CancelTaskRequest, GetTaskRequest, TaskNotFoundError
 from adcp import get_adcp_spec_version
 
+from src.core.adcp_version import _parse_release_pin, supported_adcp_versions
+
 # Add parent directories to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -81,7 +83,14 @@ class TestA2AEndpointsActual:
                         break
 
                 assert adcp_ext is not None, "AdCP extension not found in live agent card"
-                assert adcp_ext["params"]["adcp_version"] == get_adcp_spec_version()
+                # The advertised adcp_version is a NEGOTIATION value the buyer
+                # will pin on its next request, so it is release precision —
+                # NOT the SDK's patch-precision spec pin, which this agent's
+                # own inbound parser rejects. The extension URI keeps the
+                # patch version because it is a schema path.
+                assert _parse_release_pin(adcp_ext["params"]["adcp_version"]) is not None
+                assert adcp_ext["params"]["adcp_version"] in supported_adcp_versions()
+                assert get_adcp_spec_version() in adcp_ext["uri"], "the URI is a schema path"
                 assert "media_buy" in adcp_ext["params"]["protocols_supported"]
 
         except (requests.ConnectionError, requests.Timeout):
@@ -220,8 +229,12 @@ class TestA2AAgentCardCreation:
         assert "adcp_version" in params.fields
         assert "protocols_supported" in params.fields
 
-        # Validate AdCP extension values
-        assert params.fields["adcp_version"].string_value == adcp_version
+        # Validate AdCP extension values. The URI above carries the schema
+        # version (a path); the advertised adcp_version is the negotiation
+        # value, so it is release precision and must be one we accept inbound.
+        advertised = params.fields["adcp_version"].string_value
+        assert _parse_release_pin(advertised) is not None, f"advertised {advertised!r} is not release precision"
+        assert advertised in supported_adcp_versions()
         protocols_value = params.fields["protocols_supported"].list_value
         protocols = [v.string_value for v in protocols_value.values]
         assert len(protocols) >= 1

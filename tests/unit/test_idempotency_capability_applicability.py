@@ -74,3 +74,46 @@ def test_generated_replay_scenario_is_live_and_boundary_fixture_durable():
     # capability now declares `false` would silently un-grade a real,
     # verified behavior for the wrong reason.
     assert f"@{LIVE_REPLAY_SCENARIO}" not in local_text
+
+
+def test_no_source_docstring_claims_the_opposite_of_the_shipped_discriminant():
+    """Prose that contradicts the wire is a defect, not a typo.
+
+    Seven places described this seller as advertising idempotency SUPPORT while
+    `capabilities.py` ships `IdempotencyUnsupported(supported=False)`. Six were
+    parameter docstrings a buyer-facing schema renders; the seventh was the
+    Spec-Grounding-Gate note, which described this very guard as asserting
+    `supported: true`. The wire was always right — but the artifact a reviewer
+    reads to check the claim against the spec said the opposite, which is
+    exactly the kind of drift the gate exists to prevent.
+
+    Text-matching is the right shape here precisely because the defect IS the
+    text: there is no behavior to exercise, and the wire side is already pinned
+    by `test_advertised_idempotency_is_the_narrower_defect_not_a_resolved_claim`
+    above. Keyed on the shipped discriminant, so if this seller ever advertises
+    support for real, the guard inverts with it instead of going stale.
+    """
+    from pathlib import Path
+
+    from src.core.tools.capabilities import _get_adcp_capabilities_impl
+
+    if _get_adcp_capabilities_impl(None, None).adcp.idempotency.supported:
+        return  # Claiming support IS accurate then; nothing to guard.
+
+    repo_root = Path(__file__).resolve().parents[2]
+    claims = (
+        "advertises idempotency support",
+        "advertise idempotency support",
+        "Capabilities advertise\n            idempotency support",
+    )
+    offenders = [
+        f"{path.relative_to(repo_root)}: {claim!r}"
+        for path in sorted((repo_root / "src").rglob("*.py"))
+        for claim in claims
+        if claim in path.read_text()
+    ]
+
+    assert not offenders, (
+        "these describe the seller as advertising idempotency support while the wire ships "
+        "IdempotencyUnsupported(supported=False):\n  " + "\n  ".join(offenders)
+    )

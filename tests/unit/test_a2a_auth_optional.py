@@ -267,8 +267,17 @@ class TestAuthOptionalSkills:
             ),
         )
 
+        # The TENANT-SCOPED sinks are what must not fire for an unauthenticated
+        # sender. Patch those directly and let the telemetry helper run for
+        # real, rather than asserting the helper was never called: the helper
+        # IS called (REST and MCP both record this event, and its docstring
+        # says all three boundaries stay in lockstep), and it is the identity=None
+        # projection that skips the sinks. Asserting the sinks stay silent grades
+        # that property; asserting the helper stayed silent only grades that we
+        # avoided depending on it.
         with (
-            patch("src.a2a_server.adcp_a2a_server.record_boundary_error_for_identity") as record_error,
+            patch("src.services.activity_feed.activity_feed") as activity_feed,
+            patch("src.core.audit_logger.get_audit_logger") as audit_logger,
             patch.object(self.handler, "_send_protocol_webhook", new_callable=AsyncMock) as send_webhook,
             pytest.raises(InvalidRequestError) as exc_info,
         ):
@@ -280,11 +289,13 @@ class TestAuthOptionalSkills:
         assert_envelope_shape(exc_info.value.data, "AUTH_REQUIRED", recovery="correctable")
         assert exc_info.value.data["context"] == application_context
         send_webhook.assert_not_awaited()
-        # Pre-auth rejection short-circuits before the boundary-telemetry helper:
-        # nothing is recorded for an unauthenticated sender, so no tenant-scoped
-        # sink can fire for the attacker (stronger than the previous flow, which
-        # relied on the helper degrading tenant_id to None).
-        record_error.assert_not_called()
+        # No tenant-scoped sink fires for an unauthenticated sender. The
+        # boundary error IS recorded (parity with REST and MCP, which each
+        # record 1 for this event), but with identity=None, which is precisely
+        # what makes record_boundary_error skip the activity feed and the audit
+        # log and emit only the WARNING line an operator needs.
+        activity_feed.log_error.assert_not_called()
+        audit_logger.assert_not_called()
         assert self.handler.tasks == {}
 
     @pytest.mark.asyncio

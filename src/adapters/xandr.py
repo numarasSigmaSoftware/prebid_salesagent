@@ -375,7 +375,6 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
                 ),
                 Product(
                     product_id="xandr_video_instream",
@@ -404,7 +403,6 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
                 ),
                 Product(
                     product_id="xandr_native",
@@ -433,7 +431,6 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
                 ),
                 Product(
                     product_id="xandr_deals",
@@ -463,7 +460,6 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
                 ),
             ]
 

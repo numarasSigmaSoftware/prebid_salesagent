@@ -133,7 +133,12 @@ def dump_adcp_response(
     return data
 
 
+# _CONTEXT_UNSET is exported deliberately: `mcp_result` compares against it by
+# IDENTITY to mean "no context supplied by the wrapper, derive it from the
+# response". A private copy would be a different object and would silently
+# disable that derivation, so it is a cross-module contract, not an internal.
 __all__ = [
+    "_CONTEXT_UNSET",
     "dump_adcp_response",
     "serialize_application_context",
     "validate_application_context",

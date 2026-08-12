@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig, SyncJob
+from src.core.security.webhook_http import BEARER_AUTH_SCHEME, is_auth_scheme
 from src.core.thread_registry import ThreadRegistry
 from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
 
@@ -333,6 +334,13 @@ def _mark_approval_failed(
         logger.error(f"Failed to mark approval failed: {e}")
 
 
+# Legacy local scheme for order-approval notifications only. Deliberately NOT
+# in webhook_http beside BEARER_AUTH_SCHEME/HMAC_AUTH_SCHEME: those are the
+# AdCP protocol schemes that core/push_notification_config.json enumerates,
+# and "Basic" is not one of them.
+_BASIC_AUTH_SCHEME = "Basic"
+
+
 def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str, str]:
     """Build HTTP headers for an order-approval webhook POST."""
     headers = {
@@ -341,9 +349,14 @@ def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str
     }
     if not config:
         return headers
-    if config.authentication_type == "bearer" and config.authentication_token:
+    # Case-insensitive, like every other scheme comparison. `core/push_notification_config.json`
+    # (v3.1.1) enumerates `['Bearer']`, and the A2A/REST intake stores
+    # `authentication.scheme` verbatim — so a spec-conformant row reads "Bearer"
+    # and the lowercase literal here matched NOTHING, silently dropping the
+    # Authorization header and delivering the notification unauthenticated.
+    if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) and config.authentication_token:
         headers["Authorization"] = f"Bearer {config.authentication_token}"
-    elif config.authentication_type == "basic" and config.authentication_token:
+    elif is_auth_scheme(config.authentication_type, _BASIC_AUTH_SCHEME) and config.authentication_token:
         headers["Authorization"] = f"Basic {config.authentication_token}"
     if config.validation_token:
         headers["X-Webhook-Token"] = config.validation_token

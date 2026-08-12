@@ -27,10 +27,8 @@ from adcp.types.generated_poc.account.sync_accounts_request import (
     Accounts as SyncAccountInput,  # SDK 5.7: Account → Accounts
 )
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field, ValidationError
 
-from src.core.application_context import dump_adcp_response
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_identity, require_principal_id, require_tenant
 from src.core.database.models import Account as DBAccount
@@ -50,6 +48,7 @@ from src.core.schemas.account import (
     SyncResponseAccount,
 )
 from src.core.tool_context import ToolContext
+from src.core.tools._mcp import mcp_result
 from src.core.transport_helpers import get_mcp_raw_wire_payload, resolve_identity_from_context
 from src.services.idempotency_replay import (
     complete_idempotent,
@@ -213,7 +212,7 @@ async def list_accounts(
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _list_accounts_impl(req, identity)
 
-    return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, context=context)
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +767,7 @@ async def sync_accounts(
         dry_run: Preview changes without persisting.
         context: Application-level context per AdCP spec.
         idempotency_key: Required client-generated key. This seller advertises
-        idempotency support; an identical retry replays the original success.
+            idempotency support; an identical retry replays the original success.
         ctx: FastMCP context for authentication.
 
     Returns:
@@ -788,7 +787,7 @@ async def sync_accounts(
     raw_wire_payload = await get_mcp_raw_wire_payload(ctx)
     response = await _sync_accounts_impl(req, identity, raw_wire_payload=raw_wire_payload)
 
-    return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, context=context)
 
 
 # ---------------------------------------------------------------------------

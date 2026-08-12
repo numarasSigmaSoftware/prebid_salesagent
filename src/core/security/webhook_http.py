@@ -113,7 +113,38 @@ def describe_webhook_error(exc: BaseException) -> str:
 
 
 WEBHOOK_DNS_TIMEOUT_SECONDS = 2.0
-WEBHOOK_DELIVERY_DEADLINE_SECONDS = 12.0
+
+# Retry policy for one outbound webhook target. Kept here, beside the deadline
+# that wraps it, because the two are one decision: a deadline shorter than the
+# budget it bounds does not "cap" the retries, it CANCELS them.
+WEBHOOK_DELIVERY_MAX_RETRIES = 3
+WEBHOOK_POST_TIMEOUT_SECONDS = 10.0
+# `_wait_before_retry`: no sleep before attempt 0, then 2**attempt + jitter(0,1).
+WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS = 1.0
+
+
+def _worst_case_delivery_seconds() -> float:
+    """Longest one target can legitimately take: every attempt times out."""
+    posts = WEBHOOK_DELIVERY_MAX_RETRIES * WEBHOOK_POST_TIMEOUT_SECONDS
+    backoff = sum(
+        2**attempt + WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS for attempt in range(1, WEBHOOK_DELIVERY_MAX_RETRIES)
+    )
+    return posts + backoff
+
+
+# DERIVED, not chosen. This was a hand-picked 12.0 while the loop it bounds can
+# legitimately run 36-38s (3 x 10s POST + 2-3s + 4-5s backoff) — the SECOND
+# attempt alone exceeded it. So the TimeoutError branch was not an outlier
+# path, it was the normal outcome for any slow endpoint, and it cancelled the
+# retries that exist to tolerate exactly that. All four callers discard the
+# returned bool, so the only trace was one log line.
+#
+# Trade-off, deliberate: a slow target now occupies a bulkhead worker for up to
+# ~38s instead of 12s. That is the cost of the retry policy actually running;
+# the previous value bought worker turnover by making retries a no-op. Tighten
+# the RETRY POLICY above if that occupancy is too high — do not re-cap the
+# deadline below the budget, which just restores the silent cancellation.
+WEBHOOK_DELIVERY_DEADLINE_SECONDS = _worst_case_delivery_seconds()
 WEBHOOK_DELIVERY_MAX_WORKERS = 4
 _DELIVERY_DNS_BULKHEAD = SyncThreadPoolBulkhead(
     max_workers=WEBHOOK_DELIVERY_MAX_WORKERS,

@@ -90,7 +90,13 @@ def test_six_suite_list_is_single_sourced():
 
 
 def test_e2e_test_control_secret_reaches_server_and_bdd_tox_env():
-    """The per-run secret must survive both compose and tox isolation layers."""
+    """The per-run secret must survive both compose and tox isolation layers.
+
+    Wiring only — the VALUE is graded by the test below. Presence assertions
+    alone were satisfied by ``ADCP_TEST_CONTROL_TOKEN=""``: an empty secret
+    passes every substring check here while leaving the gated test-control
+    endpoints reachable with no credential at all.
+    """
     token_name = "ADCP_TEST_CONTROL_TOKEN"
     runner_text = _RUNNER.read_text()
     compose_text = _COMPOSE_FILE.read_text()
@@ -103,33 +109,66 @@ def test_e2e_test_control_secret_reaches_server_and_bdd_tox_env():
     assert token_name in pass_env, "tox strips the E2E control secret before the BDD process starts"
 
 
+def test_e2e_test_control_secret_is_a_fresh_high_entropy_value_each_run():
+    """Grade the VALUE the runner generates, by executing the runner's own line.
+
+    The sibling above asserts the token NAME appears in the right files, which
+    an empty string satisfies. This executes the generation exactly as
+    run_all_tests.sh does and grades what comes out: non-empty, hex, long
+    enough to be unguessable, and DIFFERENT on a second run (a hardcoded
+    constant would be shared across runs and could leak between them).
+
+    This file already uses this idiom for `_resolve()` and
+    `record_gate_failure` — the runner is shell, so the honest way to test it
+    is to run the shell.
+    """
+    generator = re.search(r"^ADCP_TEST_CONTROL_TOKEN=\"(\$\(.*\))\"$", _RUNNER.read_text(), re.MULTILINE)
+    assert generator, "run_all_tests.sh no longer generates the token with a command substitution"
+
+    def _generate() -> str:
+        proc = subprocess.run(
+            ["bash", "-c", f'printf "%s" "{generator.group(1)}"'],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    first, second = _generate(), _generate()
+
+    assert first, "the generated E2E control secret is EMPTY — the gated endpoints would be uncredentialed"
+    assert len(first) >= 32, f"secret is only {len(first)} chars; too short to be unguessable"
+    assert re.fullmatch(r"[0-9a-f]+", first), f"secret is not hex: {first[:8]}..."
+    assert first != second, "the secret is not per-run — a constant can leak between runs"
+
+
 def _shell_function(name: str) -> str:
     match = re.search(rf"^{name}\(\) \{{.*?^\}}", _RUNNER.read_text(), re.MULTILINE | re.DOTALL)
     assert match, f"run_all_tests.sh has no {name} function"
     return match.group(0)
 
 
-def test_in_network_report_extraction_avoids_host_bind_mounts():
-    """JSON reports cross Docker Desktop's worktree boundary via docker cp.
+def test_in_network_report_collection_is_a_plain_host_copy():
+    """JSON reports are copied out of the bind-mounted ``.tox`` dir, no container.
 
-    Mounting RESULTS_DIR into a throwaway container asks the Docker daemon to
-    chown a linked-worktree path and fails on macOS before any reports can be
-    copied. The tox_data source stays a named volume; the host destination must
-    only appear as the destination of ``docker cp``.
+    ``.tox`` used to be the ``tox_data`` NAMED volume, which forced a throwaway
+    container to read it — and mounting RESULTS_DIR into that container asked
+    the Docker daemon to chown a linked-worktree path, failing on macOS before
+    any report could be copied. The volume is gone (#1868): ``.tox`` is a plain
+    host directory, so the copy is a plain ``cp`` and neither the container nor
+    the bind mount that broke may come back.
     """
     runner_text = _RUNNER.read_text()
-    extraction = _shell_function("extract_json_reports")
+    collection = _shell_function("collect_json_reports")
 
-    assert "$(pwd)/${RESULTS_DIR}:/out" not in runner_text
-    assert '--mount "type=volume,src=${COMPOSE_PROJECT_NAME}_tox_data,dst=/t,readonly"' in extraction
-    assert 'docker cp "${REPORT_EXTRACTOR}:/out/." "$RESULTS_DIR/"' in extraction
-    assert 'if [ ! -f "$RESULTS_DIR/$suite.json" ]' in extraction
-    assert (
-        extraction.index('mkdir -p "$RESULTS_DIR"')
-        < extraction.index("if ! docker create")
-        < extraction.index("elif ! docker start")
-        < extraction.index("elif ! docker cp")
-    )
+    assert "$(pwd)/${RESULTS_DIR}:/out" not in runner_text, "the host bind mount that broke on macOS is back"
+    assert "${COMPOSE_PROJECT_NAME}_tox_data" not in runner_text, "the removed named volume is mounted again"
+    assert "docker create" not in runner_text, "the throwaway extraction container is back"
+    assert 'cp .tox/*.json "$RESULTS_DIR/"' in collection
+    assert 'if [ ! -f "$RESULTS_DIR/$suite.json" ]' in collection
+    assert collection.index('mkdir -p "$RESULTS_DIR"') < collection.index("cp .tox/*.json")
 
 
 @pytest.mark.parametrize(
@@ -140,7 +179,7 @@ def test_in_network_report_extraction_avoids_host_bind_mounts():
     ],
 )
 def test_later_gate_failure_never_masks_suite_status(suite_rc, gate_rc, expected):
-    """Extraction/audit failures fail green runs but preserve suite failures."""
+    """Report-collection/audit failures fail green runs but preserve suite failures."""
     runner_text = _RUNNER.read_text()
     function = _shell_function("record_gate_failure")
     proc = subprocess.run(
@@ -157,4 +196,4 @@ def test_later_gate_failure_never_masks_suite_status(suite_rc, gate_rc, expected
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == str(expected)
-    assert re.search(r"if ! extract_json_reports; then\s+record_gate_failure 1\s+fi", runner_text)
+    assert re.search(r"if ! collect_json_reports; then\s+record_gate_failure 1\s+fi", runner_text)

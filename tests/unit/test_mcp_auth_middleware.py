@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.main import mcp
 from src.core.resolved_identity import ResolvedIdentity
 from tests.helpers import assert_envelope_shape
 
@@ -238,13 +239,31 @@ class TestMCPAuthMiddlewareBehavior:
 
 
 class TestMCPServerMiddlewareRegistration:
-    """Verify middleware is registered on the MCP server."""
+    """Verify middleware is registered on the MCP server, in the order that matters."""
 
-    def test_mcp_server_has_middleware_registered(self):
-        """main.py must call mcp.add_middleware(MCPAuthMiddleware())."""
-        source = Path("src/core/main.py").read_text()
-        assert "add_middleware" in source, "main.py must register middleware via add_middleware()"
-        assert "MCPAuthMiddleware" in source, "main.py must use MCPAuthMiddleware"
+    def test_auth_middleware_is_registered_before_the_version_gate(self):
+        """AUTH must run before VERSION, and ``mcp.middleware`` is order-bearing.
+
+        This replaced a substring scan of ``main.py`` source text ("does the
+        string ``add_middleware`` appear?"), which passed no matter what order
+        the two were registered in — and no matter whether they were reachable
+        at all. The property being protected is that an unauthenticated caller
+        is never told which versions the agent supports, so the assertion has
+        to be about ORDER, on the live server object.
+
+        The end-to-end consequence is graded on the real wire by
+        ``tests/integration/test_auth_version_precedence.py::TestAuthBeforeVersionOnMcpWire``;
+        this is its fast, precise unit-level sibling.
+        """
+        registered = [type(m).__name__ for m in mcp.middleware]
+
+        assert "MCPAuthMiddleware" in registered, f"MCPAuthMiddleware is not registered: {registered}"
+        assert "RequestCompatMiddleware" in registered, f"RequestCompatMiddleware is not registered: {registered}"
+        assert registered.index("MCPAuthMiddleware") < registered.index("RequestCompatMiddleware"), (
+            "MCPAuthMiddleware must be registered BEFORE RequestCompatMiddleware so an "
+            f"unauthenticated caller is rejected before the version gate discloses "
+            f"supported_versions. Registered order: {registered}"
+        )
 
 
 class TestGetMediaBuysImplRefactored:

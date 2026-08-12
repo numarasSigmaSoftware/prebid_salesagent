@@ -331,3 +331,44 @@ def test_webhook_retries_on_failure(mock_sleep):
         assert call_counter["count"] <= 4, (
             f"Expected at most 4 retry attempts (3 + 1 pollution), got {call_counter['count']}"
         )
+
+
+class TestApprovalWebhookAuthSchemeIsCaseInsensitive:
+    """A spec-conformant "Bearer" row must not be delivered unauthenticated.
+
+    `core/push_notification_config.json` (v3.1.1) enumerates `['Bearer']`, and
+    the A2A/REST intake stores `authentication.scheme` verbatim — so the
+    canonical row is capitalized. This builder compared against the lowercase
+    literal `"bearer"`, which matched nothing: the Authorization header was
+    silently omitted and the notification went out unauthenticated. Every other
+    scheme comparison in the codebase routes through `is_auth_scheme`, and
+    `webhook_http`'s module docstring already claimed "every comparison now
+    goes through is_auth_scheme" while this one did not.
+    """
+
+    @staticmethod
+    def _config(scheme: str):
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.authentication_type = scheme
+        config.authentication_token = "TOK"
+        config.validation_token = None
+        return config
+
+    @pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+    def test_bearer_authorizes_regardless_of_stored_casing(self, scheme):
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        assert _approval_webhook_headers(self._config(scheme))["Authorization"] == "Bearer TOK"
+
+    @pytest.mark.parametrize("scheme", ["Basic", "basic"])
+    def test_basic_authorizes_regardless_of_stored_casing(self, scheme):
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        assert _approval_webhook_headers(self._config(scheme))["Authorization"] == "Basic TOK"
+
+    def test_an_unknown_scheme_sends_no_authorization_header(self):
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        assert "Authorization" not in _approval_webhook_headers(self._config("Digest"))

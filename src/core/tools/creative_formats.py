@@ -37,10 +37,8 @@ from adcp.utils.format_assets import get_format_assets
 
 # Format subclass preserved through backward-compatibility helper (PEP 695 type param below).
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from src.core.application_context import dump_adcp_response
 from src.core.exceptions import AdCPError, AdCPServiceUnavailableError
 from src.core.helpers import enum_value
 from src.core.tool_context import ToolContext
@@ -93,6 +91,7 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_tenant
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListCreativeFormatsRequest, ListCreativeFormatsResponse, format_id_identity
+from src.core.tools._mcp import mcp_result
 from src.core.transport_helpers import resolve_identity_from_context
 from src.core.validation_helpers import adcp_validation_boundary
 
@@ -592,7 +591,7 @@ async def list_creative_formats(
 
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
     response = _list_creative_formats_impl(req, identity)
-    return ToolResult(content=str(response), structured_content=dump_adcp_response(response, context=context))
+    return mcp_result(response, context=context)
 
 
 def list_creative_formats_raw(

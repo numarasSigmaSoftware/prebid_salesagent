@@ -186,10 +186,24 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         exc = normalize_to_adcp_error(exc, context=await _rest_application_context(request))
     tenant_id, principal_id = _best_effort_rest_identity(request)
     record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=build_two_layer_error_envelope(exc),
-    )
+    envelope = build_two_layer_error_envelope(exc)
+    try:
+        return JSONResponse(status_code=exc.status_code, content=envelope)
+    except (ValueError, TypeError):
+        # Last-resort guard, not the primary defence: `context` is coerced to
+        # JSON-safe values by `serialize_application_context` before it ever
+        # gets here. But this is an exception handler — a raise at this line
+        # does not surface as itself, it REPLACES the buyer's real error with
+        # no response at all. Whatever the unencodable value turns out to be,
+        # the buyer is better served by their error code without the context
+        # echo than by silence, so drop the echo and emit the envelope.
+        logger.exception(
+            "REST envelope was not JSON-encodable; emitting it without the context echo (code=%s, path=%s)",
+            exc.error_code,
+            request.url.path,
+        )
+        envelope.pop("context", None)
+        return JSONResponse(status_code=exc.status_code, content=envelope)
 
 
 def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None]:

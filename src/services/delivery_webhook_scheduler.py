@@ -129,7 +129,9 @@ def _supports_reporting_frequency(raw_frequency: str, *, force: bool, media_buy_
     logger.warning(
         "Skipping reporting webhook with frequency '%s' for media buy %s – "
         "only 'daily' frequency is supported for delivery webhooks at this time",
-        raw_frequency,
+        # raw_frequency comes straight off the buyer's reporting_webhook config,
+        # so it is buyer-controlled text like every other value in this call.
+        scrub_control_chars(raw_frequency),
         scrub_control_chars(media_buy_id),
     )
     return False

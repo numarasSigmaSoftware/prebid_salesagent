@@ -23,8 +23,9 @@ from enum import Enum
 from typing import Any
 
 import requests
-from adcp import create_mcp_webhook_payload, get_adcp_spec_version, sign_legacy_webhook
+from adcp import create_mcp_webhook_payload, sign_legacy_webhook
 
+from src.core.adcp_version import wire_adcp_version
 from src.core.bounded_executor import SyncThreadPoolBulkhead
 from src.core.database.repositories.push_notification_config import PushNotificationTarget
 from src.core.database.repositories.uow import WebhookDeliveryUoW
@@ -34,7 +35,9 @@ from src.core.security.webhook_http import (
     BEARER_AUTH_SCHEME,
     HMAC_AUTH_SCHEME,
     WEBHOOK_DELIVERY_DEADLINE_SECONDS,
+    WEBHOOK_DELIVERY_MAX_RETRIES,
     WEBHOOK_DELIVERY_MAX_WORKERS,
+    WEBHOOK_POST_TIMEOUT_SECONDS,
     UnsafeWebhookTargetError,
     create_pinned_webhook_session,
     describe_webhook_error,
@@ -269,7 +272,7 @@ class WebhookDeliveryService:
 
             # Build AdCP compliant payload with new fields
             delivery_payload: dict[str, Any] = {
-                "adcp_version": ".".join(get_adcp_spec_version().split(".")[:2]),
+                "adcp_version": wire_adcp_version(),
                 "notification_type": notification_type,
                 "reporting_period": {
                     "start": reporting_period_start.isoformat(),
@@ -586,7 +589,7 @@ class WebhookDeliveryService:
             return False
         logger.warning(
             "Webhook delivery to %s refused by send-time SSRF gate: %s",
-            scrub_control_chars(url),
+            scrub_control_chars(redact_webhook_url(url)),
             scrub_control_chars(ssrf_error),
         )
         circuit_breaker.record_failure()
@@ -608,7 +611,7 @@ class WebhookDeliveryService:
         Returns:
             True if delivered successfully, False otherwise
         """
-        max_retries = 3
+        max_retries = WEBHOOK_DELIVERY_MAX_RETRIES
         webhook_data = queue.dequeue()
         if not webhook_data:
             return False
@@ -648,7 +651,7 @@ class WebhookDeliveryService:
                                 config.url,
                                 body=payload_bytes,
                                 headers=headers,
-                                timeout=10.0,
+                                timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
                             ),
                             signature_error=False,
                         )
@@ -658,7 +661,7 @@ class WebhookDeliveryService:
                             config.url,
                             body=payload_bytes,
                             headers=headers,
-                            timeout=10.0,
+                            timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
                         )
                     status_code = http_result.status_code
                     if 200 <= status_code < 300:

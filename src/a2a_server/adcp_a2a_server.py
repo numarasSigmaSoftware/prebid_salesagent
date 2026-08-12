@@ -50,11 +50,12 @@ from a2a.types import (
 )
 from a2a.utils.errors import A2AError
 from adcp.types import ContextObject, CreativeAsset
+from adcp.types.base import AdCPBaseModel
 from google.protobuf import json_format, struct_pb2
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
-from src.core.adcp_version import validate_adcp_version_pins
+from src.core.adcp_version import validate_adcp_version_pins, wire_adcp_version
 from src.core.application_context import dump_adcp_response, validate_application_context
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import AUTH_REQUIRED_SUGGESTION
@@ -631,7 +632,8 @@ class AdCPRequestHandler(RequestHandler):
         - Final states (completed, failed, canceled): Send full Task object with artifacts
         - Intermediate states (working, input-required, submitted): Send TaskStatusUpdateEvent
 
-        Uses create_a2a_webhook_payload from adcp library to automatically select correct type.
+        Delegates to send_native_task_webhooks, which selects that payload type via the
+        adcp library's create_a2a_webhook_payload and records the notification durably.
         """
         if identity.tenant_id and identity.principal_id:
             await send_native_task_webhooks(
@@ -640,84 +642,6 @@ class AdCPRequestHandler(RequestHandler):
                 principal_id=identity.principal_id,
                 status=status,
             )
-
-    def _reconstruct_response_object(self, skill_name: str, data: dict) -> Any:
-        """Reconstruct a response object from skill result data to call __str__().
-
-        Args:
-            skill_name: Name of the skill that produced the result
-            data: Dictionary containing the response data
-
-        Returns:
-            Reconstructed response object, or None if reconstruction fails
-        """
-        try:
-            # Import response classes - for union types, import the concrete variants
-            from src.core.schemas import (
-                CreateMediaBuyError,
-                CreateMediaBuySuccess,
-                GetMediaBuyDeliveryResponse,
-                GetMediaBuysResponse,
-                GetProductsResponse,
-                ListAccountsResponse,
-                ListAuthorizedPropertiesResponse,
-                ListCreativeFormatsResponse,
-                ListCreativesResponse,
-                SyncAccountsResponse,
-                SyncCreativesResponse,
-                UpdateMediaBuyError,
-                UpdateMediaBuySubmitted,
-                UpdateMediaBuySuccess,
-            )
-
-            # For union types (CreateMediaBuyResponse, UpdateMediaBuyResponse),
-            # determine which concrete class based on data content
-            if skill_name == "create_media_buy":
-                # Success responses have media_buy_id, error responses have errors.
-                # No CreateMediaBuySubmitted branch on purpose: submitted results
-                # take the status=="submitted" early-return in on_message_send
-                # (Task state=SUBMITTED, no artifacts) BEFORE artifact/text
-                # reconstruction, so a submitted body can never reach here —
-                # same control-flow fact as update_media_buy (PR #1567 round-2 follow-up).
-                if "media_buy_id" in data:
-                    return CreateMediaBuySuccess(**data)
-                else:
-                    return CreateMediaBuyError(**data)
-            elif skill_name == "update_media_buy":
-                # Submitted (pending-approval) responses carry status="submitted" + task_id
-                # and no applied media_buy_id; success responses have media_buy_id; error
-                # responses have errors. Check submitted first — a submitted envelope must not
-                # be mis-reconstructed as UpdateMediaBuySuccess (whose status is Literal completed).
-                # NB: on the normal path a submitted result takes the status=="submitted"
-                # early-return in on_message_send (Task state=SUBMITTED, no artifacts) BEFORE
-                # artifact/text reconstruction reaches here (PR #1567 round-2); this branch is a
-                # defensive backstop guarded by test_a2a_update_media_buy_submitted_guard.py.
-                if data.get("status") == "submitted":
-                    return UpdateMediaBuySubmitted(**data)
-                elif "media_buy_id" in data:
-                    return UpdateMediaBuySuccess(**data)
-                else:
-                    return UpdateMediaBuyError(**data)
-
-            # Non-union response types - use the concrete class directly
-            response_map: dict[str, type] = {
-                "get_media_buy_delivery": GetMediaBuyDeliveryResponse,
-                "get_media_buys": GetMediaBuysResponse,
-                "get_products": GetProductsResponse,
-                "list_accounts": ListAccountsResponse,
-                "sync_accounts": SyncAccountsResponse,
-                "list_authorized_properties": ListAuthorizedPropertiesResponse,
-                "list_creative_formats": ListCreativeFormatsResponse,
-                "list_creatives": ListCreativesResponse,
-                "sync_creatives": SyncCreativesResponse,
-            }
-
-            response_class = response_map.get(skill_name)
-            if response_class:
-                return response_class(**data)
-        except Exception as e:
-            logger.debug("Could not reconstruct response object for %s: %s", skill_name, scrub_control_chars(str(e)))
-        return None
 
     async def on_message_send(
         self,
@@ -829,15 +753,24 @@ class AdCPRequestHandler(RequestHandler):
             # matching REST's no-identity envelope (auth_context.py), which the
             # bare A2AError previously dropped. (#1417)
             if requires_auth and not auth_token:
+                missing_token_error = AdCPAuthRequiredError(
+                    "Authentication required - Bearer token required in Authorization header",
+                    suggestion=AUTH_REQUIRED_SUGGESTION,
+                    context=request_application_context,
+                )
+                # Record BEFORE raising. InvalidRequestError is an A2AError, and
+                # the `except A2AError: raise` below re-raises it untouched — so
+                # this rejection reached the wire having written nothing, while
+                # the sibling INVALID-token path (and REST, and MCP) all record.
+                # Measured across the real transports: A2A 0, REST 1, MCP 1.
+                # `record_boundary_error`'s own docstring says all three
+                # boundaries delegate to it so severity, activity feed and audit
+                # stay in lockstep; identity is None here, so the helper degrades
+                # tenant_id to None and correctly skips the tenant-scoped sinks.
+                record_boundary_error_for_identity("a2a", "message_processing", missing_token_error, None)
                 raise InvalidRequestError(
                     message="Missing authentication token - Bearer token required in Authorization header",
-                    data=build_two_layer_error_envelope(
-                        AdCPAuthRequiredError(
-                            "Authentication required - Bearer token required in Authorization header",
-                            suggestion=AUTH_REQUIRED_SUGGESTION,
-                            context=request_application_context,
-                        )
-                    ),
+                    data=build_two_layer_error_envelope(missing_token_error),
                 )
 
             # ── Transport boundary: resolve identity ONCE ──
@@ -1044,14 +977,18 @@ class AdCPRequestHandler(RequestHandler):
 
                     # Generate human-readable text from response __str__()
                     # Per A2A spec, use TextPart + DataPart pattern (not description field)
+                    #
+                    # The text is READ from the payload, never re-derived from it:
+                    # _stamp_a2a_protocol_fields already stamped str(response) onto
+                    # artifact_data["message"] at serialization time. An outbound
+                    # payload is finished — feeding it back through Model(**data)
+                    # to recover the same string handed pydantic before-validators
+                    # a reference to the dict about to go on the wire, and one of
+                    # them mutated it in place (the list_creatives format_id
+                    # bare-string defect). Nothing rebuilds an outbound payload.
                     text_message = None
                     if res["success"] and isinstance(artifact_data, dict):
-                        try:
-                            response_obj = self._reconstruct_response_object(res["skill"], artifact_data)
-                            if response_obj and hasattr(response_obj, "__str__"):
-                                text_message = str(response_obj)
-                        except Exception:
-                            logger.debug("Response reconstruction failed, skipping text part", exc_info=True)
+                        text_message = artifact_data.get("message")
 
                     # Build parts list per A2A spec: optional text Part + required data Part
                     parts = []
@@ -1801,19 +1738,57 @@ class AdCPRequestHandler(RequestHandler):
         raise UnsupportedOperationError(message="Extended agent card not supported")
 
     @staticmethod
-    def _serialize_for_a2a(response: BaseModel | dict) -> dict:
+    def _stamp_a2a_protocol_fields(response: AdCPBaseModel) -> dict[str, Any]:
+        """Dump a Pydantic response and stamp the A2A protocol fields onto it.
+
+        ``message`` and ``success`` are not spec fields on any response
+        model — they are A2A transport-envelope markers (like MCP's
+        ``task_id``/``adcp_version``; see
+        ``tests/integration/test_harness_wire_response.py::ENVELOPE_MARKERS``),
+        a deliberate A2A-binding deviation (#1868 review).
+        ``success`` is derived from ``errors`` so a response carrying
+        per-item errors reports ``success=False`` uniformly, regardless of
+        which caller stamped it.
+
+        Single point for this derivation — three sites used to duplicate it
+        inline, and two of the three (the get_products explicit-skill and
+        NL handlers, which need the dict pre-stamped before
+        ``apply_version_compat`` sees it) omitted the errors-derivation
+        entirely, always forcing ``success=True``.
+
+        Args:
+            response: Pydantic model from a skill handler.
+
+        Returns:
+            Dict with ``message``/``success`` stamped, ready for A2A.
+        """
+        response_data = dump_adcp_response(response)
+        response_data["message"] = str(response)
+
+        # Derive success from errors field if present, default True otherwise
+        if "errors" in response_data:
+            response_data["success"] = not bool(response_data["errors"])
+        else:
+            response_data.setdefault("success", True)
+
+        return response_data
+
+    @staticmethod
+    def _serialize_for_a2a(response: AdCPBaseModel | dict) -> dict[str, Any]:
         """Serialize a handler response for A2A protocol at the framework boundary.
 
         Single serialization point for all explicit-skill A2A responses.
 
         - Pydantic models: serialized via ``model_dump(mode="json")`` here,
-          and the protocol fields (``message``, ``success``) are added.
+          and the protocol fields (``message``, ``success``) are added via
+          ``_stamp_a2a_protocol_fields``.
         - Dicts: passed through. Only skill handlers that pre-apply version
           compat (e.g., ``_handle_get_products_skill`` calls
           ``apply_version_compat`` and emits a dict already populated with
-          ``message``/``success``) use this path. Error dicts that bypass
-          the envelope contract were retired in this PR — NL handlers now
-          raise typed ``AdCPError`` instead.
+          ``message``/``success`` via ``_stamp_a2a_protocol_fields``) use
+          this path. Error dicts that bypass the envelope contract were
+          retired in this PR — NL handlers now raise typed ``AdCPError``
+          instead.
 
         Args:
             response: Pydantic model OR pre-serialized dict from a skill
@@ -1825,16 +1800,7 @@ class AdCPRequestHandler(RequestHandler):
         if isinstance(response, dict):
             return response
 
-        response_data = dump_adcp_response(response)
-        response_data["message"] = str(response)
-
-        # Derive success from errors field if present, default True otherwise
-        if "errors" in response_data:
-            response_data["success"] = not bool(response_data["errors"])
-        else:
-            response_data.setdefault("success", True)
-
-        return response_data
+        return AdCPRequestHandler._stamp_a2a_protocol_fields(response)
 
     async def _execute_explicit_skill_handler(
         self,
@@ -2096,14 +2062,9 @@ class AdCPRequestHandler(RequestHandler):
         # is a no-op for dict payloads regardless.
         if isinstance(response, dict):
             return response
-        # Capture human-readable message before converting to dict
-        message = str(response)
-        response_data = dump_adcp_response(response)
-        # Add protocol fields that _serialize_for_a2a would add for Pydantic models,
-        # since returning a dict bypasses that logic
-        response_data["message"] = message
-        response_data.setdefault("success", True)
-        return response_data
+        # Stamp the protocol fields (message, success) that _serialize_for_a2a
+        # would add for Pydantic models — returning a dict bypasses that logic.
+        return self._stamp_a2a_protocol_fields(response)
 
     async def _handle_create_media_buy_skill(
         self,
@@ -2730,11 +2691,10 @@ class AdCPRequestHandler(RequestHandler):
         # Convert to A2A response format with v2.x backward compatibility
         from src.core.version_compat import apply_version_compat
 
-        products = [product.model_dump(mode="json") for product in (response.products or [])]
-        response_data = {
-            "products": products,
-            "message": str(response),  # Use __str__ method for human-readable message
-        }
+        # Dump the full response (not just products) so schema-required
+        # envelope fields (cache_scope, status, ...) survive — matching
+        # _handle_get_products_skill's explicit-skill serialization.
+        response_data = self._stamp_a2a_protocol_fields(response)
         return apply_version_compat("get_products", response_data, None)
 
     def _extract_brand_name_from_query(self, query: str) -> str:
@@ -2804,21 +2764,25 @@ def create_agent_card() -> AgentCard:
     server_url = get_a2a_server_url() or "http://localhost:8091/a2a"
 
     from a2a.types import AgentCapabilities, AgentSkill
-    from adcp import get_adcp_spec_version
 
     # Get sales agent version from package metadata or pyproject.toml
     sales_agent_version = get_version()
 
-    # Create AdCP extension (AdCP 2.5 spec)
-    # As of adcp 2.12.1, get_adcp_spec_version() returns the protocol version (e.g., "2.5.0")
-    # Previously it returned the schema version (e.g., "v1"), but this was fixed upstream
-    protocol_version = get_adcp_spec_version()
+    # Two DIFFERENT versions, deliberately. The extension URI is a schema PATH
+    # (dist/schemas/3.1.1/...), which exists at patch precision; the advertised
+    # `adcp_version` is a NEGOTIATION value a buyer will pin on its next
+    # request, and the wire envelope is release precision. Advertising the
+    # patch version there told buyers to pin "3.1.1", which this agent's own
+    # _RELEASE_PIN_RE then rejects with VERSION_UNSUPPORTED.
+    from adcp import get_adcp_spec_version
+
+    schema_version = get_adcp_spec_version()
     adcp_extension = AgentExtension(
-        uri=f"https://adcontextprotocol.org/schemas/{protocol_version}/protocols/adcp-extension.json",
+        uri=f"https://adcontextprotocol.org/schemas/{schema_version}/protocols/adcp-extension.json",
         description="AdCP protocol version and supported domains",
         params=_dict_to_struct(
             {
-                "adcp_version": protocol_version,
+                "adcp_version": wire_adcp_version(),
                 "protocols_supported": ["media_buy"],  # Only media_buy protocol is currently supported
             }
         ),

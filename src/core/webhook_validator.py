@@ -276,8 +276,25 @@ def sanitize_webhook_url_for_log(url: str | None) -> str | None:
 
 
 def webhook_url_for_log(url: str | None) -> str:
-    """Total log helper: sanitized URL or the unparseable placeholder (never raw)."""
-    return sanitize_webhook_url_for_log(url) or UNPARSEABLE_WEBHOOK_URL_FOR_LOG
+    """Total log helper: sanitized URL or the unparseable placeholder (never raw).
+
+    Scrubbing is folded in rather than left to the caller. A buyer-supplied
+    callback URL needs BOTH treatments and they defend different things:
+    ``sanitize_webhook_url_for_log`` drops credentials and the query string
+    (where a ``?token=`` bearer lives), ``scrub_control_chars`` stops log
+    injection through the path. Composing them at the call site is a rule
+    someone has to remember at every new log line, and that rule was already
+    lost once — a scrub-only sweep replaced this helper at fourteen sites in
+    the two webhook services, which kept the injection defence and silently
+    put the buyer's full query string back in the logs at WARNING/INFO on
+    every retry, timeout and circuit-breaker trip.
+
+    One call now does both, so a raw URL cannot reach a log record by
+    forgetting half of the pair. ``scrub_control_chars`` is idempotent, so the
+    handful of pre-existing ``scrub_control_chars(webhook_url_for_log(...))``
+    call sites stay correct.
+    """
+    return scrub_control_chars(sanitize_webhook_url_for_log(url) or UNPARSEABLE_WEBHOOK_URL_FOR_LOG)
 
 
 def reject_unsafe_webhook_registration_url(
@@ -368,8 +385,19 @@ class WebhookURLValidator:
         (``validate_outbound_webhook_url``). When ``ADCP_TESTING=true``,
         localhost/loopback are allowed for capture servers. Production
         requires HTTPS.
+
+        Embedded credentials are rejected here as well as in the send-time and
+        testing validators. This method was the one sibling of the three that
+        omitted the check — not exploitable today, because
+        ``reject_unsafe_webhook_registration_url`` happens to run the wrapper
+        first, but a direct caller of this classmethod would have registered a
+        ``https://user:pw@host/cb`` callback without complaint. A validator
+        that is weaker than its siblings only stays safe while every caller
+        takes the longer path.
         """
-        allow_localhost = _adcp_testing()
+        if webhook_url_has_embedded_credentials(url):
+            return False, "URL must not contain embedded credentials"
+        allow_localhost = _allow_private_webhook_targets()
         is_valid, error = check_url_ssrf(
             url,
             resolve_dns=False,
@@ -379,8 +407,24 @@ class WebhookURLValidator:
 
     @classmethod
     def validate_outbound_webhook_url(cls, url: str) -> tuple[bool, str]:
-        """Send-time SSRF gate (full DNS), with localhost allowance under ADCP_TESTING."""
-        if _adcp_testing():
+        """Send-time SSRF gate (full DNS), with the shared private-target allowance.
+
+        Keyed on ``_allow_private_webhook_targets`` — the SAME predicate the
+        connect-time pinning adapter uses — so the two gates cannot disagree.
+        They previously did: this one keyed on ``ADCP_TESTING`` while the
+        adapter keyed on ``ADCP_ALLOW_PRIVATE_WEBHOOKS``, so setting either one
+        alone produced a contradiction in one direction or the other (send
+        allowed then connect refused, or vice versa).
+
+        ``ADCP_TESTING`` alone deliberately no longer unlocks private egress:
+        ``_allow_private_webhook_targets``'s own docstring records that gating
+        on "not production" was the too-broad approach the dedicated flag
+        replaced, and a staging deploy that serves real buyers can carry
+        ADCP_TESTING. The HTTPS-required axis stays on ``_strict_mode`` — that
+        is a different question from "may this target be private", and the two
+        are only coupled inside the adapter for its own resolution call.
+        """
+        if _allow_private_webhook_targets():
             return cls.validate_for_testing(url, allow_localhost=True)
         return cls.validate_webhook_url(url)
 

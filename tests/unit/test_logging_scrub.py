@@ -170,26 +170,68 @@ _BUYER_ATTRS = frozenset({"url", "text", "body"}) | _BUYER_ID_NAMES
 _SANITIZING_OR_SAFE_CALLS = frozenset(
     {"scrub_control_chars", "log_safe", "len", "type", "id", "bool", "int", "float", "sorted", "list"}
 )
+
+# A URL needs MORE than control-char scrubbing. A buyer's callback URL routinely
+# carries its own bearer in the query string (`?token=...`) and can carry
+# userinfo credentials, neither of which scrub_control_chars touches:
+#
+#   scrub_control_chars("https://h/cb?token=SECRET")  -> https://h/cb?token=SECRET
+#   webhook_url_for_log(same)                         -> https://h/cb
+#
+# So for a URL-valued expression, only the URL helpers count as sanitizing.
+# Treating scrub_control_chars as sufficient is exactly how fourteen raw-URL
+# log sites passed this guard.
+_URL_SANITIZING_CALLS = frozenset({"webhook_url_for_log", "sanitize_webhook_url_for_log"})
+_URL_ATTRS = frozenset({"url"})
+# Bare locals holding a URL. A plain `ast.Name` was previously only matched
+# against the exception/payload/id name sets, so `logger.warning(f"...{url}...")`
+# — the shape used at every one of those fourteen sites — was not a recognized
+# channel at all.
+_URL_NAMES = frozenset(
+    {
+        "url",
+        "webhook_url",
+        "callback_url",
+        "reporting_webhook_url",
+        "push_url",
+        "target_url",
+        "endpoint",
+    }
+)
 _LOGGER_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
 
 
 def _raw_buyer_channel_hits(tree) -> list[str]:
     """Buyer-controlled values reaching a ``logger.*`` call unsanitized.
 
-    A DENY-RAW rule, not a name allowlist. The earlier matcher recognized only
-    the identifier ``e`` and only ``config``/``target`` as attribute bases, so
-    it was blind to ~10 of the 11 shapes that actually occur — ``exc``/``err``,
-    ``str(e)``, ``{payload}``, an aliased local, ``self.config.url``,
-    ``extra={}`` values, the ``%``-operator, ``.format()``, and a
-    ``self.logger`` base. A raw site inside its own scan set left it green,
-    which is the failure mode this rewrite closes.
+    HYBRID, and the distinction is load-bearing — read it before trusting a
+    green result. This docstring previously claimed "a DENY-RAW rule, not a
+    name allowlist" over code that was an allowlist for every branch, which is
+    how sixteen raw-URL sites passed. Only ONE of the three branches is
+    actually deny-by-default:
 
-    Recognized channels: any name bound by an enclosing ``except ... as X``,
-    the conventional exception spellings, the request-payload spellings, and
-    ``<anything>.url`` / ``.text`` / ``.body``. ``str(...)``/``repr(...)`` are
-    unwrapped first — they format, they do not sanitize. A value wrapped in
-    ``scrub_control_chars(...)`` / ``log_safe(...)`` is NOT flagged, and neither
-    are shape-only reads (``len(...)``, ``sorted(x.keys())``), which is the
+    - ``ast.Call`` — DENY-BY-DEFAULT. Any call that is not in
+      ``_SANITIZING_OR_SAFE_CALLS`` / ``_URL_SANITIZING_CALLS`` is flagged, so
+      ``thing.model_dump()`` and ``params.get(...)`` are caught without being
+      enumerated. A URL-valued argument wrapped in a merely control-char
+      scrubber is ALSO flagged: a scrub keeps ``?token=`` and userinfo, so it
+      does not sanitize a URL (see ``_URL_SANITIZING_CALLS``).
+    - ``ast.Attribute`` — ALLOWLIST, keyed on ``_BUYER_ATTRS``. ``config.url``
+      is caught; ``config.secret`` is NOT.
+    - ``ast.Name`` — ALLOWLIST, keyed on the exception / payload / buyer-id /
+      URL name sets. ``url`` and ``endpoint`` are caught; a URL bound to
+      ``cb`` or ``dest`` is NOT.
+
+    So the two allowlist branches are only as good as their name sets, and a
+    buyer value under an unlisted spelling slips. Deny-by-default is not
+    available there without flagging every bare name in every logger call,
+    which would be unusable; widening the sets when a new spelling appears is
+    the accepted maintenance cost. ``test_oracle_matcher_recognizes_every_
+    interpolation_form`` pins both the covered shapes and, explicitly, the
+    known gaps — so a reader cannot mistake the gaps for coverage.
+
+    ``str(...)``/``repr(...)`` are unwrapped first — they format, they do not
+    sanitize. Shape-only reads (``len(...)``, ``sorted(x.keys())``) are the
     sanctioned way to log a buyer dict.
     """
     import ast
@@ -202,18 +244,35 @@ def _raw_buyer_channel_hits(tree) -> list[str]:
             return expr.args[0] if expr.args else expr
         return expr
 
+    def is_url_expr(expr) -> bool:
+        """A URL-valued expression, which needs the URL helpers, not just a scrub."""
+        expr = unwrap(expr)
+        if isinstance(expr, ast.Attribute):
+            return expr.attr in _URL_ATTRS
+        if isinstance(expr, ast.Name):
+            return expr.id in _URL_NAMES
+        return False
+
     def is_raw_buyer_channel(expr) -> str | None:
         expr = unwrap(expr)
         if isinstance(expr, ast.Call):
             func = expr.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-            # A sanitizing/shape-only call is clean. Anything else renders a
-            # value this matcher cannot vouch for — ``.model_dump()`` and
-            # ``params.get("assignments")`` both put raw buyer bytes in the
-            # record — so it is flagged. Both arms previously returned None,
-            # which made this branch dead and the whole guard blind to every
-            # call-shaped interpolation.
-            return None if name in _SANITIZING_OR_SAFE_CALLS else f"{name}()"
+            if name in _URL_SANITIZING_CALLS:
+                return None
+            if name in _SANITIZING_OR_SAFE_CALLS:
+                # Sanitizing for a general string, NOT for a URL: a scrub keeps
+                # `?token=...` verbatim. Flag when the wrapped value is a URL.
+                inner = expr.args[0] if expr.args else None
+                if inner is not None and is_url_expr(inner):
+                    return f"{name}(<url>) — a scrub keeps credentials and query; use webhook_url_for_log"
+                return None
+            # Anything else renders a value this matcher cannot vouch for —
+            # ``.model_dump()`` and ``params.get("assignments")`` both put raw
+            # buyer bytes in the record — so it is flagged. Both arms previously
+            # returned None, which made this branch dead and the whole guard
+            # blind to every call-shaped interpolation.
+            return f"{name}()"
         if isinstance(expr, ast.Attribute):
             return f"<...>.{expr.attr}" if expr.attr in _BUYER_ATTRS else None
         if isinstance(expr, ast.Name):
@@ -221,6 +280,8 @@ def _raw_buyer_channel_hits(tree) -> list[str]:
                 return expr.id
             if expr.id in _PAYLOAD_NAMES or expr.id in _BUYER_ID_NAMES:
                 return expr.id
+            if expr.id in _URL_NAMES:
+                return f"{expr.id} (bare URL local)"
         return None
 
     def logger_args(call):
@@ -286,6 +347,9 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
     modules.append(root / "src" / "services" / "a2a_task_lifecycle.py")
     modules.append(root / "src" / "core" / "context_manager.py")
     modules.append(root / "src" / "core" / "webhook_validator.py")
+    # The pinned-egress layer: same buyer URLs, same log seam, different dir —
+    # so the src/services glob never reached it.
+    modules.append(root / "src" / "core" / "security" / "webhook_http.py")
     return [m for m in modules if m.exists()]
 
 
@@ -349,7 +413,8 @@ class TestWebhookLogScrubCoverage:
             ),
             ("%s-positional", 'logger.warning("delivery to %s exceeded %.1fs", target.url, DEADLINE)', 1),
             # Every form below was INVISIBLE to the previous name-allowlist matcher.
-            ("positional exception named exc", 'logger.error("not valid JSON for %s: %s", url, exc)', 1),
+            # Two raw channels on one line: the bare URL local AND the exception.
+            ("positional URL local + exception named exc", 'logger.error("not valid JSON for %s: %s", url, exc)', 2),
             ("positional exception named err", 'logger.error("failed: %s", err)', 1),
             ("str(e) inside an f-string", 'logger.error(f"failed: {str(e)}")', 1),
             ("raw payload dict", 'logger.debug(f"no url configured, payload: {payload}")', 1),
@@ -378,14 +443,40 @@ class TestWebhookLogScrubCoverage:
             ),
             # Clean forms must NOT be flagged, or the guard becomes unusable.
             (
-                "scrubbed f-string",
-                'logger.warning(f"delivery to {scrub_control_chars(config.url)}: {scrub_control_chars(str(e))}")',
+                "URL-sanitized f-string",
+                'logger.warning(f"delivery to {webhook_url_for_log(config.url)}: {scrub_control_chars(str(e))}")',
                 0,
             ),
-            ("scrubbed positional", 'logger.warning("delivery to %s", scrub_control_chars(target.url))', 0),
+            ("URL-sanitized positional", 'logger.warning("delivery to %s", webhook_url_for_log(target.url))', 0),
+            # A scrub alone is NOT enough for a URL: it leaves `?token=...` and
+            # any userinfo verbatim. These two shapes read as clean under the
+            # old matcher, which is how fourteen raw-URL sites shipped.
+            (
+                "scrub-only f-string on a URL is still raw",
+                'logger.warning(f"delivery to {scrub_control_chars(config.url)}")',
+                1,
+            ),
+            (
+                "scrub-only positional on a URL is still raw",
+                'logger.warning("to %s", scrub_control_chars(target.url))',
+                1,
+            ),
+            ("bare URL local", 'logger.warning(f"Webhook delivery to {url} failed")', 1),
+            ("bare URL local, positional", 'logger.warning("posting to %s", webhook_url)', 1),
             ("shape-only dict read", 'logger.info("skill %s keys: %s", name, sorted(parameters.keys()))', 0),
             ("count-only read", 'logger.info("delivering %s items", len(payload))', 0),
             ("non-logger call", 'notifier.warning(f"delivery to {config.url}")', 0),
+            # ── KNOWN GAPS, pinned as gaps ──────────────────────────────────
+            # The Name and Attribute branches are allowlists (see the matcher
+            # docstring), so a buyer value under an unlisted spelling is NOT
+            # caught. These expect 0 hits because that is what the matcher
+            # does — not because the shapes are safe. They exist so the gap is
+            # visible and testable rather than implied, and so widening a name
+            # set flips a documented expectation instead of silently changing
+            # behaviour.
+            ("GAP: URL bound to an unlisted local", 'logger.warning(f"to {cb}")', 0),
+            ("GAP: URL bound to another unlisted local", 'logger.warning("to %s", dest)', 0),
+            ("GAP: unlisted buyer attribute", 'logger.warning(f"{config.secret}")', 0),
         ],
     )
     def test_oracle_matcher_recognizes_every_interpolation_form(self, form, source, expected):

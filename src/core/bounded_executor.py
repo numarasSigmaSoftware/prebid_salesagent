@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -10,6 +11,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from time import monotonic
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _submit_with_held_release[R](
@@ -80,7 +83,18 @@ class _AsyncAdmissionGate:
                     return
             self._available += 1
             if self._available > self._capacity:
-                raise ValueError("Async admission gate released too many times")
+                # NOT raised: this runs from a Future done-callback, where
+                # CPython swallows exceptions into the concurrent.futures
+                # logger — a "fail-loud" guard that can never reach a caller
+                # and, worse, reads like one. Log it at ERROR (which IS
+                # visible) and clamp, so an over-release cannot inflate
+                # capacity and silently widen the bulkhead it exists to bound.
+                logger.error(
+                    "Async admission gate released too many times (available=%d capacity=%d); clamping",
+                    self._available,
+                    self._capacity,
+                )
+                self._available = self._capacity
 
 
 class AsyncThreadPoolBulkhead:
