@@ -20,6 +20,12 @@ class ReportingCapableProduct(Protocol):
     """
 
     product_id: str
+    # dict, NOT ReportingCapabilities — and deliberately so. Both production callers
+    # pass ORM Product rows, where this attribute is a JSONType column
+    # (models.py: Mapped[dict | None]), so a dict is what exists at this boundary.
+    # Annotating it as the SDK model would be a type that never holds at runtime, and
+    # reading attributes off it would break on the real object. Hydrating the column
+    # into the model is a separate change at the persistence layer, not a signature fix.
     reporting_capabilities: dict[str, Any] | None
 
 

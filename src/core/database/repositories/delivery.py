@@ -20,15 +20,15 @@ from typing import Any
 
 from adcp.types import NotificationType
 from sqlalchemy import ColumnElement, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from src.core.database.models import DELIVERY_TASK_TYPE, WebhookDeliveryLog, WebhookDeliveryRecord
 
 
 def successful_final_log_clauses(
     *,
-    tenant_id: Any,
-    media_buy_id: Any,
+    tenant_id: str | ColumnElement[str] | InstrumentedAttribute[str],
+    media_buy_id: str | ColumnElement[str] | InstrumentedAttribute[str],
     task_type: str = DELIVERY_TASK_TYPE,
 ) -> tuple[ColumnElement[bool], ...]:
     """The WHERE terms matching "a successful FINAL webhook was already logged".

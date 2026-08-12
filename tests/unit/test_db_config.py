@@ -552,22 +552,43 @@ class TestBddTransportTagSetsDoNotOverlap:
         assert end is not None, f"{name} literal is unterminated — parser is stale"
         return set(re.findall(r'"([\w.-]+)"', rest[opener:end]))
 
-    def test_the_parser_finds_the_transport_independent_set(self):
-        """Guards that scan by regex must be shown to match, or an empty overlap is
+    def test_the_parser_finds_a_populated_set(self):
+        """Guards that scan by regex must be shown to match, or an empty result is
         indistinguishable from a broken parser.
 
-        Anchored on known members rather than a count. The original floor (">= 20")
-        encoded the set's size at the moment it was written, so legitimately
-        un-routing a dormant scenario broke a test that has nothing to do with the
-        size — a guard that fails for the wrong reason trains people to adjust the
-        number, which is exactly how a real staleness would then slip through.
+        Anchored on a POPULATED set rather than on
+        _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, which is now legitimately empty. The
+        parser is shared (``_tags``), so proving it against any populated set proves
+        it for all of them — and anchoring the liveness check on a set that is
+        supposed to stay empty would mean re-pointing this test every time an
+        exemption set is correctly drained, which is the "guard fails for the wrong
+        reason" shape its predecessor's docstring already warned about.
         """
-        transport_independent = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS")
-        assert transport_independent, "parser found no routed tags — regex is stale"
-        for anchor in ("T-UC-004-webhook-hmac", "T-UC-004-webhook-scheduled"):
-            assert anchor in transport_independent, (
-                f"parser did not find {anchor}, which is routed in conftest — regex is stale"
-            )
+        populated = self._tags("_UC026_XFAIL_TAGS")
+        assert populated, "parser found no tags in _UC026_XFAIL_TAGS — regex is stale"
+        assert "T-UC-026-main-full-config" in populated, (
+            "parser did not find a known _UC026_XFAIL_TAGS member — regex is stale"
+        )
+
+    def test_the_transport_independent_set_is_empty(self):
+        """It is a cross-transport coverage exemption, so empty is the only correct size.
+
+        It held 18 UC-004 tags on this branch: scenarios that already existed on main
+        and already ran a2a/mcp/rest there, reduced to one collection each. Measured
+        over the whole UC-004 module, emptying it took 420 passed to 476 with zero
+        failures — it suppressed 56 passing variants and protected nothing.
+
+        Asserted as a hard empty rather than a shrink-only ceiling: a ceiling above
+        zero is permission to re-add, and the exemption has no legitimate size other
+        than none. A scenario with genuinely no request surface belongs in an
+        integration test, not in a four-way scenario claiming parametrization.
+        """
+        tags = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS")
+        assert tags == set(), (
+            f"_TRANSPORT_INDEPENDENT_SCENARIO_TAGS is populated again with {sorted(tags)}. Each "
+            "entry removes a2a/mcp/rest coverage from a scenario that otherwise runs on all "
+            "three; if the scenario truly has no request surface, move it to an integration test."
+        )
 
     def test_the_parser_finds_each_e2e_gated_set(self):
         """A named anchor proves the balanced-delimiter parse works on the

@@ -2752,26 +2752,29 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # webhook-creds-short/valid dispatch a real create_media_buy carrying the config,
 # so their copies grade each transport's Pydantic boundary and must keep
 # multiplying.
-_TRANSPORT_INDEPENDENT_SCENARIO_TAGS = {
-    "T-UC-004-boundary-credentials",
-    "T-UC-004-partition-credentials",
-    "T-UC-004-webhook-bearer",
-    "T-UC-004-webhook-circuit-halfopen",
-    "T-UC-004-webhook-circuit-open",
-    "T-UC-004-webhook-circuit-recovery",
-    "T-UC-004-webhook-hmac",
-    "T-UC-004-webhook-no-aggregated",
-    "T-UC-004-webhook-no-config",
-    "T-UC-004-webhook-no-retry-4xx",
-    "T-UC-004-webhook-notification-type",
-    "T-UC-004-webhook-retry-5xx",
-    "T-UC-004-webhook-retry-network",
-    "T-UC-004-webhook-retry-success",
-    "T-UC-004-webhook-scheduled",
-    "T-UC-004-webhook-scheduler-derivation",
-    "T-UC-004-webhook-sequence",
-    "T-UC-004-webhook-ssrf-blocked",
-}
+# EMPTY, and it must stay that way — this set is a cross-transport coverage
+# exemption, which the shrink-only rule and the single-transport standard both
+# forbid growing.
+#
+# It briefly held 18 UC-004 tags, added by this branch. That was a coverage
+# REGRESSION, not new work at a chosen breadth: every one of those scenarios
+# already existed on main, UC-004 was already wired there (DeliveryPollEnv /
+# WebhookEnv / CircuitBreakerEnv), and on main they were excluded from e2e_rest
+# ONLY — they still ran a2a/mcp/rest. The early return below reduced them to one
+# collection each.
+#
+# Measured before removing, over the whole UC-004 module: 420 passed with the set
+# populated, 476 passed with it emptied, zero failures either way. So it was
+# suppressing 56 passing variants and protecting nothing. The rationale offered
+# for it — that these scenarios assert in-process mock / circuit-breaker state the
+# Docker path cannot see — is true of e2e_rest, which _NO_E2E_REST_TAGS and
+# _NO_REST_UC_TAG_PREFIXES already handle; a2a/mcp/rest are all in-process, so the
+# mock state is visible and the assertions hold.
+#
+# A scenario with genuinely no request surface (a pure background emission) is an
+# integration test, not a four-way scenario claiming parametrization — move it,
+# rather than adding it here.
+_TRANSPORT_INDEPENDENT_SCENARIO_TAGS: set[str] = set()
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
 # (UC-002 @account used to live here when it ran resolve_account() via IMPL on

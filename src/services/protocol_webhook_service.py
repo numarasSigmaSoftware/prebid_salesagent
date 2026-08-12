@@ -29,7 +29,7 @@ from adcp import extract_webhook_result_data, sign_legacy_webhook
 from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
-from src.core.audit_logger import get_audit_logger
+from src.core.audit_logger import AuditLogger, get_audit_logger
 from src.core.database.database_session import get_db_session
 from src.core.database.models import DELIVERY_TASK_TYPE, PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
@@ -182,7 +182,7 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
-def _audit_webhook_outcome(audit_logger: Any, message: str, *, success: bool = False) -> None:
+def _audit_webhook_outcome(audit_logger: AuditLogger | None, message: str, *, success: bool = False) -> None:
     """The one guarded audit sink for webhook delivery outcomes.
 
     Six call sites open-coded ``if audit_logger:`` around a single log call. Beyond
