@@ -191,6 +191,51 @@ class ProtocolWebhookService:
             url=url, payload=payload_dict, headers=headers, metadata=metadata
         )
 
+    def _record_refused_unsafe_url(
+        self,
+        *,
+        reason: str,
+        log_id: str,
+        tenant_id: str | None,
+        principal_id: str | None,
+        media_buy_id: str | None,
+        url: str,
+        task_type: str | None,
+        sequence_number: int,
+        notification_type: str | None,
+        attempt_count: int,
+        audit_logger: Any = None,
+    ) -> None:
+        """Record an SSRF refusal the way every other failure exit in the send loop does.
+
+        A refusal is indistinguishable, from the buyer's side, from a webhook that
+        silently stopped arriving, so it needs the same delivery-log row and audit line an
+        HTTP failure gets — not just a server-side warning. It was the one failure exit
+        that wrote neither, and it discarded the validator's reason, which is precisely
+        the operator-facing detail that explains why delivery stopped.
+
+        ``reason`` names the rejected host/scheme class and is operator-facing only: it
+        goes to the log, the delivery row and the audit trail, never onto the wire.
+        """
+        logger.warning("Refusing protocol webhook delivery to an unsafe URL: %s", reason)
+        if task_type in ("delivery_report", "media_buy_delivery") and media_buy_id and tenant_id and principal_id:
+            self._write_delivery_log(
+                log_id=log_id,
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                media_buy_id=media_buy_id,
+                webhook_url=url,
+                task_type=task_type,
+                status="failed",
+                sequence_number=sequence_number,
+                notification_type=notification_type,
+                attempt_count=attempt_count,
+                error_message=f"Refused unsafe webhook URL: {reason}",
+                completed_at=datetime.now(UTC),
+            )
+        if audit_logger:
+            audit_logger.log_warning(f"{task_type} webhook refused: unsafe URL ({reason})")
+
     @staticmethod
     def _write_delivery_log(
         *,
@@ -278,9 +323,21 @@ class ProtocolWebhookService:
             audit_logger.log_info(f"Sending {task_type} webhook for task {task_id} (sequence #{sequence_number})")
 
         for attempt in range(max_attempts):
-            is_safe, _validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
+            is_safe, validation_error = WebhookURLValidator.validate_protocol_webhook_url(url)
             if not is_safe:
-                logger.warning("Refusing protocol webhook delivery to an unsafe URL")
+                self._record_refused_unsafe_url(
+                    reason=validation_error,
+                    log_id=log_id,
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    media_buy_id=media_buy_id,
+                    url=url,
+                    task_type=task_type,
+                    sequence_number=sequence_number,
+                    notification_type=notification_type,
+                    attempt_count=attempt + 1,
+                    audit_logger=audit_logger,
+                )
                 return False
             try:
                 safe_url = webhook_url_for_log(url)

@@ -92,9 +92,16 @@ def _run_database_operation_with_retries[T](
     operation: Callable[[], T],
     *,
     retry_message: str,
-    exhausted_message: str | None = None,
+    exhausted_message: str,
 ) -> T | None:
-    """Retry one database-only operation without repeating external work."""
+    """Retry one database-only operation without repeating external work.
+
+    ``exhausted_message`` is REQUIRED and the exhausting exception is logged with it.
+    Exhaustion returns the same ``None`` a legitimate "nothing to reconcile" returns, so
+    without a message at every call site the two outcomes are indistinguishable in the
+    log — and this module exists to recover approvals after a database outage, which
+    makes its own outage path the one that must not be silent.
+    """
     for attempt in range(1, _FINALIZATION_ATTEMPTS + 1):
         try:
             return operation()
@@ -102,8 +109,7 @@ def _run_database_operation_with_retries[T](
             if not _retryable_database_error(exc):
                 raise
             if attempt == _FINALIZATION_ATTEMPTS:
-                if exhausted_message is not None:
-                    logger.error(exhausted_message)
+                logger.error(exhausted_message, exc_info=exc)
                 return None
             logger.warning(retry_message, attempt)
             time.sleep(_FINALIZATION_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)))
@@ -326,6 +332,10 @@ def finalize_latest_media_buy_approval_step(
     claimed = _run_database_operation_with_retries(
         lambda: _claimed_approval_step(tenant_id, media_buy_id),
         retry_message="Claimed approval lookup failed; retrying (attempt %s)",
+        exhausted_message=(
+            f"Claimed approval lookup exhausted retries for media buy {media_buy_id} "
+            f"(tenant {tenant_id}); the approval was NOT finalized and needs reconciliation"
+        ),
     )
     if claimed is None:
         return ApprovalFinalization(applied=False)
@@ -633,6 +643,10 @@ def reconcile_claimed_media_buy_approval_step(
     state = _run_database_operation_with_retries(
         lambda: _approval_recovery_state(tenant_id, media_buy_id),
         retry_message="Approval reconciliation lookup failed; retrying (attempt %s)",
+        exhausted_message=(
+            f"Approval reconciliation lookup exhausted retries for media buy {media_buy_id} "
+            f"(tenant {tenant_id}); the approval remains unreconciled"
+        ),
     )
     if state is None:
         return ApprovalFinalization(applied=False)

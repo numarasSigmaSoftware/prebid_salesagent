@@ -911,7 +911,7 @@ class TestEnvelopeFreeProtocolRaises:
     # protocol raise is a decision about whether the buyer gets an AdCP code, not a detail.
     _EXPECTED_ENVELOPE_FREE_RAISES = {
         "InvalidParamsError": 3,
-        "TaskNotCancelableError": 2,
+        "TaskNotCancelableError": 3,
         "TaskNotFoundError": 4,
         "UnsupportedOperationError": 3,
     }
@@ -943,8 +943,61 @@ class TestEnvelopeFreeProtocolRaises:
     def test_detector_actually_counts(self):
         """The count must come from the code, not from the expectation it is compared to."""
         counts = self._raise_counts()
-        assert sum(counts.values()) == 12
+        assert sum(counts.values()) == 13
         assert set(counts) == set(self._EXPECTED_ENVELOPE_FREE_RAISES), (
             "a declared type vanished from the module entirely — the equality above would "
             "still fail, but this states which half moved"
         )
+
+
+class TestAsyncTaskSkillsThreadTheOuterTaskId:
+    """Every skill that can return a NON-terminal task must receive the outer task id.
+
+    The buyer is handed a ``task_*`` id for these skills, and that id is only useful if it
+    reaches the durable workflow step: ``tasks/get`` reconciles against it,
+    ``tasks/cancel`` refuses without it, and ``resolve_webhook_task_id`` keys the
+    completion webhook on it.
+
+    This is a signature-and-set pin rather than a wire test on purpose — the defect it
+    guards is a NEW async skill being added to the set (or to the push-notification
+    injection, which reads the same set) while the task-id threading is forgotten. That is
+    what happened to ``sync_creatives``: it received a push-notification config but no
+    task id, so a submitted sync produced a task id with no durable counterpart, and
+    cancel then reported CANCELED for a workflow that kept running.
+    """
+
+    def test_every_async_task_skill_handler_accepts_the_outer_task_id(self):
+        import inspect
+
+        from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS, AdCPRequestHandler
+
+        handler_map = AdCPRequestHandler._skill_handler_map(AdCPRequestHandler)
+        missing = []
+        for skill in sorted(_ASYNC_TASK_SKILLS):
+            assert skill in handler_map, f"{skill} is in _ASYNC_TASK_SKILLS but has no handler"
+            params = inspect.signature(handler_map[skill]).parameters
+            if "a2a_task_id" not in params:
+                missing.append(skill)
+
+        assert not missing, (
+            f"{missing} can return a non-terminal task but their handlers do not accept "
+            "a2a_task_id, so the buyer's task id is never persisted on the workflow step — "
+            "tasks/cancel cannot resolve it and the completion webhook keys on step_id."
+        )
+
+    def test_the_push_notification_set_and_the_task_id_set_are_the_same_source(self):
+        """One definition, not two literals that can drift.
+
+        The push-notification injection and the task-id threading select the same skills
+        for the same reason: a skill that can notify asynchronously is one that can be
+        polled and canceled. They were two separate literals and only one listed
+        ``sync_creatives``.
+        """
+        from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS, _TASK_ID_BEARING_SKILLS
+
+        assert _TASK_ID_BEARING_SKILLS < _ASYNC_TASK_SKILLS, (
+            "_TASK_ID_BEARING_SKILLS must be derived from _ASYNC_TASK_SKILLS, not maintained as an independent literal"
+        )
+        # create_media_buy is threaded on its own branch (it also needs the raw wire
+        # payload), so it is the one member handled outside the keyword branch.
+        assert _ASYNC_TASK_SKILLS - _TASK_ID_BEARING_SKILLS == {"create_media_buy"}

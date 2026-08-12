@@ -46,6 +46,7 @@ def _sync_creatives_impl(
     push_notification_config: PushNotificationConfig | dict | None = None,
     context: ContextObject | dict | None = None,
     identity: ResolvedIdentity | None = None,
+    external_task_id: str | None = None,
 ) -> SyncCreativesResponse:
     """Sync creative assets to centralized library (AdCP v2.5 spec compliant endpoint).
 
@@ -418,6 +419,7 @@ def _sync_creatives_impl(
             push_notification_config=push_notification_config,
             context=context,
             identity=identity,
+            external_task_id=external_task_id,
         )
         _send_creative_notifications(
             creatives_needing_approval=creatives_needing_approval,

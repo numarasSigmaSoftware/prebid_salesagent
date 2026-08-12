@@ -15,6 +15,48 @@ from src.core.schemas import CreativeStatusEnum
 logger = logging.getLogger(__name__)
 
 
+def _sync_step_request_data(
+    *,
+    creative_info: dict[str, Any],
+    format_value: Any,
+    status: str,
+    approval_mode: str,
+    push_notification_config: PushNotificationConfig | dict | None,
+    context: ContextObject | dict | None,
+    identity: ResolvedIdentity | None,
+    external_task_id: str | None,
+) -> dict[str, Any]:
+    """Build the ``request_data`` persisted on a creative-approval workflow step.
+
+    One home for what a creative-approval step carries, because the readers are spread
+    out: the webhook payload builder reads ``protocol`` and ``context``,
+    ``resolve_webhook_task_id`` reads ``external_task_id``, and the admin UI reads the
+    creative fields. Optional keys are OMITTED rather than written as None — the readers
+    test presence.
+    """
+    request_data: dict[str, Any] = {
+        "creative_id": creative_info["creative_id"],
+        "format": format_value,
+        "name": creative_info["name"],
+        "status": status,
+        "approval_mode": approval_mode,
+    }
+    # Engine's _pydantic_json_serializer handles Pydantic models in JSONB automatically.
+    if push_notification_config:
+        request_data["push_notification_config"] = push_notification_config
+    # Echoed back in the webhook.
+    if context:
+        request_data["context"] = context
+    # Drives webhook payload construction.
+    request_data["protocol"] = identity.protocol if identity else "mcp"
+    # The buyer's outer A2A task id, so tasks/get, tasks/cancel and the completion
+    # webhook all key on the id the buyer actually holds. Absent on MCP/REST, which
+    # have no outer task id.
+    if external_task_id:
+        request_data["external_task_id"] = external_task_id
+    return request_data
+
+
 def _create_sync_workflow_steps(
     creatives_needing_approval: list[dict[str, Any]],
     principal_id: str,
@@ -23,11 +65,18 @@ def _create_sync_workflow_steps(
     push_notification_config: PushNotificationConfig | dict | None,
     context: ContextObject | dict | None,
     identity: ResolvedIdentity | None = None,
+    external_task_id: str | None = None,
 ) -> None:
     """Create workflow steps for creatives requiring approval.
 
     Creates a persistent async context and one workflow step per creative,
     plus ``ObjectWorkflowMapping`` records linking each creative to its step.
+
+    ``external_task_id`` is the buyer's outer A2A ``task_*`` id, persisted so the id
+    the buyer holds resolves to the durable step. Without it ``tasks/cancel`` finds no
+    durable counterpart for a submitted sync, and the completion webhook keys on
+    ``step_id`` rather than the id the buyer was handed. None on MCP/REST, which have
+    no outer task id.
     """
     from src.core.context_manager import get_context_manager
 
@@ -71,24 +120,16 @@ def _create_sync_workflow_steps(
             if isinstance(format_value, BaseModel):
                 format_value = format_value.model_dump(mode="json")
 
-            request_data_for_workflow = {
-                "creative_id": creative_info["creative_id"],
-                "format": format_value,
-                "name": creative_info["name"],
-                "status": status,
-                "approval_mode": approval_mode,
-            }
-            # Store push_notification_config if provided for async notification
-            # Engine's _pydantic_json_serializer handles Pydantic models in JSONB automatically
-            if push_notification_config:
-                request_data_for_workflow["push_notification_config"] = push_notification_config
-
-            # Store context if provided (for echoing back in webhook)
-            if context:
-                request_data_for_workflow["context"] = context
-
-            # Store protocol type for webhook payload creation
-            request_data_for_workflow["protocol"] = identity.protocol if identity else "mcp"
+            request_data_for_workflow = _sync_step_request_data(
+                creative_info=creative_info,
+                format_value=format_value,
+                status=status,
+                approval_mode=approval_mode,
+                push_notification_config=push_notification_config,
+                context=context,
+                identity=identity,
+                external_task_id=external_task_id,
+            )
 
             step = ctx_manager.create_workflow_step(
                 context_id=persistent_ctx.context_id,

@@ -198,6 +198,23 @@ def _dict_to_struct(d: dict) -> struct_pb2.Struct:
 #   4. Must be safe to call without authentication
 DISCOVERY_SKILLS = AUTH_OPTIONAL_SKILLS
 
+# Skills whose result can be NON-TERMINAL (submitted, awaiting an out-of-band decision).
+# The buyer is handed a ``task_*`` id for these, so the id MUST be persisted on the
+# durable workflow step: ``tasks/get`` reconciles against it, ``tasks/cancel`` refuses
+# without it, and ``resolve_webhook_task_id`` keys the completion webhook on it.
+#
+# One definition, read by both the push-notification injection and the task-id
+# threading, because they are the same set for the same reason: a skill that can notify
+# asynchronously is exactly a skill that can be polled and canceled. They were separate
+# literals, and only one of them listed sync_creatives — so a submitted sync got its
+# webhook config but no task id, and cancel then fabricated CANCELED for a workflow that
+# kept running.
+_ASYNC_TASK_SKILLS = frozenset({"create_media_buy", "sync_creatives"})
+
+# create_media_buy takes the id positionally through a wider signature (it also needs the
+# raw wire payload); the rest take it as a keyword.
+_TASK_ID_BEARING_SKILLS = _ASYNC_TASK_SKILLS - {"create_media_buy"}
+
 
 def _sanitized_envelope(exc: Exception) -> tuple[AdCPError, dict[str, Any]]:
     """THE A2A sanitize→envelope composition: ``(safe_adcp_error(exc), its two-layer envelope)``.
@@ -240,9 +257,11 @@ def _enveloped_invalid_request(exc: AdCPError) -> InvalidRequestError:
       Note this same TYPE also ships WITH an envelope when the rejection is AdCP-layer rather
       than protocol-layer (the SSRF webhook-URL check routes through this helper), so the type
       alone does not tell you the shape — the layer does.
-    - ``TaskNotCancelableError`` × 2 — a terminal task cannot be canceled.
+    - ``TaskNotCancelableError`` × 3 — a terminal task cannot be canceled, and (the third)
+      a task with no durable workflow step behind it cannot be canceled either: cancelling
+      only this process's in-memory copy would report a stop that did not happen.
 
-    Bypassing also skips ``record_boundary_error``, so none of the twelve produces a server
+    Bypassing also skips ``record_boundary_error``, so none of the thirteen produces a server
     log, activity-feed row or audit row, where REST's ``_envelope_response`` records the
     analogous not-found. That is deliberate for buyer-correctable protocol outcomes (an
     unknown task id is not a seller-side incident) but it is a real observability gap for the
@@ -1659,6 +1678,14 @@ class AdCPRequestHandler(RequestHandler):
         or not owned by the caller) — cancelling a task that does not exist is the
         same not-found condition as get, not a silent no-op. The compatibility adapter
         still emits ``-32603`` rather than the spec's ``-32001`` for typed A2A errors.
+
+        A durable counterpart is REQUIRED to report success. If the durable cancel
+        resolves nothing, an in-memory hit raises ``TaskNotCancelableError`` rather than
+        stamping CANCELED: the in-memory task is this process's view, so cancelling only
+        that would tell the buyer the work stopped while the workflow step kept running
+        and later fired its own completed webhook. Every skill that can return a
+        non-terminal task persists its outer id (``_ASYNC_TASK_SKILLS``), so a missing
+        durable counterpart means the task is genuinely not cancellable here.
         """
         task_id = params.id
         identity: ResolvedIdentity | None = None
@@ -1669,12 +1696,23 @@ class AdCPRequestHandler(RequestHandler):
                 current_status = self._TASK_STATE_TO_STEP_STATUS.get(owned.status.state, "unknown")
                 raise TaskNotCancelableError(message=f"Task cannot be canceled - current state: {current_status}")
             durable = self._durable_cancel_step(task_id, identity)
+            if durable is None:
+                # No durable counterpart: REFUSE rather than report a cancellation that
+                # did not happen. An in-memory hit used to be enough to stamp CANCELED
+                # here, which made the answer a lie whenever the work outlived the
+                # request — the buyer was told the task was canceled while the workflow
+                # step kept running and later fired its own completed webhook. A task we
+                # cannot resolve durably is one we cannot cancel, and saying so is the
+                # only honest answer available at this boundary.
+                if owned is not None:
+                    raise TaskNotCancelableError(
+                        message=("Task cannot be canceled - no durable workflow step is associated with this task id")
+                    )
+                raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
             if owned is not None:
                 owned.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_CANCELED))
                 self._remember_task(task_id, owned, identity)
                 return owned
-            if durable is None:
-                raise TaskNotFoundError(message=f"Task not found: {task_id}", data={"task_id": task_id})
             return durable
         except A2AError:
             raise
@@ -2101,7 +2139,7 @@ class AdCPRequestHandler(RequestHandler):
 
         # Inject push_notification_config into parameters for skills that need it
         # Serialize protobuf to dict at the transport boundary — _impl accepts dict
-        if push_notification_config and skill_name in ("create_media_buy", "sync_creatives"):
+        if push_notification_config and skill_name in _ASYNC_TASK_SKILLS:
             pnc_dict = json_format.MessageToDict(push_notification_config)
             # Translate A2A protobuf authentication.scheme (singular) → AdCP schemes (plural list).
             # A2A's protobuf AuthenticationInfo uses a single `scheme` field; AdCP's
@@ -2147,6 +2185,14 @@ class AdCPRequestHandler(RequestHandler):
             # Handlers return raw Pydantic models (or raise typed AdCPError on validation failure)
             if skill_name == "create_media_buy":
                 result = await handler(parameters, identity, raw_wire_payload=raw_wire_payload, a2a_task_id=task_id)
+            elif skill_name in _TASK_ID_BEARING_SKILLS:
+                # Every skill that can return a NON-TERMINAL task must persist the outer
+                # task id, or the buyer holds an id with no durable counterpart: cancel
+                # cannot find the workflow it names, and the completion webhook keys on
+                # step_id instead. Kept as one set beside the push-notification set below,
+                # because a skill that can notify asynchronously is exactly a skill that
+                # can be polled and canceled.
+                result = await handler(parameters, identity, a2a_task_id=task_id)
             else:
                 result = await handler(parameters, identity)
             # Serialize at the boundary — models become dicts with protocol fields
@@ -2297,7 +2343,13 @@ class AdCPRequestHandler(RequestHandler):
 
         return response
 
-    async def _handle_sync_creatives_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
+    async def _handle_sync_creatives_skill(
+        self,
+        parameters: dict,
+        identity: ResolvedIdentity,
+        *,
+        a2a_task_id: str | None = None,
+    ) -> dict:
         """Handle explicit sync_creatives skill invocation (AdCP spec endpoint)."""
         # DEBUG: Log incoming parameters
         logger.info("[A2A sync_creatives] Received parameters keys: %s", list(parameters.keys()))
@@ -2343,6 +2395,7 @@ class AdCPRequestHandler(RequestHandler):
             context=context,
             account=to_account_reference(parameters.get("account")),
             identity=identity,
+            external_task_id=a2a_task_id,
         )
 
         return response

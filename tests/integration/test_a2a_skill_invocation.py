@@ -405,6 +405,38 @@ class TestA2ASkillInvocation:
         assert handler.tasks[task_id].status.state == TaskState.TASK_STATE_COMPLETED
 
     @pytest.mark.asyncio
+    async def test_cancel_without_a_durable_step_refuses_instead_of_reporting_canceled(self, handler, mock_identity):
+        """A NON-terminal in-memory task with no durable counterpart must be REFUSED.
+
+        The in-memory map is one process's view; the work lives in the workflow step. So
+        stamping CANCELED on an in-memory hit alone reports a stop that did not happen —
+        the buyer is told the task is canceled while the step keeps running and later
+        fires its own completed webhook. That was reachable for a submitted
+        ``sync_creatives``, whose outer task id was never persisted, so the durable leg
+        could never resolve it.
+
+        Refusal, not a lie: ``TaskNotCancelableError``, and the in-memory task keeps its
+        real state rather than being overwritten.
+        """
+        task_id = "task_inmem_no_durable"
+        handler._remember_task(
+            task_id,
+            Task(id=task_id, context_id="ctx_inmem", status=TaskStatus(state=TaskState.TASK_STATE_WORKING)),
+            mock_identity,
+        )
+        handler._get_auth_token = MagicMock(return_value="owner-token")
+        with patch.object(handler, "_resolve_a2a_identity", return_value=mock_identity):
+            # No durable step carries this id — the production condition for a
+            # sync_creatives task before its outer id was persisted.
+            with pytest.raises(TaskNotCancelableError) as exc_info:
+                await handler.on_cancel_task(CancelTaskRequest(id=task_id), context=None)
+
+        assert "no durable workflow step" in str(exc_info.value)
+        assert handler.tasks[task_id].status.state == TaskState.TASK_STATE_WORKING, (
+            "the in-memory task must NOT be stamped CANCELED when the cancel was refused"
+        )
+
+    @pytest.mark.asyncio
     async def test_get_in_memory_task_is_principal_isolated(
         self, handler, sample_tenant, sample_principal, mock_identity
     ):

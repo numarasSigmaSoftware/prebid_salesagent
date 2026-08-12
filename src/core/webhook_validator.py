@@ -226,10 +226,11 @@ class WebhookURLValidator:
     def _matches_development_test_host(url: str) -> bool:
         """True iff ``url`` is the ONE development-only callback host the seam admits.
 
-        The single definition of that seam, shared by the registration and protocol
-        gates so they cannot disagree about which host is admissible — a mismatch
-        between them rejects a callback at registration that delivery would have
-        accepted (or vice versa), which is how the E2E capture server broke.
+        One TERM of the host rule, not the whole rule: both gates reach it through
+        ``_apply_host_seam``, which is what actually makes them agree. Read on its own
+        this helper only guarantees they agree about the development test host — the
+        ``ADCP_TESTING`` loopback allowance is the other term, and it was applied at
+        registration but not at delivery until ``_apply_host_seam`` existed.
 
         Inert outside ``ENVIRONMENT=development``: in production this returns False
         before reading anything else, so no seam can widen the production gate.
@@ -254,6 +255,37 @@ class WebhookURLValidator:
         )
 
     @classmethod
+    def _apply_host_seam(cls, url: str, is_valid: bool, error: str) -> tuple[bool, str]:
+        """The ONE host rule for AdCP protocol callbacks — registration AND delivery.
+
+        The scheme axis is already single-sourced (``_require_https_for_webhook``). This
+        is its host-axis counterpart, and it exists because the two gates had drifted:
+        registration applied the ``ADCP_TESTING`` localhost allowance and delivery did
+        not, so five of the thirty-two ``ENVIRONMENT`` x ``ADCP_TESTING`` x URL
+        combinations registered a callback that could never be delivered — a buyer
+        accepted at registration whose webhooks then silently never arrive. That is the
+        register-permissive/deliver-strict shape, on the axis
+        ``_matches_development_test_host``'s docstring already claimed was symmetric.
+
+        Both terms are deliberate and neither widens production on its own:
+        ``ADCP_TESTING`` governs the HOST axis (capture servers on loopback) — that is
+        what the flag is for, and the two sibling gates already honored it — while
+        production's HTTPS requirement is decided independently by the scheme rule, which
+        keys on ``is_production()`` precisely so a testing flag cannot downgrade a
+        deployment. So ``http://localhost`` stays refused in production; only the
+        already-registrable ``https://localhost`` becomes deliverable, and only when the
+        deployment has declared a testing posture.
+
+        Pinned by ``test_registration_and_delivery_agree_on_host`` across the full matrix.
+        """
+        is_valid, error = cls._maybe_allow_localhost(is_valid, error, allow_localhost=_adcp_testing())
+        if is_valid:
+            return True, ""
+        if cls._matches_development_test_host(url):
+            return True, ""
+        return False, error
+
+    @classmethod
     def validate_webhook_url_registration(cls, url: str) -> tuple[bool, str]:
         """Registration-time SSRF gate (no DNS required).
 
@@ -271,18 +303,12 @@ class WebhookURLValidator:
         (docker-compose.e2e.yml), ``host.docker.internal`` standalone
         (tests/e2e/conftest.py).
         """
-        allow_localhost = _adcp_testing()
         is_valid, error = check_url_ssrf(
             url,
             resolve_dns=False,
             require_https=cls._require_https_for_webhook(),
         )
-        is_valid, error = cls._maybe_allow_localhost(is_valid, error, allow_localhost=allow_localhost)
-        if is_valid:
-            return True, ""
-        if cls._matches_development_test_host(url):
-            return True, ""
-        return False, error
+        return cls._apply_host_seam(url, is_valid, error)
 
     @classmethod
     def validate_outbound_webhook_url(cls, url: str) -> tuple[bool, str]:
@@ -315,20 +341,14 @@ class WebhookURLValidator:
         in development mode so delivery can be exercised without a public
         relay. Arbitrary private hosts are never enabled by this seam.
 
-        The HTTPS decision is ``_require_https_for_webhook()``, shared with the
-        registration gate so the two cannot disagree about the SCHEME — exactly as
-        ``_matches_development_test_host`` stops them disagreeing about the HOST.
-        See that helper for the divergence this closed and for why the rule keys on
-        ``is_production()`` rather than on ``_strict_mode()``.
+        The HTTPS decision is ``_require_https_for_webhook()`` and the host decision is
+        ``_apply_host_seam()`` — both shared with the registration gate, so the two
+        cannot disagree on either axis. See ``_apply_host_seam`` for the host-axis
+        divergence that closed, and ``_require_https_for_webhook`` for why the scheme
+        rule keys on ``is_production()`` rather than on ``_strict_mode()``.
         """
         is_valid, error = check_url_ssrf(url, require_https=cls._require_https_for_webhook())
-        if is_valid:
-            return True, ""
-        # Same seam definition the registration gate uses — one source of truth, so
-        # a host admissible for delivery is admissible to register and vice versa.
-        if cls._matches_development_test_host(url):
-            return True, ""
-        return False, error
+        return cls._apply_host_seam(url, is_valid, error)
 
     @classmethod
     def validate_for_testing(cls, url: str, allow_localhost: bool = False) -> tuple[bool, str]:

@@ -87,6 +87,7 @@ def sync_creatives_raw(
     account: LibraryAccountReference | None = None,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
+    external_task_id: str | None = None,
 ):
     """Sync creative assets to the centralized creative library (raw function for A2A server use).
 
@@ -127,4 +128,5 @@ def sync_creatives_raw(
         push_notification_config=push_notification_config,
         context=context,
         identity=identity,
+        external_task_id=external_task_id,
     )
