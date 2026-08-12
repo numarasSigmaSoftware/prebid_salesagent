@@ -117,6 +117,7 @@ def given_version_unsupported_at_boundary(ctx: dict, boundary_point: str) -> Non
 # ── When ─────────────────────────────────────────────────────────────
 
 
+@when(parsers.parse('the Buyer Agent calls get_adcp_capabilities MCP tool with adcp_version "{version}"'))
 @when(parsers.parse('the Buyer Agent calls get_adcp_capabilities with adcp_version "{version}"'))
 def when_call_capabilities_with_version_pin(ctx: dict, version: str) -> None:
     # Transport-neutral phrasing: this step does not fix a transport (unlike
@@ -125,6 +126,20 @@ def when_call_capabilities_with_version_pin(ctx: dict, version: str) -> None:
     # already set — mcp/a2a/rest, matching BR-UC-010-version-negotiation.feature's
     # own header ("locks them on the real MCP, A2A, and REST wire"). The prose
     # previously said "MCP tool" while running on all three.
+    #
+    # Both phrasings are bound because the two source features disagree:
+    # the hand-authored BR-UC-010-version-negotiation.feature uses the neutral
+    # wording this step was renamed to match, while the GENERATED
+    # BR-UC-010-discover-seller-capabilities.feature still says "MCP tool" at
+    # lines 971 and 1004. Dropping the literal there would leave those two
+    # scenarios inconsistent with the other 70 "MCP tool" lines in the same
+    # generated file, so the alias absorbs the divergence locally. The prose is
+    # inaccurate for every one of those 72 lines (they all run on 3-4
+    # transports); correcting that belongs in the generator, upstream.
+    #
+    # Until this alias existed, both generated scenarios raised
+    # StepDefinitionNotFound and the makereport hook silently auto-xfailed them
+    # — green in CI, executing nothing.
     ctx["pinned_version"] = version
     dispatch_request(ctx, adcp_version=version)
 
