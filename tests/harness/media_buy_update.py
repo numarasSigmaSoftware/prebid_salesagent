@@ -67,17 +67,23 @@ class _DetachAfterCommit:
         self.tripped = True
         return DEFAULT
 
-    def guard(self, real_sandbox_mode: Any) -> Any:
-        def _wrapped(media_buy: Any) -> Any:
+    def guard(self, real_method: Any) -> Any:
+        """Wrap ``sandbox_mode`` OR ``sandbox_mode_by_id`` — both take one positional
+        arg (a ``MediaBuy`` row or a ``media_buy_id`` string respectively) and both
+        are bound by ``bind_real_sandbox_seam``, so both need this trap; wrapping
+        only one would leave a future by-id call path silently unguarded.
+        """
+
+        def _wrapped(arg: Any) -> Any:
             if self.tripped:
                 from sqlalchemy.orm.exc import DetachedInstanceError
 
                 raise DetachedInstanceError(
                     "Instance <MediaBuy> is not bound to a Session; attribute refresh "
                     "operation cannot proceed (simulated by the test harness — a "
-                    "commit boundary ran before this sandbox_mode() call)"
+                    "commit boundary ran before this sandbox_mode()/sandbox_mode_by_id() call)"
                 )
-            return real_sandbox_mode(media_buy)
+            return real_method(arg)
 
         return _wrapped
 
@@ -180,6 +186,7 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         bind_real_sandbox_seam(self._uow_instance)
         self._detach = _DetachAfterCommit()
         self._uow_instance.sandbox_mode = self._detach.guard(self._uow_instance.sandbox_mode)
+        self._uow_instance.sandbox_mode_by_id = self._detach.guard(self._uow_instance.sandbox_mode_by_id)
 
         # The *_or_raise repository helpers delegate to the plain getters and raise
         # the typed not-found when absent. Wiring the mock the same way lets tests
@@ -372,10 +379,21 @@ class MediaBuyUpdateEnv(BaseTestEnv):
 
         Accepts either ``req=<UpdateMediaBuyRequest>`` for pre-built requests
         (used by BDD dispatch_request) or flat kwargs to build a new request.
+
+        Resets ``_detach.tripped`` first: the detach oracle (see
+        _DetachAfterCommit) is per-env, not per-call — a mock's side effects
+        persist across calls within one ``with MediaBuyUpdateEnv() as env:``
+        block. Without this reset, a second ``call_impl`` in the same block
+        would spuriously raise DetachedInstanceError from the first call's
+        trip, blaming correct production code for an ordering bug that isn't
+        there. If a test ever needs to assert the trip survived across two
+        calls, don't remove this — call ``_configure_mocks()`` again (a fresh
+        ``with`` block) instead of relying on cross-call state here.
         """
         from src.core.schemas import UpdateMediaBuyRequest
         from src.core.tools.media_buy_update import _update_media_buy_impl
 
+        self._detach.tripped = False
         req = kwargs.pop("req", None)
         if req is None:
             identity = kwargs.pop("identity", self.identity)

@@ -41,6 +41,7 @@ from pydantic import Field
 
 from src.core.exceptions import AdCPError, AdCPServiceUnavailableError
 from src.core.helpers import enum_value
+from src.core.helpers.account_helpers import sandbox_wire_marker
 from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -519,7 +520,7 @@ def _list_creative_formats_impl(
     # identity.sandbox is structurally False and sandbox_flag is always None. Removing
     # the header source was spec-correct; it has not yet been replaced by a live one.
     # Tracked with the other unenriched paths rather than fixed here.
-    sandbox_flag: bool | None = True if (identity and identity.sandbox) else None
+    sandbox_flag: bool | None = sandbox_wire_marker(identity.sandbox if identity else None)
 
     # Format list from registry is compatible with library Format type
     response = ListCreativeFormatsResponse(
