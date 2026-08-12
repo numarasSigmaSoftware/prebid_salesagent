@@ -114,14 +114,28 @@ class TestA2AParameterMapping:
 
             asyncio.run(handler._handle_update_media_buy_skill(parameters=parameters, identity=_MOCK_IDENTITY))
 
-            call_kwargs = mock_update.call_args.kwargs
-            assert call_kwargs.get("idempotency_key") == "idem-key-abc123", (
-                "A2A update must forward idempotency_key; dropping it removes retry safety "
-                f"for A2A buyers while MCP and A2A create both forward it (got {call_kwargs.get('idempotency_key')!r})"
-            )
-            assert call_kwargs.get("ext") == {"vendor_field": "vendor_value"}, (
-                "A2A update must forward ext; dropping it discards the caller's extension "
-                f"payload with no signal (got {call_kwargs.get('ext')!r})"
+            # ONE atomic assertion: count and every argument together.
+            #
+            # assert_called_once() followed by a call_args read is the split shape
+            # test_architecture_weak_mock_assertions forbids — the count and the
+            # arguments are checked against different calls, so a double dispatch
+            # passes the second half. Spelling the FULL kwarg set also makes a
+            # silently-dropped sibling parameter fail here, which a .get() on the two
+            # fields under test cannot: the defect being guarded is precisely
+            # "a parameter stopped being forwarded".
+            mock_update.assert_called_once_with(
+                media_buy_id="mb_123",
+                paused=False,
+                start_time=None,
+                end_time=None,
+                budget=None,
+                packages=None,
+                push_notification_config=None,
+                reporting_webhook=None,
+                context=None,
+                ext={"vendor_field": "vendor_value"},
+                idempotency_key="idem-key-abc123",
+                identity=_MOCK_IDENTITY,
             )
 
     def test_update_media_buy_backward_compatibility_with_updates(self):

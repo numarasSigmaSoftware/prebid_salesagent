@@ -16,7 +16,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
-from adcp.types import MediaBuyStatus
+from adcp.types import MediaBuyStatus, NotificationType
 
 from src.core.tools._media_buy_status import (
     CANONICAL_STATUSES,
@@ -714,4 +714,59 @@ class TestDeliveryErrorWarningCarriesThePayload:
         assert "mb_err" in line, f"the media_buy_id must reach the log; got {line!r}"
         assert "No delivery data found" not in line, (
             f"logged the envelope __str__ summary instead of the error payload: {line!r}"
+        )
+
+
+class TestNotificationTypeCrossPinnedToSdk:
+    """derive_notification_type's return values equal the SDK's NotificationType.
+
+    ``_media_buy_status`` deliberately keeps a zero-adcp-import property (stated at
+    its TERMINAL_STATUSES definition), so ``derive_notification_type`` returns the
+    raw strings "final" / "scheduled" rather than enum members. That is fine for the
+    module — but nothing bound those literals to the enum, and three things depend
+    on them agreeing:
+
+    * the SECOND emitter writes ``NotificationType.final.value`` and friends
+      (webhook_delivery_service), changed to the enum precisely because the value is
+      persisted and later matched by equality;
+    * the reader filters ``WebhookDeliveryLog.notification_type ==
+      NotificationType.final.value`` (repositories/delivery.py);
+    * this derivation's result is used raw as the equality key for
+      ``get_idempotency_key_for_sequence(notification_type=...)`` and persisted via
+      ``create_log``.
+
+    A writer and a reader that spell the same persisted value independently desync
+    silently on a spec rename — the anti-join stops matching, every terminal buy
+    looks unsent, and finals re-send. The nearest existing assertion compares against
+    the literal ``"final"``, which is the same literal, so it cannot catch that.
+
+    Cross-pinned here rather than by importing the enum into the module, matching how
+    CANONICAL_STATUSES is held against MediaBuyStatus above: the test file already
+    depends on adcp, the production module still does not, and an SDK rename reddens.
+    """
+
+    def test_final_matches_the_sdk_enum_value(self):
+        assert derive_notification_type(["completed"]) == NotificationType.final.value
+
+    def test_scheduled_matches_the_sdk_enum_value(self):
+        assert derive_notification_type(["active"]) == NotificationType.scheduled.value
+
+    def test_every_returned_value_is_a_member_of_the_enum(self):
+        """Guards a THIRD return value being added as a bare literal.
+
+        The two assertions above pin the values this derivation returns today. This
+        one fails if a future branch returns something the enum does not contain at
+        all — the same defect one step earlier, before it reaches a persisted column.
+        """
+        members = {n.value for n in NotificationType}
+        returned = {
+            derive_notification_type(["completed"]),
+            derive_notification_type(["active"]),
+            derive_notification_type(["paused"]),
+            derive_notification_type(["canceled", "completed"]),
+        }
+        assert returned <= members, (
+            f"derive_notification_type returned {sorted(returned - members)}, which is not in the "
+            f"pinned SDK NotificationType enum {sorted(members)} — that value is persisted and "
+            "matched by equality, so a reader spelling it from the enum will never match it"
         )

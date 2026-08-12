@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,7 +86,13 @@ def _db_url() -> str:
     return url
 
 
-def _race(db_url: str, *, reset_order: list[str], reader: tuple[str, str] = (_A, _B)) -> list[str]:
+def _race(
+    db_url: str,
+    *,
+    reset_order: list[str] | None = None,
+    reader: tuple[str, str] = (_A, _B),
+    counterparty: Callable[[str], None] | None = None,
+) -> list[str]:
     """Race a scheduler-shaped read against a reset holding locks in ``reset_order``.
 
     ``reader`` is the (first, second) table pair the simulated scheduler transaction
@@ -102,7 +109,7 @@ def _race(db_url: str, *, reset_order: list[str], reader: tuple[str, str] = (_A,
     # deadlock to a control that only checks for errors.
     with create_engine(db_url).begin() as probe:
         present = {r[0] for r in probe.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public'"))}
-    missing = sorted({*reset_order, *reader} - present)
+    missing = sorted({*(reset_order or []), *reader} - present)
     assert not missing, f"race tables absent from {db_url.rsplit('/', 1)[-1]}: {missing}"
 
     barrier = threading.Barrier(2, timeout=15)
@@ -128,17 +135,29 @@ def _race(db_url: str, *, reset_order: list[str], reader: tuple[str, str] = (_A,
             engine.dispose()
 
     def reset() -> None:
-        engine = create_engine(db_url)
+        """The counterparty: the REAL reset when given one, else a replica ordering.
+
+        Parametrized rather than duplicated. The real-reset test previously
+        re-implemented this whole barrier/thread/join scaffold — the second copy of a
+        shape this module had already extracted, which is the duplication class this
+        branch spent several rounds removing elsewhere. Only the counterparty
+        genuinely differs between the two, so only it is a parameter.
+        """
         try:
             barrier.wait()
-            with engine.begin() as conn:
-                conn.execute(text(f"SET LOCAL lock_timeout = '{_TIMEOUT_MS}ms'"))
-                for table in reset_order:
-                    conn.execute(text(f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE'))
+            if counterparty is not None:
+                counterparty(db_url)
+                return
+            engine = create_engine(db_url)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"SET LOCAL lock_timeout = '{_TIMEOUT_MS}ms'"))
+                    for table in reset_order or []:
+                        conn.execute(text(f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE'))
+            finally:
+                engine.dispose()
         except Exception as exc:  # noqa: BLE001
             errors.append(f"reset:{_pgcode(exc)}")
-        finally:
-            engine.dispose()
 
     threads = [threading.Thread(target=scheduler), threading.Thread(target=reset)]
     for t in threads:
@@ -248,70 +267,24 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
           "media_buys", so a sorted-only reset inverts.
         * delivery shape: the PAIRWISE order within the hoist is what matters. Both
           tables are hoisted ahead of creatives either way, so the status shape is
-          blind to their relative order by construction — inverted, the reset would
-          hold webhook_delivery_log and want media_buys while the scheduler holds
-          media_buys and wants webhook_delivery_log.
+          blind to their relative order by construction.
 
-        A single-shape version of this test covered the first and left the second
-        graded only by a replica with a hardcoded reset_order, which never reads what
-        the reset does.
-
-        Every other test in this file races a REPLICA: ``_race`` takes ``reset_order``
-        as a parameter and simulates the reset's locking. That grades the ordering
-        RULE, which is worth something, but it does not grade the function — the two
-        links to production were ``read_text()`` assertions, and a source-text check
-        passes for code that is present and not executed.
-
-        The mutation it missed: leave the ``LOCK TABLE`` line textually intact and
-        disable the block (``if False:``). The replica races are unaffected because
-        they never call the function; the text assertion still finds the literal. Both
-        stay green while the production reset takes locks in sorted order — creatives
-        before media_buys — which is the exact inversion this file exists to prevent.
-
-        So this calls the real thing, against the status scheduler's shape, and lets a
-        deadlock surface as a deadlock.
+        Runs through ``_race`` with ``counterparty=`` rather than re-implementing the
+        barrier/thread/join scaffold: an earlier version had a second copy of it here,
+        which is the duplication this branch removed elsewhere.
         """
         import importlib.util
 
-        url = _db_url()
         spec = importlib.util.spec_from_file_location(
             "_bdd_conftest_for_reset", REPO_ROOT / "tests" / "bdd" / "conftest.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        reset_e2e_db = module._reset_e2e_db
 
-        barrier = threading.Barrier(2, timeout=15)
-        errors: list[str] = []
+        def production_reset(db_url: str) -> None:
+            module._reset_e2e_db(SimpleNamespace(postgres_url=db_url))
 
-        def scheduler() -> None:
-            """media_buys, then the second table — the loop's real access order."""
-            engine = create_engine(url)
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(f"SET LOCAL lock_timeout = '{_TIMEOUT_MS}ms'"))
-                    conn.execute(text(f'SELECT 1 FROM "{_A}" LIMIT 1 FOR SHARE'))
-                    barrier.wait()
-                    time.sleep(0.3)
-                    conn.execute(text(f'SELECT count(*) FROM "{second_table}"'))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"scheduler:{_pgcode(exc)}")
-            finally:
-                engine.dispose()
-
-        def production_reset() -> None:
-            try:
-                barrier.wait()
-                reset_e2e_db(SimpleNamespace(postgres_url=url))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"reset:{_pgcode(exc)}")
-
-        threads = [threading.Thread(target=scheduler), threading.Thread(target=production_reset)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=60)
-            assert not t.is_alive(), "a thread never finished"
+        errors = _race(_db_url(), reader=(_A, second_table), counterparty=production_reset)
 
         assert not [e for e in errors if e.endswith(DEADLOCK)], (
             f"_reset_e2e_db deadlocked against the {which_loop} access order ({errors}). Its "
