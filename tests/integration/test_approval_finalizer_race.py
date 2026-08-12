@@ -15,14 +15,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.admin.services.media_buy_completion import (
+from src.core.context_manager import ContextManager
+from src.core.database.repositories import MediaBuyUoW
+from src.core.database.repositories.workflow import WorkflowRepository
+from src.services.media_buy_completion import (
     FinalizeOutcome,
     finalize_media_buy_approval,
     finalize_media_buy_rejection,
 )
-from src.core.context_manager import ContextManager
-from src.core.database.repositories import MediaBuyUoW
-from src.core.database.repositories.workflow import WorkflowRepository
 from tests.integration.conftest import seed_pending_buy_and_step
 
 

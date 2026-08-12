@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 
-import src.admin.services.media_buy_completion as mod
+import src.services.media_buy_completion as mod
 from src.core.schemas import CreateMediaBuySuccess
 
 

@@ -1,4 +1,4 @@
-"""Shared media-buy completion/rejection webhook helper (src/admin/services/media_buy_completion.py).
+"""Shared media-buy completion/rejection webhook helper (src/services/media_buy_completion.py).
 
 Extracted from the operations approve/reject routes so the workflow and
 creative-unblock routes can emit the same completion artifact (async buyers
@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 
-from src.admin.services import media_buy_completion as mod
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
+from src.services import media_buy_completion as mod
 from src.services.protocol_webhook_service import _to_wire_dict
 
 _METADATA = {"task_type": "create_media_buy", "tenant_id": "t1", "principal_id": "p1", "media_buy_id": "mb_1"}

@@ -317,7 +317,7 @@ def create_app(config=None):
         # These fallbacks fire exactly when the response body fails to parse — the one
         # case where the operator has no server text — so a hand-copied literal there
         # reported a different entity/wording than the server.
-        from src.admin.services.media_buy_completion import (
+        from src.services.media_buy_completion import (
             MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
             WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE,
         )

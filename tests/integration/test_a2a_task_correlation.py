@@ -483,8 +483,8 @@ class TestA2ATaskCorrelation:
         from datetime import UTC, datetime
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-        from src.admin.services.media_buy_completion import FinalizeOutcome, finalize_media_buy_approval
         from src.core.database.repositories import MediaBuyUoW
+        from src.services.media_buy_completion import FinalizeOutcome, finalize_media_buy_approval
         from tests.helpers import assert_envelope_shape
         from tests.integration.conftest import make_media_buy
         from tests.utils.a2a_helpers import extract_data_from_artifact

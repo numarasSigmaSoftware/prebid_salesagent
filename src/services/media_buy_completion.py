@@ -24,7 +24,6 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from sqlalchemy.orm import Session
 
 from src.adapters.base import AdapterIdempotencyUncertain, AdapterPostMutationIncomplete
-from src.admin.utils.helpers import echo_context
 from src.core.database.models import MEDIA_BUY_FINALIZING_STATUS
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeReadiness
@@ -37,6 +36,7 @@ from src.core.exceptions import (
 )
 from src.core.logging_utils import sanitize_log_value
 from src.core.media_buy_flight import lifecycle_status_for_window, resolve_flight_window_utc
+from src.core.schema_helpers import echo_context
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess, Package
 from src.core.schemas.creative import SyncCreativesResponse
 from src.core.thread_registry import ThreadRegistry

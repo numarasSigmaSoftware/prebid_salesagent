@@ -12,7 +12,7 @@ failure, cleared the ``finalizing`` reconciliation state, and published
 These tests pin the fix: a failure strictly AFTER the first remote write
 succeeds must raise ``AdapterPostMutationIncomplete`` (the typed signal the
 finalizer maps to manual reconciliation, not a terminal failure — see
-``src/admin/services/media_buy_completion.py``'s ``except
+``src/services/media_buy_completion.py``'s ``except
 AdapterPostMutationIncomplete`` branch). A failure on the FIRST write, before
 anything remote exists, must NOT be reclassified — it stays an ordinary
 exception (pre-mutation boundary is not moved earlier than the review asked).

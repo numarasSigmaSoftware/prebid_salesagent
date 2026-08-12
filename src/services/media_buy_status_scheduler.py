@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 from datetime import UTC, datetime
+from functools import partial
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import MediaBuy
@@ -22,6 +23,7 @@ from src.core.database.repositories.creative import CreativeAssignmentRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.logging_utils import sanitize_log_value
 from src.core.media_buy_flight import resolve_flight_window_utc
+from src.services.media_buy_completion import resume_finalizing_media_buy, workflow_step_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +140,6 @@ class MediaBuyStatusScheduler:
         adapters. Each buy is reconciled in its own transaction so one failure never
         blocks the others.
         """
-        from functools import partial
-
-        from src.admin.services.media_buy_completion import resume_finalizing_media_buy, workflow_step_snapshot
         from src.core.tools.media_buy_create import adapter_supports_full_create_replay, execute_approved_media_buy
 
         try:

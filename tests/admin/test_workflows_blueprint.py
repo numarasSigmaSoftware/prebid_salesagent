@@ -547,7 +547,7 @@ class TestAdapterFailedBodyGeneric:
     def test_workflow_approve_adapter_failed_body_is_generic(self, client, test_tenant, factory_session):
         from unittest.mock import patch
 
-        from src.admin.services.media_buy_completion import FinalizeOutcome
+        from src.services.media_buy_completion import FinalizeOutcome
 
         secret = "SECRET_ADAPTER_DETAIL_abc123"
         _auth_session(client, test_tenant)
@@ -582,7 +582,7 @@ class TestApprovalInProgressResponse:
     def test_workflow_approve_retrying_returns_202_pending(self, client, test_tenant, factory_session):
         from unittest.mock import patch
 
-        from src.admin.services.media_buy_completion import (
+        from src.services.media_buy_completion import (
             MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
             FinalizeOutcome,
         )

@@ -214,7 +214,7 @@ def webhook_capture():
     mock_service.send_notification = AsyncMock(side_effect=_capture)
     captured["service"] = mock_service
     with patch(
-        "src.admin.services.media_buy_completion.get_protocol_webhook_service",
+        "src.services.media_buy_completion.get_protocol_webhook_service",
         return_value=mock_service,
     ):
         yield captured

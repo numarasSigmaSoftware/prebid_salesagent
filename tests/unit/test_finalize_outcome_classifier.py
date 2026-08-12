@@ -4,7 +4,7 @@ from typing import cast
 
 import pytest
 
-from src.admin.services.media_buy_completion import FinalizeOutcome, classify_finalize_outcome
+from src.services.media_buy_completion import FinalizeOutcome, classify_finalize_outcome
 
 
 @pytest.mark.parametrize("outcome", list(FinalizeOutcome))

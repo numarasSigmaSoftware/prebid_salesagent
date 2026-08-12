@@ -60,6 +60,23 @@ def to_context_object(context: dict[str, Any] | ContextObject | None) -> Context
     return _coerce_wire_object(context, ContextObject, "context value")
 
 
+def echo_context(request_data: dict) -> ContextObject | None:
+    """Reconstruct the buyer's request context for echoing on an outbound webhook.
+
+    The original tool request is stored on the workflow step's ``request_data``;
+    per spec the webhook's embedded result echoes the buyer's ``context`` back
+    verbatim. ``model_construct`` (not ``model_validate``): ContextObject is an
+    extra=allow passthrough and the dict was already validated at request time.
+    Returns ``None`` when no context was stored (absent/None/non-dict), so
+    ``exclude_none`` keeps the field off the wire. Shared by the media-buy
+    approve and creative approval webhook paths.
+    """
+    context_data = request_data.get("context")
+    if context_data and isinstance(context_data, dict):
+        return ContextObject.model_construct(**context_data)
+    return None
+
+
 def to_reporting_webhook(webhook: dict[str, Any] | ReportingWebhook | None) -> ReportingWebhook | None:
     """Convert dict to ReportingWebhook for adcp type compatibility."""
     return _coerce_wire_object(webhook, ReportingWebhook, "reporting_webhook value")
@@ -262,6 +279,7 @@ def create_get_products_request(
 
 # Re-export commonly used generated types for convenience
 __all__ = [
+    "echo_context",
     "is_url_shorthand",
     "brand_shorthand_to_domain",
     "to_account_reference",

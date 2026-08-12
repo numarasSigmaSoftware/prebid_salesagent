@@ -18,7 +18,7 @@ import pytest
 )
 def test_finalization_durations_must_be_positive(monkeypatch, name, value):
     """A non-positive or noninteger lease/cool-down must fail startup, never disable its fence."""
-    import src.admin.services.media_buy_completion as completion
+    import src.services.media_buy_completion as completion
 
     with monkeypatch.context() as scoped:
         scoped.setenv(name, value)

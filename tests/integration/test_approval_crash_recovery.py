@@ -32,16 +32,16 @@ from types import SimpleNamespace
 import pytest
 
 from src.adapters.base import AdapterIdempotencyUncertain, AdapterPostMutationIncomplete
-from src.admin.services.media_buy_completion import (
+from src.core.context_manager import ContextManager
+from src.core.database.models import MEDIA_BUY_RECOVERY_MANUAL
+from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.database.repositories.workflow import WorkflowRepository
+from src.services.media_buy_completion import (
     FinalizeOutcome,
     finalize_lease_heartbeat,
     finalize_media_buy_approval,
     resume_finalizing_media_buy,
 )
-from src.core.context_manager import ContextManager
-from src.core.database.models import MEDIA_BUY_RECOVERY_MANUAL
-from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
-from src.core.database.repositories.workflow import WorkflowRepository
 from tests.integration.conftest import seed_pending_buy_and_step
 
 
@@ -652,7 +652,7 @@ class TestApprovalCrashRecovery:
 
         # Small lease TTL so the heartbeat's ~TTL/3 interval fires quickly in REAL time; the
         # finalizer reads this module constant for both the claim and the heartbeat renew.
-        monkeypatch.setattr("src.admin.services.media_buy_completion.FINALIZE_LEASE_TTL_SECONDS", 3)
+        monkeypatch.setattr("src.services.media_buy_completion.FINALIZE_LEASE_TTL_SECONDS", 3)
         clock = _FakeClock(datetime.datetime.now(UTC))
 
         adapter_entered = threading.Event()
@@ -1150,7 +1150,7 @@ class TestApprovalCrashRecovery:
         owner RETAINS its lease with a cool-down expiry, so re-approval is fenced until the
         cool-down PLUS the abandoned-owner grace elapses on the injected clock, then permitted.
         """
-        from src.admin.services.media_buy_completion import FINALIZE_AMBIGUOUS_COOLDOWN_SECONDS
+        from src.services.media_buy_completion import FINALIZE_AMBIGUOUS_COOLDOWN_SECONDS
 
         tenant_id = sample_tenant["tenant_id"]
         step_id, step_data = self._seed_pending(

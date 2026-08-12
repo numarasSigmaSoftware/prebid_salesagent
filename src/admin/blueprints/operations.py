@@ -6,7 +6,10 @@ import logging
 from flask import Blueprint, request
 from sqlalchemy import select
 
-from src.admin.services.media_buy_completion import (
+from src.admin.utils import require_auth, require_tenant_access
+from src.core.database.repositories.media_buy import MediaBuyRepository
+from src.core.logging_utils import sanitize_log_value
+from src.services.media_buy_completion import (
     MEDIA_BUY_ALREADY_DECIDED_MESSAGE,
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
     FinalizeOutcome,
@@ -18,9 +21,6 @@ from src.admin.services.media_buy_completion import (
     require_finalize_applied,
     workflow_step_snapshot,
 )
-from src.admin.utils import require_auth, require_tenant_access
-from src.core.database.repositories.media_buy import MediaBuyRepository
-from src.core.logging_utils import sanitize_log_value
 
 logger = logging.getLogger(__name__)
 
