@@ -173,24 +173,46 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         exc = normalize_to_adcp_error(exc, context=await _rest_application_context(request))
     tenant_id, principal_id = _best_effort_rest_identity(request)
     record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
-    envelope = build_two_layer_error_envelope(exc)
+    envelope: dict[str, object] | None = None
     try:
+        # BOTH calls are inside the try. build_two_layer_error_envelope walks
+        # the buyer's context and is the likelier of the two to raise; leaving
+        # it one line above the try meant the guard covered only JSONResponse,
+        # so the failure it exists to prevent — a raise inside the exception
+        # handler, hence no response at all — still had an open path.
+        envelope = build_two_layer_error_envelope(exc)
         return JSONResponse(status_code=exc.status_code, content=envelope)
     except (ValueError, TypeError):
         # Last-resort guard, not the primary defence: `context` is coerced to
         # JSON-safe values by `serialize_application_context` before it ever
-        # gets here. But this is an exception handler — a raise at this line
-        # does not surface as itself, it REPLACES the buyer's real error with
-        # no response at all. Whatever the unencodable value turns out to be,
-        # the buyer is better served by their error code without the context
-        # echo than by silence, so drop the echo and emit the envelope.
+        # gets here. But this is an exception handler — a raise here does not
+        # surface as itself, it REPLACES the buyer's real error with no
+        # response at all. The buyer is better served by their error code
+        # without the context echo than by silence.
         logger.exception(
             "REST envelope was not JSON-encodable; emitting it without the context echo (code=%s, path=%s)",
             exc.error_code,
             request.url.path,
         )
-        envelope.pop("context", None)
+
+    # `context` is the only unbounded, buyer-controlled value in the envelope,
+    # so dropping it is the retry. `envelope is None` means the BUILDER raised
+    # rather than the encoder, in which case there is nothing to pop from —
+    # clear the context on the error and rebuild.
+    try:
+        if envelope is None:
+            exc.context = None
+            envelope = build_two_layer_error_envelope(exc)
+        else:
+            envelope.pop("context", None)
         return JSONResponse(status_code=exc.status_code, content=envelope)
+    except (ValueError, TypeError):
+        # Terminal net. Built by hand from scalar attributes so it cannot
+        # depend on anything that has already failed twice; the buyer still
+        # receives a readable two-layer envelope with the right status.
+        logger.exception("REST envelope could not be rebuilt; emitting the minimal shape (path=%s)", request.url.path)
+        minimal = {"code": exc.error_code, "message": str(exc)}
+        return JSONResponse(status_code=exc.status_code, content={"adcp_error": minimal, "errors": [minimal]})
 
 
 def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None]:

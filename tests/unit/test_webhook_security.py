@@ -852,3 +852,52 @@ class TestDeliveryDeadlineCoversTheRetryBudget:
         from src.core.security import webhook_http
 
         assert webhook_http.WEBHOOK_POST_TIMEOUT_SECONDS < webhook_http.WEBHOOK_DELIVERY_DEADLINE_SECONDS
+
+
+class TestWebhookUrlForLogIsTotal:
+    """The helper documented as total must not raise, on any input.
+
+    Folding `scrub_control_chars` into `webhook_url_for_log` put a `urlparse`
+    call behind a docstring promising "never raw" — and `urlparse` RAISES on
+    some malformed input rather than degrading: `urlparse("https://[fe80::1")`
+    is `ValueError: Invalid IPv6 URL`. The helper is installed at fourteen
+    sites in the delivery service, several inside `except` handlers where the
+    `scrub_control_chars` it replaced was total by construction. A raise there
+    replaces the delivery failure being logged with an unrelated one.
+
+    Reachability is bounded — registration rejects such URLs — but a helper
+    called from exception handlers has to be total by construction, not by
+    the good behaviour of its callers.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[fe80::1",  # the ValueError case
+            "https://[",
+            "https://[]",
+            None,
+            "",
+            "   ",
+            "not-a-url",
+            "://missing-scheme",
+            "https://h/cb\r\nFAKE",
+        ],
+    )
+    def test_never_raises(self, url):
+        from src.core.webhook_validator import webhook_url_for_log
+
+        result = webhook_url_for_log(url)
+
+        assert isinstance(result, str) and result, f"{url!r} produced {result!r}"
+
+    def test_malformed_input_degrades_to_the_placeholder(self):
+        from src.core.webhook_validator import UNPARSEABLE_WEBHOOK_URL_FOR_LOG, webhook_url_for_log
+
+        assert webhook_url_for_log("https://[fe80::1") == UNPARSEABLE_WEBHOOK_URL_FOR_LOG
+
+    def test_well_formed_ipv6_still_parses(self):
+        """The fix must not turn valid IPv6 into the placeholder."""
+        from src.core.webhook_validator import webhook_url_for_log
+
+        assert webhook_url_for_log("http://[::1]:8080/cb") == "http://::1/cb"

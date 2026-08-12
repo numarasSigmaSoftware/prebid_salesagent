@@ -2573,17 +2573,30 @@ def create_agent_card() -> AgentCard:
     # Get sales agent version from package metadata or pyproject.toml
     sales_agent_version = get_version()
 
-    # Two DIFFERENT versions, deliberately. The extension URI is a schema PATH
-    # (dist/schemas/3.1.1/...), which exists at patch precision; the advertised
-    # `adcp_version` is a NEGOTIATION value a buyer will pin on its next
-    # request, and the wire envelope is release precision. Advertising the
-    # patch version there told buyers to pin "3.1.1", which this agent's own
-    # _RELEASE_PIN_RE then rejects with VERSION_UNSUPPORTED.
+    # Two DIFFERENT values here, and only ONE of them is justified by the spec.
+    #
+    # `params.adcp_version` IS spec-grounded: it is a NEGOTIATION value a buyer
+    # pins on its next request, and core/version-envelope.json (3.1.1) is
+    # release precision. Advertising the SDK's patch pin told buyers to pin
+    # "3.1.1", which this agent's own _RELEASE_PIN_RE rejects with
+    # VERSION_UNSUPPORTED.
+    #
+    # The URI is NOT justified by "it is a schema path that exists at patch
+    # precision" — an earlier version of this comment claimed that, and it is
+    # false: dist/schemas/3.1.1/protocols is 404 and adcp-extension.json was
+    # removed upstream in v3. The URI is a legacy extension IDENTIFIER, held at
+    # its historical value so existing clients matching on the exact string
+    # keep working. It is an opaque key, not something to resolve. It also
+    # diverges from the identifier the pinned guide tells clients to match on;
+    # changing it is wire-affecting and is tracked separately, not folded in
+    # here.
     from adcp import get_adcp_spec_version
 
-    schema_version = get_adcp_spec_version()
+    # Named for what it is: the historical identifier component, not a
+    # resolvable schema version.
+    legacy_extension_id_version = get_adcp_spec_version()
     adcp_extension = AgentExtension(
-        uri=f"https://adcontextprotocol.org/schemas/{schema_version}/protocols/adcp-extension.json",
+        uri=f"https://adcontextprotocol.org/schemas/{legacy_extension_id_version}/protocols/adcp-extension.json",
         description="AdCP protocol version and supported domains",
         params=_dict_to_struct(
             {

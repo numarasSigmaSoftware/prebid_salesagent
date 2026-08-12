@@ -86,11 +86,15 @@ class TestA2AEndpointsActual:
                 # The advertised adcp_version is a NEGOTIATION value the buyer
                 # will pin on its next request, so it is release precision —
                 # NOT the SDK's patch-precision spec pin, which this agent's
-                # own inbound parser rejects. The extension URI keeps the
-                # patch version because it is a schema path.
+                # own inbound parser rejects.
                 assert _parse_release_pin(adcp_ext["params"]["adcp_version"]) is not None
                 assert adcp_ext["params"]["adcp_version"] in supported_adcp_versions()
-                assert get_adcp_spec_version() in adcp_ext["uri"], "the URI is a schema path"
+                # The URI is a legacy extension IDENTIFIER pinned at its
+                # historical value so existing clients keep matching. It is NOT
+                # a resolvable schema path — dist/schemas/3.1.1/protocols is
+                # 404 — and an earlier revision of this assertion pinned that
+                # false reasoning in its message.
+                assert get_adcp_spec_version() in adcp_ext["uri"], "legacy extension identifier changed"
                 assert "media_buy" in adcp_ext["params"]["protocols_supported"]
 
         except (requests.ConnectionError, requests.Timeout):

@@ -266,12 +266,30 @@ def webhook_ssrf_suggestion() -> str:
 
 
 def sanitize_webhook_url_for_log(url: str | None) -> str | None:
-    """Return ``scheme://host/path`` for logs — never credentials or query."""
+    """Return ``scheme://host/path`` for logs — never credentials or query.
+
+    ``urlparse`` RAISES on some malformed input rather than returning empty
+    components: ``urlparse("https://[fe80::1")`` is ``ValueError: Invalid IPv6
+    URL``. Accessing ``.hostname`` can raise for the same reason. This function
+    is the parsing half of a helper documented as total and installed at
+    fourteen sites in the delivery service, several inside ``except`` handlers
+    where the previous ``scrub_control_chars`` was total by construction — so a
+    raise here does not surface as itself, it replaces the delivery failure
+    being logged with an unrelated one.
+
+    Reachability is bounded (registration rejects such URLs, so a stored
+    callback should not look like this) but "should not" is not a guarantee
+    worth betting an exception handler on.
+    """
     if not url:
         return None
-    parsed = urlparse(str(url))
-    if parsed.scheme and parsed.hostname:
-        return f"{parsed.scheme}://{parsed.hostname}{parsed.path or ''}"
+    try:
+        parsed = urlparse(str(url))
+        scheme, hostname, path = parsed.scheme, parsed.hostname, parsed.path
+    except ValueError:
+        return None
+    if scheme and hostname:
+        return f"{scheme}://{hostname}{path or ''}"
     return None
 
 

@@ -244,6 +244,39 @@ of what it asserts (see `capabilities.py` and
 `test_idempotency_capability_applicability.py`). The guard also pins that the
 unimplemented phases stay visible-not-claimed.
 
+## Outbound adcp_version precision (agent card, webhook payloads)
+
+Authoritative source: `dist/schemas/3.1.1/core/version-envelope.json` (pinned
+3.1.1, derived from `adcp.get_adcp_spec_version()` = 3.1.1 via `adcp==6.6.0`).
+
+The wire `adcp_version` is RELEASE precision (MAJOR.MINOR, optional
+prerelease). `get_adcp_spec_version()` returns PATCH precision ("3.1.1"), so
+three outbound sites were stamping a value this agent's own inbound parser
+(`_RELEASE_PIN_RE`, src/core/adcp_version.py) rejects: a buyer echoing our
+advertised version back would be answered VERSION_UNSUPPORTED. Fixed by
+`wire_adcp_version()`, which returns the highest ADVERTISED release — the same
+list negotiation reads — at the delivery-webhook payload and the A2A
+agent-card extension's `params.adcp_version`.
+
+Graded: `tests/unit/test_adcp_spec_version.py::TestOutboundStampsAreReleasePrecision`
+plus the payload assertion in `test_webhook_delivery_service.py`, which checks
+against the advertisement and the real parser rather than against
+`wire_adcp_version()` so both sides cannot drift together.
+
+**The agent-card extension URI is deliberately NOT changed, and is not
+spec-grounded.** An earlier revision of the code comment justified holding it
+at patch precision by claiming it is "a schema PATH which exists at patch
+precision". That is false: `dist/schemas/3.1.1/protocols` returns 404 and
+`adcp-extension.json` was removed upstream in v3. The URI is a legacy
+extension IDENTIFIER — an opaque match key for existing clients — held at its
+historical value. It also diverges from the identifier the pinned guide tells
+clients to match on; correcting that is wire-affecting and tracked separately.
+Ungraded by any 3.1.1 storyboard step.
+
+Storyboard: no `dist/compliance/3.1.1` step grades outbound version precision
+on the agent card; the negotiation-error path (`supported_versions`) is graded
+and is covered by the UC-010 scenarios.
+
 ## Update-media-buy revision
 
 Authoritative source:

@@ -99,6 +99,33 @@ class TestRestBoundaryNeverGoesSilentOnAnUnencodableEnvelope:
     keeping it means grading it, so the unencodable value is injected here.
     """
 
+    def test_a_raising_envelope_BUILDER_still_yields_the_error(self, monkeypatch, integration_db):
+        """The builder, not just the encoder, is inside the guard.
+
+        `build_two_layer_error_envelope` walks the buyer's context and is the
+        likelier of the two calls to raise. It sat one line ABOVE the try, so
+        the guard covered only `JSONResponse` and a raise in the builder still
+        produced no response at all — the exact failure the guard exists for.
+        """
+        import src.app as app_module
+
+        real_builder = app_module.build_two_layer_error_envelope
+        calls = {"n": 0}
+
+        def _raises_once(exc):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("builder blew up on the buyer's context")
+            return real_builder(exc)
+
+        monkeypatch.setattr(app_module, "build_two_layer_error_envelope", _raises_once)
+
+        response = _put_with_non_json_context()
+
+        assert response.status_code == 401, "a raising builder must not cost the buyer their error"
+        assert response.json()["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert calls["n"] == 2, "the guard should have retried the build without the context"
+
     def test_an_unencodable_envelope_still_yields_the_error_without_the_echo(self, monkeypatch, integration_db):
         import src.app as app_module
 
