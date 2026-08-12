@@ -62,9 +62,7 @@ def test_wired_union_is_derived_not_enumerated():
     from tests.bdd.conftest import _wired_scenario_tags
 
     union = _wired_scenario_tags()
-    missing = {
-        name: sorted(value - union) for name, value in _wired_globals().items() if not value.issubset(union)
-    }
+    missing = {name: sorted(value - union) for name, value in _wired_globals().items() if not value.issubset(union)}
 
     assert not missing, (
         "these *_WIRED tags are declared bound but never reach the anti-dormancy guard, "

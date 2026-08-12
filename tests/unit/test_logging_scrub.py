@@ -346,7 +346,7 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    modules = set(sorted((root / "src" / "services").glob("*webhook*.py")))
+    modules = set((root / "src" / "services").glob("*webhook*.py"))
 
     # DERIVED from "handles buyer URLs", not from "already calls the scrubber".
     # The previous criterion was self-limiting: a module that sanitizes nothing
@@ -401,7 +401,10 @@ class TestWebhookLogScrubCoverage:
         violations: list[str] = []
         over_budget: list[str] = []
         for module in modules:
-            hits = [f"{module.name}: {hit}" for hit in _raw_buyer_channel_hits(ast.parse(module.read_text(), filename=str(module)))]
+            hits = [
+                f"{module.name}: {hit}"
+                for hit in _raw_buyer_channel_hits(ast.parse(module.read_text(), filename=str(module)))
+            ]
             budget = _PREEXISTING_RAW_CHANNELS.get(module.name, 0)
             if len(hits) > budget:
                 over_budget.append(f"{module.name}: {len(hits)} raw channels, ratchet allows {budget}")
@@ -410,8 +413,7 @@ class TestWebhookLogScrubCoverage:
             "Buyer-controlled channels must route through scrub_control_chars in logger calls "
             "(wrap the value, e.g. scrub_control_chars(str(exc)); log a dict's shape with "
             "sorted(x.keys()) rather than its content). Modules absent from "
-            "_PREEXISTING_RAW_CHANNELS are held at ZERO:\n  "
-            + "\n  ".join(over_budget + violations)
+            "_PREEXISTING_RAW_CHANNELS are held at ZERO:\n  " + "\n  ".join(over_budget + violations)
         )
 
     def test_the_ratchet_never_loosens(self):

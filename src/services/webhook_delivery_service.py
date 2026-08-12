@@ -16,7 +16,6 @@ import hashlib
 import hmac
 import json
 import logging
-import random
 import threading
 import time
 from collections import deque
@@ -41,6 +40,7 @@ from src.core.security.webhook_http import (
     create_pinned_webhook_session,
     is_auth_scheme,
     post_webhook_status,
+    webhook_retry_delay_seconds,
 )
 from src.core.webhook_validator import WebhookURLValidator, webhook_url_for_log
 
@@ -491,10 +491,17 @@ class WebhookDeliveryService:
 
     @staticmethod
     def _wait_before_retry(attempt: int, max_retries: int) -> None:
-        """Apply exponential backoff plus jitter before a retry attempt."""
-        if attempt == 0:
+        """Sleep the shared backoff before a retry attempt.
+
+        The delay comes from `webhook_retry_delay_seconds`, the same function
+        the deadline derives its budget from. This used to hardcode
+        `(2**attempt) + random.uniform(0, 1)` while `_worst_case_delivery_seconds`
+        re-expressed the identical formula, so the two could drift apart with
+        nothing noticing.
+        """
+        delay = webhook_retry_delay_seconds(attempt)
+        if delay == 0.0:
             return
-        delay = (2**attempt) + random.uniform(0, 1)
         logger.debug(f"Retrying webhook delivery after {delay:.2f}s (attempt {attempt + 1}/{max_retries})")
         time.sleep(delay)
 

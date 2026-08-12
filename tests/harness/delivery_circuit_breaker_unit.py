@@ -54,7 +54,9 @@ class CircuitBreakerEnv(CircuitBreakerMixin, BaseTestEnv):
         "post_status": f"{MODULE}.post_webhook_status",
         "session": f"{MODULE}.create_pinned_webhook_session",
         "sleep": f"{MODULE}.time.sleep",
-        "random": f"{MODULE}.random.uniform",
+        # Follows the jitter to its single home (webhook_retry_delay_seconds);
+        # MODULE no longer imports random.
+        "random": "src.core.security.webhook_http.random.uniform",
         "db": "src.core.database.repositories.uow.get_db_session",
         "logger": f"{MODULE}.logger",
         **SSRF_EXTERNAL_PATCH,
