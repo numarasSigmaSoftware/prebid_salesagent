@@ -16,7 +16,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.database.repositories import ApprovalUoW, WorkflowUoW
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
-from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_STATUSES, MediaBuyRepository
+from src.core.database.repositories.media_buy import (
+    ApprovalTrigger,
+    MediaBuyRepository,
+    execution_source_statuses_for,
+)
 from src.core.exceptions import build_two_layer_error_envelope, safe_adcp_error
 from src.core.schemas import CreateMediaBuySuccess, Package
 from src.core.tools._media_buy_status import resolve_canonical_status
@@ -51,6 +55,7 @@ class ApprovalExecutionStatus(StrEnum):
 
     READY = "ready"
     WAITING_FOR_CREATIVES = "waiting_for_creatives"
+    NOT_EXECUTABLE = "not_executable"
     CLAIM_REFUSED = "claim_refused"
     PENDING_RECONCILIATION = "pending_reconciliation"
     FAILED = "failed"
@@ -411,15 +416,32 @@ def prepare_media_buy_approval_execution(
     creatives: CreativeRepository,
     media_buy_id: str,
     approved_by: str | None,
+    trigger: ApprovalTrigger = ApprovalTrigger.HUMAN_DECISION,
 ) -> ApprovalExecutionOutcome:
-    """Apply the creative gate and atomically claim one adapter execution.
+    """Decide, and if it applies claim, one adapter execution for a media buy.
 
     The caller owns the surrounding UoW so the human workflow decision and
     the irreversible domain claim can commit together.
+
+    This owns the WHOLE eligibility decision — callers must not pre-filter on
+    ``media_buy.status``. Four of them used to, each with its own literal, and their
+    union happened to be the canonical set, so no single site read as wrong: an
+    approve route that recognised only ``pending_approval`` sent a ``pending_creatives``
+    or ``draft`` buy down the plain-workflow path instead, terminalizing the step and
+    reporting success while the buy was never executed and the creative gate never ran.
+
+    The two refusals are distinct and callers render them differently:
+
+    * ``NOT_EXECUTABLE`` — there is no media buy, or it is not in a state this trigger
+      may execute from. Nothing was claimed and nothing is wrong; the caller finishes
+      the workflow step on its own.
+    * ``CLAIM_REFUSED`` — it WAS a candidate and the atomic claim lost, so another
+      request is already executing. The caller must not proceed.
     """
+    source_statuses = execution_source_statuses_for(trigger)
     media_buy = media_buys.get_by_id(media_buy_id)
-    if media_buy is None or media_buy.status not in APPROVED_EXECUTION_SOURCE_STATUSES:
-        return ApprovalExecutionOutcome(ApprovalExecutionStatus.CLAIM_REFUSED)
+    if media_buy is None or media_buy.status not in source_statuses:
+        return ApprovalExecutionOutcome(ApprovalExecutionStatus.NOT_EXECUTABLE)
 
     gate_satisfied, blocking_ids = _approval_creative_gate(
         assignments=assignments,
@@ -441,7 +463,7 @@ def prepare_media_buy_approval_execution(
             blocking_creative_ids=blocking_ids,
         )
 
-    if not media_buys.claim_approved_execution(media_buy_id):
+    if not media_buys.claim_approved_execution(media_buy_id, trigger=trigger):
         return ApprovalExecutionOutcome(ApprovalExecutionStatus.CLAIM_REFUSED)
     if approval_fields:
         media_buys.update_fields(media_buy_id, **approval_fields)

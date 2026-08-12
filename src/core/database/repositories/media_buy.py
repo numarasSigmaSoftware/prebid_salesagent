@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
@@ -25,7 +26,45 @@ if TYPE_CHECKING:
     from adcp.types import ContextObject
 
 
+# Every pre-execution state a media buy can be claimed for adapter execution FROM.
 APPROVED_EXECUTION_SOURCE_STATUSES = ("pending_approval", "pending_creatives", "draft")
+
+# The subset still awaiting a human decision.
+#
+# This split is declared HERE, beside the set it narrows, because deriving it blindly
+# would be wrong in a way that is easy to get backwards: a buy in ``pending_approval``
+# has not been approved by anyone yet, so a trigger that is not a human decision — the
+# last blocking creative being approved, say — must NOT promote it. Letting it would make
+# creative approval a substitute for human approval.
+#
+# It was previously a bare ``{"pending_creatives", "draft"}`` literal at the creative
+# route, i.e. this derivation hand-copied at a call site with the reasoning nowhere. Read
+# through ``execution_source_statuses_for`` rather than re-deriving.
+HUMAN_DECISION_PENDING_STATUSES = ("pending_approval",)
+
+
+class ApprovalTrigger(StrEnum):
+    """What is asking for a media buy to be executed.
+
+    The trigger decides which source states are eligible, so the routes name what they
+    ARE rather than restating which statuses that implies. Four call sites each carried
+    their own status literal; their union was the canonical set, so no single one looked
+    wrong and nothing textual flagged the split.
+    """
+
+    HUMAN_DECISION = "human_decision"
+    """An administrator approved the workflow step. Every pre-execution state is eligible."""
+
+    CREATIVE_UNBLOCK = "creative_unblock"
+    """The last blocking creative was approved. States still awaiting a human decision are
+    NOT eligible — see ``HUMAN_DECISION_PENDING_STATUSES``."""
+
+
+def execution_source_statuses_for(trigger: ApprovalTrigger) -> tuple[str, ...]:
+    """Source states a media buy may be claimed for execution from, for this trigger."""
+    if trigger is ApprovalTrigger.CREATIVE_UNBLOCK:
+        return tuple(s for s in APPROVED_EXECUTION_SOURCE_STATUSES if s not in HUMAN_DECISION_PENDING_STATUSES)
+    return APPROVED_EXECUTION_SOURCE_STATUSES
 
 
 class MediaBuyRepository:
@@ -463,7 +502,12 @@ class MediaBuyRepository:
         self._session.flush()
         return media_buy
 
-    def claim_approved_execution(self, media_buy_id: str) -> bool:
+    def claim_approved_execution(
+        self,
+        media_buy_id: str,
+        *,
+        trigger: ApprovalTrigger = ApprovalTrigger.HUMAN_DECISION,
+    ) -> bool:
         """Atomically claim one approved media buy for irreversible execution.
 
         The source-state guard lets exactly one concurrent admin request move
@@ -471,11 +515,32 @@ class MediaBuyRepository:
         ``activating`` is deliberately durable before dispatch, because an
         exception after the request is sent cannot prove whether the ad server
         created the order.
+
+        ``trigger`` selects the eligible source states: a creative unblock may not
+        promote a buy still awaiting a human decision. The guard is enforced IN the
+        UPDATE, so a buy that changes state between the caller's read and this write
+        is refused rather than promoted.
+        """
+        return self._transition_approved_execution(
+            media_buy_id,
+            source_statuses=execution_source_statuses_for(trigger),
+            target_status="activating",
+        )
+
+    def reject_pending_execution(self, media_buy_id: str) -> bool:
+        """Atomically reject a media buy that has not begun executing.
+
+        Mirrors ``claim_approved_execution``: same source states, opposite decision.
+        Exists so the admin reject route stops assigning ``media_buy.status`` directly —
+        a raw write has no source guard, so it could mark a buy rejected after execution
+        had already been claimed, and it recognised only ``pending_approval``, leaving a
+        rejected ``pending_creatives`` or ``draft`` buy sitting in its old state while its
+        workflow step said rejected.
         """
         return self._transition_approved_execution(
             media_buy_id,
             source_statuses=APPROVED_EXECUTION_SOURCE_STATUSES,
-            target_status="activating",
+            target_status="rejected",
         )
 
     def mark_approved_execution_unknown(

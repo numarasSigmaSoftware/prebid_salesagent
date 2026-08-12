@@ -212,14 +212,11 @@ def _approve_mapped_media_buy(
         media_buy is not None,
         media_buy.status if media_buy else "N/A",
     )
-    if media_buy is None or media_buy.status != "pending_approval":
-        logger.warning(
-            "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
-            media_buy is not None,
-            media_buy.status if media_buy else "N/A",
-        )
-        return _complete_plain_workflow_approval(db, tenant_id, step_id)
-
+    # No status pre-filter here on purpose: prepare_media_buy_approval_execution owns the
+    # whole eligibility decision and reports NOT_EXECUTABLE below. The literal that used
+    # to sit here recognised only ``pending_approval``, so a pending_creatives or draft
+    # buy took the plain-workflow path — step terminalized, buy never executed, creative
+    # gate and execution claim both skipped.
     preparation = prepare_media_buy_approval_execution(
         media_buys=media_buy_repo,
         assignments=CreativeAssignmentRepository(db, tenant_id),
@@ -227,6 +224,13 @@ def _approve_mapped_media_buy(
         media_buy_id=media_buy_id,
         approved_by=user_email,
     )
+    if preparation.status is ApprovalExecutionStatus.NOT_EXECUTABLE:
+        logger.warning(
+            "[APPROVAL] Media buy not executable: media_buy=%s, status=%s",
+            media_buy is not None,
+            media_buy.status if media_buy else "N/A",
+        )
+        return _complete_plain_workflow_approval(db, tenant_id, step_id)
     if preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
         blocking_count = len(preparation.blocking_creative_ids)
         logger.warning(

@@ -405,7 +405,6 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         "This step is no longer awaiting approval (already approved or finalized).",
                     )
                 step.updated_at = datetime.now(UTC)
-                should_execute_media_buy = media_buy is not None and media_buy.status == "pending_approval"
 
                 if not step.comments:
                     step.comments = []
@@ -418,17 +417,23 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 )
                 attributes.flag_modified(step, "comments")
 
-                if should_execute_media_buy:
+                # No status pre-filter: prepare_media_buy_approval_execution owns the whole
+                # eligibility decision and reports NOT_EXECUTABLE. The literal that used to
+                # sit here recognised only ``pending_approval``, so approving a
+                # pending_creatives or draft buy fell through to the plain-workflow branch
+                # below — step terminalized, operator told "approved successfully", buy
+                # never executed and the creative gate never run.
+                preparation = prepare_media_buy_approval_execution(
+                    media_buys=approve_repo,
+                    assignments=CreativeAssignmentRepository(db_session, tenant_id),
+                    creatives=CreativeRepository(db_session, tenant_id),
+                    media_buy_id=media_buy_id,
+                    approved_by=user_email,
+                )
+                if preparation.status is not ApprovalExecutionStatus.NOT_EXECUTABLE:
                     # Commit the human decision and irreversible domain claim
                     # atomically. A crash after this commit is recoverable from
                     # ``activating``; no second request may dispatch the adapter.
-                    preparation = prepare_media_buy_approval_execution(
-                        media_buys=approve_repo,
-                        assignments=CreativeAssignmentRepository(db_session, tenant_id),
-                        creatives=CreativeRepository(db_session, tenant_id),
-                        media_buy_id=media_buy_id,
-                        approved_by=user_email,
-                    )
                     if preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
                         db_session.commit()
                         flash(
@@ -591,8 +596,13 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 )
                 attributes.flag_modified(step, "comments")
 
-                if media_buy and media_buy.status == "pending_approval":
-                    media_buy.status = "rejected"
+                # Guarded in the UPDATE rather than assigned here: a raw write had no
+                # source-state guard (it could mark a buy rejected after execution was
+                # already claimed) and recognised only ``pending_approval``, so rejecting
+                # a pending_creatives or draft buy left it in its old state while its
+                # workflow step said rejected.
+                if media_buy:
+                    approve_repo.reject_pending_execution(media_buy_id)
 
                 db_session.commit()
 

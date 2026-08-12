@@ -346,6 +346,60 @@ class TestOperationsApproveAtomicity:
             assert persisted is not None
             assert persisted.status == "pending_creatives"
 
+    def test_detail_route_approves_a_pending_creatives_buy_instead_of_silently_completing(
+        self, client, factory_session
+    ):
+        """A buy in a non-``pending_approval`` source state must still go through the gate.
+
+        The route used to pre-filter on ``media_buy.status == "pending_approval"``, so a
+        ``pending_creatives`` buy fell to the plain-workflow branch: the workflow step was
+        terminalized, the operator was told "approved successfully", and the buy was never
+        executed and never gated. Every eligibility decision now belongs to
+        ``prepare_media_buy_approval_execution``.
+
+        Here the buy is ``pending_creatives`` with an APPROVED creative, so the gate is
+        satisfied and the adapter must actually run — the pre-filter's failure mode was
+        silence, so a test that only asserted "not executed" would have passed on it.
+        """
+        from src.core.database.models import MediaBuy
+        from tests.factories import CreativeAssignmentFactory, CreativeFactory
+
+        tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(client)
+        media_buy = factory_session.get(MediaBuy, media_buy_id)
+        assert media_buy is not None
+        creative = CreativeFactory(
+            tenant=media_buy.tenant,
+            principal=media_buy.principal,
+            status="approved",
+        )
+        CreativeAssignmentFactory(
+            creative=creative,
+            media_buy=media_buy,
+            package_id="pkg_already_gated",
+        )
+        # The state the old literal did not recognise.
+        media_buy.status = "pending_creatives"
+        factory_session.commit()
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)
+        ) as mock_execute:
+            response = client.post(
+                f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
+                data={"action": "approve", "workflow_step_id": step_id},
+                follow_redirects=False,
+            )
+
+        assert response.status_code in (302, 303)
+        mock_execute.assert_called_once_with(media_buy_id, tenant_id, execution_claimed=True)
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted is not None
+            assert persisted.status != "pending_creatives", (
+                "the buy must have been claimed for execution, not left in its source state"
+            )
+
     def test_media_buy_detail_approval_without_assignments_waits_for_creatives(self, client, factory_session):
         """The detail route cannot execute a buy that has no creative assignment."""
         tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(

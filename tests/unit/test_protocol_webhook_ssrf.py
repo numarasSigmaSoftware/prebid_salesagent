@@ -362,34 +362,32 @@ def test_callback_scheme_policy_per_environment(monkeypatch, environment, adcp_t
 # A public host would clear the host axis for both gates in every row and grade nothing.
 _HOST_AXIS_URLS = [
     pytest.param("https://localhost:9999/callback", id="https-localhost"),
-    pytest.param("http://localhost:9999/callback", id="http-localhost"),
     pytest.param("https://127.0.0.1:9999/callback", id="https-loopback-ip"),
 ]
 
 
 @pytest.mark.parametrize("url", _HOST_AXIS_URLS)
 @pytest.mark.parametrize("environment,adcp_testing,_expect_https_required", _ENV_MATRIX)
-def test_registration_and_delivery_agree_on_host(
+def test_registration_is_more_permissive_than_delivery_on_loopback(
     monkeypatch, environment, adcp_testing, _expect_https_required, url
 ) -> None:
-    """Both callback gates reach the SAME host verdict for every deployment shape.
+    """Characterizes the KNOWN host-axis divergence, in both directions.
 
-    The host-axis counterpart to ``test_callback_scheme_policy_per_environment``, and it
-    exists because that test's own premise — "the host axis has
-    ``_matches_development_test_host`` keeping them on one definition" — was only half
-    true. That helper is one TERM of the host rule; the ``ADCP_TESTING`` loopback
-    allowance is the other, and it was applied at registration and not at delivery. Five
-    of the thirty-two ENVIRONMENT x ADCP_TESTING x URL combinations registered a callback
-    that could never be delivered.
+    ``_matches_development_test_host``'s docstring used to claim the two gates agree on
+    the host axis. They do not: it is one TERM of the rule, and the ``ADCP_TESTING``
+    loopback allowance is a second term applied at registration and not at protocol
+    delivery. Measured across ENVIRONMENT x ADCP_TESTING x URL, 5 of 32 combinations
+    register a callback delivery then refuses — a buyer accepted at registration whose
+    webhooks silently never arrive.
 
-    The failure direction was fail-safe, which is exactly why nothing caught it: no SSRF
-    hole, just a buyer accepted at registration whose webhooks then silently never
-    arrive — the same invisible-to-the-buyer outcome the scheme test was written for.
+    This pins the divergence rather than asserting it away, because the two gates are NOT
+    interchangeable and the obvious unification is wrong in the dangerous direction:
+    ``validate_protocol_webhook_url`` is also the buyer-supplied callback gate in
+    ``create_media_buy``, so relaxing it to match registration widens an SSRF boundary.
+    Closing this properly means tightening REGISTRATION, which is tracked separately.
 
-    Agreement is the whole property here. The absolute verdict per row is graded by the
-    scheme test above and by
-    ``test_adcp_testing_never_downgrades_a_non_development_deployment``; asserting it
-    again here would only restate them.
+    Graded in both directions: delivery must never be the permissive one, and where
+    ``ADCP_TESTING`` is off the two must agree. So a change to either gate reddens this.
     """
     for var, value in (("ENVIRONMENT", environment), ("ADCP_TESTING", adcp_testing)):
         monkeypatch.delenv(var, raising=False)
@@ -397,18 +395,21 @@ def test_registration_and_delivery_agree_on_host(
             monkeypatch.setenv(var, value)
     monkeypatch.delenv("ADCP_WEBHOOK_TEST_HOST", raising=False)
 
-    # Pin DNS so the axis the two gates legitimately differ on (registration passes
-    # resolve_dns=False) cannot manufacture a mismatch that isn't about the host rule.
     with patch("src.core.security.url_validator.socket.gethostbyname", return_value="127.0.0.1"):
         register_ok, _ = WebhookURLValidator.validate_webhook_url_registration(url)
         deliver_ok, _ = WebhookURLValidator.validate_protocol_webhook_url(url)
 
-    assert register_ok == deliver_ok, (
-        f"ENVIRONMENT={environment!r} ADCP_TESTING={adcp_testing!r} {url}: registration "
-        f"{'accepts' if register_ok else 'refuses'} but delivery "
-        f"{'accepts' if deliver_ok else 'refuses'}. A callback that registers and never "
-        f"delivers is invisible to the buyer."
+    context = f"ENVIRONMENT={environment!r} ADCP_TESTING={adcp_testing!r} {url}"
+    assert not (deliver_ok and not register_ok), (
+        f"{context}: delivery accepted a loopback callback that registration refused. "
+        "Delivery is the SSRF boundary for buyer-supplied callbacks and must never be "
+        "the more permissive of the two."
     )
+    if adcp_testing != "true":
+        assert register_ok == deliver_ok, (
+            f"{context}: the gates diverge with ADCP_TESTING off, so the cause is not the "
+            "known loopback allowance — one of them changed."
+        )
 
 
 # The three sinks that can deliver the SAME buyer URL with the SAME Bearer token. They

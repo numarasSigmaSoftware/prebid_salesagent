@@ -44,6 +44,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 
 from src.admin.utils import echo_context, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.core.database.repositories.media_buy import ApprovalTrigger
 from src.core.database.repositories.uow import AdminCreativeUoW
 from src.core.logging_config import log_safe
 from src.core.tools.media_buy_create import push_creative_to_existing_buy
@@ -587,31 +588,45 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 assignment_buy_statuses[media_buy_id] = media_buy.status
                 logger.info(f"[CREATIVE APPROVAL] Media buy {media_buy_id} status: {media_buy.status}")
 
-                if media_buy.status in {"pending_creatives", "draft"}:
-                    preparation = prepare_media_buy_approval_execution(
-                        media_buys=uow.media_buys,
-                        assignments=uow.assignments,
-                        creatives=uow.creatives,
-                        media_buy_id=media_buy_id,
-                        # Human approval was recorded when the buy entered
-                        # pending_creatives. Creative unblocking must not replace
-                        # that audit identity or timestamp with a system actor.
-                        approved_by=None,
+                # The eligible source states for THIS trigger are derived from the
+                # canonical set beside its declaration, not restated here. The bare
+                # ``{"pending_creatives", "draft"}`` literal that used to gate this was a
+                # hand-copy of that derivation with its reasoning nowhere — and the
+                # reasoning is the load-bearing part: a buy still awaiting a human
+                # decision must NOT be promoted by a creative approval.
+                preparation = prepare_media_buy_approval_execution(
+                    media_buys=uow.media_buys,
+                    assignments=uow.assignments,
+                    creatives=uow.creatives,
+                    media_buy_id=media_buy_id,
+                    # Human approval was recorded when the buy entered
+                    # pending_creatives. Creative unblocking must not replace
+                    # that audit identity or timestamp with a system actor.
+                    approved_by=None,
+                    trigger=ApprovalTrigger.CREATIVE_UNBLOCK,
+                )
+                if preparation.status is ApprovalExecutionStatus.READY:
+                    media_buy_actions.append({"media_buy_id": media_buy_id})
+                elif preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+                    logger.info(
+                        "[CREATIVE APPROVAL] Media buy %s still waiting for %s creatives: %s",
+                        media_buy_id,
+                        len(preparation.blocking_creative_ids),
+                        log_safe(preparation.blocking_creative_ids),
                     )
-                    if preparation.status is ApprovalExecutionStatus.READY:
-                        media_buy_actions.append({"media_buy_id": media_buy_id})
-                    elif preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
-                        logger.info(
-                            "[CREATIVE APPROVAL] Media buy %s still waiting for %s creatives: %s",
-                            media_buy_id,
-                            len(preparation.blocking_creative_ids),
-                            preparation.blocking_creative_ids,
-                        )
-                    else:
-                        logger.info(
-                            "[CREATIVE APPROVAL] Media buy %s execution was already claimed",
-                            media_buy_id,
-                        )
+                elif preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
+                    logger.info(
+                        "[CREATIVE APPROVAL] Media buy %s execution was already claimed",
+                        media_buy_id,
+                    )
+                else:
+                    # NOT_EXECUTABLE. Most often the buy is still awaiting a human
+                    # decision, which this trigger deliberately may not promote.
+                    logger.info(
+                        "[CREATIVE APPROVAL] Media buy %s is not executable by a creative unblock (status %s)",
+                        media_buy_id,
+                        media_buy.status,
+                    )
 
             # UoW auto-commits here
 

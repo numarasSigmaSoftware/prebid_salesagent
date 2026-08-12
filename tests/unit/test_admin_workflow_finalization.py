@@ -11,7 +11,10 @@ from unittest.mock import ANY, Mock, patch
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.core.database.repositories.media_buy import APPROVED_EXECUTION_SOURCE_STATUSES
+from src.core.database.repositories.media_buy import (
+    APPROVED_EXECUTION_SOURCE_STATUSES,
+    ApprovalTrigger,
+)
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.workflow_finalization import (
     ApprovalExecutionStatus,
@@ -639,7 +642,86 @@ def test_shared_preparation_uses_repository_execution_source_statuses():
         )
 
         assert outcome.status is ApprovalExecutionStatus.READY
-        media_buy_repo.claim_approved_execution.assert_called_once_with("mb_1")
+        # The trigger travels to the CAS, which enforces the source guard IN the UPDATE.
+        media_buy_repo.claim_approved_execution.assert_called_once_with("mb_1", trigger=ApprovalTrigger.HUMAN_DECISION)
+
+
+def test_creative_unblock_may_not_promote_a_buy_awaiting_a_human_decision():
+    """A creative approval must never stand in for the human approval it is not.
+
+    ``pending_approval`` is in the canonical execution source set, so a trigger that
+    ignored the split would claim and execute a buy no human has approved. The route
+    used to encode this as a bare ``{"pending_creatives", "draft"}`` literal with the
+    reasoning nowhere; the split now lives beside the canonical set and is derived.
+
+    Graded both ways so this cannot pass by refusing everything.
+    """
+    for status, trigger, expected in (
+        ("pending_approval", ApprovalTrigger.CREATIVE_UNBLOCK, ApprovalExecutionStatus.NOT_EXECUTABLE),
+        ("pending_approval", ApprovalTrigger.HUMAN_DECISION, ApprovalExecutionStatus.READY),
+        ("pending_creatives", ApprovalTrigger.CREATIVE_UNBLOCK, ApprovalExecutionStatus.READY),
+        ("draft", ApprovalTrigger.CREATIVE_UNBLOCK, ApprovalExecutionStatus.READY),
+    ):
+        media_buy_repo = Mock()
+        media_buy_repo.get_by_id.return_value = SimpleNamespace(status=status, principal_id="principal_1")
+        media_buy_repo.claim_approved_execution.return_value = True
+        assignments = Mock()
+        assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
+        creatives = Mock()
+        creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
+
+        outcome = prepare_media_buy_approval_execution(
+            media_buys=media_buy_repo,
+            assignments=assignments,
+            creatives=creatives,
+            media_buy_id="mb_1",
+            approved_by=None,
+            trigger=trigger,
+        )
+
+        assert outcome.status is expected, f"{status} + {trigger} should be {expected}, got {outcome.status}"
+        if expected is ApprovalExecutionStatus.NOT_EXECUTABLE:
+            media_buy_repo.claim_approved_execution.assert_not_called()
+
+
+def test_not_executable_is_distinct_from_claim_refused():
+    """The two refusals mean different things and callers render them differently.
+
+    NOT_EXECUTABLE says "nothing to execute here, finish the workflow step yourself";
+    CLAIM_REFUSED says "this WAS a candidate and another request already claimed it, do
+    not proceed". Collapsing them is what made the routes pre-filter in the first place.
+    """
+    assignments = Mock()
+    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
+    creatives = Mock()
+    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
+
+    absent = Mock()
+    absent.get_by_id.return_value = None
+    assert (
+        prepare_media_buy_approval_execution(
+            media_buys=absent,
+            assignments=assignments,
+            creatives=creatives,
+            media_buy_id="mb_1",
+            approved_by=None,
+        ).status
+        is ApprovalExecutionStatus.NOT_EXECUTABLE
+    )
+
+    lost_the_claim = Mock()
+    lost_the_claim.get_by_id.return_value = SimpleNamespace(status="pending_approval", principal_id="principal_1")
+    lost_the_claim.claim_approved_execution.return_value = False
+    assert (
+        prepare_media_buy_approval_execution(
+            media_buys=lost_the_claim,
+            assignments=assignments,
+            creatives=creatives,
+            media_buy_id="mb_1",
+            approved_by=None,
+        ).status
+        is ApprovalExecutionStatus.CLAIM_REFUSED
+    )
 
 
 @pytest.mark.parametrize(
