@@ -231,8 +231,30 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
             "inversion class the hoist creates (see tests/bdd/conftest.py::_reset_e2e_db)."
         )
 
-    def test_the_REAL_reset_does_not_deadlock_the_status_scheduler(self, integration_db):
-        """Drives ``_reset_e2e_db`` itself, not a stand-in for it.
+    @pytest.mark.parametrize(
+        "second_table,which_loop",
+        [
+            pytest.param("creatives", "status scheduler (media_buys -> creative tables)", id="status-shape"),
+            pytest.param(_B, "delivery scheduler (media_buys -> webhook_delivery_log)", id="delivery-shape"),
+        ],
+    )
+    def test_the_REAL_reset_does_not_deadlock_a_scheduler(self, integration_db, second_table, which_loop):
+        """Drives ``_reset_e2e_db`` itself, not a stand-in for it — for BOTH shapes.
+
+        Parametrized because the two loops exercise DIFFERENT properties of the reset
+        and neither covers the other:
+
+        * status shape: the hoist is what matters. "creatives" sorts before
+          "media_buys", so a sorted-only reset inverts.
+        * delivery shape: the PAIRWISE order within the hoist is what matters. Both
+          tables are hoisted ahead of creatives either way, so the status shape is
+          blind to their relative order by construction — inverted, the reset would
+          hold webhook_delivery_log and want media_buys while the scheduler holds
+          media_buys and wants webhook_delivery_log.
+
+        A single-shape version of this test covered the first and left the second
+        graded only by a replica with a hardcoded reset_order, which never reads what
+        the reset does.
 
         Every other test in this file races a REPLICA: ``_race`` takes ``reset_order``
         as a parameter and simulates the reset's locking. That grades the ordering
@@ -262,8 +284,8 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
         barrier = threading.Barrier(2, timeout=15)
         errors: list[str] = []
 
-        def status_scheduler() -> None:
-            """media_buys, then a creative table — the loop's real access order."""
+        def scheduler() -> None:
+            """media_buys, then the second table — the loop's real access order."""
             engine = create_engine(url)
             try:
                 with engine.begin() as conn:
@@ -271,7 +293,7 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
                     conn.execute(text(f'SELECT 1 FROM "{_A}" LIMIT 1 FOR SHARE'))
                     barrier.wait()
                     time.sleep(0.3)
-                    conn.execute(text('SELECT count(*) FROM "creatives"'))
+                    conn.execute(text(f'SELECT count(*) FROM "{second_table}"'))
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"scheduler:{_pgcode(exc)}")
             finally:
@@ -284,7 +306,7 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"reset:{_pgcode(exc)}")
 
-        threads = [threading.Thread(target=status_scheduler), threading.Thread(target=production_reset)]
+        threads = [threading.Thread(target=scheduler), threading.Thread(target=production_reset)]
         for t in threads:
             t.start()
         for t in threads:
@@ -292,7 +314,7 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
             assert not t.is_alive(), "a thread never finished"
 
         assert not [e for e in errors if e.endswith(DEADLOCK)], (
-            f"_reset_e2e_db deadlocked against the status scheduler's access order ({errors}). "
-            "Its LOCK TABLE must run and must take media_buys first — a version where that "
-            "block is present but not executed fails exactly here."
+            f"_reset_e2e_db deadlocked against the {which_loop} access order ({errors}). Its "
+            "per-table LOCK statements must run, in order, taking media_buys first — a version "
+            "where that block is present but not executed fails exactly here."
         )

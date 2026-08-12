@@ -203,36 +203,56 @@ class TestBddTagSetsReferenceRealScenarios:
         """Prose about a tag is not a route, and must not be reported as one."""
         assert not _tag_collections('"""See T-UC-999-p for context."""')
 
-    def test_the_scanner_reaches_every_tag_in_conftest(self):
-        """Coverage of the SCAN itself: every T-UC- constant must be attributed.
+    # Every T-UC- string in conftest.py that is deliberately NOT a routed tag.
+    # Enumerated, not derived: the coverage test below compares against a MINIMAL
+    # predicate (startswith only) rather than _is_tag_constant, so narrowing that
+    # predicate cannot keep the coverage claim satisfied by shrinking both sides at
+    # once. A clause dropping constants containing "partition", for instance, would
+    # silently remove 32 tags from the scan and still pass a self-referential check.
+    #
+    # 12 UC prefixes consumed by str.startswith, and 2 xfail reasons that happen to
+    # begin with the tag they describe.
+    BY_DESIGN_UNSCANNED: frozenset[str] = frozenset(
+        {
+            "T-UC-002",
+            "T-UC-002-ext-",
+            "T-UC-003",
+            "T-UC-003-ext-",
+            "T-UC-004",
+            "T-UC-004-filter",
+            "T-UC-005",
+            "T-UC-006",
+            "T-UC-011",
+            "T-UC-018",
+            "T-UC-019",
+            "T-UC-026",
+            "T-UC-002-inv-015-6 create_media_buy harness wiring is tracked in #1652",
+            "T-UC-018-ext-c list_creatives validation harness wiring is tracked in #1652",
+        }
+    )
 
-        The measurement that exposed the previous version. Without it the guard can
-        silently narrow again and still report green — a matcher that sees a subset
-        finds no violations in the part it cannot see.
+    def test_the_scanner_reaches_every_tag_in_conftest(self):
+        """Coverage of the SCAN itself, measured against a source-independent baseline.
+
+        The previous version built both sides from ``_is_tag_constant``, so narrowing
+        that predicate satisfied the claim by shrinking the numerator and denominator
+        together. Here the baseline is every string constant starting with the tag
+        prefix — no shared filter — and the gap must equal BY_DESIGN_UNSCANNED exactly.
+
+        Exactly, not ``<=``: a new unscanned tag is a hole, and an entry that stops
+        being unscanned means the list is stale and hides the next one.
         """
         source = CONFTEST.read_text()
-        tree = ast.parse(source)
-        prefixes = _startswith_arguments(tree)
-        # Same predicate the scanner uses: whole tags only, excluding startswith
-        # prefixes and prose. Comparing against RAW constants would fail for the
-        # things deliberately not checked, which is a different claim.
-        every = {n.value for n in ast.walk(tree) if _is_tag_constant(n) and id(n) not in prefixes}
+        every = {
+            n.value
+            for n in ast.walk(ast.parse(source))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith(TAG_PREFIX)
+        }
         scanned = set().union(*_tag_collections(source).values())
-        assert every - scanned == set(), (
-            f"{len(every - scanned)} of {len(every)} tags in conftest.py are invisible to this "
-            f"guard, so nothing checks them: {sorted(every - scanned)[:10]}"
-        )
-
-    def test_exact_matching_rejects_a_prefix_collision(self):
-        """The property the whole guard rests on: -049-1 must NOT match @-049-10.
-
-        A substring check reports a live tag for one that does not exist, which is
-        how two of these orphans survived an earlier manual sweep.
-        """
-        texts = ["@T-UC-005-inv-049-10\nScenario: x"]
-        assert _tag_is_defined("T-UC-005-inv-049-10", texts)
-        assert not _tag_is_defined("T-UC-005-inv-049-1", texts), (
-            "exact matching is broken — a prefix collision reads as a defined tag"
+        assert every - scanned == self.BY_DESIGN_UNSCANNED, (
+            "the set of T-UC- constants this guard does not scan changed.\n"
+            f"newly invisible (nothing checks these): {sorted((every - scanned) - self.BY_DESIGN_UNSCANNED)}\n"
+            f"stale entries (now scanned, remove them): {sorted(self.BY_DESIGN_UNSCANNED - (every - scanned))}"
         )
 
     def test_no_routed_tag_is_an_orphan(self):

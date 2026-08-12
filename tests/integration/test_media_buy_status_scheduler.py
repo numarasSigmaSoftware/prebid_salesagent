@@ -862,7 +862,10 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
 
     from tests.factories import MediaBuyFactory
     from tests.harness._base import IntegrationEnv
-    from tests.helpers.delivery_assertions import capture_scheduler_summary
+    from tests.helpers.delivery_assertions import (
+        assert_summary_reports_against_its_selection,
+        capture_scheduler_summary,
+    )
 
     with IntegrationEnv(tenant_id="t_sweep_log", principal_id="p_sweep_log") as env:
         tenant, principal = env.setup_default_data()
@@ -888,6 +891,7 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
             "silence here is indistinguishable from having selected nothing"
         )
         assert "1 unchanged" in sweep[-1], f"the selected-but-unchanged buy is invisible in the summary: {sweep[-1]!r}"
-        assert "of 1 selected" in sweep[-1], (
-            f"the summary must report against the selection, not just the buckets: {sweep[-1]!r}"
-        )
+        # Through the shared helper, not an inline copy: it exists so the two
+        # schedulers cannot drift on WHETHER the selection total is checked, and a
+        # second inline assertion here is that drift starting again.
+        assert_summary_reports_against_its_selection(lines, "Status sweep:", selected=1)

@@ -2994,11 +2994,13 @@ def _reset_e2e_db(e2e_config) -> None:
                 # latent cost, not a live one. It becomes live the moment a background
                 # transaction starts anywhere else, which
                 # tests/integration/test_e2e_reset_lock_ordering.py pins.
-                ordered_first = [t for t in ("media_buys", "webhook_delivery_log") if t in tables]
-                if ordered_first:
-                    conn.execute(
-                        text(f"LOCK TABLE {', '.join(f'"{t}"' for t in ordered_first)} IN ACCESS EXCLUSIVE MODE")
-                    )
+                # ONE STATEMENT PER TABLE, deliberately. Postgres does not document the
+                # acquisition order of a multi-table `LOCK TABLE a, b`, so a single
+                # statement leaves the very property this block exists to establish
+                # unspecified -- and an ordering that holds by implementation detail is
+                # not an ordering. Separate statements make it explicit.
+                for hot_table in (t for t in ("media_buys", "webhook_delivery_log") if t in tables):
+                    conn.execute(text(f'LOCK TABLE "{hot_table}" IN ACCESS EXCLUSIVE MODE'))
                 # Sorted so two concurrent resets cannot invert against each other either.
                 joined = ", ".join(f'"{t}"' for t in sorted(tables))
                 conn.execute(text(f"TRUNCATE TABLE {joined} RESTART IDENTITY CASCADE"))

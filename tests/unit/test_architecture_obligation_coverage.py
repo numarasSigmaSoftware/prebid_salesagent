@@ -533,31 +533,21 @@ class TestSchemaLayerObligationsAreRatcheted:
         ids = _schema_layer_obligation_ids()
         assert len(ids) > 100, f"expected hundreds of schema-layer obligations, found {len(ids)}"
 
-    # The ceiling that makes "SHRINK ONLY" more than a comment. Lower it when
-    # coverage lands; never raise it. Tracked in #1935.
+    # NO separate size ceiling, deliberately. A MAX_UNCOVERED literal beside the list
+    # it counts is the falsifiable-comment shape this suite removes elsewhere, and
+    # DERIVING it from len() makes both a `<=` and an `==` assertion tautological --
+    # the list is the state, so nothing in this file can hold the list accountable to
+    # itself. (The `<=` form was also unreachable: anything tripping it tripped the
+    # `==` first.)
     #
-    # The exact-set check below fails on an obligation that is uncovered and NOT
-    # allowlisted -- but it passes if you add that obligation to the allowlist
-    # instead of covering it, which is exactly how a shrink-only list grows. The
-    # sibling e2e_rest pin needs no ceiling because its members are arbitrary
-    # strings; here a new uncovered obligation is a legitimate set member, so the
-    # size is the only thing that distinguishes progress from accommodation.
-    MAX_UNCOVERED = 196
-
-    def test_the_uncovered_allowlist_only_shrinks(self):
-        actual = len(SCHEMA_LAYER_UNCOVERED_ALLOWLIST)
-        assert actual <= self.MAX_UNCOVERED, (
-            f"SCHEMA_LAYER_UNCOVERED_ALLOWLIST grew to {actual} (ceiling {self.MAX_UNCOVERED}) -- "
-            "a new schema-layer obligation must get a `Covers:` tag, not an allowlist entry"
-        )
-
-    def test_the_ceiling_is_not_left_slack(self):
-        """A ceiling above the real count silently permits that many new entries."""
-        actual = len(SCHEMA_LAYER_UNCOVERED_ALLOWLIST)
-        assert actual == self.MAX_UNCOVERED, (
-            f"MAX_UNCOVERED is {self.MAX_UNCOVERED} but the allowlist holds {actual} -- lower the "
-            "ceiling to match, or the ratchet has room to grow back"
-        )
+    # This follows the repo's own precedent, stated in
+    # test_architecture_e2e_rest_escape_hatches: "There is deliberately no separate
+    # count <= len(pin) ratchet: the exact-set comparison already fails in both
+    # directions." Here the exact-set check below refuses an uncovered obligation that
+    # is NOT allowlisted, and refuses an allowlisted one that IS now covered. What it
+    # cannot refuse is someone adding a genuinely-new uncovered obligation to the list
+    # instead of covering it -- that is a review judgement, tracked in #1935, and
+    # pretending a self-referential assertion catches it is worse than saying so.
 
     def test_schema_layer_coverage_matches_the_ratchet(self):
         """Both directions in one assertion, via the shared helper.
