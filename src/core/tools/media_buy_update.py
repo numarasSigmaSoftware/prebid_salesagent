@@ -1570,9 +1570,8 @@ def _build_update_request(
         str | None,
         Field(
             description=(
-                "Required request key. This seller advertises idempotency support; replay is "
-                "implemented on create_media_buy today, so a repeated key here is validated and "
-                "accepted but not yet deduplicated."
+                "Required request key. This seller advertises idempotency as unsupported, so a "
+                "repeated key here is validated and accepted but not deduplicated."
             )
         ),
     ] = None,

@@ -90,7 +90,13 @@ def test_six_suite_list_is_single_sourced():
 
 
 def test_e2e_test_control_secret_reaches_server_and_bdd_tox_env():
-    """The per-run secret must survive both compose and tox isolation layers."""
+    """The per-run secret must survive both compose and tox isolation layers.
+
+    Wiring only — the VALUE is graded by the test below. Presence assertions
+    alone were satisfied by ``ADCP_TEST_CONTROL_TOKEN=""``: an empty secret
+    passes every substring check here while leaving the gated test-control
+    endpoints reachable with no credential at all.
+    """
     token_name = "ADCP_TEST_CONTROL_TOKEN"
     runner_text = _RUNNER.read_text()
     compose_text = _COMPOSE_FILE.read_text()
@@ -101,6 +107,41 @@ def test_e2e_test_control_secret_reaches_server_and_bdd_tox_env():
     assert f'if [ -z "${{{token_name}:-}}" ]' not in runner_text, "runner must not reuse a caller's stale secret"
     assert compose_text.count(f"{token_name}:") >= 2, "compose must pass the secret to server and test runner"
     assert token_name in pass_env, "tox strips the E2E control secret before the BDD process starts"
+
+
+def test_e2e_test_control_secret_is_a_fresh_high_entropy_value_each_run():
+    """Grade the VALUE the runner generates, by executing the runner's own line.
+
+    The sibling above asserts the token NAME appears in the right files, which
+    an empty string satisfies. This executes the generation exactly as
+    run_all_tests.sh does and grades what comes out: non-empty, hex, long
+    enough to be unguessable, and DIFFERENT on a second run (a hardcoded
+    constant would be shared across runs and could leak between them).
+
+    This file already uses this idiom for `_resolve()` and
+    `record_gate_failure` — the runner is shell, so the honest way to test it
+    is to run the shell.
+    """
+    generator = re.search(r"^ADCP_TEST_CONTROL_TOKEN=\"(\$\(.*\))\"$", _RUNNER.read_text(), re.MULTILINE)
+    assert generator, "run_all_tests.sh no longer generates the token with a command substitution"
+
+    def _generate() -> str:
+        proc = subprocess.run(
+            ["bash", "-c", f'printf "%s" "{generator.group(1)}"'],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    first, second = _generate(), _generate()
+
+    assert first, "the generated E2E control secret is EMPTY — the gated endpoints would be uncredentialed"
+    assert len(first) >= 32, f"secret is only {len(first)} chars; too short to be unguessable"
+    assert re.fullmatch(r"[0-9a-f]+", first), f"secret is not hex: {first[:8]}..."
+    assert first != second, "the secret is not per-run — a constant can leak between runs"
 
 
 def _shell_function(name: str) -> str:

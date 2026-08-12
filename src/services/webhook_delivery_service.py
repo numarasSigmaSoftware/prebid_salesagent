@@ -598,6 +598,11 @@ class WebhookDeliveryService:
                     return True
                 if outcome is _AttemptOutcome.PERMANENT:
                     break
+                if outcome is not _AttemptOutcome.RETRY:
+                    # No silent default: a member added later would otherwise
+                    # fall through and be retried, which is the wrong answer for
+                    # anything that is not explicitly retryable.
+                    raise ValueError(f"unhandled webhook delivery outcome: {outcome!r}")
 
         # Permanent refusal or all retries failed
         circuit_breaker.record_failure()

@@ -63,8 +63,8 @@ async def sync_creatives(
         push_notification_config: Push notification config for async notifications (AdCP spec, optional)
         context: Application level context per adcp spec
         idempotency_key: Required client-generated request key. This seller
-            advertises idempotency support; dedupe is implemented on
-            create_media_buy today, so a retry here re-executes.
+            advertises idempotency as unsupported, so a retry here
+            re-executes rather than replaying the first result.
         ctx: FastMCP context (automatically provided)
 
     Returns:
@@ -133,8 +133,8 @@ def sync_creatives_raw(
         push_notification_config: Push notification config for status updates
         context: Application level context per adcp spec
         idempotency_key: Required client-generated request key. This seller
-            advertises idempotency support; dedupe is implemented on
-            create_media_buy today, so a retry here re-executes.
+            advertises idempotency as unsupported, so a retry here
+            re-executes rather than replaying the first result.
         ctx: FastMCP context (automatically provided)
         identity: ResolvedIdentity (transport-agnostic, preferred over ctx)
 

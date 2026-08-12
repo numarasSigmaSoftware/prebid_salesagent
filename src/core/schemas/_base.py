@@ -2111,8 +2111,10 @@ def require_idempotency_key(key: str | None) -> None:
 
     AdCP 3.1.1 requires the field on every mutating task request. Requiredness
     and shape are separate from the capability's replay guarantee: this seller
-    advertises idempotency support, and the tools that do not yet deduplicate
-    still MUST reject a missing key.
+    advertises idempotency as UNSUPPORTED (``IdempotencyUnsupported(supported=False)``
+    in capabilities.py, pinned by test_idempotency_capability_applicability.py),
+    and the key is still MANDATORY on the request — a missing one is rejected
+    regardless.
     """
     if key is None:
         from src.core.exceptions import missing_idempotency_key_error

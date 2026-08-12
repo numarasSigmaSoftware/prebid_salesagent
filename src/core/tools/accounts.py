@@ -709,9 +709,9 @@ async def sync_accounts(
         delete_missing: Deactivate accounts not in the list.
         dry_run: Preview changes without persisting.
         context: Application-level context per AdCP spec.
-        idempotency_key: Required client-generated key. This seller advertises
-            idempotency support, but replay is implemented on create_media_buy
-            today, so a retry here re-executes rather than replaying the first
+        idempotency_key: Required client-generated key. The key is mandatory
+            per AdCP 3.1.1, but this seller advertises idempotency as
+            unsupported, so a retry re-executes rather than replaying the first
             result. Extending dedupe to this tool is tracked separately.
         ctx: FastMCP context for authentication.
 
