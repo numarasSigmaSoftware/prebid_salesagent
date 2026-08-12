@@ -2884,7 +2884,6 @@ def _wired_scenario_tags() -> frozenset[str]:
     )
 
 
-
 def _is_brand_shorthand_media_buy(marker_names: set[str]) -> bool:
     """True when a brand_shorthand scenario targets create_media_buy (UC-002 harness)."""
     return "brand_shorthand" in marker_names and "create_media_buy" in marker_names
