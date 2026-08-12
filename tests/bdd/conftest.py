@@ -3630,13 +3630,16 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 # These scenarios isolate authentication credential length, so
                 # their product must satisfy the independent reporting
                 # capability gate on every transport, including the live server.
-                product.reporting_capabilities = {
+                # Build from the model's own default and override only what the
+                # scenario needs. A hand-written subset silently drops whichever
+                # fields the pinned SDK requires, and Product validation then
+                # fails at read time as SERVICE_UNAVAILABLE — which is not the
+                # rejection these credential-length scenarios are asserting.
+                from src.core.schemas.product import _default_reporting_capabilities
+
+                product.reporting_capabilities = _default_reporting_capabilities().model_dump(mode="json") | {
                     "supports_webhooks": True,
                     "available_reporting_frequencies": ["daily"],
-                    # Required by the pinned SDK: a partial block fails Product
-                    # validation at read time, which the live server surfaces as
-                    # SERVICE_UNAVAILABLE from get_products.
-                    "date_range_support": "date_range",
                 }
                 env._commit_factory_data()
                 ctx["env"] = env
