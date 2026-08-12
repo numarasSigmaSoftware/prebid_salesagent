@@ -27,37 +27,81 @@ fixed order passing cannot distinguish "no deadlock" from "no contention".
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 import pytest
 from sqlalchemy import create_engine, text
 
-from src.core.database.database_session import get_engine
-
 _A, _B = "media_buys", "webhook_delivery_log"
 # Bounded so an unexpected hang fails the test instead of stalling the suite.
 _TIMEOUT_MS = 4000
 
 
-def _db_url() -> str:
-    """The live test database URL, via the engine rather than a session.
+DEADLOCK = "40P01"  # psycopg2.errors.DeadlockDetected
+LOCK_TIMEOUT = "55P03"  # psycopg2.errors.LockNotAvailable
 
-    ``get_db_session()`` is barred from test bodies by
-    test_architecture_repository_pattern -- rightly, since that guard exists to stop
-    tests hand-rolling data setup. This needs no session at all, only the URL to
-    open two INDEPENDENT connections with: the whole point is that a single session
-    cannot observe a lock conflict with itself.
+
+def _pgcode(exc: BaseException) -> str:
+    """The SQLSTATE, not the exception class.
+
+    Both a deadlock and a lock_timeout surface as ``OperationalError``, so asserting
+    on the class name cannot tell "Postgres detected a cycle" from "we simply waited
+    too long" -- the no-deadlock/no-contention conflation this module's docstring
+    claims to have eliminated, reintroduced one layer down in its own control.
     """
-    return str(get_engine().url.render_as_string(hide_password=False))
+    return getattr(getattr(exc, "orig", None), "pgcode", None) or type(exc).__name__
 
 
-def _race(db_url: str, *, reset_order: list[str]) -> list[str]:
-    """Run the scheduler's read against a reset holding locks in ``reset_order``.
+def _db_url() -> str:
+    """The URL of THIS test's database, from the env var ``integration_db`` sets.
+
+    Not ``get_engine()``: that returns a process-cached engine bound to whatever
+    DATABASE_URL was current at first use, which is the bare ``adcp_test`` database
+    with no schema — while ``integration_db`` creates a UNIQUE database per test and
+    publishes it here. The first version of this module read the cached engine and
+    still passed, because an earlier test in the same file had populated the bare
+    database by the time these ran. Alone, the same tests raised 42P01
+    (UndefinedTable) and the inverted control's 40P01 assertion failed.
+
+    That is the order-dependence this suite has elsewhere (#1931), reproduced inside
+    a test written to grade concurrency: it was green for a reason that had nothing
+    to do with lock ordering.
+
+    Not ``get_db_session()`` either — barred from test bodies by
+    test_architecture_repository_pattern, and no session is wanted here: a single
+    session cannot deadlock against itself, so this needs a URL to open two
+    INDEPENDENT connections with.
+    """
+    url = os.environ.get("DATABASE_URL")
+    assert url and url.startswith("postgresql://"), (
+        f"DATABASE_URL is {url!r}; integration_db sets it to this test's own database, and "
+        "racing against any other one grades nothing"
+    )
+    return url
+
+
+def _race(db_url: str, *, reset_order: list[str], reader: tuple[str, str] = (_A, _B)) -> list[str]:
+    """Race a scheduler-shaped read against a reset holding locks in ``reset_order``.
+
+    ``reader`` is the (first, second) table pair the simulated scheduler transaction
+    touches, defaulting to the delivery scheduler's. It is a parameter because the
+    two background loops have DIFFERENT shapes and only one of them can show what the
+    explicit LOCK buys — hardcoding the delivery pair made a status-scheduler test
+    silently race the wrong transaction.
 
     Returns the error class names seen. A deadlock surfaces as OperationalError
     (psycopg2.errors.DeadlockDetected) on whichever side Postgres chooses to kill.
     """
+    # Fail loudly if a table is missing rather than reporting 42P01 as if it were a
+    # lock outcome: an UndefinedTable makes both orderings "error", which reads as a
+    # deadlock to a control that only checks for errors.
+    with create_engine(db_url).begin() as probe:
+        present = {r[0] for r in probe.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public'"))}
+    missing = sorted({*reset_order, *reader} - present)
+    assert not missing, f"race tables absent from {db_url.rsplit('/', 1)[-1]}: {missing}"
+
     barrier = threading.Barrier(2, timeout=15)
     errors: list[str] = []
 
@@ -71,12 +115,12 @@ def _race(db_url: str, *, reset_order: list[str]) -> list[str]:
                 # barrier earlier makes the reset block before it can reach the
                 # barrier at all, which manufactures a stall in both orderings and
                 # tells you nothing about either.
-                conn.execute(text(f'SELECT 1 FROM "{_A}" LIMIT 1 FOR SHARE'))
+                conn.execute(text(f'SELECT 1 FROM "{reader[0]}" LIMIT 1 FOR SHARE'))
                 barrier.wait()
                 time.sleep(0.3)
-                conn.execute(text(f'SELECT count(*) FROM "{_B}"'))
-        except Exception as exc:  # noqa: BLE001 - the class name IS the assertion
-            errors.append(type(exc).__name__)
+                conn.execute(text(f'SELECT count(*) FROM "{reader[1]}"'))
+        except Exception as exc:  # noqa: BLE001 - the SQLSTATE is the assertion
+            errors.append(f"reader:{_pgcode(exc)}")
         finally:
             engine.dispose()
 
@@ -89,7 +133,7 @@ def _race(db_url: str, *, reset_order: list[str]) -> list[str]:
                 for table in reset_order:
                     conn.execute(text(f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE'))
         except Exception as exc:  # noqa: BLE001
-            errors.append(type(exc).__name__)
+            errors.append(f"reset:{_pgcode(exc)}")
         finally:
             engine.dispose()
 
@@ -109,9 +153,10 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
         url = _db_url()
 
         errors = _race(url, reset_order=[_B, _A])
-        assert errors, (
-            "taking the locks in the opposite order to the scheduler produced no error at all — "
-            "the race is no longer being set up, so the fixed case below proves nothing"
+        assert any(e.endswith(DEADLOCK) for e in errors), (
+            f"inverting the order produced {errors or 'no error'}, not a {DEADLOCK} deadlock. A "
+            f"{LOCK_TIMEOUT} lock_timeout here would mean the race degenerated into plain waiting, "
+            "which would make the fixed case below prove nothing"
         )
 
     def test_scheduler_order_does_not_deadlock(self, integration_db):
@@ -126,6 +171,61 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
         assert not errors, (
             f"acquiring in the scheduler's own order still errored ({errors}) — the reset in "
             "tests/bdd/conftest.py::_reset_e2e_db orders its LOCK TABLE to prevent exactly this"
+        )
+
+    def test_the_status_scheduler_shape_is_what_the_hoist_protects(self, integration_db):
+        """media_buys -> creatives: the shape the pairwise ordering does NOT cover.
+
+        The delivery scheduler's pair (media_buys, webhook_delivery_log) is already
+        ordered by ``sorted()`` alone, so that pair cannot show what the explicit LOCK
+        buys. The status scheduler is where it shows: it starts at media_buys and then
+        reads creative tables, and "creatives" sorts BEFORE "media_buys". Under a
+        sorted-only reset the two orders invert.
+
+        Measured over 10 races: 10 deadlocks (40P01) sorted-only, 0 with the hoist.
+        Both directions asserted, because the passing half alone cannot distinguish
+        "the hoist works" from "these two never contend".
+        """
+        url = _db_url()
+        inverted = _race(url, reset_order=["creatives", _A], reader=(_A, "creatives"))
+        assert any(e.endswith(DEADLOCK) for e in inverted), (
+            f"a sorted-only reset (creatives before media_buys) against the status scheduler's "
+            f"shape produced {inverted or 'no error'}, not {DEADLOCK} — if these no longer contend, "
+            "the hoist below is being credited for something it is not doing"
+        )
+
+        hoisted = _race(url, reset_order=[_A, "creatives"], reader=(_A, "creatives"))
+        assert not hoisted, (
+            f"locking media_buys first still errored ({hoisted}) — this ordering is the reason "
+            "_reset_e2e_db hoists media_buys ahead of the sorted list"
+        )
+
+    def test_every_background_loop_still_starts_at_media_buys(self):
+        """The invariant the hoist depends on, and its accepted cost.
+
+        Hoisting media_buys ahead of the ~20 tables that sort before it inverts
+        against anything touching one of those and THEN media_buys — measured with an
+        audit_logs -> media_buys reader: 10 deadlocks with the hoist, 0 without. That
+        is safe ONLY because every server-side transaction begins at media_buys.
+
+        So the invariant is a property of the background loops, and this pins the set
+        of them. A third loop is not necessarily wrong — but it must start at
+        media_buys, or the reset's ordering has to be reconsidered, and that decision
+        should not be made silently by adding a start call.
+        """
+        from pathlib import Path
+
+        main_py = (Path(__file__).resolve().parents[2] / "src" / "core" / "main.py").read_text()
+        started = sorted(
+            line.split("await ")[1].split("(")[0].strip()
+            for line in main_py.splitlines()
+            if "await start_" in line and "scheduler" in line
+        )
+        assert started == ["start_delivery_webhook_scheduler", "start_media_buy_status_scheduler"], (
+            f"the set of background scheduler loops changed to {started}. Each must begin its "
+            "transaction at media_buys — _reset_e2e_db hoists that table first on exactly that "
+            "assumption, and a loop starting elsewhere reintroduces the deadlock through the "
+            "inversion class the hoist creates (see tests/bdd/conftest.py::_reset_e2e_db)."
         )
 
     def test_the_reset_locks_the_contended_tables_first(self):

@@ -2965,27 +2965,35 @@ def _reset_e2e_db(e2e_config) -> None:
                 )
             ]
             if tables:
-                # Take the contended locks FIRST, in the order the delivery-webhook
-                # scheduler takes them. Its selection query reads media_buys and then
-                # webhook_delivery_log (the correlated anti-join over successful
-                # `final` sends); this TRUNCATE needs AccessExclusiveLock on both, and
-                # the table list comes from pg_tables in whatever order the catalog
-                # returns. When those two orders disagreed, Postgres detected a cycle
-                # and killed one side:
+                # Lock media_buys FIRST -- because every server-side transaction that
+                # can run concurrently with this reset begins there.
                 #
-                #   A waits for AccessShareLock     on webhook_delivery_log; blocked by B
-                #   B waits for AccessExclusiveLock on media_buys;           blocked by A
+                # THE INVARIANT, stated because the obvious rationale is the wrong one:
+                # it is NOT that media_buys must precede webhook_delivery_log. sorted()
+                # already does that ("m" < "w"), so for that pair alone this LOCK is
+                # redundant -- measured: sorted-only against the delivery scheduler's
+                # selection query produces zero deadlocks. A maintainer reading a
+                # pairwise rationale would conclude the LOCK is dead and delete it.
                 #
-                # That failed roughly half of in-network runs, on a different scenario
-                # each time. Acquiring media_buys before webhook_delivery_log removes
-                # the inversion: whichever side wins media_buys runs to completion and
-                # the other waits, which is contention rather than a deadlock.
+                # What it actually buys is that media_buys is the reset's first lock
+                # OVERALL. Both background loops (src/core/main.py) start there --
+                # delivery_webhook_scheduler on its anti-join, media_buy_status_scheduler
+                # on get_all_by_statuses -- so neither can hold a lock this reset wants
+                # while waiting for one this reset holds. The status scheduler then reads
+                # creative tables, and "creatives" sorts BEFORE "media_buys": under
+                # sorted-only the reset takes creatives first, the scheduler holds
+                # media_buys and wants creatives, and that is a cycle. Measured over 10
+                # races: 10 deadlocks (40P01) sorted-only, 0 with the hoist.
                 #
-                # Scoping DELIVERY_WEBHOOK_INTERVAL (run_all_tests.sh) keeps the
-                # scheduler out of legs that do not grade it, but it cannot help
-                # `./run_all_tests.sh ci`: that runs the `e2e` suite, which REQUIRES a
-                # ticking scheduler, alongside bdd_e2e in the same stack. Ordering here
-                # is what makes the two safe together.
+                # ACCEPTED COST: hoisting media_buys ahead of the ~20 tables that sort
+                # before it creates a new inversion class against any transaction that
+                # touches one of those and THEN media_buys. Measured with an
+                # audit_logs -> media_buys reader: 10 deadlocks with the hoist, 0 under
+                # sorted-only. No such counterparty exists -- both loops start at
+                # media_buys, which is exactly the invariant above -- so this is a
+                # latent cost, not a live one. It becomes live the moment a background
+                # transaction starts anywhere else, which
+                # tests/integration/test_e2e_reset_lock_ordering.py pins.
                 ordered_first = [t for t in ("media_buys", "webhook_delivery_log") if t in tables]
                 if ordered_first:
                     conn.execute(
