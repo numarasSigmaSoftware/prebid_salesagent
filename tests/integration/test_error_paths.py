@@ -363,7 +363,7 @@ class TestA2AMissingTokenRecordsTheBoundaryError:
     """
 
     @staticmethod
-    async def _send_without_token():
+    async def _send_without_token(host: str | None = None):
         from a2a.types import SendMessageRequest
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
@@ -374,7 +374,8 @@ class TestA2AMissingTokenRecordsTheBoundaryError:
         params = SendMessageRequest(
             message=create_a2a_message_with_skill("create_media_buy", {"promoted_offering": "x"})
         )
-        return await handler.on_message_send(params, context=make_a2a_context(headers={}))
+        headers = {"host": host} if host else {}
+        return await handler.on_message_send(params, context=make_a2a_context(headers=headers))
 
     @pytest.mark.asyncio
     async def test_the_rejection_is_recorded_before_it_is_raised(self, integration_db):
@@ -390,12 +391,53 @@ class TestA2AMissingTokenRecordsTheBoundaryError:
             f"A2A missing-token rejection recorded {recorder.call_count} boundary errors; "
             "REST and MCP each record 1 for the same event"
         )
-        transport, operation, error, identity = recorder.call_args.args
+        transport, operation, error, _identity = recorder.call_args.args
         assert transport == "a2a"
+        assert operation == "message_processing"
         assert error.error_code == "AUTH_REQUIRED"
-        # identity is None here, which is what makes the helper skip the
-        # tenant-scoped sinks rather than fabricate an "unknown" tenant.
-        assert identity is None
+        # The identity argument is deliberately NOT asserted None any more.
+        # A2A resolves a header-only identity here so the rejection can be
+        # scoped to a tenant and written durably, matching REST and MCP; with
+        # no host header there is simply nothing to resolve. Whether that
+        # produces a durable row is graded by
+        # test_a_resolvable_tenant_gets_a_durable_row_not_just_a_log_line.
+
+    @pytest.mark.asyncio
+    async def test_a_resolvable_tenant_gets_a_durable_row_not_just_a_log_line(self, integration_db, sample_tenant):
+        """Parity with REST and MCP means a ROW, not a log line.
+
+        The first version of this fix passed identity=None, so
+        record_boundary_error returned before the activity feed and the audit
+        log — it recorded nothing durable, and the docstring's claim that all
+        three boundaries stay in lockstep was still false. A2A now resolves a
+        header-only tenant for the rejection, exactly as REST's
+        _best_effort_rest_identity does, so an operator can see A2A auth
+        failures at all.
+
+        A header-resolved tenant is not an authorization decision: it scopes
+        WHERE the refusal is recorded. The caller is still unauthenticated and
+        still refused — the envelope assertion below is unchanged.
+        """
+        from unittest.mock import patch
+
+        from a2a.utils.errors import A2AError
+
+        with (
+            patch("src.services.activity_feed.activity_feed") as activity_feed,
+            patch("src.core.audit_logger.get_audit_logger") as audit_logger,
+            pytest.raises(A2AError),
+        ):
+            await self._send_without_token(host=f"{sample_tenant['subdomain']}.example.com")
+
+        activity_feed.log_error.assert_called_once_with(
+            tenant_id=sample_tenant["tenant_id"],
+            principal_name="anonymous",
+            error_message=(
+                "message_processing: Authentication required - Bearer token required in Authorization header"
+            ),
+            error_code="AUTH_REQUIRED",
+        )
+        audit_logger.assert_called_once_with("A2A", sample_tenant["tenant_id"])
 
     @pytest.mark.asyncio
     async def test_the_buyer_still_receives_the_auth_envelope(self, integration_db):

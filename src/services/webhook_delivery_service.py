@@ -32,6 +32,7 @@ from src.core.database.repositories.uow import PushNotificationConfigUoW
 from src.core.logging_config import scrub_control_chars
 from src.core.security.webhook_http import (
     BEARER_AUTH_SCHEME,
+    HMAC_AUTH_SCHEME,
     WEBHOOK_DELIVERY_DEADLINE_SECONDS,
     WEBHOOK_DELIVERY_MAX_RETRIES,
     WEBHOOK_DELIVERY_MAX_WORKERS,
@@ -487,6 +488,23 @@ class WebhookDeliveryService:
                 )
         if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) and config.authentication_token:
             headers["Authorization"] = f"Bearer {config.authentication_token}"
+        elif config.authentication_type and not is_auth_scheme(config.authentication_type, HMAC_AUTH_SCHEME):
+            # A CONFIGURED scheme that matched nothing means this delivery goes
+            # out unauthenticated — silently, before this branch existed. No
+            # auth configured at all (falsy authentication_type) is a different,
+            # legitimate case and stays quiet.
+            #
+            # This path supports HMAC-SHA256 and Bearer. order_approval_service
+            # supports Bearer and Basic. The two sets genuinely differ (only
+            # this one signs), so they are named here rather than merged.
+            logger.warning(
+                "Webhook auth scheme %s is not supported on the delivery path (expected %s or %s); "
+                "sending UNAUTHENTICATED to %s",
+                scrub_control_chars(config.authentication_type),
+                HMAC_AUTH_SCHEME,
+                BEARER_AUTH_SCHEME,
+                webhook_url_for_log(config.url),
+            )
         return headers
 
     @staticmethod
@@ -606,10 +624,23 @@ class WebhookDeliveryService:
                 if outcome is _AttemptOutcome.PERMANENT:
                     break
                 if outcome is not _AttemptOutcome.RETRY:
-                    # No silent default: a member added later would otherwise
-                    # fall through and be retried, which is the wrong answer for
-                    # anything that is not explicitly retryable.
-                    raise ValueError(f"unhandled webhook delivery outcome: {outcome!r}")
+                    # A member added later must not fall through and be
+                    # RETRIED, which is the wrong answer for anything not
+                    # explicitly retryable.
+                    #
+                    # This logs and STOPS rather than raising. The raise it
+                    # replaces was caught by the `except Exception` in
+                    # send_delivery_webhook and turned into a generic "webhook
+                    # delivery failed", so the fail-loud guard never reached a
+                    # caller — it just relabelled the failure. Treating an
+                    # unknown outcome as terminal reaches the same end state
+                    # deliberately, and the ERROR names the member.
+                    logger.error(
+                        "Unhandled webhook delivery outcome %r for %s — treating as terminal, not retrying",
+                        outcome,
+                        webhook_url_for_log(config.url),
+                    )
+                    break
 
         # Permanent refusal or all retries failed
         circuit_breaker.record_failure()

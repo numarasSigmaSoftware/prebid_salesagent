@@ -51,3 +51,32 @@ def test_async_bulkhead_capacity_is_global_across_sequential_event_loops() -> No
     finally:
         release_worker.set()
         bulkhead._executor.shutdown(wait=True)
+
+
+class TestAdmissionGateOverReleaseIsObservable:
+    """The over-release guard must be reachable AND leave capacity bounded.
+
+    It used to `raise ValueError` from inside a Future done-callback, where
+    CPython swallows the exception into the concurrent.futures logger — a
+    fail-loud guard that could never reach a caller, and read like one. It now
+    logs at ERROR and clamps. Swapping a raise for a clamp with nothing driving
+    it just moves the untested code, so this drives it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_over_release_clamps_instead_of_inflating_capacity(self, caplog):
+        import logging
+
+        from src.core.bounded_executor import _AsyncAdmissionGate
+
+        gate = _AsyncAdmissionGate(capacity=2)
+
+        with caplog.at_level(logging.ERROR, logger="src.core.bounded_executor"):
+            gate.release()  # one more release than was ever acquired
+
+        assert gate._available <= 2, (
+            f"capacity inflated to {gate._available} — an over-release widens the bulkhead it bounds"
+        )
+        assert any("released too many times" in r.getMessage() for r in caplog.records), (
+            "the over-release was neither raised nor logged, so it is invisible"
+        )

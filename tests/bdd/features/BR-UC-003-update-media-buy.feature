@@ -2126,6 +2126,11 @@ Feature: BR-UC-003 Update Media Buy
       | absent          | <not provided> | success |
       | matches_current | 7              | success |
 
+    # DORMANT AND CONTRADICTORY, deliberately. These rows encode the contract
+    # that lands with optimistic concurrency (#1689): matches_current ->
+    # success, stale/ahead -> CONFLICT. Shipped behavior REJECTS every
+    # schema-valid revision with UNSUPPORTED_FEATURE, so wiring these turns
+    # them RED — they are not merely unwired. Graduate with #1607/#1689.
     Examples: Invalid partitions
       | partition      | value | outcome                            |
       | stale_revision | 5     | error "CONFLICT" with suggestion   |

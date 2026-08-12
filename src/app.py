@@ -47,6 +47,7 @@ from src.core.exceptions import (
 )
 from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
 from src.core.lifecycle import run_all_shutdown_callbacks
+from src.core.logging_config import scrub_control_chars
 from src.core.main import mcp
 from src.core.resolved_identity import resolve_identity
 from src.core.tool_error_logging import handle_tool_error, record_boundary_error
@@ -192,7 +193,7 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         logger.exception(
             "REST envelope was not JSON-encodable; emitting it without the context echo (code=%s, path=%s)",
             exc.error_code,
-            request.url.path,
+            scrub_control_chars(request.url.path),
         )
 
     # `context` is the only unbounded, buyer-controlled value in the envelope,
@@ -210,7 +211,10 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         # Terminal net. Built by hand from scalar attributes so it cannot
         # depend on anything that has already failed twice; the buyer still
         # receives a readable two-layer envelope with the right status.
-        logger.exception("REST envelope could not be rebuilt; emitting the minimal shape (path=%s)", request.url.path)
+        logger.exception(
+            "REST envelope could not be rebuilt; emitting the minimal shape (path=%s)",
+            scrub_control_chars(request.url.path),
+        )
         minimal = {"code": exc.error_code, "message": str(exc)}
         return JSONResponse(status_code=exc.status_code, content={"adcp_error": minimal, "errors": [minimal]})
 
@@ -585,7 +589,7 @@ async def _handle_landing_page(request: Request):
             html_content = await asyncio.to_thread(generate_tenant_landing_page, result.tenant, result.effective_host)
             return HTMLResponse(content=html_content)
         except Exception as e:
-            logger.error(f"Error generating landing page: {e}", exc_info=True)
+            logger.error("Error generating landing page: %s", scrub_control_chars(str(e)), exc_info=True)
             return HTMLResponse(
                 content=generate_fallback_landing_page(
                     f"Error generating landing page for {result.tenant.get('name', 'tenant')}"

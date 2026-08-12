@@ -273,11 +273,13 @@ class TestAuthOptionalSkills:
         assert_envelope_shape(exc_info.value.data, "AUTH_REQUIRED", recovery="correctable")
         assert exc_info.value.data["context"] == application_context
         send_webhook.assert_not_awaited()
-        # No tenant-scoped sink fires for an unauthenticated sender. The
-        # boundary error IS recorded (parity with REST and MCP, which each
-        # record 1 for this event), but with identity=None, which is precisely
-        # what makes record_boundary_error skip the activity feed and the audit
-        # log and emit only the WARNING line an operator needs.
+        # No tenant-scoped sink fires HERE — and the reason changed, so it is
+        # worth stating. It is no longer "the boundary passes identity=None on
+        # principle": A2A now resolves a header-only tenant for this rejection,
+        # matching REST and MCP (#1546 re-review item 7). This request simply
+        # carries no headers to resolve one FROM, so there is no tenant to scope
+        # a row to. The durable-row parity is graded by
+        # TestA2AMissingTokenIsRecordedDurably below, with a resolvable tenant.
         activity_feed.log_error.assert_not_called()
         audit_logger.assert_not_called()
         assert self.handler.tasks == {}

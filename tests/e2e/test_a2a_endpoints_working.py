@@ -225,8 +225,12 @@ class TestA2AAgentCardCreation:
         assert adcp_ext is not None, "AdCP extension not found in capabilities.extensions"
 
         # Validate AdCP extension structure
-        adcp_version = get_adcp_spec_version()
-        assert adcp_ext.uri == f"https://adcontextprotocol.org/schemas/{adcp_version}/protocols/adcp-extension.json"
+        # The URI is pinned as a LITERAL. Rebuilding it from
+        # get_adcp_spec_version() — the same call production uses — asserted
+        # production against production: both sides moved together, so the
+        # assertion could not fail. This is a legacy identifier whose whole
+        # value is that it does not change, so a literal is the honest pin.
+        assert adcp_ext.uri == "https://adcontextprotocol.org/schemas/3.1.1/protocols/adcp-extension.json"
         assert adcp_ext.params is not None
         # protobuf Struct: access fields dict-like
         params = adcp_ext.params

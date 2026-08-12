@@ -400,9 +400,13 @@ class WebhookURLValidator:
 
         Blocks known-bad hostnames and literal private IPs. Unresolvable
         public hostnames are allowed here; send-time re-checks with DNS
-        (``validate_outbound_webhook_url``). When ``ADCP_TESTING=true``,
-        localhost/loopback are allowed for capture servers. Production
-        requires HTTPS.
+        (``validate_outbound_webhook_url``). Localhost/loopback are allowed
+        only under ``_allow_private_webhook_targets()`` — the SAME predicate
+        the connect-time pinning adapter reads, so the two gates cannot
+        disagree. This said ``ADCP_TESTING`` after the body moved to the shared
+        predicate; the drift was fail-closed (the docstring promised a LOOSER
+        gate than the code) but it is exactly the prose-vs-code gap this PR
+        keeps finding. Production requires HTTPS.
 
         Embedded credentials are rejected here as well as in the send-time and
         testing validators. This method was the one sibling of the three that

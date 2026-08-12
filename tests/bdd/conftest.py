@@ -3461,7 +3461,12 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 yield
         else:
             pytest.xfail(
-                "UC-003 harness not yet wired for non-extension scenarios (full graduation pending, PR #1567 follow-up)"
+                "UC-003 harness not yet wired for non-extension scenarios (full graduation pending, PR #1567 "
+                "follow-up). NOTE for whoever wires it: the three `revision` rows in the generated feature "
+                "encode the POST-#1689 contract (matches_current -> success, stale/ahead -> CONFLICT) and "
+                "contradict shipped behavior, which rejects every schema-valid revision with "
+                "UNSUPPORTED_FEATURE until optimistic-concurrency lands. Wiring them turns them RED — "
+                "'not yet wired' understates it. Graduation is gated on #1607/#1689, not on harness work."
             )
 
     elif uc == "UC-006":

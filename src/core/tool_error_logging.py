@@ -23,6 +23,7 @@ from src.core.exceptions import (
     build_two_layer_error_envelope,
     normalize_to_adcp_error,
 )
+from src.core.logging_config import scrub_control_chars
 from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,15 @@ def record_boundary_error(
     error_code, error_message, _recovery = extract_error_info(error)
     is_typed = isinstance(error, AdCPError)
     transport_upper = transport.upper()
+    # `operation` is buyer-controlled on REST, where callers pass
+    # `request.url.path`. urlsplit strips CR/LF, but VT, FF, U+2028 and NEL all
+    # survive percent-decoding and each SPLITS a log line — the class this
+    # repo's own TestControlCharClassCompleteness derives from splitlines() and
+    # names log forging as the risk. Scrubbing here closes all four logger
+    # calls in this function at one seam, rather than at each call site.
+    # Production installs JSONFormatter, which escapes them, so the exposure is
+    # plaintext (dev/staging) only.
+    operation = scrub_control_chars(operation)
 
     if is_typed:
         logger.warning(
@@ -243,7 +253,7 @@ def record_boundary_error(
             error_code=error_code,
         )
     except Exception as e:
-        logger.warning("Failed to log %s error to activity feed: %s", transport_upper, e)
+        logger.warning("Failed to log %s error to activity feed: %s", transport_upper, scrub_control_chars(str(e)))
 
     try:
         from src.core.audit_logger import get_audit_logger
@@ -258,7 +268,7 @@ def record_boundary_error(
             error=error_message,
         )
     except Exception as e:
-        logger.warning("Failed to log %s error to audit log: %s", transport_upper, e)
+        logger.warning("Failed to log %s error to audit log: %s", transport_upper, scrub_control_chars(str(e)))
 
 
 def record_boundary_error_for_identity(

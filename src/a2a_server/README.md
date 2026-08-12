@@ -103,8 +103,19 @@ Automatically fetches and parses Agent Cards to:
 
 ### AdCP Extension Support
 
-The agent card includes the AdCP extension in `capabilities.extensions`. The version is dynamically
-determined from the installed `adcp` library via `get_adcp_spec_version()`:
+The agent card includes the AdCP extension in `capabilities.extensions`. Two DIFFERENT versions
+appear there, deliberately:
+
+- the extension **URI** carries the SDK's patch-precision pin (`get_adcp_spec_version()`). It is a
+  legacy extension IDENTIFIER — an opaque match key held at its historical value so existing clients
+  keep matching — **not** a resolvable schema path (`dist/schemas/3.1.1/protocols` is 404, and
+  `adcp-extension.json` was removed upstream in v3);
+- `params.adcp_version` carries the RELEASE-precision advertised version (`wire_adcp_version()`),
+  because it is a negotiation value a buyer pins on its next request and `core/version-envelope.json`
+  is release precision. Advertising the patch pin there told buyers to pin a value this agent's own
+  inbound parser rejects with `VERSION_UNSUPPORTED`.
+
+One version driving both — which this section used to describe — was the defect.
 
 ```json
 {

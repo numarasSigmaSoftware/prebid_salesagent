@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig, SyncJob
+from src.core.logging_config import scrub_control_chars
 from src.core.security.webhook_http import BEARER_AUTH_SCHEME, is_auth_scheme
 from src.core.thread_registry import ThreadRegistry
 from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
@@ -358,6 +359,22 @@ def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str
         headers["Authorization"] = f"Bearer {config.authentication_token}"
     elif is_auth_scheme(config.authentication_type, _BASIC_AUTH_SCHEME) and config.authentication_token:
         headers["Authorization"] = f"Basic {config.authentication_token}"
+    elif config.authentication_type:
+        # Configured but unrecognised: the notification goes out
+        # UNAUTHENTICATED. Silent before this branch existed — the same shape
+        # as the lowercase-literal defect above, which is why fixing only the
+        # casing left the hole open. No auth configured at all is legitimate
+        # and stays quiet.
+        #
+        # This path supports Bearer and Basic; the delivery path supports
+        # HMAC-SHA256 and Bearer. The sets differ deliberately (only delivery
+        # signs), so they are named rather than merged.
+        logger.warning(
+            "Approval webhook auth scheme %s is not supported here (expected %s or %s); sending UNAUTHENTICATED",
+            scrub_control_chars(config.authentication_type),
+            BEARER_AUTH_SCHEME,
+            _BASIC_AUTH_SCHEME,
+        )
     if config.validation_token:
         headers["X-Webhook-Token"] = config.validation_token
     return headers
