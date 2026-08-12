@@ -23,7 +23,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastmcp import Client
 
+from src.core.main import mcp
+from tests.factories.principal import PrincipalFactory
 from tests.helpers import assert_envelope_shape
 from tests.integration.test_bearer_across_transports import _build_jsonrpc_skill
 
@@ -149,3 +152,63 @@ class TestAuthBeforeVersionOnMcpMiddleware:
         # AUTH won (not VERSION) and the version gate downstream was never reached.
         _assert_auth_without_version_disclosure(exc.value)
         call_next.assert_not_awaited()
+
+
+class TestAuthBeforeVersionOnMcpWire:
+    """The same precedence, graded on the real MCP wire.
+
+    The sibling class above drives ``MCPAuthMiddleware`` directly with an
+    ``AsyncMock`` standing in for ``call_next``. That grades the middleware's
+    own short-circuit — it cannot grade the thing the property actually rests
+    on, which is that ``src/core/main.py`` registers ``MCPAuthMiddleware``
+    BEFORE ``RequestCompatMiddleware``. Swap those two adjacent lines and the
+    mocked test still passes, because the mock IS the middleware whose ordering
+    is the point.
+
+    These cases go through ``Client(mcp)``, so both middlewares are really
+    registered and really run in their registered order. Only
+    ``resolve_identity_from_context`` is patched, and only to choose WHICH
+    unauthenticated caller is being simulated — the ordering itself is
+    production's.
+    """
+
+    @staticmethod
+    async def _call_with_unsupported_pin() -> Any:
+        """An auth-required tool carrying an unsupported version pin."""
+        async with Client(mcp) as client:
+            return await client.call_tool(
+                "create_media_buy",
+                {"adcp_version": _UNSUPPORTED_PIN},
+                raise_on_error=False,
+            )
+
+    @staticmethod
+    def _envelope(result: Any) -> dict:
+        assert result.is_error, f"expected an error envelope, got {result.content}"
+        return json.loads(result.content[0].text)
+
+    @pytest.mark.asyncio
+    async def test_missing_token_returns_auth_not_version(self):
+        """A missing token resolves to a principal-less identity, not a raise."""
+        anonymous = PrincipalFactory.make_identity(principal_id=None, tenant_id=None, protocol="mcp")
+
+        with patch(
+            "src.core.mcp_auth_middleware.resolve_identity_from_context",
+            return_value=anonymous,
+        ):
+            envelope = self._envelope(await self._call_with_unsupported_pin())
+
+        _assert_auth_without_version_disclosure(envelope)
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_returns_auth_not_version(self):
+        """An invalid token makes identity resolution raise."""
+        from src.core.exceptions import AdCPAuthenticationError
+
+        with patch(
+            "src.core.mcp_auth_middleware.resolve_identity_from_context",
+            side_effect=AdCPAuthenticationError("Invalid token"),
+        ):
+            envelope = self._envelope(await self._call_with_unsupported_pin())
+
+        _assert_auth_without_version_disclosure(envelope)
