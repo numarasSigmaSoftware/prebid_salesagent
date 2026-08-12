@@ -30,10 +30,13 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, text
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 _A, _B = "media_buys", "webhook_delivery_log"
 # Bounded so an unexpected hang fails the test instead of stalling the suite.
 _TIMEOUT_MS = 4000
@@ -228,16 +231,68 @@ class TestE2eResetDoesNotDeadlockTheScheduler:
             "inversion class the hoist creates (see tests/bdd/conftest.py::_reset_e2e_db)."
         )
 
-    def test_the_reset_locks_the_contended_tables_first(self):
-        """The behavioural tests above race a REPLICA of the reset's ordering, so this
-        pins that the reset itself still uses it — the two halves together are what
-        make removing the LOCK statement fail.
-        """
-        from pathlib import Path
+    def test_the_REAL_reset_does_not_deadlock_the_status_scheduler(self, integration_db):
+        """Drives ``_reset_e2e_db`` itself, not a stand-in for it.
 
-        source = (Path(__file__).resolve().parents[1] / "bdd" / "conftest.py").read_text()
-        assert 'ordered_first = [t for t in ("media_buys", "webhook_delivery_log") if t in tables]' in source, (
-            "_reset_e2e_db no longer locks media_buys before webhook_delivery_log; the deadlock "
-            "the tests above describe is reachable again"
+        Every other test in this file races a REPLICA: ``_race`` takes ``reset_order``
+        as a parameter and simulates the reset's locking. That grades the ordering
+        RULE, which is worth something, but it does not grade the function — the two
+        links to production were ``read_text()`` assertions, and a source-text check
+        passes for code that is present and not executed.
+
+        The mutation it missed: leave the ``LOCK TABLE`` line textually intact and
+        disable the block (``if False:``). The replica races are unaffected because
+        they never call the function; the text assertion still finds the literal. Both
+        stay green while the production reset takes locks in sorted order — creatives
+        before media_buys — which is the exact inversion this file exists to prevent.
+
+        So this calls the real thing, against the status scheduler's shape, and lets a
+        deadlock surface as a deadlock.
+        """
+        import importlib.util
+
+        url = _db_url()
+        spec = importlib.util.spec_from_file_location(
+            "_bdd_conftest_for_reset", REPO_ROOT / "tests" / "bdd" / "conftest.py"
         )
-        assert "LOCK TABLE" in source, "_reset_e2e_db no longer takes explicit locks before TRUNCATE"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reset_e2e_db = module._reset_e2e_db
+
+        barrier = threading.Barrier(2, timeout=15)
+        errors: list[str] = []
+
+        def status_scheduler() -> None:
+            """media_buys, then a creative table — the loop's real access order."""
+            engine = create_engine(url)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"SET LOCAL lock_timeout = '{_TIMEOUT_MS}ms'"))
+                    conn.execute(text(f'SELECT 1 FROM "{_A}" LIMIT 1 FOR SHARE'))
+                    barrier.wait()
+                    time.sleep(0.3)
+                    conn.execute(text('SELECT count(*) FROM "creatives"'))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"scheduler:{_pgcode(exc)}")
+            finally:
+                engine.dispose()
+
+        def production_reset() -> None:
+            try:
+                barrier.wait()
+                reset_e2e_db(SimpleNamespace(postgres_url=url))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"reset:{_pgcode(exc)}")
+
+        threads = [threading.Thread(target=status_scheduler), threading.Thread(target=production_reset)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+            assert not t.is_alive(), "a thread never finished"
+
+        assert not [e for e in errors if e.endswith(DEADLOCK)], (
+            f"_reset_e2e_db deadlocked against the status scheduler's access order ({errors}). "
+            "Its LOCK TABLE must run and must take media_buys first — a version where that "
+            "block is present but not executed fails exactly here."
+        )
