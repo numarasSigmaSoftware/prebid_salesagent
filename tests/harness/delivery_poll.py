@@ -104,12 +104,15 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         errors[] rather than appearing in media_buy_deliveries, which would make "excluded
         when scoped" prove nothing (an unscoped response would be missing it either way).
 
-        Returns the seeded media_buy_id, or None in e2e mode: the live server owns its own
-        DB seeding path and this env has no local session to seed through. Declared as a
-        return value rather than the step function probing ``hasattr(env, "_session")`` —
-        the env is what knows whether it can seed, not the step.
+        Returns the seeded media_buy_id, or None when this env has no local session to
+        seed through. e2e mode still binds ``_session`` to the live server's own database
+        (see ``IntegrationEnv.__enter__`` / ``associate_buys_with_account``, which this
+        method also calls), so seeding proceeds there too — only a genuinely session-less
+        env (unit variants) skips. Declared as a return value rather than the step
+        function probing ``hasattr(env, "_session")`` directly — the env is what knows
+        whether it can seed, not the step.
         """
-        if self.is_e2e:
+        if self._session is None:
             return None
 
         from tests.bdd.steps.generic._account_resolution import seed_account_with_access
