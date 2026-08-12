@@ -2682,6 +2682,19 @@ _ADMIN_TAG_PREFIX = "T-ADMIN-"
 # (MediaBuyListEnv, MediaBuyLifecycleEnv) dispatch it, so UC-019 now runs a2a/mcp/rest.
 _NO_REST_UC_TAG_PREFIXES: tuple[str, ...] = ()
 
+# Scenarios with no e2e-observable surface: they assert in-process state a live
+# server cannot expose. Do NOT append e2e_rest (false-green) and do NOT grow
+# _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
+_NO_E2E_REST_TAGS: frozenset[str] = frozenset(
+    {
+        # Send-time webhook scenario asserting in-process mock/circuit-breaker state.
+        "T-UC-004-webhook-ssrf-blocked",
+        # Internal AdCPTestContext simulation is deliberately in-process only:
+        # live protocol requests must use real disposable state, never X-* hooks.
+        "T-UC-002-inv-020-5",
+    }
+)
+
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Parametrize BDD scenarios across the wire transports (a2a/mcp/rest).
@@ -2736,12 +2749,12 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         transports = [Transport.A2A, Transport.MCP]
         ids = ["a2a", "mcp"]
 
-    # Internal AdCPTestContext simulation is deliberately in-process only:
-    # live protocol requests must use real disposable state, never X-* hooks.
-    is_internal_simulation = "T-UC-002-inv-020-5" in marker_names
-    if os.environ.get("BDD_E2E_ENABLED") == "true" and not no_rest_uc and not is_internal_simulation:
-        transports.append(Transport.E2E_REST)
-        ids.append("e2e_rest")
+    if os.environ.get("BDD_E2E_ENABLED") == "true" and not no_rest_uc:
+        # Scenarios with no e2e-observable surface — skip e2e_rest rather than
+        # xfail (shrink-only ratchet / false-green).
+        if not (marker_names & _NO_E2E_REST_TAGS):
+            transports.append(Transport.E2E_REST)
+            ids.append("e2e_rest")
 
     metafunc.parametrize("ctx", transports, ids=ids, indirect=True)
 
@@ -3261,7 +3274,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
 
     elif uc == "UC-006":
         marker_names = {m.name for m in request.node.iter_markers()}
-        if marker_names & {"account", "creative-invariant", "BR-RULE-034"}:
+        if marker_names & {"account", "creative-invariant", "BR-RULE-034", "webhook-ssrf"}:
             # CreativeSyncEnv exercises the full sync_creatives transport wrappers.
             # @account scenarios drive account resolution (enrich_identity_with_account());
             # @creative-invariant scenarios (#1399 R3-F2) drive the success-variant
@@ -3269,6 +3282,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             # @BR-RULE-034 scenarios drive cross-principal isolation (triple-key
             # creative lookup) — dormant until the cross-principal existence-gate
             # fix (PR #1430 review) made the surface safe to grade.
+            # @webhook-ssrf scenarios grade registration SSRF on push_notification_config.url.
             from tests.harness.creative_sync import CreativeSyncEnv
 
             with _db_scope_for(request, e2e_config), CreativeSyncEnv(e2e_config=e2e_config) as env:

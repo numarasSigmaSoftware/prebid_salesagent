@@ -34,7 +34,7 @@ from sqlalchemy import select
 from src.core.database.models import PushNotificationConfig
 from src.services.webhook_delivery_service import WebhookDeliveryService
 from tests.harness._base import IntegrationEnv
-from tests.harness._mixins import CircuitBreakerMixin
+from tests.harness._mixins import SSRF_EXTERNAL_PATCH, CircuitBreakerMixin
 
 
 class _LogCaptureHandler(logging.Handler):
@@ -69,6 +69,7 @@ class CircuitBreakerEnv(CircuitBreakerMixin, IntegrationEnv):
         "client": "src.services.webhook_delivery_service.httpx.Client",
         "sleep": "src.services.webhook_delivery_service.time.sleep",
         "random": "src.services.webhook_delivery_service.random.uniform",
+        **SSRF_EXTERNAL_PATCH,
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -97,6 +98,8 @@ class CircuitBreakerEnv(CircuitBreakerMixin, IntegrationEnv):
     def _configure_mocks(self) -> None:
         # random.uniform: return 0.0 for deterministic tests
         self.mock["random"].return_value = 0.0
+
+        self._configure_ssrf_default()
 
         # httpx.Client: 200 OK by default
         self.set_http_response(200)

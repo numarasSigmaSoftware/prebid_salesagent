@@ -41,7 +41,7 @@ WORKDIR /app
 # image), plus tox + tox-uv (a dev TOOL, not in the dependency group) so the
 # in-network runner uses the SAME tox envs as the host path — no arg drift.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/cache/uv \
+RUN --mount=type=cache,target=/cache/uv,sharing=locked \
     uv sync --frozen --group dev --extra ui-tests \
     && uv pip install --python /opt/venv tox tox-uv
 

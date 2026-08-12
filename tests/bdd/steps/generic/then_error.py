@@ -63,24 +63,6 @@ def _wire_code(ctx: dict) -> str | None:
     return (envelope.get("adcp_error") or {}).get("code")
 
 
-def _wire_recovery(ctx: dict) -> str | None:
-    """Return the buyer-facing ``recovery`` hint from the captured wire envelope.
-
-    Mirrors ``_wire_code``: when the scenario dispatched through a wire transport
-    (REST/A2A/MCP), the ``recovery`` classification is the buyer-facing contract
-    and must be read from the real envelope, not the lossy reconstructed
-    ``ctx['error']`` (which can carry a recovery that never reached the wire).
-    Reads the ``adcp_error`` layer, the same authoritative location ``_wire_code``
-    uses. Returns ``None`` on IMPL / no-wire scenarios so callers fall back to the
-    reconstructed exception.
-    """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
-    if not envelope:
-        return None
-    return (envelope.get("adcp_error") or {}).get("recovery")
-
-
 def _wire_suggestion(ctx: dict) -> str | None:
     """Return the buyer-facing ``suggestion`` from the captured wire envelope.
 
@@ -545,16 +527,19 @@ def then_error_format_id_structure(ctx: dict) -> None:
 def then_error_recovery(ctx: dict, recovery: str) -> None:
     """Assert the error recovery hint matches — wire-first, reconstructed fallback.
 
-    When the scenario dispatched through a wire transport, assert on the real
-    wire envelope's ``recovery`` (the buyer-facing contract — the value that
-    actually reached the buyer); otherwise fall back to the reconstructed
-    ``ctx['error']`` for IMPL/no-wire scenarios. Pinning the wire value is what
-    makes a factory ``recovery`` regression (e.g. ``transient`` → ``correctable``
-    on a since-terminal CONFLICT) go red.
+    On a wire transport the recovery is read from the real envelope via
+    ``assert_wire_error`` (the buyer-facing contract — the value that actually
+    reached the buyer, and the two-layer agreement alongside it); IMPL/no-wire
+    scenarios fall back to the reconstructed ``ctx['error']``. Pinning the wire
+    value is what makes a factory ``recovery`` regression (e.g. ``transient`` →
+    ``correctable`` on a since-terminal CONFLICT) go red.
     """
-    actual = _wire_recovery(ctx)
-    if actual is not None:
-        assert actual == recovery, f"Expected recovery '{recovery}', got '{actual}' (wire)"
+    result = ctx.get("result")
+    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    if envelope is not None:
+        wire_code = _wire_code(ctx)
+        assert wire_code, f"Expected wire error code when asserting recovery={recovery!r}: {envelope}"
+        result.assert_wire_error(wire_code, recovery=recovery)
         return
     error = ctx.get("error")
     assert error is not None, "No error recorded in ctx"
