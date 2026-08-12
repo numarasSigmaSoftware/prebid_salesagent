@@ -40,6 +40,7 @@ implement (in-flight tracking and its error-detail siblings) stay visible but
 unwired.
 """
 
+import re
 from pathlib import Path
 
 from src.core.config_loader import current_tenant
@@ -148,17 +149,58 @@ def test_no_source_docstring_claims_the_opposite_of_the_shipped_discriminant():
         return  # Claiming support IS accurate then; nothing to guard.
 
     repo_root = Path(__file__).resolve().parents[2]
-    claims = (
-        "advertises idempotency support",
-        "advertise idempotency support",
-        "Capabilities advertise\n            idempotency support",
+    # Patterns, not substrings. The first pass here matched only the phrasings
+    # used in the source docstrings that had just been corrected, so it stayed
+    # green against the very defect it was written for: the grounding note
+    # spells the same inversion as "the live `supported: true` discriminant".
+    # Fitting the matcher to the fixed sites is the failure this guard exists
+    # to stop, and it happened twice — scan root first, then patterns.
+    #
+    # Each pattern asserts something about THIS seller's live posture.
+    # Descriptions of the schema union ("`supported: true` requires
+    # replay_ttl_seconds") and of the rejected alternative ("`supported: true`
+    # claims every mutating call is safe to retry blind") are legitimate and
+    # must not match — hence "live/current/asserts", not a bare
+    # "supported: true".
+    claim_patterns = (
+        r"advertises?\s+idempotency\s+support",
+        r"reports?\s+idempotency\s+support",
+        r"[Ii]dempotency\s+advertised",
+        r"(?:live|current)\s+`?supported:\s*true`?",
+        r"asserts?\s+(?:the\s+)?(?:live\s+)?`?supported:\s*true`?",
     )
-    offenders = [
-        f"{path.relative_to(repo_root)}: {claim!r}"
-        for path in sorted((repo_root / "src").rglob("*.py"))
-        for claim in claims
-        if claim in path.read_text()
-    ]
+    # Scanning src/ only was the original mistake: the site that mattered most
+    # was .claude/notes/pr1546-adcp-3.1.1-grounding.md, the Spec-Grounding-Gate
+    # record a reviewer reads to check the claim against the spec — and it sat
+    # outside the guard fitted to the sites that had just been corrected.
+    scan_roots = (repo_root / "src", repo_root / "docs", repo_root / ".claude" / "notes")
+    # Release notes are a HISTORICAL record, not a description of current
+    # behavior. docs/releases/2.0.0.md says 2.0.0 "advertises idempotency
+    # support ... with a 24-hour replay window", and that is TRUE of 2.0.0:
+    # it shipped 2026-07-01, and the flip to supported=false is 2026-07-24, in
+    # this PR. Forcing an edit there would falsify the changelog, so the
+    # exclusion is deliberate — not an allowlist of inconvenient hits.
+    excluded_roots = (repo_root / "docs" / "releases",)
+
+    def _in_scope(path: Path) -> bool:
+        return not any(path.is_relative_to(excluded) for excluded in excluded_roots)
+
+    offenders = []
+    for root in scan_roots:
+        for suffix in ("*.py", "*.md"):
+            for path in sorted(root.rglob(suffix)):
+                if not _in_scope(path):
+                    continue
+                text = path.read_text()
+                for pattern in claim_patterns:
+                    for match in re.finditer(pattern, text):
+                        # "advertises idempotency as unsupported" is the CORRECT
+                        # wording and contains the offending prefix.
+                        window = text[match.start() : match.end() + 40]
+                        if "unsupported" in window:
+                            continue
+                        line = text.count("\n", 0, match.start()) + 1
+                        offenders.append(f"{path.relative_to(repo_root)}:{line}: {match.group(0)!r}")
 
     assert not offenders, (
         "these describe the seller as advertising idempotency support while the wire ships "

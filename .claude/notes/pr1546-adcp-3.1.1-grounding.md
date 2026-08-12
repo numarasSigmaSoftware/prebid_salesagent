@@ -235,8 +235,14 @@ The upstream supported-true phases this seller does NOT yet implement
 (in-flight tracking, expired-window, canonical-comparison, conflict-details)
 remain visible in the generated feature but unwired — tracked for the
 reservation-subsystem rebuild (#1683). The local applicability guard asserts
-the live `supported: true` discriminant matches the enforced replay window and
-that the unimplemented phases stay visible-not-claimed.
+the live discriminant is `IdempotencyUnsupported(supported=False)` — NOT
+`supported: true`, which this note previously described. That inversion
+mattered more here than in the source docstrings: this file is the
+Spec-Grounding-Gate artifact, so it is what a reviewer reads to check the
+claim against the spec, and it described the guard as asserting the opposite
+of what it asserts (see `capabilities.py` and
+`test_idempotency_capability_applicability.py`). The guard also pins that the
+unimplemented phases stay visible-not-claimed.
 
 ## Update-media-buy revision
 
