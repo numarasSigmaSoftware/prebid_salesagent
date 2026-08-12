@@ -939,7 +939,8 @@ class MediaBuy(Base):
     # UPDATE (MediaBuyRepository.try_claim_final_webhook) before the final POST so
     # only one worker sends; a stale claim (crashed worker) self-heals once older
     # than the lease. NULL until a final is claimed. The residual crash-after-POST
-    # duplicate window is deferred to the durable outbox (#1606).
+    # duplicate window closes only when the send is durably reserved before
+    # the POST (a transactional outbox); this column is best-effort until then.
     final_webhook_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Same pattern as final_webhook_claimed_at, but for PERIODIC (non-final)
     # delivery webhooks: the 24h dedup check in _should_skip_send is read-only,

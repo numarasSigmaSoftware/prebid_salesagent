@@ -14,6 +14,8 @@ rewrite that keeps the shape and loses the behavior still fails.
 """
 
 import os
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -97,3 +99,34 @@ class TestSessionCookieSecureFollowsProductionSignal:
         config = app_config_under_env(PRODUCTION="false")
 
         assert config["SESSION_COOKIE_SECURE"] is False
+
+
+class TestDocumentedCookiePolicyMatchesTheImplementation:
+    """docs/security.md must state the values create_app() actually sets.
+
+    The guide documented `SameSite=None` "required for OAuth" and `Path=/admin/`
+    long after the implementation moved to `Lax` and `/`, and never mentioned
+    HttpOnly at all. Nothing failed, because prose is not executed — so an operator
+    reading it got CSRF guidance that was the opposite of the deployed behaviour.
+
+    Compares against the REAL config rather than a second literal list: a test that
+    restated the expected values would just be a third place to drift.
+    """
+
+    DOC = Path(__file__).resolve().parents[2] / "docs" / "security.md"
+
+    @pytest.mark.parametrize(
+        "key",
+        ["SESSION_COOKIE_SECURE", "SESSION_COOKIE_HTTPONLY", "SESSION_COOKIE_SAMESITE", "SESSION_COOKIE_PATH"],
+    )
+    def test_the_guide_states_the_configured_value(self, app_config_under_env, key):
+        config = app_config_under_env(ENVIRONMENT="production")
+        documented = re.search(rf"^{key} = (.+?)\s*(?:#.*)?$", self.DOC.read_text(), re.MULTILINE)
+        assert documented, f"docs/security.md no longer documents {key}"
+
+        actual = config[key]
+        expected_literal = f'"{actual}"' if isinstance(actual, str) else str(actual)
+        assert documented.group(1).strip() == expected_literal, (
+            f"docs/security.md documents {key} = {documented.group(1).strip()} but create_app() sets "
+            f"{expected_literal}. Update the guide — operators act on it."
+        )

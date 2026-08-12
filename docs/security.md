@@ -169,12 +169,32 @@ All authentication changes must include tests for:
 
 #### Session Cookie Configuration
 ```python
-# Production session config
-SESSION_COOKIE_DOMAIN = ".sales-agent.example.com"  # Scoped to internal domain
+# Production session config (src/admin/app.py, gated on config.is_production())
+SESSION_COOKIE_DOMAIN = ".sales-agent.example.com"  # Scoped to internal domain (multi-tenant only)
 SESSION_COOKIE_SECURE = True                        # HTTPS only
-SESSION_COOKIE_SAMESITE = "None"                   # Required for OAuth
-SESSION_COOKIE_PATH = "/admin/"                     # Admin interface only
+SESSION_COOKIE_HTTPONLY = True                      # Not readable from JavaScript
+SESSION_COOKIE_SAMESITE = "Lax"                     # Not sent on cross-site requests
+SESSION_COOKIE_PATH = "/"                           # Covers /admin/* AND /auth/* callbacks
 ```
+
+`SameSite=Lax` is compatible with the OAuth flow: `/auth/google/callback` and
+`/auth/gam/callback` are GET routes and nothing requests a `form_post` response
+mode, and Lax sends cookies on top-level GET navigation. An earlier revision of
+this guide documented `SameSite=None` as "required for OAuth" — it is not, and
+`None` sends the session cookie on every cross-site request, which is the CSRF
+exposure Lax exists to close.
+
+`Path=/` rather than `/admin/` because the OAuth callbacks live under `/auth/`.
+Scoping the cookie to `/admin/` means the callback cannot read the session it is
+supposed to complete — the failure described earlier in this section.
+
+`HttpOnly=True` matches development. A previous production branch set it False
+with `SameSite=None`, justified by an EventSource requirement that does not
+exist: nothing in `src/admin`, `templates` or `static` reads `document.cookie`.
+
+These values are pinned against the real `create_app()` configuration by
+`tests/unit/test_admin_session_cookie_policy.py`, so this block cannot drift
+from the implementation without a test failing.
 
 #### OAuth Flow Architecture
 ```python

@@ -81,7 +81,7 @@ class MediaBuyRepository:
         and skips the send. The caller MUST commit for the claim to be visible to
         other transactions. This does NOT close the crash-after-POST duplicate window
         (the POST precedes the success-log write); a durable exactly-once final
-        (outbox) is tracked in #1606.
+        requires reserving the send durably before the POST (a transactional outbox).
 
         The claim is MUTUALLY EXCLUSIVE with the periodic claim: it also requires
         ``last_periodic_webhook_claimed_at`` to be free or past

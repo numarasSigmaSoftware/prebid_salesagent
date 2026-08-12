@@ -1,7 +1,7 @@
 """redact legacy webhook delivery log credentials
 
 Historical rows in ``webhook_delivery_log`` were written before the
-credential-redaction work in PR #1575: ``webhook_url`` held the complete,
+credential-redaction work on the delivery path: ``webhook_url`` held the complete,
 unredacted outbound URL (userinfo, capability-host, path, query, and fragment
 credentials all survived verbatim), and ``error_message`` could carry the same
 data via an unsanitized ``str(exception)`` -- ``requests.HTTPError`` embeds the

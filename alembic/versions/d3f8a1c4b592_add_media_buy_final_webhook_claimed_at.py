@@ -5,7 +5,8 @@ workers. The delivery scheduler atomically claims the final via a
 conditional UPDATE on this column before the outbound POST, so only one worker
 sends; a stale claim (crashed worker, older than the lease) self-heals on a later
 batch. NULL until a final is claimed. The residual crash-after-POST duplicate
-window is deferred to the durable outbox (#1606).
+window closes only when the send is durably reserved BEFORE the POST
+(a transactional outbox); this column is the best-effort guard until then.
 
 Revision ID: d3f8a1c4b592
 Revises: 823974a5553e

@@ -377,7 +377,8 @@ class DeliveryWebhookScheduler:
                 # operator can re-send a fresh periodic report. It does NOT bypass
                 # the final gate: a completed buy whose final was already delivered
                 # is still skipped, so a manual trigger won't duplicate the final on
-                # the read-check path (best-effort; #1606 for true exactly-once).
+                # the read-check path (best-effort; true exactly-once needs a durable
+                # reserve-before-send).
                 return await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
         except Exception as e:
             # Log here (this frame knows the media_buy_id) then RE-RAISE, so the caller
@@ -433,7 +434,7 @@ class DeliveryWebhookScheduler:
         UPDATE then matches 0 rows and loses). The returned token is passed to
         _release_final_webhook_claim on a definitive failure/no-send so the claim doesn't
         block an immediate retry for the whole lease. Does NOT close the
-        post-POST window — #1606. That window is not crash-only: a failure of the
+        post-POST window, which only a durable reserve-before-send closes. That window is not crash-only: a failure of the
         success-path ``_write_delivery_log`` (which raises) is indistinguishable
         here from a failed send, so the claim is released and the final re-sends.
         """
@@ -520,7 +521,8 @@ class DeliveryWebhookScheduler:
             force: If True, bypass frequency + the 24h "scheduled" dedup. Does
                 NOT bypass the final gate, so a manual re-trigger won't emit a
                 duplicate final on the read-check path (best-effort; a crash /
-                concurrency window remains — see #1606).
+                concurrency window remains, closable only by reserving the send durably
+        # before the POST).
 
         Returns:
             True when a webhook was actually delivered; False when the buy was
@@ -619,7 +621,7 @@ class DeliveryWebhookScheduler:
         matching final/periodic release method.
 
         Extracted from _deliver_report to keep it under the statement-count
-        guard (ADR-009 / #1610) — pure refactor, no behavior change.
+        guard (ADR-009) — pure refactor, no behavior change.
         """
         if is_final:
             self._release_final_webhook_claim(session, media_buy, claim_token)
@@ -655,7 +657,7 @@ class DeliveryWebhookScheduler:
         to the POST alone reddens it.
 
         A successful POST keeps the claim; the crash-after-POST duplicate window
-        is the best-effort residual tracked in #1606.
+        is the best-effort residual, closable only by a durable reserve-before-send.
         """
         # Reporting period for daily frequency: yesterday (full day).
         start_date_obj = datetime.now(UTC).date() - timedelta(days=1)
@@ -699,7 +701,7 @@ class DeliveryWebhookScheduler:
         # simulator) attaches its own notification_type / sequence_number /
         # next_expected_at from an in-memory counter. That emitter IS graded by the
         # shared next_expected_at oracle, but not by the omission or pairing ones —
-        # reconciliation tracked in #1624.
+        # the two emitters are not yet reconciled.
         #
         # The body emitted here is governed by media-buy-delivery-webhook-result.json
         # (@ 3.1.0, the release the schema entered). It lists notification_type in
@@ -707,7 +709,7 @@ class DeliveryWebhookScheduler:
         #
         # That constraint IS graded offline now, contrary to an earlier revision of
         # this comment which said the file "is not among the vendored fixtures ...
-        # so it is not graded offline". That was true of the vendored tree; #1868
+        # so it is not graded offline". That was true of the vendored tree; the
         # repointed tests/helpers/pinned_schema.py at the SDK's own adcp/_schemas/,
         # where the file resolves. test_scheduler_webhook_body_is_schema_valid
         # validates a real scheduler body against it, so "required" and the
@@ -798,7 +800,7 @@ class DeliveryWebhookScheduler:
         # number is allocated below. The loser skips; the winner's claim is
         # released below on a failed send (token-guarded) so an immediate retry
         # isn't blocked for the lease. The crash-after-POST residual is tracked
-        # in #1606.
+        # by a durable reserve-before-send.
         claim_token = self._claim_webhook_send(session, media_buy, is_final=is_final)
         if claim_token is None:
             return False
@@ -881,7 +883,7 @@ class DeliveryWebhookScheduler:
                 # Say only what is known here. Distinguishing them properly means
                 # giving send_notification a typed outcome instead of a bool —
                 # a change across every caller (A2A, MCP, task webhooks), tracked
-                # in #1624 rather than widened into this PR.
+                # separately rather than widened into this change.
                 raise RuntimeError(
                     f"Delivery report webhook send failed for media buy {media_buy.media_buy_id} "
                     "(webhook service reported failure; if no HTTP attempt is logged, the URL was "

@@ -287,7 +287,7 @@ def is_production() -> bool:
 
     Convergence is NOT repo-wide: 16 open-coded production decisions remain
     in admin blueprints and the landing page, all presentation or deploy-shape
-    rather than security boundaries, tracked in #1819. TestProductionSignalConverged
+    rather than security boundaries. TestProductionSignalConverged
     (tests/unit/test_db_config.py) holds that count on a shrink-only ratchet and
     fails on a new one anywhere, so the remainder cannot grow quietly; the two
     security-bearing convergences above are graded behaviorally by

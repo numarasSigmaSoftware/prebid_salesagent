@@ -313,7 +313,7 @@ class DeliveryRepository:
         classifies any exception from the send as a failed send — releasing the
         final claim and leaving no success row — so a DB error on the post-2xx
         write alone re-sends the final on the next batch. Closing it needs an
-        atomic reserve / outbox (#1606).
+        atomic reserve-before-send (a transactional outbox).
 
         Uses ``successful_final_log_clauses`` — the same predicate
         ``MediaBuyRepository.get_reportable_for_delivery`` correlates against —
