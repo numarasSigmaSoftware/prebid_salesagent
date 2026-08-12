@@ -44,9 +44,9 @@ def test_agent_card_scheme(host, xfp, expected):
 def test_agent_card_adcp_extension_follows_v2_convention():
     """The A2A agent card's AdCP extension follows the pinned A2A guide's convention.
 
-    Per ``dist/docs/3.1.1/building/by-layer/L0/a2a-guide.mdx`` § "AdCP
-    Extension" (resolves @main, not at tag v3.1.1: the 3.1.1 prose snapshot was
-    published after the tag): the extension URI is the STABLE
+    Per ``docs/building/by-layer/L0/a2a-guide.mdx`` § "AdCP Extension" — the
+    unversioned prose path, which resolves at tag v3.1.1 (dist/docs carries no
+    3.1.1 snapshot): the extension URI is the STABLE
     ``https://adcontextprotocol.org/extensions/adcp`` (the versioned
     ``adcp-extension.json`` schema was a v2 artifact, removed in v3, so a
     ``/schemas/<version>/...`` URI addresses nothing), and the card's

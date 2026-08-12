@@ -2327,10 +2327,9 @@ class AdCPRequestHandler(RequestHandler):
 
 
 # Agent-card AdCP extension: grounded in the pinned A2A guide
-# (dist/docs/3.1.1/building/by-layer/L0/a2a-guide.mdx § "AdCP Extension" —
-# resolves @main, not at tag v3.1.1: the 3.1.1 prose snapshot was published
-# after the tag), NOT the v3 version-envelope contract. Two facts from that
-# guide drive the shape:
+# (docs/building/by-layer/L0/a2a-guide.mdx § "AdCP Extension" — the unversioned
+# prose path, which resolves at tag v3.1.1; dist/docs carries no 3.1.1 snapshot),
+# NOT the v3 version-envelope contract. Two facts from that guide drive the shape:
 #   * The extension URI is the STABLE ``https://adcontextprotocol.org/extensions/adcp``
 #     — the versioned ``adcp-extension.json`` schema was a v2 artifact and was
 #     removed in v3, so a ``/schemas/<version>/protocols/adcp-extension.json`` URI

@@ -237,9 +237,9 @@ class MediaBuyStatusScheduler:
         its window opens.
 
         Spec tension (deliberate, ungraded):
-        dist/docs/3.1.1/media-buy/specification.mdx:141 (resolves @main, not at
-        tag v3.1.1: the 3.1.1 prose snapshot was published after the tag; eight
-        files share the ``specification.mdx`` basename, so the full path matters)
+        docs/media-buy/specification.mdx:141 — the unversioned prose path, which
+        resolves at tag v3.1.1 (dist/docs carries no 3.1.1 snapshot); eight files
+        share the ``specification.mdx`` basename, so the full path matters —
         says sellers MUST transition ``pending_start`` -> ``active`` when the
         flight date arrives, while this check holds a buy with
         assigned-but-unapproved creatives past that date — serving unapproved

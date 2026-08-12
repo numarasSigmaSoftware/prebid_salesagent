@@ -365,10 +365,9 @@ class TestValidationModeSemantics:
         CREATIVE_NOT_FOUND — "Referenced creative does not exist in the agent's
         creative library. Recovery: correctable (...). Sellers MUST return this
         code uniformly for any creative_id not owned by the calling account".
-        error-handling.mdx "Not-found precedence" (newest prose at
-        dist/docs/3.1.1, which resolves @main — not at tag v3.1.1, since the
-        3.1.1 prose snapshot was published after the tag): the code for a
-        creative_id reference
+        docs/building/by-layer/L3/error-handling.mdx:193 "Not-found precedence"
+        — the unversioned prose path, which resolves at tag v3.1.1 (dist/docs
+        carries no 3.1.1 snapshot): the code for a creative_id reference
         SHOULD be CREATIVE_NOT_FOUND. Ungraded by storyboard (zero
         CREATIVE_NOT_FOUND hits in dist/compliance/3.1.1).
 
