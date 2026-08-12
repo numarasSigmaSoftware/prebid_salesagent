@@ -192,6 +192,13 @@ class TestSyncCreativesSandboxMarkerTransport:
 
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_sandbox_scoped_sync_carries_the_marker(self, integration_db, transport):
+        """Mirrors the negative control's wire-vs-payload branching (see its docstring).
+
+        ``payload.sandbox is True`` alone grades the parsed model, not the buyer-visible
+        bytes — a transport that dropped the key while the model kept a stale value from
+        elsewhere would still satisfy it. MCP and REST are asserted to HAVE a wire
+        explicitly; IMPL/A2A (no wire in this harness) fall back to the payload check.
+        """
         from src.core.schema_helpers import to_account_reference
 
         suffix = transport.value
@@ -207,9 +214,22 @@ class TestSyncCreativesSandboxMarkerTransport:
 
         assert result.is_success, f"[{suffix}] dispatch failed: {result.error!r}"
         assert_envelope(result, transport)
-        assert result.payload.sandbox is True, (
-            f"[{suffix}] sandbox-scoped sync_creatives must carry sandbox: true, got {result.payload.sandbox!r}"
-        )
+
+        if transport in (Transport.MCP, Transport.REST):
+            assert result.wire_response is not None, (
+                f"[{suffix}] {transport.value} must capture a real wire response — a regression "
+                "here would silently fall back to the weaker payload-only assertion below"
+            )
+
+        if result.wire_response is not None:
+            assert result.wire_response.get("sandbox") is True, (
+                f"[{suffix}] sandbox-scoped sync_creatives must carry sandbox: true on the wire, "
+                f"got {result.wire_response.get('sandbox')!r}"
+            )
+        else:
+            assert result.payload.sandbox is True, (
+                f"[{suffix}] sandbox-scoped sync_creatives must carry sandbox: true, got {result.payload.sandbox!r}"
+            )
 
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_live_scoped_sync_omits_the_marker(self, integration_db, transport):

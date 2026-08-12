@@ -339,7 +339,7 @@ _XFAIL_TAGS: dict[str, str] = {
     "adapter suppression it grades ARE implemented — re-check when the harness reaches it",
     "T-UC-002-sandbox-validation": "UC-002 harness not wired for this scenario; sandbox validation "
     "is production validation (no separate path) — re-check when the harness reaches it",
-    # FIXME(salesagent-gh8p.13 / production-gap bead): natural-key sandbox resolution
+    # FIXME(#1914): natural-key sandbox resolution
     # without prior provisioning is unimplemented. _resolve_by_natural_key
     # (account_helpers.py:110) requires the sandbox account to already exist —
     # raises ACCOUNT_NOT_FOUND rather than auto-provisioning. The "no sandbox field

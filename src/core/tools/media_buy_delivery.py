@@ -89,7 +89,7 @@ from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.helpers.account_helpers import partition_by_sandbox_mode
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_for_mode
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AggregatedTotals,
@@ -207,16 +207,12 @@ def _get_media_buy_delivery_impl(
     # single-mode request still constructs exactly one.
     _adapters_by_mode: dict[bool, AdServerAdapter] = {}
 
-    def _adapter_for(is_sandbox: bool) -> AdServerAdapter:
-        if is_sandbox not in _adapters_by_mode:
-            _adapters_by_mode[is_sandbox] = get_adapter(
-                principal,
-                dry_run=testing_ctx.dry_run if testing_ctx else False,
-                testing_context=testing_ctx,
-                tenant=tenant,
-                sandbox=is_sandbox,
+    def _adapter_for(sandbox: bool) -> AdServerAdapter:
+        if sandbox not in _adapters_by_mode:
+            _adapters_by_mode[sandbox] = adapter_for_mode(
+                principal, tenant=tenant, testing_ctx=testing_ctx, sandbox=sandbox
             )
-        return _adapters_by_mode[is_sandbox]
+        return _adapters_by_mode[sandbox]
 
     # Determine reporting period
     if req.start_date and req.end_date:

@@ -107,7 +107,7 @@ def _patch_adapter_with_snapshot(ctx: dict, snapshot_data: dict) -> None:
     adapter_mock.get_packages_snapshot.return_value = snapshot_data
 
     patcher = patch(
-        "src.core.tools.media_buy_list.get_adapter",
+        "src.core.helpers.adapter_helpers.get_adapter",
         return_value=adapter_mock,
     )
     patcher.start()
@@ -844,7 +844,7 @@ def given_adapter_no_realtime(ctx: dict) -> None:
     adapter_mock.get_packages_snapshot.return_value = {}
 
     patcher = patch(
-        "src.core.tools.media_buy_list.get_adapter",
+        "src.core.helpers.adapter_helpers.get_adapter",
         return_value=adapter_mock,
     )
     patcher.start()

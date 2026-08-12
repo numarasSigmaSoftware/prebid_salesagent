@@ -46,7 +46,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
     """
 
     EXTERNAL_PATCHES = {
-        "adapter": "src.core.tools.media_buy_delivery.get_adapter",
+        "adapter": "src.core.helpers.adapter_helpers.get_adapter",
     }
     REST_ENDPOINT = "/api/v1/media-buys/delivery"
 
@@ -85,6 +85,48 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
                     "the buy does not exist in this scenario's database"
                 )
         self._commit_factory_data()
+
+    def seed_decoy_buy_on_account(
+        self,
+        tenant: Any,
+        owner: Any,
+        *,
+        account_id: str,
+        media_buy_id: str,
+        brand_domain: str,
+        operator: str,
+    ) -> str | None:
+        """Create a buy on a DIFFERENT account, so an account-scope Then step has something to exclude.
+
+        Owned by ``owner`` — the scenario's own buy principal, not the env's default
+        identity — so ownership filtering does not remove it and only the account filter
+        can. Seeds adapter data too: a targeted buy whose adapter read fails degrades into
+        errors[] rather than appearing in media_buy_deliveries, which would make "excluded
+        when scoped" prove nothing (an unscoped response would be missing it either way).
+
+        Returns the seeded media_buy_id, or None in e2e mode: the live server owns its own
+        DB seeding path and this env has no local session to seed through. Declared as a
+        return value rather than the step function probing ``hasattr(env, "_session")`` —
+        the env is what knows whether it can seed, not the step.
+        """
+        if self.is_e2e:
+            return None
+
+        from tests.bdd.steps.generic._account_resolution import seed_account_with_access
+        from tests.factories import MediaBuyFactory
+
+        seed_account_with_access(
+            tenant,
+            owner,
+            account_id=account_id,
+            status="active",
+            brand_domain=brand_domain,
+            operator=operator,
+        )
+        MediaBuyFactory(tenant=tenant, principal=owner, media_buy_id=media_buy_id, status="active")
+        self.associate_buys_with_account([media_buy_id], account_id)
+        self.set_adapter_response(media_buy_id=media_buy_id)
+        return media_buy_id
 
     def call_a2a(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
         """Call get_media_buy_delivery via real AdCPRequestHandler — full A2A pipeline."""

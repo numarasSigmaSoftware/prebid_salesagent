@@ -453,7 +453,7 @@ def _update_media_buy_impl(
             # above, it records no workflow-step audit entry and fires no
             # buyer-facing status="failed" push, since
             # audit_workflow_step_failure_ctx has nothing to mark failed yet.
-            _mb_sandbox = uow.sandbox_mode(_current_mb)
+            sandbox = uow.sandbox_mode(_current_mb)
 
             # Extract testing context early (needed for dry_run check)
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
@@ -498,7 +498,7 @@ def _update_media_buy_impl(
                 dry_run=testing_ctx.dry_run,
                 testing_context=testing_ctx,
                 tenant=tenant,
-                sandbox=_mb_sandbox,
+                sandbox=sandbox,
             )
             today = req.today or date.today()
 

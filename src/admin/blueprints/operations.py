@@ -15,7 +15,7 @@ from sqlalchemy import select
 from src.admin.utils import echo_context, require_auth, require_tenant_access
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.media_buy import MediaBuyRepository
-from src.core.exceptions import AdCPMediaBuyRejectedError
+from src.core.exceptions import AdCPAccountNotFoundError, AdCPMediaBuyRejectedError
 from src.core.logging_config import log_safe
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
 from src.core.webhook_validator import validate_webhook_task_type
@@ -217,6 +217,11 @@ def media_buy_detail(tenant_id, media_buy_id):
 
             # Fetch delivery metrics if media buy is active or completed
             delivery_metrics = None
+            # Distinct from delivery_metrics=None (still loading / not yet fetched): a
+            # dangling account reference is a seller-side data-integrity fault the
+            # operator must act on, not a transient adapter hiccup — the template
+            # renders it as its own state rather than the generic "loading..." one.
+            delivery_metrics_error = None
             if media_buy.status in ["active", "approved", "completed"]:
                 try:
                     from datetime import UTC, datetime, timedelta
@@ -225,7 +230,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                     from src.core.database.models import Tenant
                     from src.core.database.repositories.account import AccountRepository
                     from src.core.helpers.account_helpers import sandbox_mode_for_buy
-                    from src.core.helpers.adapter_helpers import get_adapter
+                    from src.core.helpers.adapter_helpers import adapter_for_mode
                     from src.core.schemas import Principal as PrincipalSchema
                     from src.core.schemas import ReportingPeriod
 
@@ -249,9 +254,10 @@ def media_buy_detail(tenant_id, media_buy_id):
                         )
                         # Admin route has no buyer identity; derive the mode from the buy's
                         # account so a sandbox buy's delivery is read from the simulator.
-                        adapter = get_adapter(
+                        adapter = adapter_for_mode(
                             principal_schema,
-                            dry_run=False,
+                            tenant=tenant,
+                            testing_ctx=None,
                             sandbox=sandbox_mode_for_buy(AccountRepository(db_session, tenant_id), media_buy),
                         )
 
@@ -282,6 +288,16 @@ def media_buy_detail(tenant_id, media_buy_id):
                             "currency": delivery_response.currency,
                             "by_package": delivery_response.by_package,
                         }
+                except AdCPAccountNotFoundError as e:
+                    # sandbox_mode_for_buy (account_helpers._account_is_sandbox) raises this
+                    # when the buy's account_id is dangling — seller-side data corruption, not
+                    # a transient read failure. ERROR + stack so it surfaces distinctly from
+                    # the broad except below, which is deliberately WARNING-only.
+                    logger.error(
+                        f"Dangling account reference fetching delivery metrics for {log_safe(media_buy_id)}: {e}",
+                        exc_info=True,
+                    )
+                    delivery_metrics_error = str(e)
                 except Exception as e:
                     # log_safe on the path parameter: it reaches this line straight from
                     # the URL, and the scanner flags it as a log-injection sink. Bounded
@@ -305,6 +321,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 computed_state=computed_state,
                 readiness=readiness,
                 delivery_metrics=delivery_metrics,
+                delivery_metrics_error=delivery_metrics_error,
             )
     except Exception as e:
         logger.error(f"Error viewing media buy: {e}", exc_info=True)

@@ -118,6 +118,14 @@ class TestUnresolvedAccountRefusesDispatch:
     """SA-003: an unresolvable non-null account must never fall through to live."""
 
     def test_unresolved_account_raises_rather_than_returning_live(self) -> None:
+        """The wire message matches the file's other ACCOUNT_NOT_FOUND raises.
+
+        A buyer parsing ACCOUNT_NOT_FOUND on the wire cannot distinguish a
+        site-specific phrasing from the family's; the seller-side "why" this refusal
+        differs from a buyer-typo'd account_id is documented at the raise site and
+        emitted at ERROR with a stack (an operator concern), not carried in the
+        buyer-facing message.
+        """
         from src.core.exceptions import AdCPAccountNotFoundError
 
         accounts = _accounts_repo({})  # the referenced account does not exist
@@ -125,8 +133,11 @@ class TestUnresolvedAccountRefusesDispatch:
         with pytest.raises(AdCPAccountNotFoundError) as exc_info:
             _account_is_sandbox(accounts, "acc_missing")
 
-        assert "sandbox mode cannot be established" in str(exc_info.value), (
-            "the refusal must say why dispatch was refused, not read as a generic not-found"
+        assert str(exc_info.value) == "Account 'acc_missing' not found.", (
+            f"expected the terse family-consistent message, got: {exc_info.value!r}"
+        )
+        assert exc_info.value.suggestion == "Check account reference, re-run sync_accounts.", (
+            "the spec-canonical suggestion for ACCOUNT_NOT_FOUND must survive on this raise"
         )
 
     def test_unresolved_account_aborts_a_partition(self) -> None:

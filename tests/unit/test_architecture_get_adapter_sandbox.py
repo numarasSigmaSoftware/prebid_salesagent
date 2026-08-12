@@ -45,10 +45,6 @@ KNOWN_EXEMPT: dict[str, str] = {}
 # already-listed module inherited the first one's exemption and left this arm green.
 # The two allowlists now answer the same question — "which call site?" — the same way.
 LITERAL_EXEMPT: dict[str, str] = {
-    "src/core/tools/products.py::_get_products_impl": (
-        "identity.sandbox is never populated on this path (no enrich_identity_with_account "
-        "call), so the value was already constantly False; the literal states it honestly"
-    ),
     "src/core/tools/capabilities.py::_get_adcp_capabilities_impl": (
         "GetAdcpCapabilitiesRequest has no account field in the pinned SDK, so the mode is "
         "dead by protocol rather than by omission"
@@ -75,6 +71,11 @@ IDENTITY_KEYED_SITES: dict[str, str] = {
     "src/core/tools/media_buy_create.py::_create_media_buy_impl": (
         "create_media_buy declares and forwards `account`; the boundary enriches the "
         "identity before _impl, so identity.sandbox is the resolved account's mode"
+    ),
+    "src/core/tools/products.py::_get_products_impl": (
+        "get_products declares and forwards `account` on MCP/A2A/REST; the boundary "
+        "enriches the identity before _impl, so identity.sandbox is the resolved "
+        "account's mode"
     ),
 }
 

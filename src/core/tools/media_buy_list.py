@@ -70,7 +70,7 @@ from src.core.exceptions import (
     AdCPValidationError,
 )
 from src.core.helpers.account_helpers import partition_by_sandbox_mode
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_for_mode
 from src.core.schemas import (
     ApprovalStatus,
     CreativeApproval,
@@ -181,7 +181,7 @@ def _get_media_buys_impl(
 
     if include_snapshot:
 
-        def _package_refs(buys: list[Any]) -> list[tuple[str, str, str | None]]:
+        def _package_refs(buys: list[_MediaBuyData]) -> list[tuple[str, str, str | None]]:
             """(media_buy_id, package_id, platform_line_item_id) triples for one partition."""
             refs: list[tuple[str, str, str | None]] = []
             for buy in buys:
@@ -193,16 +193,10 @@ def _get_media_buys_impl(
         # Each partition reads through its own adapter: sandbox buys never touch the
         # tenant's real ad server. An empty partition constructs no adapter at all, so
         # the extra call exists only for genuinely mixed requests.
-        for partition, partition_is_sandbox in ((live_buys, False), (sandbox_buys, True)):
+        for partition, sandbox in ((live_buys, False), (sandbox_buys, True)):
             if not partition:
                 continue
-            adapter = get_adapter(
-                principal,
-                dry_run=testing_ctx.dry_run if testing_ctx else False,
-                testing_context=testing_ctx,
-                tenant=tenant,
-                sandbox=partition_is_sandbox,
-            )
+            adapter = adapter_for_mode(principal, tenant=tenant, testing_ctx=testing_ctx, sandbox=sandbox)
             if not adapter.capabilities.supports_realtime_reporting:
                 # Scope the reason to this partition's buys only.
                 for buy in partition:

@@ -129,3 +129,59 @@ def test_live_buy_detail_reads_through_the_real_adapter(client, factory_session,
 
     assert resp.status_code == 200, f"the detail page did not render (status={resp.status_code})"
     assert_all_live(spy, context="admin media-buy detail for a live buy")
+
+
+def test_dangling_account_reference_renders_a_distinct_operator_message(client, factory_session, monkeypatch):
+    """A buy whose account_id doesn't resolve renders as its own state, not a silent placeholder.
+
+    ``sandbox_mode_for_buy`` raises ``AdCPAccountNotFoundError`` for a dangling
+    ``media_buys.account_id`` — a seller-side data-integrity fault. Before this test, the
+    route's broad ``except Exception`` caught that typed refusal identically to a
+    transient adapter hiccup, and the page rendered the generic "Delivery metrics are
+    being loaded from the ad server..." placeholder either way — the one surface where
+    the operator most needs to see the fault looked identical to it resolving itself.
+
+    The composite FK on ``media_buys(tenant_id, account_id)`` (ON DELETE SET NULL)
+    prevents seeding a genuinely orphaned row through factories or the ORM — this is
+    exactly the "reachability is very low" the raise site's own comment documents — so
+    the trigger is mocked at ``account_helpers.sandbox_mode_for_buy``, the route's
+    actual import, rather than reproduced via real corrupted data.
+    """
+    from datetime import date
+
+    from src.core.exceptions import AdCPAccountNotFoundError
+    from src.core.helpers import account_helpers
+
+    tenant = TenantFactory(tenant_id=f"{_TENANT}_dangling", ad_server="mock")
+    principal = PrincipalFactory(tenant=tenant, principal_id="p_detail_dangling")
+    account = AccountFactory(tenant=tenant, account_id="acc_dangling", sandbox=False)
+    buy = MediaBuyFactory(
+        tenant=tenant,
+        principal=principal,
+        account_id=account.account_id,
+        status="active",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 12, 31),
+    )
+    factory_session.commit()
+
+    def _raise_dangling(accounts, media_buy):
+        raise AdCPAccountNotFoundError(
+            f"Account '{media_buy.account_id}' not found.",
+            suggestion="Check account reference, re-run sync_accounts.",
+        )
+
+    monkeypatch.setattr(account_helpers, "sandbox_mode_for_buy", _raise_dangling)
+    _auth(client, tenant.tenant_id)
+
+    resp = client.get(f"/tenant/{tenant.tenant_id}/media-buy/{buy.media_buy_id}")
+
+    assert resp.status_code == 200, f"the detail page did not render (status={resp.status_code})"
+    body = resp.get_data(as_text=True)
+    assert "Could not resolve this media buy's account" in body, (
+        "the dangling-account state did not render distinctly — got the generic "
+        f"placeholder or something else. Body snippet: {body[:2000]!r}"
+    )
+    assert "being loaded from the ad server" not in body, (
+        "the dangling-account fault rendered as the generic transient-loading placeholder"
+    )

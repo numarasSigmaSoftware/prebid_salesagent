@@ -70,6 +70,7 @@ class GetProductsBody(SalesAgentBaseModel):
     # dict BrandReference or string domain/URL shorthand (#1324)
     brand: dict[str, Any] | str | None = None
     filters: dict[str, Any] | None = None
+    account: dict[str, Any] | None = None  # AccountReference; resolved at the transport boundary
     adcp_version: str = "1.0.0"
 
 
@@ -227,6 +228,13 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
     ``ToolError`` propagates to the global handler in ``src.app`` for envelope
     translation; no defensive catch needed here.
     """
+    if body.account is not None and identity is not None:
+        from src.core.transport_helpers import enrich_identity_with_account
+
+        with adcp_validation_boundary(context="get_products request"):
+            account_ref = to_account_reference(body.account)
+        identity = enrich_identity_with_account(identity, account_ref)
+
     with adcp_validation_boundary(context="get_products request"):
         req = products_module.create_get_products_request(
             brief=body.brief,

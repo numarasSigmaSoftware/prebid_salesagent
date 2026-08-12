@@ -1559,6 +1559,7 @@ class AdCPRequestHandler(RequestHandler):
             filters=filters,
             property_list=parameters.get("property_list"),
             context=parameters.get("context"),
+            account=to_account_reference(parameters.get("account")),
             identity=identity,
         )
 

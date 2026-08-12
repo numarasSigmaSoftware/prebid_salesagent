@@ -83,6 +83,19 @@ from src.core.database.database_session import get_db_session
 from src.core.schemas import Principal
 
 
+def _mock_adapter_config(*, manual_approval_required: bool) -> dict[str, Any]:
+    """Config dict for MockAdServerAdapter.
+
+    ``manual_approval_required`` is the one field the sandbox short-circuit and the
+    tenant-configured mock branch intentionally set differently (see the sandbox
+    branch below). Naming it as an argument here — rather than each branch hand-
+    building its own dict literal — means a field added to one automatically
+    reaches the other; the two config dicts were previously typed out separately
+    and could drift on any key besides this one without either branch noticing.
+    """
+    return {"enabled": True, "manual_approval_required": manual_approval_required}
+
+
 def get_adapter(
     principal: Principal,
     dry_run: bool = False,
@@ -141,23 +154,20 @@ def get_adapter(
         # a sandbox request from a live one.
         logger.info("[ADAPTER_SELECT] sandbox account — forcing mock adapter, no real ad-platform calls")
         return MockAdServerAdapter(
-            {
-                "enabled": True,
-                # Stated, not inherited. The tenant's own mock branch below defaults this
-                # to True "for safety" from AdapterConfig; this branch cannot read that
-                # row (the whole point of short-circuiting above is to touch no adapter
-                # config), so the two mock adapters would differ on a field
-                # _create_media_buy_impl actually reads — a sandbox buy auto-executing
-                # where the tenant's mock would queue for approval.
-                #
-                # False is deliberate here rather than merely inherited: a simulator that
-                # parks the buyer's request awaiting a human defeats what the sandbox is
-                # for, and the approval gate exists to protect real spend, which this
-                # adapter cannot incur. Written out so the divergence is a decision the
-                # next reader can see, instead of one produced by an absent key — a test
-                # asserting only "the mock was selected" cannot tell those apart.
-                "manual_approval_required": False,
-            },
+            # manual_approval_required=False is deliberate, not inherited. The tenant's
+            # own mock branch below defaults this to True "for safety" from
+            # AdapterConfig; this branch cannot read that row (the whole point of
+            # short-circuiting above is to touch no adapter config), so the two mock
+            # adapters would differ on a field _create_media_buy_impl actually reads —
+            # a sandbox buy auto-executing where the tenant's mock would queue for
+            # approval. A simulator that parks the buyer's request awaiting a human
+            # defeats what the sandbox is for, and the approval gate exists to protect
+            # real spend, which this adapter cannot incur. Named here rather than left
+            # to whatever _mock_adapter_config's caller happens to pass, so the
+            # divergence is a decision the next reader can see, instead of one produced
+            # by an absent key — a test asserting only "the mock was selected" cannot
+            # tell those apart.
+            _mock_adapter_config(manual_approval_required=False),
             principal,
             dry_run,
             tenant_id=tenant_id,
@@ -184,10 +194,12 @@ def get_adapter(
                 logger.info(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
             if adapter_type == "mock":
                 # Default to True (require approval) for safety
-                adapter_config["manual_approval_required"] = (
-                    config_row.mock_manual_approval_required
-                    if config_row.mock_manual_approval_required is not None
-                    else True
+                adapter_config = _mock_adapter_config(
+                    manual_approval_required=(
+                        config_row.mock_manual_approval_required
+                        if config_row.mock_manual_approval_required is not None
+                        else True
+                    )
                 )
             elif adapter_type == "google_ad_manager":
                 adapter_config = repo.get_gam_config(config_row)
@@ -271,3 +283,28 @@ def get_adapter(
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
         )
+
+
+def adapter_for_mode(
+    principal: Principal,
+    *,
+    tenant: Any,
+    testing_ctx: Any,
+    sandbox: bool,
+) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+    """get_adapter() with the dry_run-from-testing_ctx boilerplate factored out.
+
+    Buy-keyed callers that build one adapter per sandbox/live partition
+    (get_media_buy_delivery, get_media_buy_deliveries) previously typed out this
+    exact five-argument call at each site; a change to how dry_run derives from
+    testing_ctx had to land at both by hand. sandbox is the caller's already-
+    resolved mode (BuyKeyedSandboxMixin.sandbox_mode / partition_by_sandbox_mode) —
+    this wrapper does not derive it.
+    """
+    return get_adapter(
+        principal,
+        dry_run=testing_ctx.dry_run if testing_ctx else False,
+        testing_context=testing_ctx,
+        tenant=tenant,
+        sandbox=sandbox,
+    )

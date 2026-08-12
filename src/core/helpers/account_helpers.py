@@ -178,8 +178,13 @@ def _account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> 
         # closes accounts. Carrying the spec's canonical suggestion verbatim is the
         # consistent choice once the code is the spec's: a buyer parsing
         # ACCOUNT_NOT_FOUND gets the remedy the spec documents for it, rather than a
-        # second, site-specific phrasing of the same code. The MESSAGE, which is free
-        # text, is where the seller-side nature is stated.
+        # second, site-specific phrasing of the same code.
+        #
+        # The MESSAGE stays in the same terse register as this file's other
+        # ACCOUNT_NOT_FOUND raises (`_resolve_by_id`, `_resolve_by_natural_key`) — a
+        # buyer parsing the wire sees one family, not three. The seller-side nature
+        # this comment documents is for the next reader of this file, not the wire;
+        # the log line below (ERROR, with a stack) is the operator-facing signal.
         #
         # Logged at ERROR with a stack rather than left to the boundary. As a typed
         # AdCPError this reaches `record_boundary_error`, which logs typed errors at
@@ -194,10 +199,7 @@ def _account_is_sandbox(accounts: AccountRepository, account_id: str | None) -> 
             stack_info=True,
         )
         raise AdCPAccountNotFoundError(
-            f"Account '{account_id}' referenced by this operation could not be resolved; "
-            "refusing to dispatch because sandbox mode cannot be established. The reference "
-            "is stored on the media buy, so this is a seller-side data condition rather than "
-            "a problem with the request.",
+            f"Account '{account_id}' not found.",
             suggestion="Check account reference, re-run sync_accounts.",
         )
     return bool(account.sandbox)

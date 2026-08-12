@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 
+from tests.bdd.steps._outcome_helpers import wire_dict
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
@@ -3172,7 +3173,11 @@ def _seed_decoy_buy_on_another_account(ctx: dict, value: str) -> None:
     scoping rather than from the decoy never having been visible.
     """
     env = ctx.get("env")
-    if env is None or not hasattr(env, "_session"):
+    # UC-004's @webhook/@webhook-reliability variants bind WebhookEnv/CircuitBreakerEnv
+    # (unit envs, no DB) instead of DeliveryPollEnv — they don't carry this seeding
+    # capability at all, and the account-scope assertion only applies to the polling
+    # path. Checked via the capability itself, not a class hasattr(_session) probe.
+    if env is None or not hasattr(env, "seed_decoy_buy_on_account"):
         return
 
     ctx["account_boundary_named"] = value.strip() not in ("(field absent)", "(omitted)", "(not provided)")
@@ -3192,25 +3197,16 @@ def _seed_decoy_buy_on_another_account(ctx: dict, value: str) -> None:
             "would leave the account assertion unable to fail in the direction that matters."
         )
 
-    from tests.bdd.steps.generic._account_resolution import seed_account_with_access
-    from tests.factories import MediaBuyFactory
-
-    seed_account_with_access(
+    decoy_id = env.seed_decoy_buy_on_account(
         tenant,
         owner,
         account_id=_DECOY_ACCOUNT_ID,
-        status="active",
+        media_buy_id=_DECOY_BUY_ID,
         brand_domain="decoy-corp.example",
         operator="decoy-corp.example",
     )
-    MediaBuyFactory(tenant=tenant, principal=owner, media_buy_id=_DECOY_BUY_ID, status="active")
-    env.associate_buys_with_account([_DECOY_BUY_ID], _DECOY_ACCOUNT_ID)
-    # The decoy needs adapter data for the same reason the scenario's own buy does: a
-    # targeted buy whose adapter read fails degrades into errors[] rather than appearing
-    # in media_buy_deliveries. Without it the decoy is missing from an UNSCOPED response
-    # too, and "excluded when an account is named" would prove nothing.
-    env.set_adapter_response(media_buy_id=_DECOY_BUY_ID)
-    ctx["account_decoy_buy_id"] = _DECOY_BUY_ID
+    if decoy_id is not None:
+        ctx["account_decoy_buy_id"] = decoy_id
 
 
 def _assert_account_scope(ctx: dict, deliveries: list) -> None:
@@ -3220,13 +3216,21 @@ def _assert_account_scope(ctx: dict, deliveries: list) -> None:
     ("Filter delivery data to a specific account" —
     dist/schemas/3.1.1/media-buy/get-media-buy-delivery-request.json), so this grades the
     filter in both directions against a decoy buy on another account.
+
+    ``deliveries`` (the reconstructed ``response.media_buy_deliveries``) is accepted only
+    for the non-empty check its callers already ran; the scope assertion itself reads
+    ``wire_dict(ctx)`` — a transport that dropped or renamed ``media_buy_id`` during
+    serialization would leave the decoy present on the wire while the parsed model still
+    looked correct, and this is the security-critical filter that whole class of gap
+    matters most for.
     """
     decoy = ctx.get("account_decoy_buy_id")
     assert decoy, (
         "no decoy buy was seeded for an account row — the scope assertion below would "
         "grade nothing. _seed_decoy_buy_on_another_account must run in the When step."
     )
-    returned = {getattr(d, "media_buy_id", None) for d in deliveries}
+    wire_deliveries = wire_dict(ctx).get("media_buy_deliveries") or []
+    returned = {d.get("media_buy_id") for d in wire_deliveries}
     if ctx.get("account_boundary_named"):
         assert decoy not in returned, (
             f"the request named an account, but delivery for {decoy!r} — which belongs to a "

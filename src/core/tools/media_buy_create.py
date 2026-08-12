@@ -801,7 +801,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             # decision goes through the same seam every other buy-keyed path uses
             # rather than re-deriving it from a hand-built repository. media_buy is
             # already attached and read synchronously, so this adds no lookup.
-            mb_sandbox = uow.sandbox_mode(media_buy)
+            sandbox = uow.sandbox_mode(media_buy)
 
             # Reconstruct CreateMediaBuyRequest from raw_request
             try:
@@ -1070,7 +1070,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             tenant=tenant_obj,
             # Deferred execution: the request identity is long gone, so re-derive the
             # account's mode. An approved sandbox buy must not dispatch to a real adapter.
-            sandbox=mb_sandbox,
+            sandbox=sandbox,
         )
 
         # Check if adapter returned an error response
@@ -1191,7 +1191,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         dry_run=False,
                         testing_context=testing_ctx,
                         tenant=tenant_obj,
-                        sandbox=mb_sandbox,
+                        sandbox=sandbox,
                     )
 
                     # Call adapter's add_creative_assets method
@@ -1248,7 +1248,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 dry_run=False,
                 testing_context=testing_ctx,
                 tenant=tenant_obj,
-                sandbox=mb_sandbox,
+                sandbox=sandbox,
             )
             if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                 approval_success = adapter.orders_manager.approve_order(response.media_buy_id)

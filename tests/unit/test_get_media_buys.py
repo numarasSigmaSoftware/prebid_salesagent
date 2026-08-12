@@ -373,7 +373,7 @@ class TestGetMediaBuysImpl:
         mock_adapter.capabilities.supports_realtime_reporting = True
         mock_adapter.get_packages_snapshot = MagicMock()
 
-        with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
+        with patch("src.core.helpers.adapter_helpers.get_adapter", return_value=mock_adapter):
             req = self._make_request()
             _get_media_buys_impl(req, identity=make_identity(), include_snapshot=False)
 
@@ -397,7 +397,7 @@ class TestGetMediaBuysImpl:
         mock_adapter.capabilities.supports_realtime_reporting = True
         mock_adapter.get_packages_snapshot.return_value = {"buy_1": {"pkg_1": snapshot}}
 
-        with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
+        with patch("src.core.helpers.adapter_helpers.get_adapter", return_value=mock_adapter):
             req = self._make_request()
             response = _get_media_buys_impl(req, identity=make_identity(), include_snapshot=True)
 
@@ -419,7 +419,7 @@ class TestGetMediaBuysImpl:
         mock_adapter = MagicMock()
         mock_adapter.capabilities.supports_realtime_reporting = False
 
-        with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
+        with patch("src.core.helpers.adapter_helpers.get_adapter", return_value=mock_adapter):
             req = self._make_request()
             response = _get_media_buys_impl(req, identity=make_identity(), include_snapshot=True)
 

@@ -99,6 +99,7 @@ class TestSnapshotPartitioning:
     """get_media_buys snapshots can span both modes in one response."""
 
     def _run(self, buys_by_account: dict[str, str]) -> tuple[list[bool], MagicMock]:
+        from src.core.helpers import adapter_helpers
         from src.core.tools import media_buy_list as mbl
 
         accounts = {"acc_sbx": True, "acc_live": False}
@@ -109,7 +110,10 @@ class TestSnapshotPartitioning:
 
         with (
             patch.object(mbl, "MediaBuyUoW", return_value=uow),
-            patch.object(mbl, "get_adapter") as mock_get_adapter,
+            # mbl calls adapter_for_mode, which resolves get_adapter through
+            # adapter_helpers' own module namespace — patch at that source, not mbl
+            # (which no longer imports get_adapter directly).
+            patch.object(adapter_helpers, "get_adapter") as mock_get_adapter,
             patch.object(mbl, "_fetch_target_media_buys", return_value=target),
             patch.object(mbl, "_fetch_creative_approvals", return_value={}),
             patch.object(mbl, "_fetch_packages", return_value={}),

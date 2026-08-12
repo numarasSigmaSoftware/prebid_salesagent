@@ -13,6 +13,7 @@ from typing import Annotated, Any, cast
 from adcp import FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
+from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import BrandReference, ContextObject, PropertyListReference
 from fastmcp.server.context import Context
 from pydantic import Field
@@ -713,16 +714,11 @@ async def _get_products_impl(
             adapter = get_adapter(
                 principal,
                 dry_run=True,
-                tenant=tenant,  # identity.sandbox is structurally False here: enrich_identity_with_account is
-                # never called on this path, so the flag is never populated regardless of the
-                # account the buyer sent. Written as the literal it always was, rather than an
-                # expression that reads like a live decision. GetProductsWholesaleRequest.account
-                # exists in the pinned schema but is not exposed on any transport — the MCP
-                # signature, get_products_raw, _get_products_impl, and REST GetProductsBody all
-                # omit it, so no buyer can name a sandbox account here today. Routing a sandbox
-                # get_products to the mock is tracked separately, and stating False here does
-                # not change behaviour, only what the next reader believes.
-                sandbox=False,
+                tenant=tenant,
+                # account is enriched onto identity at the MCP/A2A/REST boundary (same
+                # pattern as get_media_buy_delivery), so a sandbox account here selects
+                # the mock adapter rather than the tenant's real one.
+                sandbox=identity.sandbox,
             )
 
             supported_models = adapter.get_supported_pricing_models()
@@ -802,6 +798,7 @@ async def get_products(
     filters: ProductFilters | None = None,
     property_list: PropertyListReference | None = None,
     context: ContextObject | None = None,  # payload-level context
+    account: LibraryAccountReference | None = None,
     ctx: Context | ToolContext | None = None,
 ):
     """Get available products matching the brief.
@@ -814,6 +811,7 @@ async def get_products(
         filters: Structured filters for product discovery (optional)
         property_list: Property list reference for filtering by buyer's property list (optional)
         context: Application level context per adcp spec
+        account: Account reference for multi-account rate-card lookup and sandbox scoping (optional)
         ctx: FastMCP context (automatically provided)
 
     Returns:
@@ -839,6 +837,12 @@ async def get_products(
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
 
+    # Handle account resolution at boundary (same as get_media_buy_delivery pattern)
+    if account is not None and identity is not None:
+        from src.core.transport_helpers import enrich_identity_with_account
+
+        identity = enrich_identity_with_account(identity, account)
+
     # Call shared implementation
     # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
     response = await _get_products_impl(req, identity)
@@ -852,6 +856,7 @@ async def get_products_raw(
     filters: ProductFilters | None = None,
     property_list: PropertyListReference | None = None,
     context: ContextObject | None = None,  # Application level context per adcp spec
+    account: LibraryAccountReference | None = None,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
 ) -> GetProductsResponse:
@@ -867,6 +872,7 @@ async def get_products_raw(
         filters: Structured filters for product discovery (optional)
         property_list: Property list reference for filtering by buyer's property list (optional)
         context: Application level context per adcp spec
+        account: Account reference for multi-account rate-card lookup and sandbox scoping (optional)
         ctx: FastMCP context (automatically provided)
         identity: Resolved identity from transport boundary (preferred over ctx)
 
@@ -876,6 +882,12 @@ async def get_products_raw(
     # Resolve identity from transport context if not provided
     if identity is None:
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
+
+    # Handle account resolution at boundary (same as get_media_buy_delivery pattern)
+    if account is not None and identity is not None:
+        from src.core.transport_helpers import enrich_identity_with_account
+
+        identity = enrich_identity_with_account(identity, account)
 
     # Create request object - adcp library validates schema
     req = create_get_products_request(
