@@ -144,25 +144,64 @@ def _is_identity_attr(node: ast.expr) -> bool:
     return isinstance(base, ast.Attribute) and base.attr == "identity"
 
 
+def _for_loop_candidates(name: str, func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.expr]:
+    """Values a for-loop target named *name* can bind, resolved from a literal iterable.
+
+    Handles ``for x in <iterable>:`` (bare ``Name`` target) and ``for a, b, ... in
+    <iterable of tuples>:`` (``Tuple``/``List`` target, one level deep — matches every
+    current production shape, e.g. ``media_buy_list.py``'s
+    ``for partition, partition_is_sandbox in ((live_buys, False), (sandbox_buys,
+    True)):``). Only a literal ``Tuple``/``List``/``Set`` for ``node.iter`` yields
+    candidates — a non-literal iterable (a function call, a variable) has no values
+    visible on the AST, so it contributes nothing, same as any other expression this
+    resolver can't see through.
+    """
+    candidates: list[ast.expr] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.For):
+            continue
+        target = node.target
+        index: int | None = None
+        if isinstance(target, ast.Name):
+            if target.id != name:
+                continue
+        elif isinstance(target, ast.Tuple | ast.List):
+            for i, elt in enumerate(target.elts):
+                if isinstance(elt, ast.Name) and elt.id == name:
+                    index = i
+                    break
+            else:
+                continue
+        else:
+            continue
+
+        iterable = node.iter
+        if not isinstance(iterable, ast.Tuple | ast.List | ast.Set):
+            continue
+        for element in iterable.elts:
+            if index is None:
+                candidates.append(element)
+            elif isinstance(element, ast.Tuple | ast.List) and index < len(element.elts):
+                candidates.append(element.elts[index])
+    return candidates
+
+
 def _one_hop_candidates(value: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> list[ast.expr]:
-    """What ``value`` can hold: itself, or what a local of that name is assigned in *func*.
+    """What ``value`` can hold: itself, what a local of that name is assigned in *func*,
+    or what a for-loop target of that name is bound to across a literal iterable.
 
     Shared by the identity and literal arms. It exists because production writes the
     via-local form (``s = <expr>`` then ``sandbox=s``) at 4 of 12 sites, so an arm that
     inspects the call's expression directly sees a bare ``Name`` and concludes nothing.
     (7 of the 12 sites pass a bare ``Name``; 2 of those 7 are forwarded parameters,
     which resolve to themselves by design — see below. A third — media_buy_list.py's
-    ``for partition, partition_is_sandbox in (...)`` loop target — also resolves to
-    itself, but NOT by design: this resolver only walks ``ast.Assign``/``ast.AnnAssign``,
-    so a for-loop target is invisible to it regardless of what it holds. The literal at
-    that site is correct today (one adapter per mode), so this is not currently an
-    unguarded hard-wire — but a future for/with/walrus-bound hard-wire at that shape
-    would be invisible to both arms. Resolver-coverage gap, not fixed here. That leaves
-    4 sites that are genuinely local assignments.) The identity arm was extended to
-    follow one hop; its sibling was not, which left ``s = False; sandbox=s`` — the
-    cheapest hard-wire, written in production's own idiom — passing the literal arm at
-    those 4 sites. One resolver now serves both, so a future arm cannot inherit half
-    the fix.
+    ``for partition, partition_is_sandbox in (...)`` loop target — is resolved by
+    :func:`_for_loop_candidates`, to ``[Constant(False), Constant(True)]``: two DIFFERENT
+    literals, one per partition, each correct for its own data. That leaves 4 sites that
+    are genuinely local assignments.) The identity arm was extended to follow one hop;
+    its sibling was not, which left ``s = False; sandbox=s`` — the cheapest hard-wire,
+    written in production's own idiom — passing the literal arm at those 4 sites. One
+    resolver now serves both, so a future arm cannot inherit half the fix.
 
     A bare PARAMETER deliberately resolves to itself: the mode is chosen by the caller,
     which each arm grades on its own. Following parameters would flag a forwarding
@@ -178,20 +217,32 @@ def _one_hop_candidates(value: ast.expr, func: ast.FunctionDef | ast.AsyncFuncti
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.target.id == value.id and node.value is not None:
                 assigned.append(node.value)
+    assigned.extend(_for_loop_candidates(value.id, func))
     return assigned or [value]
 
 
 def _hard_wires_sandbox(call: _AdapterCall) -> bool:
-    """True when every expression this site's ``sandbox=`` can hold is a constant.
+    """True when every expression this site's ``sandbox=`` can hold is the SAME constant.
 
-    ``all``, not ``any``: a local initialised to a literal and then reassigned from the
-    account is not hard-wired, and flagging it would push contributors toward the
-    allowlist to silence a false positive — the one pressure a shrink-only allowlist
-    cannot absorb.
+    Not just "all constants": a for-loop like ``for partition, is_sandbox in ((live,
+    False), (sandbox, True)):`` resolves to TWO different constants, one per
+    partition — each is correct for its own data, so that is a legitimate derivation,
+    not a hard-wire. Collapsing to a single constant (every partition passing the same
+    literal) is the actual hard-wire signature: the value would then not depend on
+    which partition — or which account — is being processed.
+
+    ``all``, not ``any``, for the constant-ness check: a local initialised to a literal
+    and then reassigned from the account is not hard-wired, and flagging it would push
+    contributors toward the allowlist to silence a false positive — the one pressure a
+    shrink-only allowlist cannot absorb.
     """
     if call.value is None:
         return False
-    return all(isinstance(candidate, ast.Constant) for candidate in _one_hop_candidates(call.value, call.func))
+    candidates = _one_hop_candidates(call.value, call.func)
+    if not all(isinstance(candidate, ast.Constant) for candidate in candidates):
+        return False
+    values = {candidate.value for candidate in candidates}
+    return len(values) == 1
 
 
 def _hard_wired_offenders(calls: list[_AdapterCall]) -> list[str]:
@@ -397,6 +448,49 @@ def test_literal_arm_catches_both_the_inline_and_the_via_local_form() -> None:
     ), (
         "a local reassigned from the account is not hard-wired; flagging it would push contributors "
         "toward the allowlist to silence a false positive"
+    )
+
+
+def test_literal_arm_follows_a_for_loop_target() -> None:
+    """The for-loop binding form — media_buy_list.py's actual shape — through the real
+    predicate, both signs.
+
+    Production writes ``for partition, partition_is_sandbox in ((live_buys, False),
+    (sandbox_buys, True)): ... sandbox=partition_is_sandbox``. Before
+    :func:`_for_loop_candidates` existed, this loop target was invisible to both arms —
+    a for-loop target is neither an ``ast.Assign`` nor an ``ast.AnnAssign`` — so a
+    regression collapsing both partitions to the same literal (routing every buy through
+    one adapter mode regardless of which partition it came from) would have passed both
+    arms silently. This asserts through the real offender lister, not a re-implementation
+    of the predicate, so neutering the resolver reddens this test, not just the guard.
+    """
+
+    def _flags(source: str) -> bool:
+        calls = _adapter_calls_in(ast.parse(source), "synthetic.py")
+        assert len(calls) == 1, f"expected one get_adapter call in:\n{source}"
+        return bool(_hard_wired_offenders(calls))
+
+    # The real shape: two DIFFERENT literals, one per partition — legitimate.
+    assert not _flags(
+        "def f(live_buys, sandbox_buys):\n"
+        "    for partition, is_sbx in ((live_buys, False), (sandbox_buys, True)):\n"
+        "        return get_adapter(p, sandbox=is_sbx)\n"
+    ), "two different per-partition literals is a legitimate derivation, not a hard-wire"
+
+    # The regression this arm exists to catch: both partitions collapsed to the SAME
+    # literal — the value no longer depends on which partition is being processed.
+    assert _flags(
+        "def f(live_buys, sandbox_buys):\n"
+        "    for partition, is_sbx in ((live_buys, False), (sandbox_buys, False)):\n"
+        "        return get_adapter(p, sandbox=is_sbx)\n"
+    ), "both partitions passing the same literal is exactly the hard-wire this arm exists to catch"
+
+    # A bare (non-tuple) for-loop target over a literal iterable, for completeness.
+    assert _flags("def f():\n    for is_sbx in (False, False):\n        return get_adapter(p, sandbox=is_sbx)\n"), (
+        "a bare for-loop target collapsed to one literal must also be caught"
+    )
+    assert not _flags("def f():\n    for is_sbx in (False, True):\n        return get_adapter(p, sandbox=is_sbx)\n"), (
+        "a bare for-loop target genuinely varying across iterations is not a hard-wire"
     )
 
 
