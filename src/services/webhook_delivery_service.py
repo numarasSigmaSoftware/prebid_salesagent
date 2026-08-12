@@ -40,7 +40,7 @@ from src.core.security.webhook_http import (
     is_auth_scheme,
     post_webhook_status,
 )
-from src.core.webhook_validator import WebhookURLValidator
+from src.core.webhook_validator import WebhookURLValidator, webhook_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +430,7 @@ class WebhookDeliveryService:
         except TimeoutError:
             logger.warning(
                 "Webhook delivery to %s exceeded the %.1fs total deadline",
-                scrub_control_chars(target.url),
+                webhook_url_for_log(target.url),
                 WEBHOOK_DELIVERY_DEADLINE_SECONDS,
             )
             return False
@@ -444,7 +444,7 @@ class WebhookDeliveryService:
         """Queue and synchronously drain one session-independent target snapshot."""
         if isinstance(target.auth_blocked_at, datetime):
             logger.warning(
-                f"⚠️ Auth blocked for {scrub_control_chars(target.url)}, skipping until credentials reconfigured"
+                f"⚠️ Auth blocked for {webhook_url_for_log(target.url)}, skipping until credentials reconfigured"
             )
             return False
 
@@ -452,11 +452,11 @@ class WebhookDeliveryService:
         circuit_breaker = self._circuit_breakers.setdefault(endpoint_key, CircuitBreaker())
         queue = self._queues.setdefault(endpoint_key, WebhookQueue(max_size=1000))
         if not circuit_breaker.can_attempt():
-            logger.warning(f"⚠️ Circuit breaker OPEN for {scrub_control_chars(target.url)}, skipping webhook delivery")
+            logger.warning(f"⚠️ Circuit breaker OPEN for {webhook_url_for_log(target.url)}, skipping webhook delivery")
             return False
 
         if not queue.enqueue({"config": target, "payload": delivery_payload, "timestamp": datetime.now(UTC)}):
-            logger.warning(f"⚠️ Queue full for {scrub_control_chars(target.url)}, webhook dropped")
+            logger.warning(f"⚠️ Queue full for {webhook_url_for_log(target.url)}, webhook dropped")
             return False
         return self._deliver_with_backoff(endpoint_key, circuit_breaker, queue)
 
@@ -481,7 +481,7 @@ class WebhookDeliveryService:
                 )
             else:
                 logger.warning(
-                    f"⚠️ Webhook secret for {scrub_control_chars(config.url)} is too weak (min 32 characters required)"
+                    f"⚠️ Webhook secret for {webhook_url_for_log(config.url)} is too weak (min 32 characters required)"
                 )
         if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) and config.authentication_token:
             headers["Authorization"] = f"Bearer {config.authentication_token}"
@@ -510,7 +510,7 @@ class WebhookDeliveryService:
             return False
         logger.warning(
             "Webhook delivery to %s refused by send-time SSRF gate: %s",
-            scrub_control_chars(url),
+            webhook_url_for_log(url),
             scrub_control_chars(ssrf_error),
         )
         circuit_breaker.record_failure()
@@ -540,7 +540,7 @@ class WebhookDeliveryService:
         except (TypeError, ValueError) as exc:
             logger.error(
                 "Webhook payload is not valid JSON for %s: %s",
-                scrub_control_chars(url),
+                webhook_url_for_log(url),
                 scrub_control_chars(str(exc)),
             )
             circuit_breaker.record_failure()
@@ -623,40 +623,40 @@ class WebhookDeliveryService:
         except UnsafeWebhookTargetError as e:
             # DNS rebinding/private targets are permanent security failures,
             # not transient network errors. Never retry the unsafe URL.
-            logger.warning(f"Webhook delivery to {scrub_control_chars(url)} refused: {scrub_control_chars(str(e))}")
+            logger.warning(f"Webhook delivery to {webhook_url_for_log(url)} refused: {scrub_control_chars(str(e))}")
             return _AttemptOutcome.PERMANENT
         except requests.Timeout:
             logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} timed out (attempt: {attempt + 1}/{max_retries})"
+                f"Webhook delivery to {webhook_url_for_log(url)} timed out (attempt: {attempt + 1}/{max_retries})"
             )
             return _AttemptOutcome.RETRY
         except requests.RequestException as e:
             logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} failed: "
+                f"Webhook delivery to {webhook_url_for_log(url)} failed: "
                 f"{scrub_control_chars(str(e))} (attempt: {attempt + 1}/{max_retries})"
             )
             return _AttemptOutcome.RETRY
         except Exception as e:
             logger.error(
-                f"Unexpected error delivering to {scrub_control_chars(url)}: {scrub_control_chars(str(e))}",
+                f"Unexpected error delivering to {webhook_url_for_log(url)}: {scrub_control_chars(str(e))}",
                 exc_info=True,
             )
             return _AttemptOutcome.PERMANENT
 
         if 200 <= status_code < 300:
-            logger.debug(f"Webhook delivered to {scrub_control_chars(url)} (status: {status_code})")
+            logger.debug(f"Webhook delivered to {webhook_url_for_log(url)} (status: {status_code})")
             return _AttemptOutcome.DELIVERED
 
         # Refused redirects and client errors are permanent for this
         # payload/configuration. Redirects are never followed.
         if 300 <= status_code < 500:
             logger.warning(
-                f"Webhook delivery to {scrub_control_chars(url)} returned non-retryable status {status_code}"
+                f"Webhook delivery to {webhook_url_for_log(url)} returned non-retryable status {status_code}"
             )
             return _AttemptOutcome.PERMANENT
 
         logger.warning(
-            f"Webhook delivery to {scrub_control_chars(url)} returned status {status_code} "
+            f"Webhook delivery to {webhook_url_for_log(url)} returned status {status_code} "
             f"(attempt: {attempt + 1}/{max_retries})"
         )
         return _AttemptOutcome.RETRY

@@ -40,7 +40,7 @@ from src.core.security.webhook_http import (
     is_auth_scheme,
     post_webhook_status_async,
 )
-from src.core.webhook_validator import reject_unsafe_outbound_webhook_url
+from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,14 @@ class ProtocolWebhookService:
 
         # Log sanitized config (exclude sensitive authentication_token)
         safe_config = {
-            "url": push_notification_config.url if hasattr(push_notification_config, "url") else None,
+            # The dict is named `safe_config` and deliberately omits
+            # authentication_token — but the URL went in raw, and a buyer's
+            # callback URL routinely carries its own bearer in the query
+            # string (`?token=...`). webhook_url_for_log drops credentials and
+            # query, so the field is now as safe as the dict's name claims.
+            "url": (
+                webhook_url_for_log(push_notification_config.url) if hasattr(push_notification_config, "url") else None
+            ),
             "authentication_type": (
                 push_notification_config.authentication_type
                 if hasattr(push_notification_config, "authentication_type")

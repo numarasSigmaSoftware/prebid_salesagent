@@ -185,7 +185,11 @@ class DeliveryWebhookScheduler:
                 logger.warning(
                     "Skipping reporting webhook with frequency '%s' for media buy %s – "
                     "only 'daily' frequency is supported for delivery webhooks at this time",
-                    raw_freq,
+                    # raw_freq comes straight off the buyer's reporting_webhook
+                    # config, so it is buyer-controlled text like every other
+                    # value in this call — its neighbour was wrapped in the same
+                    # sweep and it was missed.
+                    scrub_control_chars(raw_freq),
                     scrub_control_chars(media_buy.media_buy_id),
                 )
                 return
