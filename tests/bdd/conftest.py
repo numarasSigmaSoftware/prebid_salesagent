@@ -3633,6 +3633,10 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 product.reporting_capabilities = {
                     "supports_webhooks": True,
                     "available_reporting_frequencies": ["daily"],
+                    # Required by the pinned SDK: a partial block fails Product
+                    # validation at read time, which the live server surfaces as
+                    # SERVICE_UNAVAILABLE from get_products.
+                    "date_range_support": "date_range",
                 }
                 env._commit_factory_data()
                 ctx["env"] = env

@@ -324,6 +324,9 @@ def init_db_ci():
                         "expected_delay_minutes": 0,
                         "timezone": "UTC",
                         "supports_webhooks": True,
+                        # Required by the pinned SDK's ReportingCapabilities; a
+                        # partial block fails Product validation at read time.
+                        "date_range_support": "date_range",
                         "available_metrics": ["impressions", "clicks", "spend"],
                     },
                 },
@@ -343,6 +346,9 @@ def init_db_ci():
                         "expected_delay_minutes": 0,
                         "timezone": "UTC",
                         "supports_webhooks": True,
+                        # Required by the pinned SDK's ReportingCapabilities; a
+                        # partial block fails Product validation at read time.
+                        "date_range_support": "date_range",
                         "available_metrics": ["impressions", "completed_views", "spend"],
                     },
                 },

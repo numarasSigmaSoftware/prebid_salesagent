@@ -1,6 +1,6 @@
 """Delivery targets survive the UoW that produced them.
 
-`list_active_delivery_targets` returns `PushNotificationTarget` — a plain
+`claim_delivery_targets` returns `PushNotificationTarget` — a plain
 dataclass — specifically so the outbound worker can read `url` and
 `authentication_token` AFTER the session is closed. `webhook_delivery_service`
 does exactly that: it snapshots inside `with PushNotificationConfigUoW(...)`
@@ -28,14 +28,23 @@ class _PushConfigEnv(IntegrationEnv):
     EXTERNAL_PATCHES: dict[str, str] = {}
 
 
+# claim_delivery_targets binds a delivery to one media buy's callbacks, so the
+# seeded registration has to carry the media_buy_id the claim asks for.
+_MEDIA_BUY_ID = "snap-media-buy"
+_EVENT_KEY = "snap-event-key"
+
+
 def _seed_config(tenant_id: str, principal_id: str) -> None:
-    from tests.factories import PrincipalFactory, PushNotificationConfigFactory, TenantFactory
+    from tests.factories import MediaBuyFactory, PrincipalFactory, PushNotificationConfigFactory, TenantFactory
 
     tenant = TenantFactory(tenant_id=tenant_id)
     principal = PrincipalFactory(tenant=tenant, principal_id=principal_id)
+    # push_notification_configs.media_buy_id carries a real FK.
+    MediaBuyFactory(tenant=tenant, principal=principal, media_buy_id=_MEDIA_BUY_ID)
     PushNotificationConfigFactory(
         tenant=tenant,
         principal=principal,
+        media_buy_id=_MEDIA_BUY_ID,
         url="https://buyer.example/webhook",
         authentication_type="Bearer",
         authentication_token="tok-123456789012345",
@@ -58,7 +67,7 @@ class TestDeliveryTargetsOutliveTheirSession:
             # let the UoW's own session open and close around the read.
             with PushNotificationConfigUoW(tenant_id) as uow:
                 assert uow.push_notification_configs is not None
-                targets = uow.push_notification_configs.list_active_delivery_targets(principal_id)
+                targets = uow.push_notification_configs.claim_delivery_targets(principal_id, _MEDIA_BUY_ID, _EVENT_KEY)
 
         # Session is closed here. A detached ORM row raises on first attribute
         # read; a snapshot does not.
@@ -94,7 +103,7 @@ class TestDeliveryTargetsOutliveTheirSession:
             # let the UoW's own session open and close around the read.
             with PushNotificationConfigUoW(tenant_id) as uow:
                 assert uow.push_notification_configs is not None
-                targets = uow.push_notification_configs.list_active_delivery_targets(principal_id)
+                targets = uow.push_notification_configs.claim_delivery_targets(principal_id, _MEDIA_BUY_ID, _EVENT_KEY)
 
         assert isinstance(targets[0], PushNotificationTarget)
         try:
