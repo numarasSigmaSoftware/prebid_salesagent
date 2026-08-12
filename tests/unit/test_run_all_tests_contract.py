@@ -111,12 +111,27 @@ class TestSchedulerIntervalIsScopedToTheE2eSuite:
     Parametrized over the invocations that actually occur, because the bug was a
     single unconditional export: asserting only the ``e2e`` case would pass for
     the broken version too.
+
+    Scope of this gate, stated because an earlier revision of it over-claimed: it
+    keeps the scheduler OUT of legs that do not grade it. It does NOT make
+    ``./run_all_tests.sh ci`` safe -- that invocation legitimately needs the
+    scheduler for its ``e2e`` suite while also running bdd_e2e, so the interval is
+    5 and both run. Lock ordering is what makes that safe; see
+    tests/integration/test_e2e_reset_lock_ordering.py.
     """
 
     @pytest.mark.parametrize(
         "args,expected,why",
         [
             pytest.param(["e2e"], "5", "test_daily_delivery_webhook waits for a real tick", id="e2e-alone"),
+            # These two are NOT protected by the scoping, and must not be read as if
+            # they were. `ci` runs the `e2e` suite -- which REQUIRES a ticking
+            # scheduler -- alongside bdd_e2e in one compose stack (the E2E_WORKERS
+            # fast path rewrites `bdd` into `bdd_inprocess,bdd_e2e` AFTER this
+            # decision, and after the resolve-only seam, so neither this value nor
+            # this test can see it). Interval 5 is correct here; what keeps the two
+            # safe together is the lock ordering in _reset_e2e_db, graded by
+            # tests/integration/test_e2e_reset_lock_ordering.py.
             pytest.param(["ci"], "5", "the full suite includes e2e", id="ci-full"),
             pytest.param([], "5", "no argument means the full suite", id="default"),
             pytest.param(["bdd_e2e"], "<off>", "the CI in-network job — the leg that deadlocked", id="bdd_e2e"),

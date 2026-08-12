@@ -2965,7 +2965,34 @@ def _reset_e2e_db(e2e_config) -> None:
                 )
             ]
             if tables:
-                joined = ", ".join(f'"{t}"' for t in tables)
+                # Take the contended locks FIRST, in the order the delivery-webhook
+                # scheduler takes them. Its selection query reads media_buys and then
+                # webhook_delivery_log (the correlated anti-join over successful
+                # `final` sends); this TRUNCATE needs AccessExclusiveLock on both, and
+                # the table list comes from pg_tables in whatever order the catalog
+                # returns. When those two orders disagreed, Postgres detected a cycle
+                # and killed one side:
+                #
+                #   A waits for AccessShareLock     on webhook_delivery_log; blocked by B
+                #   B waits for AccessExclusiveLock on media_buys;           blocked by A
+                #
+                # That failed roughly half of in-network runs, on a different scenario
+                # each time. Acquiring media_buys before webhook_delivery_log removes
+                # the inversion: whichever side wins media_buys runs to completion and
+                # the other waits, which is contention rather than a deadlock.
+                #
+                # Scoping DELIVERY_WEBHOOK_INTERVAL (run_all_tests.sh) keeps the
+                # scheduler out of legs that do not grade it, but it cannot help
+                # `./run_all_tests.sh ci`: that runs the `e2e` suite, which REQUIRES a
+                # ticking scheduler, alongside bdd_e2e in the same stack. Ordering here
+                # is what makes the two safe together.
+                ordered_first = [t for t in ("media_buys", "webhook_delivery_log") if t in tables]
+                if ordered_first:
+                    conn.execute(
+                        text(f"LOCK TABLE {', '.join(f'"{t}"' for t in ordered_first)} IN ACCESS EXCLUSIVE MODE")
+                    )
+                # Sorted so two concurrent resets cannot invert against each other either.
+                joined = ", ".join(f'"{t}"' for t in sorted(tables))
                 conn.execute(text(f"TRUNCATE TABLE {joined} RESTART IDENTITY CASCADE"))
     finally:
         engine.dispose()
