@@ -8,11 +8,49 @@ optional fields but not for caller-owned context: an explicitly supplied JSON
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from pydantic import BaseModel
 
 _CONTEXT_UNSET = object()
+
+# Values ``json.dumps`` accepts verbatim. ``bool`` is listed explicitly even
+# though it subclasses ``int``: membership is checked before the ``float``
+# branch, and being explicit keeps the set readable as "the JSON scalars".
+_JSON_SAFE_ATOMS = (str, bool, int, type(None))
+
+# Stack sentinel marking "every child of this container has been expanded".
+_CLOSE_MARKER = object()
+
+
+def _json_safe_atom(value: Any) -> Any:
+    """Coerce one non-container value into something every JSON encoder accepts.
+
+    This exists because the boundary must not be able to raise. RFC 8259 has no
+    ``NaN``/``Infinity``, but CPython's ``json.loads`` accepts those literals by
+    default, so a buyer can put a non-finite float into ``context`` on any
+    transport and it arrives here as a real ``float('nan')``. Echoing it back
+    "unchanged" is not possible — ``JSONResponse`` (REST) raises ``ValueError:
+    Out of range float values are not JSON compliant``, and because every caller
+    of this module runs inside an exception handler, that raise SHADOWS the
+    buyer's real error and the boundary emits no envelope at all. Non-finite
+    floats therefore become JSON ``null``: the key stays present (context echo is
+    positional as well as value-wise) and the envelope stays emittable.
+
+    Non-JSON objects — a ``datetime`` reaching us through ``model_extra``, which
+    Pydantic's ``mode="json"`` never sees because extras are merged raw — are
+    rendered the way ``mode="json"`` would have rendered them, falling back to
+    ``str`` so an unknown type still cannot break the encoder.
+    """
+    if isinstance(value, _JSON_SAFE_ATOMS):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return str(value)
 
 
 def _detach(value: Any) -> Any:
@@ -36,28 +74,45 @@ def _detach(value: Any) -> Any:
     float / bool / None) are immutable, so they are assigned directly rather
     than copied; only dict/list containers are cloned, which is sufficient to
     guarantee a later mutation of the source object cannot change an already-
-    emitted response.
+    emitted response. Every scalar passes through ``_json_safe_atom`` so a value
+    JSON cannot represent can never reach an encoder inside an exception handler.
+
+    A container that reaches itself is replaced with ``null`` at the point the
+    cycle closes. JSON has no way to express a cycle, so a faithful copy of one
+    is still unserializable — breaking it is what keeps the promise that this
+    function cannot raise. ``open_containers`` holds only the ids on the path
+    from the root to the node being expanded (the ``_CLOSE_MARKER`` marker pops one
+    as its subtree completes), so it costs O(depth), and repeated references
+    that are NOT cycles are copied out in full rather than being mistaken for
+    one.
     """
     if isinstance(value, dict):
         root: Any = {}
     elif isinstance(value, list):
         root = []
     else:
-        return value
+        return _json_safe_atom(value)
 
+    open_containers: set[int] = set()
     stack: list[tuple[Any, Any]] = [(value, root)]
     while stack:
         source, dest = stack.pop()
+        if source is _CLOSE_MARKER:
+            open_containers.discard(dest)
+            continue
+        open_containers.add(id(source))
+        # Popped after every child of `source` has been expanded.
+        stack.append((_CLOSE_MARKER, id(source)))
         items = source.items() if isinstance(source, dict) else enumerate(source)
         for key, item in items:
-            if isinstance(item, dict):
-                child: Any = {}
-                stack.append((item, child))
-            elif isinstance(item, list):
-                child = []
-                stack.append((item, child))
+            if isinstance(item, dict | list):
+                if id(item) in open_containers:
+                    child: Any = None
+                else:
+                    child = {} if isinstance(item, dict) else []
+                    stack.append((item, child))
             else:
-                child = item
+                child = _json_safe_atom(item)
             if isinstance(dest, dict):
                 dest[key] = child
             else:
