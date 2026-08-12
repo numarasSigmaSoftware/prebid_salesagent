@@ -148,8 +148,7 @@ class TransportResult:
         meta = pinned_error_code_metadata()
         spec = meta.get(code)
         assert spec is not None, (
-            f"{code!r} is not a canonical AdCP error code (pinned error-code.json @04f59d2d5 "
-            f"plus the declared 3.1.1 auth supplement). "
+            f"{code!r} is not a canonical AdCP error code (pinned error-code.json). "
             "Reconcile the feature to a canonical code."
         )
         expected_recovery = recovery if recovery is not None else spec["recovery"]

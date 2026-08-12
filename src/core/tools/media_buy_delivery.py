@@ -14,7 +14,6 @@ from math import floor
 from typing import Annotated, Any, cast
 
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import Field, RootModel
 from rich.console import Console
 
@@ -108,6 +107,7 @@ from src.core.schemas import (
     ReportingPeriod as MediaBuyReportingPeriod,
 )
 from src.core.testing_hooks import AdCPTestContext, DeliverySimulator, TimeSimulator, apply_testing_hooks
+from src.core.tools._mcp import mcp_result
 from src.core.tools._media_buy_status import (
     CANONICAL_STATUSES,
     NO_MORE_DATA_STATUSES,
@@ -807,7 +807,7 @@ async def get_media_buy_delivery(
         context=context,
     )
     response = _get_media_buy_delivery_impl(req, identity)
-    return ToolResult(content=str(response), structured_content=response)
+    return mcp_result(response)
 
 
 def get_media_buy_delivery_raw(

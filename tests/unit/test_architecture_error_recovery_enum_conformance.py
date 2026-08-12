@@ -13,6 +13,18 @@ Codes absent from the pinned enum (internal/adapter-only codes that have no AdCP
 wire equivalent — e.g. ``WORKFLOW_CREATION_FAILED``, ``GAM_UPDATE_FAILED``) cannot
 be graded against an enum that does not contain them; they are reported by
 ``test_internal_only_codes_are_documented`` rather than silently skipped.
+
+Reads the ``recovery`` field through ``tests.helpers.pinned_schema`` (the
+installed SDK's own error-code.json), NOT the vendored fixture the sibling
+``suggestion``-conformance oracle still uses. Verified before this migration:
+the SDK's 92-code enum is a strict superset of the fixture's 64 (fixture-only
+set is empty), and the ``recovery`` classification is IDENTICAL across all 64
+shared codes (0 divergences; 30 AdCPError subclasses graded, unchanged before
+and after) — the ``suggestion`` field is NOT identical across those same
+codes (4 textual divergences), which is why only this reader migrated.
+Reproduce the fixture count: ``uv run python3 -c "import json;
+print(len(json.load(open('tests/fixtures/adcp_schemas_pinned/enums/error-code.json'))['enum']))"``
+-> 64 (see docs/adcp-spec-version.md "Pinned schema sources" for the full measurement).
 """
 
 from __future__ import annotations
@@ -135,4 +147,21 @@ def test_internal_only_codes_are_documented() -> None:
         f"New non-spec error code(s) {sorted(unexpected)} are not in the pinned enum and so "
         f"escape the recovery oracle. Either add the code to the AdCP error-code enum (and the "
         f"pin) or, if it is genuinely internal-only, add it to known_internal here."
+    )
+
+
+@pytest.mark.parametrize("code", ["AUTH_MISSING", "AUTH_INVALID"])
+def test_production_emitted_auth_codes_are_graded(code: str) -> None:
+    """The auth codes production emits are in the vocabulary this oracle grades against.
+
+    The AUTH_MISSING/AUTH_INVALID split is emitted at every wire boundary, so the
+    codes must resolve in the pinned enum or the split silently escapes grading
+    (the parametrized oracle above only walks codes present in ``_RECOVERY_BY_CODE``).
+    They exist only in the installed SDK's enum, not in the older vendored fixture
+    the sibling suggestion oracle reads — which is the concrete reason this reader
+    resolves through the SDK tree.
+    """
+    assert code in _RECOVERY_BY_CODE, (
+        f"{code} is emitted by production but absent from the pinned error-code enum, "
+        "so its recovery classification is ungraded."
     )
