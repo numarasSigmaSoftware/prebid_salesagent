@@ -36,6 +36,8 @@ from tests.helpers.delivery_assertions import (
     assert_detached_push_config,
     assert_next_expected_at_shape,
     assert_partial_data_pairing,
+    assert_summary_reports_against_its_selection,
+    capture_scheduler_summary,
 )
 from tests.helpers.delivery_fixtures import (
     DAILY_REPORTING_WEBHOOK,
@@ -759,13 +761,9 @@ async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
     )
 
     scheduler = DeliveryWebhookScheduler()
-    summaries: list[str] = []
-
-    def capture(msg, *args, **kwargs):
-        summaries.append(msg % args if args else msg)
 
     with (
-        patch("src.services.delivery_webhook_scheduler.logger.info", side_effect=capture),
+        capture_scheduler_summary("src.services.delivery_webhook_scheduler") as summaries,
         mock_send_notification(scheduler) as mock_send,
     ):
         await scheduler._send_reports()
@@ -778,3 +776,8 @@ async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
         f"the suppressed buy is invisible in the summary: {batch[-1]!r} — this line is "
         "the only place an operator sees that work was dropped rather than absent"
     )
+    # The half this test was missing while its twin on the status scheduler had it:
+    # without the total, "1 suppressed" and an idle run are not distinguishable by
+    # anyone reading only the buckets. Deleting the "(of N selected)" fragment from
+    # the production line reddened nothing here before this.
+    assert_summary_reports_against_its_selection(summaries, "batch complete", selected=1)

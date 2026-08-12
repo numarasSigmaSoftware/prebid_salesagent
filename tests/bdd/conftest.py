@@ -167,7 +167,6 @@ _XFAIL_TAGS: dict[str, str] = {
     # Steps have hard assertions now; xfail at scenario level until production catches up.
     "T-UC-003-main": "implementation_date, budget, sandbox not populated in update response — spec-production gap",
     "T-UC-003-alt-timing": "implementation_date not populated in update response — spec-production gap",
-    # FIXME(salesagent-ghgx): UC-003 pause — sandbox flag not populated in update response
     # FIXME(salesagent-ghgx): UC-003 optimization_goals — affected_packages empty in response
     "T-UC-003-alt-optimization-goals": "affected_packages not populated for optimization_goals changes — spec-production gap",
     # FIXME(salesagent-javy): UC-003 ext-t — invoice_recipient authorization (BR-RULE-214) not implemented;

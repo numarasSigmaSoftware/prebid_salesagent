@@ -859,10 +859,10 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
     records: caplog depends on global logging state other tests mutate, so a
     caplog version passes alone and captures nothing in the full suite.
     """
-    from unittest.mock import patch
 
     from tests.factories import MediaBuyFactory
     from tests.harness._base import IntegrationEnv
+    from tests.helpers.delivery_assertions import capture_scheduler_summary
 
     with IntegrationEnv(tenant_id="t_sweep_log", principal_id="p_sweep_log") as env:
         tenant, principal = env.setup_default_data()
@@ -878,12 +878,7 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
             end_time=datetime.now(UTC) + timedelta(days=7),
         )
 
-        lines: list[str] = []
-
-        def capture(msg, *args, **kwargs):
-            lines.append(msg % args if args else msg)
-
-        with patch("src.services.media_buy_status_scheduler.logger.info", side_effect=capture):
+        with capture_scheduler_summary("src.services.media_buy_status_scheduler") as lines:
             summary = await MediaBuyStatusScheduler()._update_statuses()
 
         assert summary.updated == 0, f"seeding no longer produces a no-op sweep (updated={summary.updated})"

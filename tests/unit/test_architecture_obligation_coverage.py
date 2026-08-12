@@ -85,22 +85,28 @@ def _get_all_obligation_ids() -> set[str]:
     return ids
 
 
-def _get_behavioral_obligations() -> set[str]:
-    """Get obligation IDs where ``**Layer** behavioral``."""
+def _obligation_ids_for_layer(layer: str) -> set[str]:
+    """Obligation IDs declared ``**Layer** <layer>``.
+
+    One collector for both layers. The schema-layer version was added as a copy of
+    the behavioral one with a single literal changed -- parameter substitution,
+    which is the duplication the DRY invariant names, and invisible to R0801 at
+    this size. Two copies would drift the moment the obligation format changes.
+    """
     ids: set[str] = set()
-    for md in OBLIGATIONS_DIR.glob("*.md"):
-        content = md.read_text()
-        lines = content.splitlines()
+    marker = f"**Layer** {layer}"
+    for md in sorted(OBLIGATIONS_DIR.glob("*.md")):
+        lines = md.read_text().splitlines()
         for i, line in enumerate(lines):
-            if "**Obligation ID**" in line:
-                m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
-                if not m:
-                    continue
-                oid = m.group(1)
-                # Check next line for Layer tag
-                if i + 1 < len(lines) and "**Layer** behavioral" in lines[i + 1]:
-                    ids.add(oid)
+            m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
+            if m and i + 1 < len(lines) and marker in lines[i + 1]:
+                ids.add(m.group(1))
     return ids
+
+
+def _get_behavioral_obligations() -> set[str]:
+    """Obligation IDs where ``**Layer** behavioral``."""
+    return _obligation_ids_for_layer("behavioral")
 
 
 def _get_covered_obligations() -> set[str]:
@@ -304,20 +310,11 @@ class TestObligationCoverage:
 def _schema_layer_obligation_ids() -> set[str]:
     """Obligation IDs declared ``**Layer** schema``.
 
-    The sibling of the behavioral collector above, which filtered
-    ``**Layer** behavioral`` and so left every schema-layer obligation ungraded. A
-    ``Covers:`` tag added to one of those was decoration: deleting it reddened
-    nothing, which is how CONSTR-REPORTING-FREQUENCY-01 could be described as
-    covered while nothing checked it.
+    The behavioral collector above filtered ``**Layer** behavioral`` only, so every
+    schema-layer obligation was ungraded and a ``Covers:`` tag on one was
+    decoration -- deleting it reddened nothing.
     """
-    ids: set[str] = set()
-    for md in sorted(OBLIGATIONS_DIR.glob("*.md")):
-        lines = md.read_text().splitlines()
-        for i, line in enumerate(lines):
-            m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
-            if m and i + 1 < len(lines) and "**Layer** schema" in lines[i + 1]:
-                ids.add(m.group(1))
-    return ids
+    return _obligation_ids_for_layer("schema")
 
 
 # Schema-layer obligations with no ``Covers:`` tag today. SHRINK ONLY.
@@ -535,6 +532,32 @@ class TestSchemaLayerObligationsAreRatcheted:
         """A collector matching nothing would make every assertion below vacuous."""
         ids = _schema_layer_obligation_ids()
         assert len(ids) > 100, f"expected hundreds of schema-layer obligations, found {len(ids)}"
+
+    # The ceiling that makes "SHRINK ONLY" more than a comment. Lower it when
+    # coverage lands; never raise it. Tracked in #1935.
+    #
+    # The exact-set check below fails on an obligation that is uncovered and NOT
+    # allowlisted -- but it passes if you add that obligation to the allowlist
+    # instead of covering it, which is exactly how a shrink-only list grows. The
+    # sibling e2e_rest pin needs no ceiling because its members are arbitrary
+    # strings; here a new uncovered obligation is a legitimate set member, so the
+    # size is the only thing that distinguishes progress from accommodation.
+    MAX_UNCOVERED = 196
+
+    def test_the_uncovered_allowlist_only_shrinks(self):
+        actual = len(SCHEMA_LAYER_UNCOVERED_ALLOWLIST)
+        assert actual <= self.MAX_UNCOVERED, (
+            f"SCHEMA_LAYER_UNCOVERED_ALLOWLIST grew to {actual} (ceiling {self.MAX_UNCOVERED}) -- "
+            "a new schema-layer obligation must get a `Covers:` tag, not an allowlist entry"
+        )
+
+    def test_the_ceiling_is_not_left_slack(self):
+        """A ceiling above the real count silently permits that many new entries."""
+        actual = len(SCHEMA_LAYER_UNCOVERED_ALLOWLIST)
+        assert actual == self.MAX_UNCOVERED, (
+            f"MAX_UNCOVERED is {self.MAX_UNCOVERED} but the allowlist holds {actual} -- lower the "
+            "ceiling to match, or the ratchet has room to grow back"
+        )
 
     def test_schema_layer_coverage_matches_the_ratchet(self):
         """Both directions in one assertion, via the shared helper.

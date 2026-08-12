@@ -285,7 +285,7 @@ def is_production() -> bool:
     literal and so never saw FLY_APP_NAME. A Fly.io deployment therefore served
     its admin session cookie without Secure and left POST /test/auth reachable.
 
-    Convergence is NOT repo-wide: sixteen open-coded production decisions remain
+    Convergence is NOT repo-wide: 16 open-coded production decisions remain
     in admin blueprints and the landing page, all presentation or deploy-shape
     rather than security boundaries, tracked in #1819. TestProductionSignalConverged
     (tests/unit/test_db_config.py) holds that count on a shrink-only ratchet and

@@ -8,6 +8,8 @@ once (avoids the drift where some sites silently dropped `sequence_number`).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from src.core.tools._media_buy_status import WEBHOOK_ONLY_FIELDS
@@ -294,4 +296,45 @@ def assert_next_expected_at_is_next_utc_midnight(payload: dict, *, context: str)
     assert now < parsed <= now + timedelta(hours=24), (
         f"{context}: next_expected_at must be the NEXT UTC midnight — strictly ahead of now and "
         f"no more than 24h out — got {value!r} against now={now.isoformat()}"
+    )
+
+
+@contextmanager
+def capture_scheduler_summary(module_path: str) -> Iterator[list[str]]:
+    """Spy a scheduler module's ``logger.info``, yielding the formatted lines.
+
+    Shared by the two scheduler summary tests, which had this block verbatim in
+    both files — and had already drifted: one asserted the summary reports against
+    its selection, the other did not, so deleting the "(of N selected)" fragment
+    from the delivery scheduler reddened nothing.
+
+    Spies the module logger rather than using ``caplog``: caplog depends on global
+    logging state that other tests mutate, so a caplog version of these passes
+    alone and sees an empty capture inside the full suite — green for the wrong
+    reason. Formats with ``msg % args`` because both schedulers log lazily.
+    """
+    from unittest.mock import patch
+
+    lines: list[str] = []
+
+    def _capture(msg, *args, **kwargs):
+        lines.append(msg % args if args else msg)
+
+    with patch(f"{module_path}.logger.info", side_effect=_capture):
+        yield lines
+
+
+def assert_summary_reports_against_its_selection(lines: list[str], marker: str, *, selected: int) -> None:
+    """Assert the run emitted its summary AND reported it against the selection.
+
+    The "(of N selected)" half is the point: buckets alone cannot distinguish "every
+    row was skipped" from "there was nothing to do", which is the misreading both
+    summaries were widened to prevent. Asserted here once so the two schedulers
+    cannot drift on whether it is checked.
+    """
+    matching = [line for line in lines if marker in line]
+    assert matching, f"no summary line containing {marker!r} was emitted (saw {lines!r})"
+    assert f"of {selected} selected" in matching[-1], (
+        f"the summary does not report against its selection: {matching[-1]!r} — without the "
+        f"total, {selected} skipped rows and an idle run print the same buckets"
     )

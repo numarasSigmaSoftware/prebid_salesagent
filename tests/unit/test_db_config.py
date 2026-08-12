@@ -1,5 +1,8 @@
 """Tests for database configuration helpers."""
 
+import ast
+import re
+
 import pytest
 
 from src.core.database.db_config import int_env
@@ -40,14 +43,18 @@ class TestProductionSignalConverged:
     Fly-only deployment serving its admin session cookie without Secure and
     leaving POST /test/auth reachable.
 
-    Convergence is NOT complete, and this class does not claim it is. Sixteen
-    open-coded production decisions remain, all in admin blueprints and the
-    landing page. OPEN_CODED_ALLOWANCE is the shrink-only ratchet over exactly
-    those: a new one anywhere fails immediately, and fixing one fails until its
-    allowance is lowered, so the count cannot drift back up quietly. A prose
-    claim of full convergence is what this replaces -- the previous guard
-    checked one regex against four named files and could not have seen any of
-    the sixteen.
+    Convergence is NOT complete, and this class does not claim it is. Open-coded
+    production decisions remain in admin blueprints and the landing page;
+    OPEN_CODED_ALLOWANCE below is the authority on how many, and the shrink-only
+    ratchet over exactly those: a new one anywhere fails immediately, and fixing
+    one fails until its allowance is lowered, so the count cannot drift back up
+    quietly. A prose claim of full convergence is what this replaces -- the
+    previous guard checked one regex against four named files and could not have
+    seen any of them.
+
+    The count is deliberately NOT restated here. It is stated once, in
+    config.py's docstring, and test_the_documented_remaining_count_matches_the_scan
+    checks that one statement against the table.
     """
 
     # Every remaining site that reads a production signal directly, by file.
@@ -80,23 +87,172 @@ class TestProductionSignalConverged:
         "src/landing/landing_page.py": 3,
     }
 
-    SIGNAL_READ = r'os\.(?:environ\.get|getenv)\(\s*"(?:PRODUCTION|ENVIRONMENT|FLY_APP_NAME)"'
+    SIGNAL_NAMES = frozenset({"PRODUCTION", "ENVIRONMENT", "FLY_APP_NAME"})
+
+    @staticmethod
+    def _is_environ(node) -> bool:
+        """``os.environ`` or a bare ``environ`` from ``from os import environ``."""
+        return (isinstance(node, ast.Attribute) and node.attr == "environ") or (
+            isinstance(node, ast.Name) and node.id == "environ"
+        )
+
+    @classmethod
+    def _reads_signal(cls, node) -> bool:
+        """One read of a production signal env var, in any call shape.
+
+        AST, not a regex. The previous SIGNAL_READ was a per-LINE match on
+        ``os.(environ.get|getenv)("NAME")`` with a double quote hardcoded, so five
+        real shapes were invisible to the ratchet and could be added freely:
+
+            os.environ["PRODUCTION"]                 subscript
+            os.getenv('PRODUCTION')                  single quotes
+            from os import environ; environ.get(...) bare name
+            os.environ.get(                          call split across lines
+                "PRODUCTION")
+            os.environ.get(KEY)                      non-literal key
+
+        The first four are counted here. The fifth cannot be resolved statically
+        and is reported separately by test_no_signal_is_read_through_an_indirect_key,
+        because silently not counting it is how a site hides.
+        """
+        if isinstance(node, ast.Call):
+            func = node.func
+            is_getenv = (isinstance(func, ast.Attribute) and func.attr == "getenv") or (
+                isinstance(func, ast.Name) and func.id == "getenv"
+            )
+            is_environ_get = isinstance(func, ast.Attribute) and func.attr == "get" and cls._is_environ(func.value)
+            if (is_getenv or is_environ_get) and node.args:
+                first = node.args[0]
+                return isinstance(first, ast.Constant) and first.value in cls.SIGNAL_NAMES
+            return False
+        if isinstance(node, ast.Subscript) and cls._is_environ(node.value):
+            key = node.slice
+            return isinstance(key, ast.Constant) and key.value in cls.SIGNAL_NAMES
+        return False
 
     @classmethod
     def _open_coded_counts(cls):
-        import re
         from collections import Counter
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        pattern = re.compile(cls.SIGNAL_READ)
         counts = Counter()
         for sub in ("src", "scripts"):
             for path in sorted((root / sub).rglob("*.py")):
-                found = sum(1 for line in path.read_text().splitlines() if pattern.search(line))
+                found = sum(1 for node in ast.walk(ast.parse(path.read_text())) if cls._reads_signal(node))
                 if found:
                     counts[path.relative_to(root).as_posix()] = found
         return counts
+
+    @pytest.mark.parametrize(
+        "source,why",
+        [
+            pytest.param('os.environ.get("PRODUCTION")', "the shape the old regex matched", id="dotted-get"),
+            pytest.param("os.getenv('PRODUCTION')", "single quotes", id="single-quoted"),
+            pytest.param('os.environ["PRODUCTION"]', "subscript", id="subscript"),
+            pytest.param("environ.get('FLY_APP_NAME')", "from os import environ", id="bare-environ-get"),
+            pytest.param('environ["ENVIRONMENT"]', "from os import environ, subscript", id="bare-environ-sub"),
+            pytest.param('os.environ.get(\n    "PRODUCTION"\n)', "call split across lines", id="multiline"),
+            pytest.param('getenv("PRODUCTION")', "from os import getenv", id="bare-getenv"),
+        ],
+    )
+    def test_the_scanner_sees_every_read_shape(self, source, why):
+        """Each shape below was green under the old per-line regex except the first.
+
+        Parametrized rather than spot-checked: the defect was that ONE shape was
+        modelled, so a test asserting only that shape agrees with the bug.
+        """
+        found = [n for n in ast.walk(ast.parse(source)) if self._reads_signal(n)]
+        assert len(found) == 1, f"scanner missed {why}: {source!r}"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'os.environ.get("UNRELATED_VAR")',
+            'some_dict.get("PRODUCTION")',
+            'config["PRODUCTION"]',
+        ],
+    )
+    def test_the_scanner_does_not_over_match(self, source):
+        """A scanner that counts any .get("PRODUCTION") would flag unrelated dicts,
+        and a ratchet that cries wolf gets its allowance raised rather than read."""
+        assert not [n for n in ast.walk(ast.parse(source)) if self._reads_signal(n)], source
+
+    # Generic env accessors that take the variable NAME as a parameter. These are
+    # not open-coded production decisions -- the caller chooses the variable, and a
+    # caller passing a signal name does so as a literal the ratchet still sees at
+    # its own site. Forbidding the pattern outright would ban a normal idiom and
+    # get this test's allowance raised rather than read.
+    INDIRECT_KEY_ALLOWLIST = {
+        "src/core/config.py": "_env_flag_is_true(name) -- the shared truthy-vocabulary parser",
+        "src/core/database/db_config.py": "int_env(name, default) -- generic integer env parser",
+        "src/core/config_loader.py": "get_secret(key, default) -- generic secret accessor",
+        "src/admin/auth_helpers.py": "env-or-config lookup taking env_var as a parameter",
+    }
+
+    def test_no_signal_is_read_through_an_indirect_key(self):
+        """``os.environ[KEY]`` cannot be resolved statically, so a NEW one must not appear.
+
+        The one shape the AST scanner genuinely cannot count: if the key is a
+        variable, no static check can tell whether it holds "PRODUCTION". Left
+        entirely unchecked that is an unmonitored way to open-code the signal, so
+        new sites are refused while the four generic accessors are named above.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        indirect = []
+        for sub in ("src", "scripts"):
+            for path in sorted((root / sub).rglob("*.py")):
+                tree = ast.parse(path.read_text())
+                for node in ast.walk(tree):
+                    dynamic_sub = (
+                        isinstance(node, ast.Subscript)
+                        and self._is_environ(node.value)
+                        and not isinstance(node.slice, ast.Constant)
+                    )
+                    dynamic_get = (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "get"
+                        and self._is_environ(node.func.value)
+                        and node.args
+                        and not isinstance(node.args[0], ast.Constant)
+                    )
+                    if (dynamic_sub or dynamic_get) and path.relative_to(root).as_posix() not in (
+                        self.INDIRECT_KEY_ALLOWLIST
+                    ):
+                        indirect.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
+        assert not indirect, (
+            f"environ read through a non-literal key at {indirect} — the ratchet cannot see these, "
+            "so a production signal could be open-coded there unmonitored. Use a literal name, or "
+            "add the file to INDIRECT_KEY_ALLOWLIST if it is a generic accessor taking the name as "
+            "a parameter."
+        )
+
+    def test_the_indirect_key_allowlist_has_no_stale_entries(self):
+        """An allowlisted file that no longer reads environ indirectly hides the next one."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        stale = []
+        for rel in self.INDIRECT_KEY_ALLOWLIST:
+            tree = ast.parse((root / rel).read_text())
+            has_indirect = any(
+                (isinstance(n, ast.Subscript) and self._is_environ(n.value) and not isinstance(n.slice, ast.Constant))
+                or (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "get"
+                    and self._is_environ(n.func.value)
+                    and n.args
+                    and not isinstance(n.args[0], ast.Constant)
+                )
+                for n in ast.walk(tree)
+            )
+            if not has_indirect:
+                stale.append(rel)
+        assert not stale, f"remove these from INDIRECT_KEY_ALLOWLIST — they no longer read environ indirectly: {stale}"
 
     def test_the_scanner_matches_a_known_open_coded_site(self):
         """An allowance table compared against a broken scanner passes by finding
@@ -165,38 +321,70 @@ class TestProductionSignalConverged:
             "reader of that file learns the site is tracked without consulting this table"
         )
 
+    def test_every_fixme_marker_sits_at_its_site(self):
+        """PLACEMENT, not just count.
+
+        The count check above is satisfied by six markers anywhere in a six-site
+        file — all of them in the module docstring, say — while its own message
+        claims location semantics ("at each allowlisted source location, so a reader
+        of that file learns the site is tracked"). CLAUDE.md asks for the marker AT
+        the site; an assertion that cannot tell a marker at line 400 from one above
+        line 12 is not checking that.
+
+        Proximity, not exact adjacency: a marker may carry a wrapped explanation, so
+        requiring line N-1 exactly would break on a two-line note. Within three lines
+        above keeps it attached to the site while leaving room to explain.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        detached = {}
+        for rel in self.OPEN_CODED_ALLOWANCE:
+            if rel in self.FIXME_EXEMPT:
+                continue
+            lines = (root / rel).read_text().splitlines()
+            marker_lines = [i for i, line in enumerate(lines) if self.FIXME_MARKER in line]
+            tree = ast.parse("\n".join(lines))
+            site_lines = sorted({n.lineno - 1 for n in ast.walk(tree) if self._reads_signal(n)})
+            unmarked = [ln + 1 for ln in site_lines if not any(0 < ln - m <= 3 for m in marker_lines)]
+            if unmarked:
+                detached[rel] = unmarked
+        assert not detached, (
+            f"{self.FIXME_MARKER} is not within three lines above these sites (file: line numbers): "
+            f"{detached} -- the marker exists to be seen by whoever edits that line, so its position "
+            "is the whole point"
+        )
+
     def test_the_fixme_exemptions_still_have_allowances(self):
         """An exemption for a file that left the table hides the next real violation."""
         orphaned = sorted(set(self.FIXME_EXEMPT) - set(self.OPEN_CODED_ALLOWANCE))
         assert not orphaned, f"these files are FIXME-exempt but no longer allowlisted: {orphaned}"
 
     def test_the_documented_remaining_count_matches_the_scan(self):
-        """Both prose statements of "how many remain" must equal the computed number.
+        """config.py's stated count must equal the table's, and the scanner's.
 
-        They had drifted three ways at once -- this docstring said "Eighteen",
-        config.py said "sixteen", and the scanner found 16. A number restated in
-        prose in two files is exactly the falsifiable comment these commits set out
-        to remove, so it is derived here rather than re-checked by eye.
+        Three defects in the first version of this test, all of which made it
+        weaker than it looked:
+
+        * It grepped for an English number word ("sixteen") in THIS file, while the
+          word came from a ``{10: "ten", ...}`` table of literals declared a few
+          lines above the assertion — so the "this file" half matched itself and
+          could never fail.
+        * ``assert word, "extend the number-word table"`` went RED when the count
+          dropped below 10, i.e. the test failed because the ratchet IMPROVED, and
+          the remedy was to edit the test.
+        * The config.py half was a bare substring check, so "ten" matched inside
+          "Tightening".
+
+        Now: the count lives in exactly ONE prose location (config.py's docstring),
+        is written as a digit, and is matched with word boundaries so no substring
+        can satisfy it. Any integer works, so shrinking the ratchet can never fail
+        this test for improving.
         """
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
         remaining = sum(n for f, n in self.OPEN_CODED_ALLOWANCE.items() if f not in self.FIXME_EXEMPT)
-        words = {
-            10: "ten",
-            11: "eleven",
-            12: "twelve",
-            13: "thirteen",
-            14: "fourteen",
-            15: "fifteen",
-            16: "sixteen",
-            17: "seventeen",
-            18: "eighteen",
-            19: "nineteen",
-            20: "twenty",
-        }
-        word = words.get(remaining)
-        assert word, f"extend the number-word table for {remaining}"
 
         scanned = sum(n for f, n in self._open_coded_counts().items() if f not in self.FIXME_EXEMPT)
         assert scanned == remaining, (
@@ -204,12 +392,35 @@ class TestProductionSignalConverged:
             f"{scanned} -- the table is stale"
         )
 
-        for rel, label in (("tests/unit/test_db_config.py", "this file"), ("src/core/config.py", "config.py")):
-            text = (root / rel).read_text().lower()
-            assert word in text, (
-                f"{label} no longer states the remaining count as {word!r} ({remaining} sites) -- "
-                "update the prose; a stale count here is the exact defect this test exists for"
-            )
+        doc = (root / "src" / "core" / "config.py").read_text()
+        stated = re.findall(r"\b(\d+) open-coded production decisions remain\b", doc)
+        assert stated == [str(remaining)], (
+            f"config.py states {stated or 'no'} open-coded production decisions remain, but the "
+            f"allowance table and the scanner both say {remaining}. config.py's docstring is the "
+            "single place this count is written -- update it there."
+        )
+
+    def test_the_count_is_stated_in_exactly_one_place(self):
+        """A number restated in two files is the falsifiable comment this removes.
+
+        The count had drifted three ways at once (this file said "Eighteen",
+        config.py "sixteen", the scanner 16) precisely because two files asserted
+        it independently. Keeping it to one statement is what makes the check above
+        meaningful rather than a race between two prose sources.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        pattern = re.compile(r"\b\d+ open-coded production decisions remain\b")
+        stating = [
+            rel
+            for rel in ("src/core/config.py", "tests/unit/test_db_config.py")
+            if pattern.search((root / rel).read_text())
+        ]
+        assert stating == ["src/core/config.py"], (
+            f"the remaining-count is stated in {stating}; it belongs in config.py's docstring only, "
+            "so there is one thing to keep true"
+        )
 
     def test_no_site_still_open_codes_the_bare_presence_check(self):
         """A regression back to a hand-rolled copy at any of the four sites must fail this test."""
