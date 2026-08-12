@@ -209,7 +209,7 @@ DISCOVERY_SKILLS = AUTH_OPTIONAL_SKILLS
 # literals, and only one of them listed sync_creatives — so a submitted sync got its
 # webhook config but no task id, and cancel then fabricated CANCELED for a workflow that
 # kept running.
-_ASYNC_TASK_SKILLS = frozenset({"create_media_buy", "sync_creatives"})
+_ASYNC_TASK_SKILLS = frozenset({"create_media_buy", "sync_creatives", "update_media_buy"})
 
 # create_media_buy takes the id positionally through a wider signature (it also needs the
 # raw wire payload); the rest take it as a keyword.
@@ -2601,7 +2601,13 @@ class AdCPRequestHandler(RequestHandler):
 
         return response
 
-    async def _handle_update_media_buy_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
+    async def _handle_update_media_buy_skill(
+        self,
+        parameters: dict,
+        identity: ResolvedIdentity,
+        *,
+        a2a_task_id: str | None = None,
+    ) -> dict:
         """Handle explicit update_media_buy skill invocation (CRITICAL for campaign management)."""
         # Identity already resolved at transport boundary (on_message_send)
 
@@ -2646,6 +2652,7 @@ class AdCPRequestHandler(RequestHandler):
             push_notification_config=params.get("push_notification_config"),
             context=params.get("context"),
             identity=identity,
+            external_task_id=a2a_task_id,
         )
 
         return response

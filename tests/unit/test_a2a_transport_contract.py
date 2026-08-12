@@ -1001,3 +1001,16 @@ class TestAsyncTaskSkillsThreadTheOuterTaskId:
         # create_media_buy is threaded on its own branch (it also needs the raw wire
         # payload), so it is the one member handled outside the keyword branch.
         assert _ASYNC_TASK_SKILLS - _TASK_ID_BEARING_SKILLS == {"create_media_buy"}
+
+    def test_the_set_names_every_skill_that_can_return_a_non_terminal_task(self):
+        """Membership pin: the three skills whose result can be ``submitted``.
+
+        Derived from what each skill can RETURN, not from what the dispatch happens to
+        thread — create_media_buy and update_media_buy can answer with a submitted
+        result awaiting approval, and sync_creatives with creatives pending review.
+        A fourth async skill added without joining this set gets neither a persisted
+        task id nor a push-notification config, which is the drift this pins.
+        """
+        from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS
+
+        assert _ASYNC_TASK_SKILLS == {"create_media_buy", "sync_creatives", "update_media_buy"}

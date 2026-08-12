@@ -343,10 +343,29 @@ def _verify_principal(
         )
 
 
+def _update_workflow_metadata(identity: ResolvedIdentity, external_task_id: str | None) -> dict[str, Any]:
+    """Metadata merged into the update step's ``request_data``.
+
+    ``external_task_id`` is the buyer's outer A2A ``task_*`` id. An update that returns
+    ``status="submitted"`` hands the buyer that id, so it has to reach the durable step:
+    ``resolve_webhook_task_id`` reads exactly this key to decide whether the completion
+    webhook carries the buyer's id or falls back to the internal ``step_id``, and
+    ``tasks/cancel`` refuses outright when no durable step carries it.
+
+    Omitted rather than written as None on MCP/REST, which have no outer task id — the
+    reader tests presence.
+    """
+    metadata: dict[str, Any] = {"protocol": identity.protocol}
+    if external_task_id:
+        metadata["external_task_id"] = external_task_id
+    return metadata
+
+
 def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
+    external_task_id: str | None = None,
 ) -> UpdateMediaBuyResult | UpdateMediaBuySubmitted:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
@@ -466,7 +485,7 @@ def _update_media_buy_impl(
                     status="in_progress",
                     tool_name="update_media_buy",
                     request_data=req,
-                    request_metadata={"protocol": identity.protocol},
+                    request_metadata=_update_workflow_metadata(identity, external_task_id),
                 )
 
             principal = resolve_principal_or_raise(principal_id, tenant_id=identity.tenant_id, context=req.context)
@@ -1624,6 +1643,7 @@ def update_media_buy_raw(
     idempotency_key: str | None = None,  # AdCP idempotency key for retry safety
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
+    external_task_id: str | None = None,
 ):
     """Update an existing media buy (raw function for A2A server use).
 
@@ -1676,4 +1696,4 @@ def update_media_buy_raw(
         identity = resolve_identity_from_context(ctx, require_valid_token=True)
     # A2A/REST callers pass identity directly without a FastMCP Context, so there
     # is no workflow context_id to forward — _impl creates one if needed.
-    return _update_media_buy_impl(req=req, identity=identity, context_id=None)
+    return _update_media_buy_impl(req=req, identity=identity, context_id=None, external_task_id=external_task_id)
