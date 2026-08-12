@@ -34,7 +34,9 @@ from src.core.logging_config import scrub_control_chars
 from src.core.security.webhook_http import (
     BEARER_AUTH_SCHEME,
     WEBHOOK_DELIVERY_DEADLINE_SECONDS,
+    WEBHOOK_DELIVERY_MAX_RETRIES,
     WEBHOOK_DELIVERY_MAX_WORKERS,
+    WEBHOOK_POST_TIMEOUT_SECONDS,
     UnsafeWebhookTargetError,
     create_pinned_webhook_session,
     is_auth_scheme,
@@ -562,7 +564,7 @@ class WebhookDeliveryService:
         Returns:
             True if delivered successfully, False otherwise
         """
-        max_retries = 3
+        max_retries = WEBHOOK_DELIVERY_MAX_RETRIES
         webhook_data = queue.dequeue()
         if not webhook_data:
             return False
@@ -618,7 +620,7 @@ class WebhookDeliveryService:
                 url,
                 body=payload_bytes,
                 headers=headers,
-                timeout=10.0,
+                timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
             )
         except UnsafeWebhookTargetError as e:
             # DNS rebinding/private targets are permanent security failures,

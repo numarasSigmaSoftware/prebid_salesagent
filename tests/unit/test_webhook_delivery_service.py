@@ -10,6 +10,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from src.core.security.webhook_http import WEBHOOK_POST_TIMEOUT_SECONDS
 from src.services.webhook_delivery_service import CircuitState, WebhookDeliveryService
 
 
@@ -128,7 +129,7 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
             "https://example.com/webhook",
             body=ANY,
             headers=ANY,
-            timeout=10.0,
+            timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
         )
         call_args = mock_post.call_args
 

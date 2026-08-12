@@ -753,15 +753,24 @@ class AdCPRequestHandler(RequestHandler):
             # matching REST's no-identity envelope (auth_context.py), which the
             # bare A2AError previously dropped. (#1417)
             if requires_auth and not auth_token:
+                missing_token_error = AdCPAuthRequiredError(
+                    "Authentication required - Bearer token required in Authorization header",
+                    suggestion=AUTH_REQUIRED_SUGGESTION,
+                    context=request_application_context,
+                )
+                # Record BEFORE raising. InvalidRequestError is an A2AError, and
+                # the `except A2AError: raise` below re-raises it untouched — so
+                # this rejection reached the wire having written nothing, while
+                # the sibling INVALID-token path (and REST, and MCP) all record.
+                # Measured across the real transports: A2A 0, REST 1, MCP 1.
+                # `record_boundary_error`'s own docstring says all three
+                # boundaries delegate to it so severity, activity feed and audit
+                # stay in lockstep; identity is None here, so the helper degrades
+                # tenant_id to None and correctly skips the tenant-scoped sinks.
+                record_boundary_error_for_identity("a2a", "message_processing", missing_token_error, None)
                 raise InvalidRequestError(
                     message="Missing authentication token - Bearer token required in Authorization header",
-                    data=build_two_layer_error_envelope(
-                        AdCPAuthRequiredError(
-                            "Authentication required - Bearer token required in Authorization header",
-                            suggestion=AUTH_REQUIRED_SUGGESTION,
-                            context=request_application_context,
-                        )
-                    ),
+                    data=build_two_layer_error_envelope(missing_token_error),
                 )
 
             # ── Transport boundary: resolve identity ONCE ──

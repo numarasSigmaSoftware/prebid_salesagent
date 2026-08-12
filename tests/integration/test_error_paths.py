@@ -344,3 +344,67 @@ class TestRestBoundaryAuditObservability:
         assert audit_log.success is False
         assert audit_log.principal_id == "test_principal"
         assert "buy_x missing" in (audit_log.error_message or "")
+
+
+@pytest.mark.requires_db
+class TestA2AMissingTokenRecordsTheBoundaryError:
+    """A2A's missing-token rejection must leave the same trail as its siblings.
+
+    `record_boundary_error`'s docstring states that all three boundaries
+    delegate to it so log severity, activity-feed publishing and audit logging
+    stay in lockstep — a claimed invariant with no oracle. A2A broke it in one
+    specific spot: the missing-token branch raises `InvalidRequestError`, an
+    `A2AError` subclass, and `except A2AError: raise` re-raises it without ever
+    reaching the recorder. Measured over the real transports before the fix:
+    A2A 0, REST 1, MCP 1.
+
+    The gap is INSIDE A2A too, not only across transports — the sibling
+    INVALID-token path a few lines down does record.
+    """
+
+    @staticmethod
+    async def _send_without_token():
+        from a2a.types import SendMessageRequest
+
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from tests.a2a_helpers import make_a2a_context
+        from tests.utils.a2a_helpers import create_a2a_message_with_skill
+
+        handler = AdCPRequestHandler()
+        params = SendMessageRequest(
+            message=create_a2a_message_with_skill("create_media_buy", {"promoted_offering": "x"})
+        )
+        return await handler.on_message_send(params, context=make_a2a_context(headers={}))
+
+    @pytest.mark.asyncio
+    async def test_the_rejection_is_recorded_before_it_is_raised(self, integration_db):
+        from unittest.mock import patch
+
+        from a2a.utils.errors import A2AError
+
+        with patch("src.a2a_server.adcp_a2a_server.record_boundary_error_for_identity") as recorder:
+            with pytest.raises(A2AError):
+                await self._send_without_token()
+
+        assert recorder.call_count == 1, (
+            f"A2A missing-token rejection recorded {recorder.call_count} boundary errors; "
+            "REST and MCP each record 1 for the same event"
+        )
+        transport, operation, error, identity = recorder.call_args.args
+        assert transport == "a2a"
+        assert error.error_code == "AUTH_REQUIRED"
+        # identity is None here, which is what makes the helper skip the
+        # tenant-scoped sinks rather than fabricate an "unknown" tenant.
+        assert identity is None
+
+    @pytest.mark.asyncio
+    async def test_the_buyer_still_receives_the_auth_envelope(self, integration_db):
+        """Recording must not change what reaches the wire."""
+        from a2a.utils.errors import A2AError
+
+        with pytest.raises(A2AError) as exc_info:
+            await self._send_without_token()
+
+        envelope = exc_info.value.data
+        assert envelope["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert envelope["errors"][0]["code"] == "AUTH_REQUIRED"

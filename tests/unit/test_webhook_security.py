@@ -755,3 +755,43 @@ class TestPrivateTargetOptInIsSingleSourced:
         assert send_ok is False and connect_ok is False, (
             f"ADCP_TESTING alone must not unlock private egress: send={send_ok} connect={connect_ok}"
         )
+
+
+class TestDeliveryDeadlineCoversTheRetryBudget:
+    """The deadline must bound the retry loop, not cancel it.
+
+    `WEBHOOK_DELIVERY_DEADLINE_SECONDS` was a hand-picked 12.0 wrapping a loop
+    that can legitimately run 36-38s (3 x 10s POST plus 2-3s and 4-5s backoff).
+    The second attempt alone exceeded it, so the TimeoutError branch was the
+    normal outcome for any slow endpoint and the retries never happened. All
+    four callers discard the returned bool, so the only signal was a log line.
+
+    Nothing pinned the relation — the sole existing reference monkeypatches the
+    constant to 0.05.
+    """
+
+    def test_the_deadline_is_at_least_the_worst_case_retry_budget(self):
+        from src.core.security import webhook_http
+
+        assert webhook_http.WEBHOOK_DELIVERY_DEADLINE_SECONDS >= webhook_http._worst_case_delivery_seconds(), (
+            "the deadline is shorter than the retry loop it wraps, so retries are cancelled, not capped"
+        )
+
+    def test_the_worst_case_matches_the_documented_arithmetic(self):
+        """Pins the derivation itself: 3 POSTs plus backoff before attempts 1 and 2.
+
+        That the SERVICE actually uses these constants is graded behaviorally
+        by tests/unit/test_webhook_delivery_service.py::test_adcp_payload_structure,
+        which asserts the real POST call carries WEBHOOK_POST_TIMEOUT_SECONDS.
+        """
+        from src.core.security import webhook_http
+
+        expected = 3 * webhook_http.WEBHOOK_POST_TIMEOUT_SECONDS + (2 + 1) + (4 + 1)
+        assert webhook_http._worst_case_delivery_seconds() == expected
+
+    def test_a_single_attempt_fits_inside_the_deadline(self):
+        """The floor the old value violated: one POST timing out must not
+        already blow the total budget."""
+        from src.core.security import webhook_http
+
+        assert webhook_http.WEBHOOK_POST_TIMEOUT_SECONDS < webhook_http.WEBHOOK_DELIVERY_DEADLINE_SECONDS
