@@ -2098,6 +2098,12 @@ class AdCPRequestHandler(RequestHandler):
             packages=params.get("packages"),
             push_notification_config=params.get("push_notification_config"),
             context=params.get("context"),
+            # Accepted by the raw wrapper and forwarded by MCP/REST. Dropping them here
+            # silently discarded the buyer's retry-safety key and extension payloads on
+            # A2A only, so an identical request behaved differently per transport.
+            reporting_webhook=params.get("reporting_webhook"),
+            ext=params.get("ext"),
+            idempotency_key=params.get("idempotency_key"),
             revision=_revision,
             identity=identity,
         )
