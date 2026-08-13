@@ -180,6 +180,35 @@ def _approval_in_progress_response():
     ), 202
 
 
+def _is_media_buy_finalizing(media_buy) -> bool:
+    """True when a live lease owner is completing this buy's decision.
+
+    Sibling of ``is_media_buy_approvable``: neither approvable nor terminal, so the route
+    reports the in-progress state rather than claiming a decision it does not own.
+    """
+    return media_buy is not None and media_buy.status == MEDIA_BUY_FINALIZING_STATUS
+
+
+def _respond_to_non_approvable_media_buy(media_buy):
+    """Respond for a buy that can no longer be approved — the two outcomes differ.
+
+    An already-decided (terminal) buy is an idempotent success. A buy that is simply gone
+    approved nothing and never will, so neither its flash nor its JSON arm may claim
+    success — the distinction ``operations.py`` already encodes. Owning both arms here
+    keeps the caller free of a branch that would only re-derive this decision.
+    """
+    logger.warning(
+        "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
+        media_buy is not None,
+        sanitize_log_value(media_buy.status if media_buy else "N/A"),
+    )
+    if media_buy is None:
+        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
+        return jsonify({"success": False, "error": MEDIA_BUY_VANISHED_MESSAGE}), 404
+    flash("Workflow step approved successfully", "success")
+    return jsonify({"success": True}), 200
+
+
 def _hold_for_unapproved_creatives(db, tenant_id: str, media_buy_id: str, user_email: str):
     """Park the approved buy at ``pending_creatives`` until creatives are ready.
 
@@ -367,7 +396,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     )
                     if rendered is not None:
                         return rendered
-                elif media_buy is not None and media_buy.status == MEDIA_BUY_FINALIZING_STATUS:
+                elif _is_media_buy_finalizing(media_buy):
                     # Plain in-flight ``finalizing`` (a live lease owner is completing the
                     # decision) — NOT approvable, NOT terminal. Do not claim success:
                     # report the in-progress state (same 202 vocabulary as RETRYING).
@@ -380,19 +409,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     # The mapped buy is no longer pending_approval (already decided, or
                     # gone). Do NOT write the step — the step follows the buy decision and
                     # must not be reverted.
-                    logger.warning(
-                        "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
-                        media_buy is not None,
-                        sanitize_log_value(media_buy.status if media_buy else "N/A"),
-                    )
-                    if media_buy is None:
-                        # VANISHED, not decided: nothing was approved and nothing exists to
-                        # approve later, so neither the flash nor the JSON arm may report
-                        # success. Same decision operations.py already encodes.
-                        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
-                        return jsonify({"success": False, "error": MEDIA_BUY_VANISHED_MESSAGE}), 404
-                    # Already-decided (terminal) replay — idempotent success.
-                    flash("Workflow step approved successfully", "success")
+                    return _respond_to_non_approvable_media_buy(media_buy)
             else:
                 # Plain (non-media-buy) workflow step — no buy decision to own, so mark the
                 # step approved directly.
