@@ -347,6 +347,41 @@ class TestUpdateOperationLease:
             assert media_buy.update_adapter_invoked_at is None
             assert media_buy.update_recovery_mode is None
 
+    def test_finalize_lease_boundary_instant_is_recoverable_and_claimable(self, tenant_a, principal_a):
+        """The reconciler SCAN and the claim CAS must agree at ``expires_at == now``.
+
+        ``get_finalizing_recoverable`` mirrors ``_finalize_lease_expired`` in SQL. When the
+        two disagreed (scan ``< now``, CAS ``<=`` via ``> now``), a buy whose lease expired
+        exactly on the instant was claimable but never OFFERED — the scan that feeds the
+        reconciler filtered it out, so nothing ever recovered it. Narrowing the SQL clause
+        back to ``<`` reddens the scan assertion below.
+        """
+        media_buy_id = "mb_finalize_lease_boundary"
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, media_buy_id, status="pending_approval"))
+
+        clock = datetime.now(UTC)
+        boundary = clock + timedelta(seconds=1)
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock) as uow:
+            claim = uow.media_buys.claim_finalizing(
+                media_buy_id, expected_status="pending_approval", lease_ttl_seconds=1
+            )
+            assert claim is not None
+            _buy, first_lease = claim
+
+        with MediaBuyUoW(tenant_a) as uow:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            # The clock below lands ON the stored expiry, not merely past it.
+            assert media_buy.finalize_lease_expires_at == boundary
+            recoverable = {b.media_buy_id for b in MediaBuyRepository.get_finalizing_recoverable(uow.session, boundary)}
+        assert media_buy_id in recoverable, "a lease expiring on the instant must be offered to the reconciler"
+
+        with MediaBuyUoW(tenant_a, now_fn=lambda: boundary) as uow:
+            second_lease = uow.media_buys.acquire_finalize_lease(media_buy_id, lease_ttl_seconds=1)
+        assert second_lease is not None, "the CAS must claim what the scan offered"
+        assert second_lease != first_lease
+
     def test_update_status_nonexistent_returns_none(self, tenant_a, principal_a):
         """Updating status of nonexistent media buy returns None."""
         with MediaBuyUoW(tenant_a) as uow:

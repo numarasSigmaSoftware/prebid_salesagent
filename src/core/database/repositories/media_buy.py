@@ -773,6 +773,27 @@ class MediaBuyRepository:
         """A live (claimed, unexpired) update lease — the exact negation of expired."""
         return not MediaBuyRepository._update_lease_expired(media_buy, now)
 
+    @staticmethod
+    def _finalize_lease_expired(media_buy: MediaBuy, now: datetime.datetime) -> bool:
+        """The finalize lease is NOT held: never claimed, or its expiry has passed.
+
+        The finalize-lease twin of ``_update_lease_expired``, on the same ``<=`` boundary:
+        at ``expires_at == now`` the lease is EXPIRED. It was inlined at the two Python
+        claim gates and mirrored a third time in SQL by ``get_finalizing_recoverable``,
+        whose ``< now`` disagreed at exactly that instant — a buy whose lease expired on
+        the boundary was claimable by ``acquire_finalize_lease`` yet invisible to the
+        reconciler scan that feeds it. Deciding it here once removes that disagreement.
+
+        NOT the abandoned-owner grace window (``_reapproval_guard``): that is a different
+        predicate, comparing the expiry against a cutoff further in the past.
+        """
+        return media_buy.finalize_lease_expires_at is None or media_buy.finalize_lease_expires_at <= now
+
+    @staticmethod
+    def _finalize_lease_live(media_buy: MediaBuy, now: datetime.datetime) -> bool:
+        """A live (claimed, unexpired) finalize lease — the exact negation of expired."""
+        return not MediaBuyRepository._finalize_lease_expired(media_buy, now)
+
     def _mark_update_manual_reconciliation(self, media_buy: MediaBuy, now: datetime.datetime) -> None:
         """Fence an ambiguous adapter-backed update for operator reconciliation."""
         media_buy.update_recovery_mode = MEDIA_BUY_RECOVERY_MANUAL
@@ -950,7 +971,7 @@ class MediaBuyRepository:
             return None
         if media_buy.finalize_recovery_mode is not None:
             return None
-        if media_buy.finalize_lease_expires_at is not None and media_buy.finalize_lease_expires_at > now:
+        if self._finalize_lease_live(media_buy, now):
             return None
         _apply(media_buy)
         self._session.flush()
@@ -1078,7 +1099,7 @@ class MediaBuyRepository:
             return False
         if media_buy.finalize_recovery_mode is not None:
             return False
-        if media_buy.finalize_lease_expires_at is not None and media_buy.finalize_lease_expires_at > now:
+        if self._finalize_lease_live(media_buy, now):
             return False
         media_buy.finalize_recovery_mode = MEDIA_BUY_RECOVERY_MANUAL
         self._session.flush()
@@ -1131,6 +1152,12 @@ class MediaBuyRepository:
         flagged ``manual_required`` (hot-loop prevention — the reconciler never
         re-touches those). The per-buy ``acquire_finalize_lease`` CAS remains the
         authoritative single-winner gate; this filter is noise reduction.
+
+        The lease clause is the SQL mirror of ``_finalize_lease_expired`` and must keep
+        its ``<=`` boundary: a scan that used ``<`` would skip exactly the buys whose
+        lease expired ON the instant, while the CAS this feeds would happily claim them —
+        the reconciler would never offer them for recovery. Python-side changes to the
+        predicate have to be mirrored here by hand; the two are pinned together by test.
         """
         return list(
             session.scalars(
@@ -1139,7 +1166,7 @@ class MediaBuyRepository:
                     MediaBuy.finalize_recovery_mode.is_(None),
                     or_(
                         MediaBuy.finalize_lease_expires_at.is_(None),
-                        MediaBuy.finalize_lease_expires_at < now,
+                        MediaBuy.finalize_lease_expires_at <= now,
                     ),
                 )
             ).all()
