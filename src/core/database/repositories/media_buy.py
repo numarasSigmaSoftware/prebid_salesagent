@@ -757,6 +757,22 @@ class MediaBuyRepository:
     def _new_update_lease() -> str:
         return f"update_{uuid.uuid4().hex[:12]}"
 
+    @staticmethod
+    def _update_lease_expired(media_buy: MediaBuy, now: datetime.datetime) -> bool:
+        """The update lease is NOT held: never claimed, or its expiry has passed.
+
+        The single home for the update-lease liveness decision. It was inlined at five
+        sites in three spellings (a 4-condition guard twice, this 2-condition subset,
+        and two negated forms), so a re-tuning of what "expired" means had to be applied
+        five times by hand or the seams would silently disagree.
+        """
+        return media_buy.update_lease_expires_at is None or media_buy.update_lease_expires_at <= now
+
+    @staticmethod
+    def _update_lease_live(media_buy: MediaBuy, now: datetime.datetime) -> bool:
+        """A live (claimed, unexpired) update lease — the exact negation of expired."""
+        return not MediaBuyRepository._update_lease_expired(media_buy, now)
+
     def _mark_update_manual_reconciliation(self, media_buy: MediaBuy, now: datetime.datetime) -> None:
         """Fence an ambiguous adapter-backed update for operator reconciliation."""
         media_buy.update_recovery_mode = MEDIA_BUY_RECOVERY_MANUAL
@@ -777,7 +793,7 @@ class MediaBuyRepository:
         media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
         if media_buy is None:
             return None
-        if media_buy.update_lease_expires_at is not None and media_buy.update_lease_expires_at > now:
+        if self._update_lease_live(media_buy, now):
             return None
         if media_buy.update_adapter_invoked_at is not None:
             self._mark_update_manual_reconciliation(media_buy, now)
@@ -798,8 +814,7 @@ class MediaBuyRepository:
             return False
         now = self._now()
         if (
-            media_buy.update_lease_expires_at is None
-            or media_buy.update_lease_expires_at <= now
+            self._update_lease_expired(media_buy, now)
             or media_buy.update_recovery_mode is not None
             or media_buy.update_reconcile_incident_at is not None
         ):
@@ -816,14 +831,11 @@ class MediaBuyRepository:
             return False
         now = self._now()
         if (
-            media_buy.update_lease_expires_at is None
-            or media_buy.update_lease_expires_at <= now
+            self._update_lease_expired(media_buy, now)
             or media_buy.update_recovery_mode is not None
             or media_buy.update_reconcile_incident_at is not None
         ):
-            if (
-                media_buy.update_lease_expires_at is None or media_buy.update_lease_expires_at <= now
-            ) and media_buy.update_adapter_invoked_at is not None:
+            if self._update_lease_expired(media_buy, now) and media_buy.update_adapter_invoked_at is not None:
                 self._mark_update_manual_reconciliation(media_buy, now)
             return False
         media_buy.update_lease_id = None
@@ -848,7 +860,7 @@ class MediaBuyRepository:
         now = self._now()
         if media_buy.update_adapter_invoked_at is None or media_buy.update_lease_expires_at is None:
             return False
-        if media_buy.update_lease_expires_at > now:
+        if self._update_lease_live(media_buy, now):
             return False
         self._mark_update_manual_reconciliation(media_buy, now)
         return True
