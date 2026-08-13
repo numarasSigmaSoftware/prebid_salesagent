@@ -21,7 +21,7 @@ things:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,6 +38,14 @@ from tests.harness.assertions import assert_rejected, assert_wire_omits_unset
 from tests.harness.product import ProductEnv
 from tests.harness.transport import Transport, TransportResult
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
+
+if TYPE_CHECKING:
+    # Type-only: keeps the production types off this test module's import path
+    # while still letting mypy check the interception signatures below.
+    from adcp import GetProductsRequest, GetProductsResponse
+    from adcp.types import AccountReference
+
+    from src.core.resolved_identity import ResolvedIdentity
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -276,13 +284,15 @@ class TestGetProductsRequestAccountFieldWiring:
     """
 
     @staticmethod
-    def _capture_req_account(*, transport: Transport) -> Any:
+    def _capture_req_account(*, transport: Transport) -> AccountReference | None:
         import src.core.tools.products as products_mod
 
-        captured: dict[str, Any] = {}
+        captured: dict[str, AccountReference | None] = {}
         original_impl = products_mod._get_products_impl
 
-        async def capturing_impl(req: Any, identity: Any = None) -> Any:
+        async def capturing_impl(
+            req: GetProductsRequest, identity: ResolvedIdentity | None = None
+        ) -> GetProductsResponse:
             captured["account"] = req.account
             return await original_impl(req, identity)
 

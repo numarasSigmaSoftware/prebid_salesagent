@@ -22,6 +22,7 @@ success, by contrast, surfaces as a success envelope) — asserted via
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -106,7 +107,7 @@ class TestAccountReferenceRoutesTheAdapter:
     """
 
     @staticmethod
-    def _adapter_modes(*, transport: Transport, account_sandbox: bool):
+    def _adapter_modes(*, transport: Transport, account_sandbox: bool) -> MagicMock:
         from tests.factories import AccountFactory, AgentAccountAccessFactory
 
         with MediaBuyCreateEnv() as env:
