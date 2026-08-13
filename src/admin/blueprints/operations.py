@@ -491,9 +491,14 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # be reported as one.
                     db_session.rollback()
                     if media_buy is None:
-                        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
-                    else:
-                        flash("Media buy approved successfully", "success")
+                        # Report the vanished buy in THIS response instead of flashing and
+                        # redirecting: the redirect target is media_buy_detail, which answers
+                        # a missing buy with a bare-string 404 that renders no template, so
+                        # get_flashed_messages() never runs there. A flash queued here would
+                        # survive in the session and surface on some unrelated later page —
+                        # the operator would be told nothing about the request they made.
+                        return MEDIA_BUY_VANISHED_MESSAGE, 404
+                    flash("Media buy approved successfully", "success")
 
             elif action == "reject":
                 reason_text = reason or "Rejected by administrator"
