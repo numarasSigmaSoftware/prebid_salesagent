@@ -31,6 +31,23 @@ def _pkg(package_id):
     return p
 
 
+def test_rejectable_media_buy_statuses_membership():
+    """Pin the reject-entry gate's exact membership.
+
+    Both admin reject routes gate on this set, so a silent addition/removal/rename here
+    changes which buys a reject may claim. ``pending_creatives`` is a wire status from
+    the AdCP MediaBuyStatus enum; ``pending_approval`` is deliberately internal-only —
+    it is NOT in that enum (a buy awaiting seller approval is not yet reportable to the
+    buyer), so the set is asserted literally rather than derived from the enum.
+    """
+    from adcp.types import MediaBuyStatus
+
+    assert set(mod.REJECTABLE_MEDIA_BUY_STATUSES) == {"pending_approval", "pending_creatives"}
+    wire_statuses = {status.value for status in MediaBuyStatus}
+    assert "pending_creatives" in wire_statuses
+    assert "pending_approval" not in wire_statuses
+
+
 def test_build_media_buy_result_completion():
     result = mod.build_media_buy_result(_media_buy(revision=3), [_pkg("p1"), _pkg("p2")])
     assert isinstance(result, CreateMediaBuySuccess)
