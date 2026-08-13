@@ -228,11 +228,12 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
     ``ToolError`` propagates to the global handler in ``src.app`` for envelope
     translation; no defensive catch needed here.
     """
-    if body.account is not None and identity is not None:
+    with adcp_validation_boundary(context="get_products request"):
+        account_ref = to_account_reference(body.account)
+
+    if account_ref is not None and identity is not None:
         from src.core.transport_helpers import enrich_identity_with_account
 
-        with adcp_validation_boundary(context="get_products request"):
-            account_ref = to_account_reference(body.account)
         identity = enrich_identity_with_account(identity, account_ref)
 
     with adcp_validation_boundary(context="get_products request"):
@@ -240,6 +241,7 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
             brief=body.brief,
             brand=body.brand,
             filters=body.filters,
+            account=account_ref,
         )
     response = await products_module._get_products_impl(req, identity)
     result = response.model_dump(mode="json")

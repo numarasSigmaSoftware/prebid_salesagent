@@ -826,6 +826,7 @@ async def get_products(
                 filters=filters,
                 property_list=property_list,
                 context=context,
+                account=account,
             )
     except ValueError as e:
         # Helper raises ValueError for semantic (non-Pydantic) input problems.
@@ -896,6 +897,7 @@ async def get_products_raw(
         filters=filters,
         property_list=property_list,
         context=context,
+        account=account,
     )
 
     # Call shared implementation
