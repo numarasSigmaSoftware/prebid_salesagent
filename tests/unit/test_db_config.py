@@ -501,7 +501,11 @@ class TestBddTransportTagSetsDoNotOverlap:
     both sets excludes nothing — it reads as protection while being unreachable,
     which is how _NO_E2E_REST_TAGS' sole entry rotted after its scenario was
     routed, and how all eleven _UC004_E2E_WEBHOOK_INTERNAL_TAGS entries rotted
-    after the UC-004 webhook scenarios were.
+    after the UC-004 webhook scenarios were. That rot lasted exactly as long as
+    _TRANSPORT_INDEPENDENT_SCENARIO_TAGS did: with the registry emptied those
+    scenarios parametrize again, so all twelve entries are restored and both gates
+    are live. Keeping the two sets from overlapping a second time is this guard's
+    whole job — the sets being populated is the expected state, not a relapse.
 
     Every set whose only use is gated on e2e_rest belongs in E2E_GATED_SETS. A
     set that is checked but absent from the table is the escape hatch this guard

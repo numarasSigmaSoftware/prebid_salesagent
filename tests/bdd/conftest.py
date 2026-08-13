@@ -569,9 +569,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "T-UC-005-inv-031-2-holds",
             # REMOVED: "T-UC-005-inv-049-1-holds" / "T-UC-005-inv-049-1-violated".
             # Neither tag appears on any scenario in tests/bdd/features/**, so both
-            # excluded nothing — the same rot as the emptied _NO_E2E_REST_TAGS and
-            # _UC004_E2E_WEBHOOK_INTERNAL_TAGS, arriving by a third route: not a
-            # scenario that was re-routed, but a tag that no longer exists at all.
+            # excluded nothing — the same rot that briefly emptied _NO_E2E_REST_TAGS
+            # and _UC004_E2E_WEBHOOK_INTERNAL_TAGS (both since restored, once the
+            # routing that made them unreachable was itself removed), arriving by a
+            # third route: not a scenario that was re-routed, but a tag that no
+            # longer exists at all.
             # The remaining 12 entries were each confirmed present in a feature file.
             "T-UC-005-inv-049-2-holds",
             "T-UC-005-inv-049-2-violated",
@@ -2257,10 +2259,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # `BDD_E2E_ENABLED=true pytest tests/bdd/test_uc019_query_media_buys.py
         # --collect-only` -> 484 collected, 0 carrying an e2e_rest param.
         #
-        # This is the same rot that had already hollowed out _NO_E2E_REST_TAGS and
-        # _UC004_E2E_WEBHOOK_INTERNAL_TAGS: a set stays populated and reads as live
-        # coverage after the routing that fed it was removed one layer up. The
-        # reachability guard does not catch this variant — it models deadness only
+        # This is the same rot that briefly hollowed out _NO_E2E_REST_TAGS and
+        # _UC004_E2E_WEBHOOK_INTERNAL_TAGS (both since restored, once the routing
+        # that made them unreachable was itself removed): a set stays populated and
+        # reads as live coverage after the routing that fed it was removed one layer
+        # up. The reachability guard does not catch this variant — it models deadness only
         # as overlap with _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, not as "the gate is
         # unreachable because parametrization never produces the param". Deriving
         # gated sets from the AST and modelling both mechanisms is tracked
