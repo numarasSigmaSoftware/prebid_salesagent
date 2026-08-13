@@ -103,7 +103,13 @@ def _enclosing_function(tree: ast.Module, call: ast.Call):
 
 
 def _adapter_calls_in(tree: ast.Module, rel: str) -> list[_AdapterCall]:
-    """Every ``get_adapter()`` call in one parsed module.
+    """Every ``get_adapter()``/``adapter_for_mode()`` call in one parsed module.
+
+    ``adapter_for_mode`` is the thin ``get_adapter`` wrapper that factors out the
+    dry_run-from-testing_ctx boilerplate (``src/core/helpers/adapter_helpers.py``); its
+    ``sandbox=`` keyword is the exact same sandbox-routing decision, so a call site
+    written through the wrapper must be scanned identically to a direct ``get_adapter``
+    call, not silently drop off this guard's radar.
 
     Split out from the filesystem walk so the self-tests can drive the REAL extraction
     over a synthetic module. A self-test that re-implements the extraction against a
@@ -111,11 +117,12 @@ def _adapter_calls_in(tree: ast.Module, rel: str) -> list[_AdapterCall]:
     which from the outside is indistinguishable from the arm working.
     """
     found: list[_AdapterCall] = []
-    for call in iter_call_expressions(tree, "get_adapter"):
-        value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
-        func = _enclosing_function(tree, call)
-        site = f"{rel}::{func.name}" if func is not None else rel
-        found.append(_AdapterCall(rel, call.lineno, site, func, value))
+    for name in ("get_adapter", "adapter_for_mode"):
+        for call in iter_call_expressions(tree, name):
+            value = next((kw.value for kw in call.keywords if kw.arg == "sandbox"), None)
+            func = _enclosing_function(tree, call)
+            site = f"{rel}::{func.name}" if func is not None else rel
+            found.append(_AdapterCall(rel, call.lineno, site, func, value))
     return found
 
 
