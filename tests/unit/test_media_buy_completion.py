@@ -102,7 +102,14 @@ def test_emit_media_buy_webhook_sends_payload_carrying_reason(protocol):
 
 def test_emit_media_buy_webhook_swallows_delivery_errors():
     """A webhook delivery failure must be logged, never raised — the DB transition
-    already committed and must not be undone by a delivery error."""
+    already committed and must not be undone by a delivery error.
+
+    The ``call_count`` assert is what makes "must not raise" non-vacuous: without it this
+    test also passes when the emitter returns early and never reaches the raising service,
+    i.e. when no exception was ever thrown for it to swallow. (The "logged" half is left
+    ungraded deliberately — log capture in this suite passes in isolation and sees ``[]``
+    under the full run, so a caplog assert would be the fragile kind of oracle.)
+    """
     result = mod.build_media_buy_result(_media_buy(), [_pkg("p1")])
     step_data = {"step_id": "s", "context_id": "c", "tool_name": "create_media_buy", "request_data": {}}
     service = MagicMock()
@@ -111,6 +118,8 @@ def test_emit_media_buy_webhook_swallows_delivery_errors():
         mod.emit_media_buy_webhook(
             step_data, MagicMock(), result, AdcpTaskStatus.completed, _METADATA
         )  # must not raise
+
+    assert service.send_notification.call_count == 1
 
 
 @pytest.mark.parametrize("delivered", [False, True])
