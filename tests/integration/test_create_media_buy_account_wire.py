@@ -213,6 +213,12 @@ class TestSandboxMarkerReachesTheBuyer:
     @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
     def test_sandbox_create_is_marked_on_the_wire(self, integration_db, transport):
         result = _create_and_read_marker(transport, account_sandbox=True)
+        # Symmetric with the negative arm, which schema-validates via
+        # assert_wire_omits_unset: a marker on an otherwise schema-invalid response
+        # is not a passing wire.
+        from tests.helpers.pinned_schema import validate_against_pinned_schema
+
+        validate_against_pinned_schema(_CREATE_MEDIA_BUY_SCHEMA, result.wire_response)
         assert result.wire_response.get("sandbox") is True, (
             f"[{transport.value}] a create against a sandbox account carried no sandbox marker; "
             "the buyer cannot distinguish a simulated booking from one that moved real budget"
@@ -262,6 +268,12 @@ class TestSandboxMarkerOnTheDryRunBranch:
 
     def test_dry_run_against_a_sandbox_account_is_still_marked(self, integration_db):
         result = _create_and_read_marker(Transport.REST, account_sandbox=True, dry_run=True)
+        # Symmetric with the negative arm below, which schema-validates via
+        # assert_wire_omits_unset. The dry-run branch builds its own response, so the
+        # rest of that response needs grading here too, not just the marker.
+        from tests.helpers.pinned_schema import validate_against_pinned_schema
+
+        validate_against_pinned_schema(_CREATE_MEDIA_BUY_SCHEMA, result.wire_response)
         assert result.wire_response.get("sandbox") is True, (
             "a dry-run create against a sandbox account carried no sandbox marker; the "
             "early-return branch builds its own response and must set it there"
