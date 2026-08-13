@@ -152,6 +152,39 @@ async def _rest_application_context(request: Request) -> dict[str, object] | Non
     return None
 
 
+def _safe_request_path(request: Request) -> str:
+    """The request path for a log line, without trusting the read to succeed."""
+    try:
+        return scrub_control_chars(request.url.path)
+    except Exception:  # noqa: BLE001 - a path we cannot read must not cost the buyer the envelope
+        logger.debug("REST boundary: request path unreadable for logging", exc_info=True)
+        return "<unreadable-path>"
+
+
+def _safe_status_code(exc: AdCPError) -> int:
+    """`exc.status_code` without trusting the attribute to exist or be an int."""
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else 500
+
+
+def _minimal_envelope(exc: AdCPError) -> dict[str, object]:
+    """The last envelope the buyer can still be given, from guarded reads only.
+
+    Every access is defensive because this runs after two prior attempts have
+    already failed: a custom `__str__` that raises, or a missing/odd
+    `error_code`, must not turn a degraded response into no response.
+    """
+    code = getattr(exc, "error_code", None)
+    if not isinstance(code, str) or not code:
+        code = "INTERNAL_ERROR"
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 - a raising __str__ must not cost the buyer the envelope
+        message = "An internal error occurred and its detail could not be rendered."
+    minimal = {"code": code, "message": message}
+    return {"adcp_error": minimal, "errors": [minimal]}
+
+
 async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
     """Build a JSONResponse carrying the two-layer envelope for ``exc``.
 
@@ -208,15 +241,27 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
             envelope.pop("context", None)
         return JSONResponse(status_code=exc.status_code, content=envelope)
     except (ValueError, TypeError):
-        # Terminal net. Built by hand from scalar attributes so it cannot
-        # depend on anything that has already failed twice; the buyer still
-        # receives a readable two-layer envelope with the right status.
+        # Terminal net. The comment here used to claim it was "built by hand from
+        # scalar attributes so it cannot depend on anything that has already
+        # failed twice" — but `str(exc)` is a method call, not a scalar read, and
+        # an exception whose __str__ raises would propagate straight out of this
+        # handler. That is the exact failure this three-tier chain exists to
+        # prevent, reintroduced at its own last line. Nothing in
+        # src/core/exceptions.py overrides __str__ today; the point is that the
+        # tier must not depend on that staying true.
+        #
+        # So every read here is now guarded, and the whole tier is wrapped: past
+        # this point there is no fourth tier to fall back to.
+        # No try around the log call: the only value in it that could plausibly
+        # raise is the buyer-controlled path, so that is read defensively into a
+        # local instead. A bare `except Exception: pass` here would be a silent
+        # except — which this repo forbids, and rightly: it would hide the very
+        # failure this tier exists to report.
         logger.exception(
             "REST envelope could not be rebuilt; emitting the minimal shape (path=%s)",
-            scrub_control_chars(request.url.path),
+            _safe_request_path(request),
         )
-        minimal = {"code": exc.error_code, "message": str(exc)}
-        return JSONResponse(status_code=exc.status_code, content={"adcp_error": minimal, "errors": [minimal]})
+        return JSONResponse(status_code=_safe_status_code(exc), content=_minimal_envelope(exc))
 
 
 def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None]:
