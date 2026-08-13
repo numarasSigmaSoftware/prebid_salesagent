@@ -1,7 +1,7 @@
 """Account resolution helpers.
 
 Bridges AccountReference from request payloads to a validated account id + sandbox mode.
-Used by _create_media_buy_impl and _sync_creatives_impl.
+Used across the tool and transport layers wherever an AccountReference needs resolving.
 
 beads: salesagent-8n4
 """
