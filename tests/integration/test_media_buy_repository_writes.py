@@ -298,6 +298,35 @@ class TestUpdateOperationLease:
             assert media_buy.update_reconcile_incident_reason == "update lease expired after adapter invocation"
             assert media_buy.order_name == f"Order {media_buy_id}"
 
+    def test_lease_at_its_exact_expiry_instant_is_claimable(self, tenant_a, principal_a):
+        """``expires_at == now`` is EXPIRED, not live — the boundary the shared predicate picks.
+
+        ``_update_lease_expired`` exists so this boundary is decided once instead of at five
+        inlined sites; without a case ON the boundary, flipping its ``<=`` to ``<`` (making
+        the expiry instant still-live) changes the liveness semantics with nothing red. The
+        injectable clock puts ``now`` exactly on ``expires_at``, so the case is exact rather
+        than a race against wall time.
+        """
+        media_buy_id = "mb_update_lease_boundary"
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, media_buy_id))
+
+        clock = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock) as uow:
+            first_lease = uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1)
+            assert first_lease is not None
+
+        with MediaBuyUoW(tenant_a) as uow:
+            media_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert media_buy is not None
+            # Pin that the clock below really lands ON the stored expiry, not merely past it.
+            assert media_buy.update_lease_expires_at == clock + timedelta(seconds=1)
+
+        with MediaBuyUoW(tenant_a, now_fn=lambda: clock + timedelta(seconds=1)) as uow:
+            second_lease = uow.media_buys.claim_update_lease(media_buy_id, lease_ttl_seconds=1)
+            assert second_lease is not None, "a lease at its exact expiry instant must be claimable"
+            assert second_lease != first_lease
+
     def test_unexpired_invoked_lease_completes_and_clears_operation_state(self, tenant_a, principal_a):
         media_buy_id = "mb_update_lease_complete"
         with MediaBuyUoW(tenant_a) as uow:
