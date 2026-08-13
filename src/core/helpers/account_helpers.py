@@ -125,8 +125,7 @@ def sandbox_wire_marker(is_sandbox: bool | None) -> bool | None:
     responses when processing a sandbox account request. ``None``, not ``False``, when
     not sandbox — the spec asks for the field's presence to signal sandbox, not for an
     explicit live/non-sandbox assertion. Shared so every success-response builder that
-    sets this marker (media_buy_create, sync_creatives, list_creative_formats) makes
-    the same True/False-vs-None call rather than each re-deciding it.
+    sets this marker makes the same True-vs-None call rather than each re-deciding it.
     """
     return True if is_sandbox else None
 
