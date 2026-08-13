@@ -152,10 +152,10 @@ class TestGetProductsSandboxMarkerOnWire:
     """``GetProductsResponse.sandbox`` echoes the resolved account's mode on the real wire.
 
     Mirrors the sandbox-marker pattern in ``test_creative_sync_transport.py``:
-    parametrized across all four transports, asserting on ``result.wire_response`` where
+    parametrized across every transport, asserting on ``result.wire_response`` where
     a real wire is captured (A2A/REST/MCP — ProductEnv's ``call_a2a``/``call_mcp`` drive
     the real ``AdCPRequestHandler``/FastMCP pipelines, and REST goes through a real
-    ``TestClient`` route, so all three dispatchers stash the literal wire body), and
+    ``TestClient`` route, so those dispatchers stash the literal wire body), and
     falling back to the parsed ``payload`` for IMPL, which is in-process by definition
     and never has a wire (see ``ImplDispatcher``'s docstring in
     ``tests/harness/dispatchers.py``). Pairs a positive case with a negative control so
@@ -253,16 +253,17 @@ class TestGetProductsSandboxMarkerOnWire:
 
 class TestGetProductsRequestAccountFieldWiring:
     """``req.account`` on the request built by ``create_get_products_request`` is
-    actually SET from the input ``account`` reference at all 3 callers.
+    actually SET from the input ``account`` reference at every caller.
 
     ``req.account`` itself has no production reader — enrichment happens from the raw
     ``account`` kwarg via ``enrich_identity_with_account``, not by reading ``req.account``
     back out (see ``create_get_products_request``'s docstring). This test does not claim
-    otherwise. It pins the WIRING behind the schema-conformance comments at each of the
-    3 ``create_get_products_request(...)`` call sites (MCP wrapper, ``get_products_raw``,
-    the REST route in ``api_v1.py``) — before this test, nothing reddened if
+    otherwise. It pins the WIRING behind the schema-conformance comment at each
+    ``create_get_products_request(...)`` call site — before this test, nothing reddened if
     ``account=account`` were silently dropped from any of them, even though the pinned
-    3.1.1 ``get-products-request.json`` schema declares the field.
+    3.1.1 ``get-products-request.json`` schema declares the field. The parametrization
+    below names the transports it covers; no count is restated here, so a new call site
+    cannot make this prose quietly wrong.
 
     Captures ``req`` by patching ``_get_products_impl`` at its SOURCE module
     (``src.core.tools.products``) with a side effect that records ``req.account`` and then
