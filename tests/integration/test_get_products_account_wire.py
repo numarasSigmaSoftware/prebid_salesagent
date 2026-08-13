@@ -1,12 +1,15 @@
 """Wire-path tests: ``account`` reaches get_products' adapter dispatch.
 
-``get_products`` consumes ``req.account`` (resolved via ``enrich_identity_with_account``
-at the MCP/A2A/REST boundary, mirroring ``get_media_buy_delivery``) to decide the
-``sandbox=`` mode passed to ``get_adapter`` when annotating pricing options. Before this
-wiring, no transport declared ``account`` on ``get_products`` even though the pinned
-3.1.1 ``get-products-request.json`` declares the field — so a sandbox account always
-built the tenant's real adapter (``sandbox=False`` was hard-wired). Like
-``test_create_media_buy_account_wire.py``, this proves two separate things:
+The ``account`` reference is enriched onto ``identity`` at the MCP/A2A/REST boundary via
+``enrich_identity_with_account`` (mirroring ``get_media_buy_delivery``), and it is
+``identity.sandbox`` — not ``req.account`` — that decides the ``sandbox=`` mode passed to
+``get_adapter`` when annotating pricing options. On the ``req.account`` half of that
+split, ``TestGetProductsRequestAccountFieldWiring`` below is authoritative; this
+docstring does not restate it. Before this wiring, no transport declared ``account`` on
+``get_products`` even though the pinned 3.1.1 ``get-products-request.json`` declares the
+field — so a sandbox account always built the tenant's real adapter (``sandbox=False``
+was hard-wired). Like ``test_create_media_buy_account_wire.py``, this proves two separate
+things:
 
 1. ``account`` crosses the wire on every transport that declares it (a bogus account
    is rejected with ``ACCOUNT_NOT_FOUND``, which can only happen if the reference
