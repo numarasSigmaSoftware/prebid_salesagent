@@ -3,7 +3,7 @@
 import json
 import logging
 
-from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, Response, flash, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
@@ -13,6 +13,7 @@ from src.core.database.models import (
     MEDIA_BUY_FINALIZING_STATUS,
     WORKFLOW_STEP_TERMINAL_STATUSES,
     Context,
+    MediaBuy,
     is_media_buy_approvable,
 )
 from src.core.database.models import Principal as ModelPrincipal
@@ -180,7 +181,7 @@ def _approval_in_progress_response():
     ), 202
 
 
-def _is_media_buy_finalizing(media_buy) -> bool:
+def _is_media_buy_finalizing(media_buy: MediaBuy | None) -> bool:
     """True when a live lease owner is completing this buy's decision.
 
     Sibling of ``is_media_buy_approvable``: neither approvable nor terminal, so the route
@@ -189,7 +190,7 @@ def _is_media_buy_finalizing(media_buy) -> bool:
     return media_buy is not None and media_buy.status == MEDIA_BUY_FINALIZING_STATUS
 
 
-def _respond_to_non_approvable_media_buy(media_buy):
+def _respond_to_non_approvable_media_buy(media_buy: MediaBuy | None) -> tuple[Response, int]:
     """Respond for a buy that can no longer be approved — the two outcomes differ.
 
     An already-decided (terminal) buy is an idempotent success. A buy that is simply gone
