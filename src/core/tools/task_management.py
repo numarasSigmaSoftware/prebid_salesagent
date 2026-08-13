@@ -57,18 +57,23 @@ async def list_tasks(
 
     identity = require_identity(identity)
     tenant = require_tenant(identity)
-    require_principal_id(identity)  # F-03: an authenticated (non-anonymous) principal is required
+    principal_id = require_principal_id(identity)  # F-03: an authenticated (non-anonymous) principal is required
 
     with WorkflowUoW(tenant["tenant_id"]) as uow:
         assert uow.workflows is not None
 
+        # Principal-scoped, not tenant-scoped: this is a buyer-facing tool, so a sibling
+        # principal in the same tenant must not see another buyer's task ids or summaries.
+        # The count carries the same scope as the page, or the total leaks their existence.
         total = uow.workflows.count_by_tenant(
+            principal_id=principal_id,
             status=status,
             object_type=object_type,
             object_id=object_id,
         )
 
         tasks = uow.workflows.list_by_tenant(
+            principal_id=principal_id,
             status=status,
             object_type=object_type,
             object_id=object_id,
@@ -143,12 +148,14 @@ async def get_task(
 
     identity = require_identity(identity)
     tenant = require_tenant(identity)
-    require_principal_id(identity)  # F-03: an authenticated (non-anonymous) principal is required
+    principal_id = require_principal_id(identity)  # F-03: an authenticated (non-anonymous) principal is required
 
     with WorkflowUoW(tenant["tenant_id"]) as uow:
         assert uow.workflows is not None
 
-        task = uow.workflows.get_by_step_id_or_raise(task_id)
+        # Principal-scoped: a sibling principal who learns this task id must not read its
+        # stored response_data. Reported not-found, like any unknown id.
+        task = uow.workflows.get_by_step_id_or_raise(task_id, principal_id=principal_id)
 
         mappings = uow.workflows.get_mappings_for_step(task_id)
 
@@ -219,7 +226,11 @@ async def complete_task(
     with WorkflowUoW(tenant["tenant_id"]) as uow:
         assert uow.workflows is not None
 
-        task = uow.workflows.get_by_step_id_or_raise(task_id)
+        # Principal-scoped: a sibling principal must not be able to complete or fail
+        # another buyer's task. This fetch gates reachability for the transition below —
+        # a step this principal does not own raises not-found before any write is
+        # attempted, so ``transition_if_nonterminal`` needs no separate scope.
+        task = uow.workflows.get_by_step_id_or_raise(task_id, principal_id=principal_id)
 
         # Derived from the canonical terminal set, not a hand-listed positive set: a
         # literal enumerating the states that MAY complete silently omits every

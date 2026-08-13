@@ -75,11 +75,21 @@ class TestWorkflowOrRaise:
     def test_get_by_step_id_or_raise_returns_when_present(self):
         step = MagicMock()
         repo = _repo_with_first(WorkflowRepository, step)
-        assert repo.get_by_step_id_or_raise("step-1") is step
+        assert repo.get_by_step_id_or_raise("step-1", principal_id="principal-1") is step
 
     def test_get_by_step_id_or_raise_raises_when_absent(self):
         repo = _repo_with_first(WorkflowRepository, None)
         with pytest.raises(AdCPTaskNotFoundError) as exc:
-            repo.get_by_step_id_or_raise("step-missing")
+            repo.get_by_step_id_or_raise("step-missing", principal_id="principal-1")
         assert exc.value.error_code == "TASK_NOT_FOUND"
         assert "step-missing" in str(exc.value)
+
+    def test_get_by_step_id_or_raise_requires_principal_scope(self):
+        """``principal_id`` is keyword-REQUIRED, so no call site can silently fetch unscoped.
+
+        A default would mean "unscoped" at every site that forgot it — exactly the
+        defect this scoping closes — so the omission has to be a TypeError.
+        """
+        repo = _repo_with_first(WorkflowRepository, MagicMock())
+        with pytest.raises(TypeError, match="principal_id"):
+            repo.get_by_step_id_or_raise("step-1")  # type: ignore[call-arg]

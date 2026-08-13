@@ -105,9 +105,18 @@ class TestListTasksTool:
 
         assert "tasks" in result
         mock_workflow_repo.count_by_tenant.assert_called_once_with(
+            principal_id="principal_123",
             status="requires_approval",
             object_type=None,
             object_id=None,
+        )
+        mock_workflow_repo.list_by_tenant.assert_called_once_with(
+            principal_id="principal_123",
+            status="requires_approval",
+            object_type=None,
+            object_id=None,
+            offset=0,
+            limit=20,
         )
 
 
@@ -181,6 +190,7 @@ class TestGetTaskTool:
 
         assert result["task_id"] == "step_123"
         assert result["status"] == "requires_approval"
+        mock_workflow_repo.get_by_step_id_or_raise.assert_called_once_with("step_123", principal_id="principal_123")
 
     async def test_get_task_not_found_raises_error(self, mock_uow, mock_workflow_repo, sample_tenant):
         """Test that get_task raises ToolError when task not found.
@@ -270,6 +280,7 @@ class TestCompleteTaskTool:
 
         assert result["status"] == "completed"
         assert result["task_id"] == "step_123"
+        mock_workflow_repo.get_by_step_id_or_raise.assert_called_once_with("step_123", principal_id="principal_123")
         mock_workflow_repo.transition_if_nonterminal.assert_called_once_with(
             "step_123",
             status="completed",

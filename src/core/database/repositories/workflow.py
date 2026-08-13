@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import ColumnExpressionArgument, func, select, update
+from sqlalchemy import ColumnExpressionArgument, Select, func, select, update
 from sqlalchemy.orm import Session
 
 from src.core.database.models import Context as DBContext
@@ -146,6 +146,25 @@ class WorkflowRepository:
             stmt.order_by(ObjectWorkflowMapping.created_at, WorkflowStep.created_at, WorkflowStep.step_id)
         ).first()
 
+    def _principal_scoped_steps(self, principal_id: str) -> Select[tuple[WorkflowStep]]:
+        """Base SELECT over the steps a single principal owns, within the tenant.
+
+        One home for what "principal-scoped" means, so the buyer-facing reads cannot
+        drift apart: the tenant join every read carries, PLUS ``DBContext.principal_id``.
+        Step ids and transport task ids are bearer-ish identifiers, so a read that
+        authorizes only the tenant lets any same-tenant sibling principal who learns an
+        id read another principal's stored ``response_data`` or drive its workflow.
+        Callers pass ``principal_id`` as a required keyword so no call site can omit it.
+        """
+        return (
+            select(WorkflowStep)
+            .join(DBContext)
+            .where(
+                DBContext.tenant_id == self._tenant_id,
+                DBContext.principal_id == principal_id,
+            )
+        )
+
     def get_by_external_task_id(self, external_task_id: str, *, principal_id: str) -> WorkflowStep | None:
         """Get the workflow step carrying a given transport outer task id.
 
@@ -156,31 +175,34 @@ class WorkflowRepository:
         surviving a server restart (the admin approval that terminalized the step runs
         in a different process, so the in-memory task map is not enough).
 
-        Scoped to BOTH the tenant (Context join, like every read) AND the owning
-        ``principal_id``: task ids are bearer-ish identifiers, and the durable
-        get/cancel must authorize the CALLER — another principal in the same tenant
-        who learns a task id must be able to neither read its stored response_data
-        nor cancel its workflow. Keyword-required so no call site can omit the scope.
+        Scoped to BOTH the tenant and the owning ``principal_id`` — see
+        :meth:`_principal_scoped_steps` for why the tenant alone is not an
+        authorization boundary here.
         """
         return self._session.scalars(
-            select(WorkflowStep)
-            .join(DBContext)
-            .where(
+            self._principal_scoped_steps(principal_id).where(
                 WorkflowStep.request_data["external_task_id"].as_string() == external_task_id,
-                DBContext.tenant_id == self._tenant_id,
-                DBContext.principal_id == principal_id,
             )
         ).first()
 
-    def get_by_step_id_or_raise(self, step_id: str) -> WorkflowStep:
-        """Get a workflow step by ID or raise ``AdCPTaskNotFoundError``.
+    def get_by_step_id_or_raise(self, step_id: str, *, principal_id: str) -> WorkflowStep:
+        """Get a principal's own workflow step by ID or raise ``AdCPTaskNotFoundError``.
 
         Collapses the task fetch-and-raise guard shared by get_task/complete_task.
         No ``context`` parameter by design: those tools carry the FastMCP transport
         ``Context``, not an AdCP ``ContextObject``, so the task not-found envelope
         stays context-less rather than echoing a transport object into a repository.
+
+        Principal-scoped (:meth:`_principal_scoped_steps`), unlike the plain
+        :meth:`get_by_step_id` used by admin and already-authorized internal callers:
+        these two callers ARE the buyer-facing MCP tools, where the principal is the
+        authorization boundary. A sibling principal's step is reported not-found —
+        the same signal an unknown id gets, so the response does not confirm the id
+        exists.
         """
-        step = self.get_by_step_id(step_id)
+        step = self._session.scalars(
+            self._principal_scoped_steps(principal_id).where(WorkflowStep.step_id == step_id)
+        ).first()
         if step is None:
             from src.core.exceptions import AdCPTaskNotFoundError
 
@@ -190,28 +212,26 @@ class WorkflowRepository:
     def list_by_tenant(
         self,
         *,
+        principal_id: str,
         status: str | None = None,
         object_type: str | None = None,
         object_id: str | None = None,
         offset: int = 0,
         limit: int = 20,
     ) -> list[WorkflowStep]:
-        """List workflow steps for the tenant, with optional filters.
+        """List the steps ``principal_id`` owns in this tenant, with optional filters.
 
         Args:
+            principal_id: Owning principal — required, see :meth:`_principal_scoped_steps`.
+                The buyer-facing ``list_tasks`` tool is the caller, so leaking a sibling
+                principal's steps here would expose their ids and summaries.
             status: Filter by step status (e.g., "pending", "requires_approval").
             object_type: Filter by associated object type (e.g., "media_buy").
             object_id: Filter by specific object ID (requires object_type).
             offset: Number of steps to skip.
             limit: Maximum number of steps to return.
         """
-        stmt = (
-            select(WorkflowStep)
-            .join(DBContext)
-            .where(
-                DBContext.tenant_id == self._tenant_id,
-            )
-        )
+        stmt = self._principal_scoped_steps(principal_id)
 
         if status:
             stmt = stmt.where(WorkflowStep.status == status)
@@ -232,21 +252,18 @@ class WorkflowRepository:
     def count_by_tenant(
         self,
         *,
+        principal_id: str,
         status: str | None = None,
         object_type: str | None = None,
         object_id: str | None = None,
     ) -> int:
-        """Count workflow steps matching the given filters.
+        """Count the steps ``principal_id`` owns in this tenant, matching the filters.
 
-        Uses the same filter logic as list_by_tenant but returns only the count.
+        Uses the same filter logic and the same principal scope as list_by_tenant
+        but returns only the count — the pagination total must describe the same
+        rows the page does, or it leaks the existence of a sibling's steps.
         """
-        stmt = (
-            select(WorkflowStep)
-            .join(DBContext)
-            .where(
-                DBContext.tenant_id == self._tenant_id,
-            )
-        )
+        stmt = self._principal_scoped_steps(principal_id)
 
         if status:
             stmt = stmt.where(WorkflowStep.status == status)

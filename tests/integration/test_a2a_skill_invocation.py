@@ -552,6 +552,106 @@ class TestA2ASkillInvocation:
             "the sibling principal's cancel attempt must not have mutated the step"
         )
 
+    # ------------------------------------------------------------------
+    # The same principal-isolation rule, enforced on the MCP task tools.
+    #
+    # The A2A durable get/cancel above authorize the caller, not just the tenant.
+    # list_tasks / get_task / complete_task read and drive the SAME workflow_steps
+    # rows through WorkflowRepository, so a tenant-only scope there would reopen the
+    # hole the A2A path closes: a sibling principal who learns (or enumerates) a step
+    # id could read its stored response_data or terminalize its workflow. These run
+    # against the real DB, so they grade the repository's WHERE clause, not a mock.
+    # ------------------------------------------------------------------
+
+    def _mcp_identity(self, tenant_id: str, principal_id: str):
+        """A ResolvedIdentity for the MCP task tools (they take identity= directly)."""
+        from tests.factories import PrincipalFactory
+
+        return PrincipalFactory.make_identity(tenant_id=tenant_id, principal_id=principal_id, protocol="mcp")
+
+    @pytest.mark.asyncio
+    async def test_list_tasks_is_principal_isolated(self, sample_tenant, sample_principal):
+        """``list_tasks`` must not list — or count — a sibling principal's steps.
+
+        The total is asserted too: a page correctly filtered but counted tenant-wide
+        still tells the sibling how many tasks another buyer has.
+        """
+        from src.core.tools.task_management import list_tasks
+
+        tenant_id = sample_tenant["tenant_id"]
+        step_id = self._persist_a2a_step(
+            tenant_id, sample_principal["principal_id"], "task_mcp_iso_list", None, status="requires_approval"
+        )
+
+        owner = await list_tasks(identity=self._mcp_identity(tenant_id, sample_principal["principal_id"]))
+        assert step_id in [t["task_id"] for t in owner["tasks"]], (
+            "control: the owning principal must see its own step, else the sibling assert is vacuous"
+        )
+        assert owner["total"] == 1
+
+        sibling = await list_tasks(identity=self._mcp_identity(tenant_id, "same_tenant_other_buyer"))
+        assert step_id not in [t["task_id"] for t in sibling["tasks"]], (
+            "list_tasks must not cross principal boundaries within a tenant"
+        )
+        assert sibling["total"] == 0, "the pagination total must not count another principal's steps"
+
+    @pytest.mark.asyncio
+    async def test_get_task_is_principal_isolated(self, sample_tenant, sample_principal):
+        """``get_task`` must not disclose a sibling principal's stored ``response_data``.
+
+        Reported not-found — the same signal an unknown id gets — so the response does
+        not confirm the id exists.
+        """
+        from src.core.exceptions import AdCPTaskNotFoundError
+        from src.core.tools.task_management import get_task
+
+        tenant_id = sample_tenant["tenant_id"]
+        step_id = self._persist_a2a_step(
+            tenant_id,
+            sample_principal["principal_id"],
+            "task_mcp_iso_get",
+            {"media_buy_id": "mb_mcp_iso", "status": "completed"},
+        )
+
+        owner_view = await get_task(
+            task_id=step_id, identity=self._mcp_identity(tenant_id, sample_principal["principal_id"])
+        )
+        assert owner_view["response_data"] == {"media_buy_id": "mb_mcp_iso", "status": "completed"}, (
+            "control: the owner must read its own response_data"
+        )
+
+        with pytest.raises(AdCPTaskNotFoundError, match=step_id):
+            await get_task(task_id=step_id, identity=self._mcp_identity(tenant_id, "same_tenant_other_buyer"))
+
+    @pytest.mark.asyncio
+    async def test_complete_task_is_principal_isolated(self, sample_tenant, sample_principal):
+        """``complete_task`` must not let a sibling principal terminalize another buyer's step.
+
+        Asserts the step is still non-terminal afterwards: a refusal that had already
+        written would be a worse bug than the disclosure.
+        """
+        from src.core.exceptions import AdCPTaskNotFoundError
+        from src.core.tools.task_management import complete_task
+
+        tenant_id = sample_tenant["tenant_id"]
+        step_id = self._persist_a2a_step(
+            tenant_id, sample_principal["principal_id"], "task_mcp_iso_complete", None, status="requires_approval"
+        )
+
+        with pytest.raises(AdCPTaskNotFoundError, match=step_id):
+            await complete_task(task_id=step_id, identity=self._mcp_identity(tenant_id, "same_tenant_other_buyer"))
+
+        assert self._step_status(tenant_id, step_id) == "requires_approval", (
+            "the sibling principal's completion attempt must not have mutated the step"
+        )
+
+        # Control: the step WAS completable — the refusal above is about ownership, not state.
+        result = await complete_task(
+            task_id=step_id, identity=self._mcp_identity(tenant_id, sample_principal["principal_id"])
+        )
+        assert result["status"] == "completed"
+        assert self._step_status(tenant_id, step_id) == "completed"
+
     @pytest.mark.asyncio
     async def test_get_task_reconciles_stale_in_memory_with_terminal_step(
         self, handler, sample_tenant, sample_principal, mock_identity

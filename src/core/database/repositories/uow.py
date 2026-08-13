@@ -14,7 +14,7 @@ Usage:
         # auto-commits when exiting the `with` block
 
     with WorkflowUoW(tenant_id) as uow:
-        steps = uow.workflows.list_by_tenant(status="pending")
+        steps = uow.workflows.list_by_tenant(principal_id=principal_id, status="pending")
         # auto-commits when exiting the `with` block
 
     with TenantConfigUoW(tenant_id) as uow:

@@ -222,6 +222,7 @@ def _dispatch_list_tasks_e2e(ctx: dict, **params: Any) -> dict:
 
     repo = WorkflowRepository(env._session, env.identity.tenant_id)
     steps = repo.list_by_tenant(
+        principal_id=env.identity.principal_id,
         status=params.get("status"),
         object_type=params.get("object_type"),
         object_id=params.get("object_id"),
