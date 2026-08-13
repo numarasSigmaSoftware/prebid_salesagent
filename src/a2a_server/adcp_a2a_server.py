@@ -643,7 +643,7 @@ class AdCPRequestHandler(RequestHandler):
                 "Failed to send protocol-level webhook for task %s: %s", task.id, scrub_control_chars(str(e))
             )
 
-    def _best_effort_a2a_identity(self, context: Any) -> Any:
+    def _best_effort_a2a_identity(self, context: ServerCallContext | None) -> ResolvedIdentity | None:
         """Resolve a header-only identity for boundary observability ONLY.
 
         Mirrors REST's ``_best_effort_rest_identity``: never an authorization
