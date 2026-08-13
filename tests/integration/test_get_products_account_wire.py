@@ -33,7 +33,7 @@ from tests.factories import (
 )
 from tests.harness.assertions import assert_rejected, assert_wire_omits_unset
 from tests.harness.product import ProductEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import Transport, TransportResult
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -160,7 +160,7 @@ class TestGetProductsSandboxMarkerOnWire:
     """
 
     @staticmethod
-    def _dispatch(*, transport: Transport, account_sandbox: bool):
+    def _dispatch(*, transport: Transport, account_sandbox: bool) -> TransportResult:  # type: ignore[return]
         mode = "sbx" if account_sandbox else "live"
         suffix = transport.value
         with ProductEnv(tenant_id=f"t-gp-marker-{mode}-{suffix}", principal_id=f"p-gp-marker-{mode}-{suffix}") as env:
