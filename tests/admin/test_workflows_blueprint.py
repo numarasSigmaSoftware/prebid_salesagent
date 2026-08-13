@@ -413,6 +413,7 @@ class TestWorkflowDecisionOwnership:
         ``{"success": true}, 200``.
         """
         from src.core.database.models import MediaBuy
+        from src.services.media_buy_completion import MEDIA_BUY_VANISHED_MESSAGE
 
         _auth_session(client, test_tenant)
         media_buy_id, context_id, step_id = _setup_mapped_media_buy_step(
@@ -432,9 +433,41 @@ class TestWorkflowDecisionOwnership:
         assert r.status_code == 404
         body = r.get_json()
         assert body.get("success") is False, f"a vanished buy must not report success: {body}"
-        assert "no longer exists" in body.get("error", "")
+        assert body.get("error") == MEDIA_BUY_VANISHED_MESSAGE
+        # The flash channel is the operator's other report of the same event; it must
+        # carry the same warning, not the shared "approved successfully" success.
+        with client.session_transaction() as sess:
+            flashes = sess.get("_flashes", [])
+        assert ("warning", MEDIA_BUY_VANISHED_MESSAGE) in flashes, f"vanished flash missing: {flashes}"
         # The step follows the buy decision; with no buy there is nothing to approve.
         assert _step_status(test_tenant, step_id) == "pending_approval"
+
+    def test_approve_when_mapped_buy_already_decided_is_an_idempotent_success(
+        self, client, test_tenant, factory_session
+    ):
+        """The vanished case's sibling cell: a buy already decided (``active``) reached
+        through a still-pending step is a terminal REPLAY, so it IS an idempotent success.
+
+        Pins the other half of ``_respond_to_non_approvable_media_buy``'s split — collapsing
+        the two arms back together would have to break either this test or the vanished one.
+        """
+        _auth_session(client, test_tenant)
+        _, context_id, step_id = _setup_mapped_media_buy_step(
+            factory_session, test_tenant, buy_status="active", step_status="pending_approval"
+        )
+
+        r = client.post(
+            f"/tenant/{test_tenant}/workflows/{context_id}/steps/{step_id}/approve",
+            content_type="application/json",
+            json={},
+        )
+
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body.get("success") is True, f"an already-decided buy replays as success: {body}"
+        with client.session_transaction() as sess:
+            flashes = sess.get("_flashes", [])
+        assert ("success", "Workflow step approved successfully") in flashes, f"success flash missing: {flashes}"
 
     def test_reject_on_terminal_step_returns_409(self, client, test_tenant, factory_session):
         """Replaying reject on a rejected step → 409; the step stays rejected."""
