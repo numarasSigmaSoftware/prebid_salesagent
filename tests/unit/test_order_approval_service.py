@@ -398,6 +398,28 @@ class TestUnrecognisedSchemeIsNotSilent:
             "an unrecognised scheme sent an unauthenticated notification without warning"
         )
 
+    def test_recognised_scheme_with_no_token_names_the_TOKEN_not_the_scheme(self, caplog):
+        """The two causes must not be conflated.
+
+        The elif fires whenever the scheme-match ifs failed for ANY reason, so a
+        Bearer row with no token logged "scheme Bearer is not supported here
+        (expected Bearer or Basic)" — Bearer in both halves of the sentence,
+        pointing the operator at scheme support when the credential is missing.
+        """
+        import logging
+
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        config = TestApprovalWebhookAuthSchemeIsCaseInsensitive._config("Bearer")
+        config.authentication_token = None
+        with caplog.at_level(logging.WARNING, logger="src.services.order_approval_service"):
+            headers = _approval_webhook_headers(config)
+
+        assert "Authorization" not in headers
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "configured with no token" in message, f"wrong axis: {message!r}"
+        assert "is not supported" not in message, f"a recognised scheme must not be called unsupported: {message!r}"
+
     def test_no_configured_scheme_stays_quiet(self, caplog):
         """Absence of auth is legitimate; only a MISMATCH is noteworthy."""
         import logging

@@ -489,22 +489,29 @@ class WebhookDeliveryService:
         if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) and config.authentication_token:
             headers["Authorization"] = f"Bearer {config.authentication_token}"
         elif config.authentication_type and not is_auth_scheme(config.authentication_type, HMAC_AUTH_SCHEME):
-            # A CONFIGURED scheme that matched nothing means this delivery goes
-            # out unauthenticated — silently, before this branch existed. No
-            # auth configured at all (falsy authentication_type) is a different,
-            # legitimate case and stays quiet.
+            # Split by CAUSE: a recognised scheme with no token is a missing
+            # credential, not an unsupported scheme, and saying "Bearer is not
+            # supported (expected Bearer or Basic)" points the operator at the
+            # wrong axis. No auth configured at all stays quiet.
             #
             # This path supports HMAC-SHA256 and Bearer. order_approval_service
             # supports Bearer and Basic. The two sets genuinely differ (only
             # this one signs), so they are named here rather than merged.
-            logger.warning(
-                "Webhook auth scheme %s is not supported on the delivery path (expected %s or %s); "
-                "sending UNAUTHENTICATED to %s",
-                scrub_control_chars(config.authentication_type),
-                HMAC_AUTH_SCHEME,
-                BEARER_AUTH_SCHEME,
-                webhook_url_for_log(config.url),
-            )
+            if is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME):
+                logger.warning(
+                    "Webhook auth scheme %s is configured with no token; sending UNAUTHENTICATED to %s",
+                    scrub_control_chars(config.authentication_type),
+                    webhook_url_for_log(config.url),
+                )
+            else:
+                logger.warning(
+                    "Webhook auth scheme %s is not supported on the delivery path (expected %s or %s); "
+                    "sending UNAUTHENTICATED to %s",
+                    scrub_control_chars(config.authentication_type),
+                    HMAC_AUTH_SCHEME,
+                    BEARER_AUTH_SCHEME,
+                    webhook_url_for_log(config.url),
+                )
         return headers
 
     @staticmethod

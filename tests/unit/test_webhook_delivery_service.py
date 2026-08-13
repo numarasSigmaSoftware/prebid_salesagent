@@ -411,3 +411,60 @@ def test_deliver_disables_redirects(webhook_service, mock_db_session):
         )
 
     assert captured["kwargs"]["allow_redirects"] is False
+
+
+class TestBuildDeliveryHeadersRecognisedSchemeNoToken:
+    """A recognised-but-tokenless scheme must not be logged as unsupported.
+
+    `_build_delivery_headers`'s elif fires whenever the scheme-match ifs
+    failed for ANY reason — including a Bearer row with no token — so it used
+    to log "scheme Bearer is not supported on the delivery path (expected
+    HMAC-SHA256 or Bearer)", naming Bearer in both halves of the sentence and
+    pointing at scheme support when the real problem is a missing credential.
+    """
+
+    def test_bearer_with_no_token_names_the_token_not_the_scheme(self, caplog):
+        import logging
+
+        from src.core.database.repositories.push_notification_config import (
+            PushNotificationTarget,
+        )
+
+        config = PushNotificationTarget(
+            url="https://example.com/webhook",
+            authentication_type="Bearer",
+            authentication_token=None,
+            webhook_secret=None,
+            auth_blocked_at=None,
+        )
+        service = WebhookDeliveryService()
+        with caplog.at_level(logging.WARNING, logger="src.services.webhook_delivery_service"):
+            headers = service._build_delivery_headers(config, b"{}", "2026-01-01T00:00:00Z")
+
+        assert "Authorization" not in headers
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "configured with no token" in message, f"wrong axis: {message!r}"
+        assert "is not supported" not in message, f"a recognised scheme must not be called unsupported: {message!r}"
+
+    def test_unrecognised_scheme_still_names_it_unsupported(self, caplog):
+        import logging
+
+        from src.core.database.repositories.push_notification_config import (
+            PushNotificationTarget,
+        )
+
+        config = PushNotificationTarget(
+            url="https://example.com/webhook",
+            authentication_type="Digest",
+            authentication_token="irrelevant",
+            webhook_secret=None,
+            auth_blocked_at=None,
+        )
+        service = WebhookDeliveryService()
+        with caplog.at_level(logging.WARNING, logger="src.services.webhook_delivery_service"):
+            headers = service._build_delivery_headers(config, b"{}", "2026-01-01T00:00:00Z")
+
+        assert "Authorization" not in headers
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "is not supported" in message, f"an unrecognised scheme must say so: {message!r}"
+        assert "configured with no token" not in message, f"wrong axis: {message!r}"
