@@ -96,6 +96,42 @@ def test_emit_media_buy_webhook_swallows_delivery_errors():
         )  # must not raise
 
 
+async def test_emit_protocol_result_webhook_reports_a_handled_delivery_failure():
+    """A delivery the service HANDLED and refused must not be reported as sent.
+
+    ``send_notification`` returns False without raising on no-URL, an SSRF rejection, a
+    4xx, exhausted retries and a transport error — so the swallow-errors sibling above,
+    which drives the *raising* arm, never reaches this path. ``blueprints/creatives.py``
+    branches on this return value, so reporting True for a refused delivery tells it a
+    buyer was notified when none was.
+    """
+    result = mod.build_media_buy_result(_media_buy(), [_pkg("p1")])
+    step_data = {"step_id": "s", "context_id": "c", "tool_name": "create_media_buy", "request_data": {}}
+    service = MagicMock()
+    service.send_notification = AsyncMock(return_value=False)
+    with patch.object(mod, "get_protocol_webhook_service", return_value=service):
+        sent = await mod.emit_protocol_result_webhook_async(
+            step_data, MagicMock(), result, AdcpTaskStatus.completed, _METADATA
+        )
+
+    assert sent is False, "a handled (non-raising) delivery refusal must not report success"
+
+
+async def test_emit_protocol_result_webhook_reports_a_successful_delivery():
+    """The success arm still returns True — pins that the failure arm above discriminates
+    rather than returning a blanket False."""
+    result = mod.build_media_buy_result(_media_buy(), [_pkg("p1")])
+    step_data = {"step_id": "s", "context_id": "c", "tool_name": "create_media_buy", "request_data": {}}
+    service = MagicMock()
+    service.send_notification = AsyncMock(return_value=True)
+    with patch.object(mod, "get_protocol_webhook_service", return_value=service):
+        sent = await mod.emit_protocol_result_webhook_async(
+            step_data, MagicMock(), result, AdcpTaskStatus.completed, _METADATA
+        )
+
+    assert sent is True
+
+
 _URL = "https://buyer.example/webhook"
 
 

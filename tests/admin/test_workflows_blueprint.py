@@ -403,6 +403,39 @@ class TestWorkflowDecisionOwnership:
         assert r.status_code == 409
         assert _step_status(test_tenant, step_id) == "completed"
 
+    def test_approve_when_mapped_buy_vanished_does_not_report_success(self, client, test_tenant, factory_session):
+        """A mapped buy that no longer exists approved NOTHING — the route must say so.
+
+        An already-decided buy is an idempotent success; a VANISHED one is not, and never
+        will be, so neither the JSON arm nor the flash may claim success. This is the
+        distinction ``operations.py`` encodes and the workflow route previously collapsed
+        into a shared "approved successfully". Reverting that fix turns this 404 back into
+        ``{"success": true}, 200``.
+        """
+        from src.core.database.models import MediaBuy
+
+        _auth_session(client, test_tenant)
+        media_buy_id, context_id, step_id = _setup_mapped_media_buy_step(
+            factory_session, test_tenant, buy_status="pending_approval", with_assignment=False
+        )
+        # Delete the buy but KEEP the step→buy mapping: the vanished case the route reads.
+        buy = factory_session.get(MediaBuy, media_buy_id)
+        factory_session.delete(buy)
+        factory_session.commit()
+
+        r = client.post(
+            f"/tenant/{test_tenant}/workflows/{context_id}/steps/{step_id}/approve",
+            content_type="application/json",
+            json={},
+        )
+
+        assert r.status_code == 404
+        body = r.get_json()
+        assert body.get("success") is False, f"a vanished buy must not report success: {body}"
+        assert "no longer exists" in body.get("error", "")
+        # The step follows the buy decision; with no buy there is nothing to approve.
+        assert _step_status(test_tenant, step_id) == "pending_approval"
+
     def test_reject_on_terminal_step_returns_409(self, client, test_tenant, factory_session):
         """Replaying reject on a rejected step → 409; the step stays rejected."""
         _auth_session(client, test_tenant)
