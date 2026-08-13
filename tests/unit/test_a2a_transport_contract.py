@@ -1014,3 +1014,80 @@ class TestAsyncTaskSkillsThreadTheOuterTaskId:
         from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS
 
         assert _ASYNC_TASK_SKILLS == {"create_media_buy", "sync_creatives", "update_media_buy"}
+
+
+class TestA2ASkillParameterForwarding:
+    """The A2A skill handlers must forward the request-level parameters their
+    siblings do.
+
+    MCP (``update_media_buy`` / ``create_media_buy``) and REST
+    (``PUT /media-buys/{id}`` / ``POST /media-buys``) both plumb
+    ``idempotency_key``, ``reporting_webhook`` and ``ext`` through to the shared
+    raw function. The A2A handlers silently dropped them, so the same buyer
+    payload was non-idempotent, had no reporting webhook and lost its extension
+    object on A2A alone — a divergence no schema check can see, because dropping a
+    keyword argument is not a type error.
+
+    Driven through the REAL handler with the core tool spied, so removing any
+    forwarded keyword reddens these.
+    """
+
+    _WEBHOOK = {
+        "url": "https://buyer.example/reporting",
+        "reporting_frequency": "daily",
+        "authentication": {
+            "schemes": ["Bearer"],
+            "credentials": "reporting-webhook-credential-value",
+        },
+    }
+    _EXT = {"vendor_trace_id": "trace-42"}
+
+    @pytest.mark.asyncio
+    async def test_update_skill_forwards_idempotency_reporting_and_ext(self):
+        handler = AdCPRequestHandler()
+        identity = make_test_a2a_identity()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool") as spy:
+            spy.return_value = {"ok": True}
+            await handler._handle_update_media_buy_skill(
+                {
+                    "media_buy_id": "mb_1",
+                    "paused": True,
+                    "reporting_webhook": self._WEBHOOK,
+                    "ext": self._EXT,
+                    "idempotency_key": "idempotency-key-update-1",
+                },
+                identity,
+            )
+
+        assert spy.call_count == 1, "the core update tool must be invoked exactly once"
+        forwarded = spy.call_args.kwargs
+        assert forwarded["idempotency_key"] == "idempotency-key-update-1"
+        assert forwarded["reporting_webhook"] == self._WEBHOOK
+        assert forwarded["ext"] == self._EXT
+
+    @pytest.mark.asyncio
+    async def test_create_skill_forwards_idempotency_reporting_and_ext(self):
+        handler = AdCPRequestHandler()
+        identity = make_test_a2a_identity()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_create_media_buy_tool") as spy:
+            spy.return_value = {"ok": True}
+            await handler._handle_create_media_buy_skill(
+                {
+                    "brand": {"domain": "forwarding.example"},
+                    "packages": [{"product_id": "prod_1", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
+                    "start_time": "2030-01-01T00:00:00Z",
+                    "end_time": "2030-01-08T00:00:00Z",
+                    "reporting_webhook": self._WEBHOOK,
+                    "ext": self._EXT,
+                    "idempotency_key": "idempotency-key-create-1",
+                },
+                identity,
+            )
+
+        assert spy.call_count == 1, "the core create tool must be invoked exactly once"
+        forwarded = spy.call_args.kwargs
+        assert forwarded["idempotency_key"] == "idempotency-key-create-1"
+        assert forwarded["reporting_webhook"] == self._WEBHOOK
+        assert forwarded["ext"] == self._EXT

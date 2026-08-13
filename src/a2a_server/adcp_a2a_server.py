@@ -2325,6 +2325,8 @@ class AdCPRequestHandler(RequestHandler):
             push_notification_config=push_notification_config,
             reporting_webhook=params.get("reporting_webhook"),
             context=params.get("context"),
+            # Same omission the update handler had: MCP and REST both forward ext.
+            ext=params.get("ext"),
             # Wrap for boundary-pattern consistency with delivery/sync_creatives. A crash is
             # structurally impossible here (create_media_buy_raw re-coerces via
             # CreateMediaBuyRequest), and to_account_reference is idempotent on an already
@@ -2651,6 +2653,12 @@ class AdCPRequestHandler(RequestHandler):
             packages=params.get("packages"),
             push_notification_config=params.get("push_notification_config"),
             context=params.get("context"),
+            # Forwarded for parity with the MCP wrapper and the REST route. Dropping
+            # them here made an A2A update silently non-idempotent, with no reporting
+            # webhook and no extension object, for a request that carried all three.
+            reporting_webhook=params.get("reporting_webhook"),
+            ext=params.get("ext"),
+            idempotency_key=params.get("idempotency_key"),
             identity=identity,
             external_task_id=a2a_task_id,
         )
