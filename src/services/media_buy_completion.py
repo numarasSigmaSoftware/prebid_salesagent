@@ -98,6 +98,12 @@ MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE = (
     "Media buy approval is in progress — the ad-server order will be created automatically shortly"
 )
 
+# Sibling of the three above: the workflow step's mapped media buy row is GONE, so
+# nothing was approved. Distinct from "already decided" (a terminal replay, which IS an
+# idempotent success) — a vanished buy must never be reported to the operator as one.
+# Shared so both admin approve routes report the event with a single wording.
+MEDIA_BUY_VANISHED_MESSAGE = "Media buy no longer exists — nothing was approved"
+
 
 def workflow_step_snapshot(step: WorkflowStep) -> dict[str, Any]:
     """Snapshot the fields a finalize/webhook call needs from a WorkflowStep row.

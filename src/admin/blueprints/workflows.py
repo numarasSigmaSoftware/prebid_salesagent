@@ -22,6 +22,7 @@ from src.core.logging_utils import sanitize_log_value
 from src.services.media_buy_completion import (
     MEDIA_BUY_ALREADY_DECIDED_MESSAGE,
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
+    MEDIA_BUY_VANISHED_MESSAGE,
     WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE,
     FinalizeOutcome,
     claim_pending_creatives_hold,
@@ -377,12 +378,19 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 else:
                     # The mapped buy is no longer pending_approval (already decided, or
                     # gone). Do NOT write the step — the step follows the buy decision and
-                    # must not be reverted. Idempotent success.
+                    # must not be reverted.
                     logger.warning(
                         "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
                         media_buy is not None,
                         sanitize_log_value(media_buy.status if media_buy else "N/A"),
                     )
+                    if media_buy is None:
+                        # VANISHED, not decided: nothing was approved and nothing exists to
+                        # approve later, so neither the flash nor the JSON arm may report
+                        # success. Same decision operations.py already encodes.
+                        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
+                        return jsonify({"success": False, "error": MEDIA_BUY_VANISHED_MESSAGE}), 404
+                    # Already-decided (terminal) replay — idempotent success.
                     flash("Workflow step approved successfully", "success")
             else:
                 # Plain (non-media-buy) workflow step — no buy decision to own, so mark the

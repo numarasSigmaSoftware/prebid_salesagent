@@ -12,6 +12,7 @@ from src.core.logging_utils import sanitize_log_value
 from src.services.media_buy_completion import (
     MEDIA_BUY_ALREADY_DECIDED_MESSAGE,
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
+    MEDIA_BUY_VANISHED_MESSAGE,
     FinalizeOutcome,
     claim_pending_creatives_hold,
     classify_finalize_outcome,
@@ -489,7 +490,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # be reported as one.
                     db_session.rollback()
                     if media_buy is None:
-                        flash("Media buy no longer exists — nothing was approved", "warning")
+                        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
                     else:
                         flash("Media buy approved successfully", "success")
 
