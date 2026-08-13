@@ -521,8 +521,8 @@ class DeliveryWebhookScheduler:
             force: If True, bypass frequency + the 24h "scheduled" dedup. Does
                 NOT bypass the final gate, so a manual re-trigger won't emit a
                 duplicate final on the read-check path (best-effort; a crash /
-                concurrency window remains, closable only by reserving the send durably
-        # before the POST).
+                concurrency window remains, closable only by reserving the send
+                durably before the POST).
 
         Returns:
             True when a webhook was actually delivered; False when the buy was
