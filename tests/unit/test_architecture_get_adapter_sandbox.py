@@ -340,6 +340,34 @@ def test_guard_would_catch_a_regression() -> None:
     )
 
 
+def test_collector_also_extracts_adapter_for_mode_calls() -> None:
+    """Self-test, both signs, for the ``adapter_for_mode`` half of the extraction.
+
+    ``_adapter_calls_in`` scans both ``get_adapter(`` and ``adapter_for_mode(`` (see its
+    docstring), but every synthetic-module string in this file up to this point only
+    exercises the ``get_adapter`` name. A regression that narrowed the loop back to
+    ``for name in ("get_adapter",)`` would leave every other test in this file green,
+    because none of them ever spells ``adapter_for_mode`` — this is the only test that
+    would catch it going dark.
+    """
+    present = _adapter_calls_in(
+        ast.parse("a = adapter_for_mode(principal, sandbox=identity.sandbox, tenant=t)\n"), "synthetic.py"
+    )
+    missing = _adapter_calls_in(ast.parse("a = adapter_for_mode(principal, tenant=t)\n"), "synthetic.py")
+
+    assert len(present) == 1 and len(missing) == 1, (
+        "the collector no longer finds an adapter_for_mode call at all"
+    )
+    assert present[0].value is not None, "adapter_for_mode's sandbox= keyword was not extracted"
+    assert missing[0].value is None, "the missing arm should still see an absent sandbox= as None"
+    assert _missing_sandbox_offenders(missing), (
+        "the missing arm no longer flags an adapter_for_mode call with no sandbox= — it would pass vacuously"
+    )
+    assert not _missing_sandbox_offenders(present), (
+        "the missing arm flags a present adapter_for_mode sandbox= as absent — it would fire on every site"
+    )
+
+
 def _resolves_to_identity_sandbox(value: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> bool:
     """True when ``value`` reaches ``identity.sandbox`` — directly or through a local.
 
