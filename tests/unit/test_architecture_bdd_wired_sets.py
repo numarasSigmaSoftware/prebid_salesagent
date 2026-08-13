@@ -42,6 +42,17 @@ _WIRED_BASELINE: dict[str, set[str]] = {
         "T-UC-010-v31-version-unsupported-prerelease",
         "T-UC-010-v31-version-unsupported-sub-min",
     },
+    # Hoisted from function-local scope in the round-3 response: as locals they
+    # were bound but invisible to the globals-scan derivation, so unbinding a
+    # step degraded them to a silent xfail instead of failing.
+    "_UC003_MANUAL_APPROVAL_WIRED": {
+        "T-UC-003-alt-manual",
+        "T-UC-003-approval-adapter",
+        "T-UC-003-approval-tenant",
+    },
+    "_UC003_REQUIRED_IDEMPOTENCY_WIRED": {
+        "T-UC-003-local-required-idempotency-v311",
+    },
     "_UC010_CAPABILITY_FILTER_WIRED": {
         "T-UC-010-local-capability-filter-empty-v311",
         "T-UC-010-local-capability-filter-invalid-v311",

@@ -168,7 +168,23 @@ _BUYER_ID_NAMES = frozenset({"media_buy_id", "buyer_ref", "creative_id", "packag
 _BUYER_ATTRS = frozenset({"url", "text", "body"}) | _BUYER_ID_NAMES
 # Calls whose result cannot carry raw buyer bytes into the record.
 _SANITIZING_OR_SAFE_CALLS = frozenset(
-    {"scrub_control_chars", "log_safe", "len", "type", "id", "bool", "int", "float", "sorted", "list"}
+    {
+        "scrub_control_chars",
+        "log_safe",
+        # Scrubs internally and returns a placeholder when the read fails; its
+        # whole purpose is to yield a log-safe path. Listed because the Call
+        # branch is deny-by-default, so an unrecognised call is flagged even
+        # when it sanitizes — which is the branch behaving correctly.
+        "_safe_request_path",
+        "len",
+        "type",
+        "id",
+        "bool",
+        "int",
+        "float",
+        "sorted",
+        "list",
+    }
 )
 
 # A URL needs MORE than control-char scrubbing. A buyer's callback URL routinely
