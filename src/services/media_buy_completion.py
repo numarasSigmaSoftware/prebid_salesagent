@@ -367,19 +367,30 @@ async def emit_protocol_result_webhook_async(
         )
     try:
         service = get_protocol_webhook_service()
-        await service.send_notification(
+        # send_notification HANDLES its own failures and reports them as False (no URL
+        # configured, SSRF-rejected, non-2xx, transport error). Discarding it and
+        # returning a literal True reported a delivery that never happened — to the
+        # operator log and to the creative-review caller that branches on this bool.
+        sent = await service.send_notification(
             push_notification_config=webhook_config,
             payload=payload,
             metadata=metadata,
         )
         # CreateMediaBuyError (reject path) carries no media_buy_id — fall back to the step id.
         result_media_buy_id = getattr(result, "media_buy_id", None) or step_data["step_id"]
-        logger.info(
-            "Sent %s webhook notification for task %s",
-            sanitize_log_value(status),
-            sanitize_log_value(result_media_buy_id),
-        )
-        return True
+        if sent:
+            logger.info(
+                "Sent %s webhook notification for task %s",
+                sanitize_log_value(status),
+                sanitize_log_value(result_media_buy_id),
+            )
+        else:
+            logger.warning(
+                "Failed to send %s webhook notification for task %s",
+                sanitize_log_value(status),
+                sanitize_log_value(result_media_buy_id),
+            )
+        return sent
     except Exception as webhook_err:
         logger.warning("Failed to send webhook notification: %s", sanitize_log_value(webhook_err))
         return False
