@@ -212,6 +212,9 @@ class TestGetProductsSandboxMarkerOnWire:
     def test_sandbox_account_marks_the_response_on_the_wire(self, integration_db, transport):
         result = self._dispatch(transport=transport, account_sandbox=True)
         if result.wire_response is not None:
+            from tests.helpers.pinned_schema import validate_against_pinned_schema
+
+            validate_against_pinned_schema(_GET_PRODUCTS_SCHEMA, result.wire_response)
             assert result.wire_response.get("sandbox") is True, (
                 f"[{transport.value}] sandbox-scoped get_products must carry sandbox: true on the wire, "
                 f"got {result.wire_response.get('sandbox')!r}"
