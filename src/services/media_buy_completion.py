@@ -106,8 +106,12 @@ MEDIA_BUY_VANISHED_MESSAGE = "Media buy no longer exists — nothing was approve
 
 # The buy statuses from which a reject can still CLAIM the single-winner decision:
 # undecided (``pending_approval``) or approved-but-held-on-creatives
-# (``pending_creatives``). Both admin reject routes gate on this set and
-# ``finalize_media_buy_rejection`` CAS's against it, so the three must never drift.
+# (``pending_creatives``). Both admin reject routes gate their ENTRY on this set, so
+# those two gates must never drift from each other. It is NOT what the CAS compares
+# against: both routes pass ``expected_status=media_buy.status`` (the status they
+# actually observed) to ``finalize_media_buy_rejection``, so a reject that raced an
+# approve-HOLD loses the claim instead of also succeeding. The constant is only that
+# parameter's fallback default, for a caller with no observed status to pass.
 REJECTABLE_MEDIA_BUY_STATUSES: tuple[str, ...] = ("pending_approval", "pending_creatives")
 
 
