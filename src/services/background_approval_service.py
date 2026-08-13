@@ -192,6 +192,27 @@ def _update_approval_progress(tenant_id: str, workflow_step_id: str, progress_da
         logger.warning(f"Failed to update approval progress: {e}")
 
 
+def _log_refused_transition(workflow_step_id: str, status: str) -> None:
+    """Record that ``transition_if_nonterminal`` refused to finalize a step.
+
+    The primitive returns None when the step is ALREADY terminal — a buyer cancel, an
+    admin rejection or another finalizer committed first — and a terminal step is
+    immutable, so refusing is the correct outcome of that race, not an error. It must
+    still be reported honestly: this polling thread is the only observer of its own
+    writes, so the log line below is the sole operator-visible record of what happened,
+    and the unconditional "Marked ... as completed" it replaces named a status the row
+    does not carry.
+
+    Shared by both finalizers so the refusal is worded once (CLAUDE.md DRY invariant).
+    """
+    logger.warning(
+        "Workflow step %s was NOT marked as %s: it is already terminal (concurrently "
+        "canceled/rejected/finalized). Leaving the committed outcome in place.",
+        workflow_step_id,
+        status,
+    )
+
+
 def _mark_approval_complete(
     tenant_id: str, workflow_step_id: str, order_id: str, attempts: int, elapsed_seconds: float
 ) -> None:
@@ -209,7 +230,9 @@ def _mark_approval_complete(
                     "message": f"Order approved successfully after {attempts} attempts ({int(elapsed_seconds)}s)",
                 },
             )
-            if step:
+            if step is None:
+                _log_refused_transition(workflow_step_id, "completed")
+            else:
                 step.transaction_details = {
                     "approval_status": "approved",
                     "gam_order_status": "APPROVED",
@@ -217,7 +240,7 @@ def _mark_approval_complete(
                     "elapsed_seconds": int(elapsed_seconds),
                     "completed_at": datetime.now(UTC).isoformat(),
                 }
-            logger.info(f"Marked workflow step {workflow_step_id} as completed")
+                logger.info("Marked workflow step %s as completed", workflow_step_id)
     except Exception as e:
         logger.error(f"Failed to mark approval complete: {e}")
 
@@ -233,9 +256,11 @@ def _mark_approval_failed(tenant_id: str, workflow_step_id: str, error_message: 
                 error_message=error_message,
                 response_data={"status": "failed", "error": error_message},
             )
-            if step:
+            if step is None:
+                _log_refused_transition(workflow_step_id, "failed")
+            else:
                 step.transaction_details = {"approval_status": "failed", "failure_reason": error_message}
-            logger.info(f"Marked workflow step {workflow_step_id} as failed")
+                logger.info("Marked workflow step %s as failed", workflow_step_id)
     except Exception as e:
         logger.error(f"Failed to mark approval failed: {e}")
 
