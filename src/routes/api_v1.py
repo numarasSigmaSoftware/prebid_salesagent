@@ -387,11 +387,12 @@ async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity
 @router.post("/media-buys/delivery")
 async def get_media_buy_delivery(body: GetMediaBuyDeliveryBody, identity: ResolvedIdentity = require_auth):
     """Get delivery metrics for media buys (auth required)."""
-    if body.account is not None:
+    with adcp_validation_boundary(context="get_media_buy_delivery request"):
+        account_ref = to_account_reference(body.account)
+
+    if account_ref is not None:
         from src.core.transport_helpers import enrich_identity_with_account
 
-        with adcp_validation_boundary(context="get_media_buy_delivery request"):
-            account_ref = to_account_reference(body.account)
         enriched = enrich_identity_with_account(identity, account_ref)
         assert enriched is not None  # identity is non-None (from require_auth)
         identity = enriched
