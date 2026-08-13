@@ -1091,3 +1091,119 @@ class TestA2ASkillParameterForwarding:
         assert forwarded["idempotency_key"] == "idempotency-key-create-1"
         assert forwarded["reporting_webhook"] == self._WEBHOOK
         assert forwarded["ext"] == self._EXT
+
+    # Parameters the A2A handlers legitimately do NOT forward, each with the reason it is
+    # excluded. This is the ONLY hand-written list in the two tests below — the expected
+    # set itself is derived from the raw function's signature, so a NEW parameter added to
+    # update_media_buy_raw / create_media_buy_raw appears in the expected set automatically
+    # and reddens until it is either forwarded or consciously excluded here. Hand-listing
+    # the FORWARDED parameters is what let this gap survive two rounds of review.
+    _UPDATE_NOT_FORWARDED = {
+        # Transport-specific: the FastMCP Context belongs to the MCP wrapper. A2A resolves
+        # identity at its own boundary and passes `identity` instead.
+        "ctx": "MCP-only transport handle; A2A passes identity",
+        # Accepted by update_media_buy_raw's signature but dropped before
+        # _build_update_request, so forwarding would be a silent no-op. The REST route
+        # omits both for the same documented reason (#1417).
+        "targeting_overlay": "dead in update_media_buy_raw; REST omits it too (#1417)",
+        "creatives": "dead in update_media_buy_raw; REST omits it too (#1417)",
+    }
+    _CREATE_NOT_FORWARDED = {
+        "ctx": "MCP-only transport handle; A2A passes identity",
+        # Accepted for AdCP 3.1.1 request-shape compatibility but not honored by _impl;
+        # the REST route declares it and likewise does not forward it (#1619).
+        "paused": "pause-on-create not honored by _impl; REST omits it too (#1619)",
+    }
+
+    @staticmethod
+    def _expected_forwarded(raw_fn, excluded: dict[str, str]) -> set[str]:
+        """Every parameter of ``raw_fn`` the A2A handler is obliged to forward.
+
+        Derived from the live signature rather than transcribed, so the set cannot drift
+        away from the function it is meant to mirror.
+        """
+        import inspect
+
+        params = set(inspect.signature(raw_fn).parameters)
+        stale = excluded.keys() - params
+        assert not stale, f"exclusion list names parameters that no longer exist: {sorted(stale)}"
+        return params - excluded.keys()
+
+    @pytest.mark.asyncio
+    async def test_update_skill_forwards_every_live_raw_parameter(self):
+        """No parameter of update_media_buy_raw may be silently dropped by the A2A handler."""
+        from src.core.tools.media_buy_update import update_media_buy_raw
+
+        handler = AdCPRequestHandler()
+        identity = make_test_a2a_identity()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool") as spy:
+            spy.return_value = {"ok": True}
+            await handler._handle_update_media_buy_skill({"media_buy_id": "mb_1"}, identity)
+
+        expected = self._expected_forwarded(update_media_buy_raw, self._UPDATE_NOT_FORWARDED)
+        missing = expected - set(spy.call_args.kwargs)
+        assert not missing, (
+            f"A2A update handler drops {sorted(missing)}; forward them, or add each to "
+            "_UPDATE_NOT_FORWARDED with the reason it must not be forwarded"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_skill_forwards_every_live_raw_parameter(self):
+        """No parameter of create_media_buy_raw may be silently dropped by the A2A handler."""
+        from src.core.tools.media_buy_create import create_media_buy_raw
+
+        handler = AdCPRequestHandler()
+        identity = make_test_a2a_identity()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_create_media_buy_tool") as spy:
+            spy.return_value = {"ok": True}
+            await handler._handle_create_media_buy_skill(
+                {
+                    "brand": {"domain": "forwarding.example"},
+                    "packages": [{"product_id": "prod_1", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
+                    "start_time": "2030-01-01T00:00:00Z",
+                    "end_time": "2030-01-08T00:00:00Z",
+                    # Required by CreateMediaBuyRequest; the boundary rejects without it.
+                    "idempotency_key": "idempotency-key-create-signature-1",
+                },
+                identity,
+            )
+
+        expected = self._expected_forwarded(create_media_buy_raw, self._CREATE_NOT_FORWARDED)
+        missing = expected - set(spy.call_args.kwargs)
+        assert not missing, (
+            f"A2A create handler drops {sorted(missing)}; forward them, or add each to "
+            "_CREATE_NOT_FORWARDED with the reason it must not be forwarded"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_skill_forwards_flight_and_economics_values(self):
+        """The newly-forwarded parameters must carry the buyer's VALUES, not just appear.
+
+        A presence-only assertion passes on ``flight_start_date=None`` hardcoded at the
+        call site; these pin the actual payload through to the core tool.
+        """
+        handler = AdCPRequestHandler()
+        identity = make_test_a2a_identity()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool") as spy:
+            spy.return_value = {"ok": True}
+            await handler._handle_update_media_buy_skill(
+                {
+                    "media_buy_id": "mb_1",
+                    "flight_start_date": "2030-02-01",
+                    "flight_end_date": "2030-02-28",
+                    "currency": "EUR",
+                    "pacing": "even",
+                    "daily_budget": 250.0,
+                },
+                identity,
+            )
+
+        forwarded = spy.call_args.kwargs
+        assert forwarded["flight_start_date"] == "2030-02-01"
+        assert forwarded["flight_end_date"] == "2030-02-28"
+        assert forwarded["currency"] == "EUR"
+        assert forwarded["pacing"] == "even"
+        assert forwarded["daily_budget"] == 250.0

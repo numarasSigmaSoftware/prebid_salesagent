@@ -2333,6 +2333,12 @@ class AdCPRequestHandler(RequestHandler):
             # typed/dict account — but resolving at the boundary keeps all three handlers uniform.
             account=to_account_reference(params.get("account")),
             idempotency_key=params.get("idempotency_key"),
+            # Audited against create_media_buy_raw's signature by
+            # test_create_skill_forwards_every_live_raw_parameter: the only buyer-facing
+            # parameter not forwarded is ``paused``, and that omission is deliberate and
+            # matches the REST route — pause-on-create is accepted for AdCP 3.1.1 shape
+            # compatibility but is not honored by _impl (see #1619), so forwarding it
+            # would advertise an effect the request does not have.
             identity=identity,
             # The DataPart params AS SENT (pre-normalization, pre-mutation) are
             # the idempotency payload-hash input; the post-processed dict is the
@@ -2643,7 +2649,12 @@ class AdCPRequestHandler(RequestHandler):
                 context=params.get("context"),
             )
 
-        # Call core function with validated fields + raw nested structures and identity
+        # Call core function with validated fields + raw nested structures and identity.
+        # The forwarded set is the REST route's set (PUT /media-buys/{id}) exactly — see
+        # test_update_skill_forwards_every_live_raw_parameter, which derives the expected
+        # keywords from update_media_buy_raw's own signature so a parameter added there can
+        # no longer be silently dropped on A2A alone. Two earlier rounds each restored only
+        # the parameters a reviewer happened to name, which is why this is now signature-derived.
         response = core_update_media_buy_tool(
             media_buy_id=req.media_buy_id or "",
             paused=req.paused,
@@ -2659,6 +2670,19 @@ class AdCPRequestHandler(RequestHandler):
             reporting_webhook=params.get("reporting_webhook"),
             ext=params.get("ext"),
             idempotency_key=params.get("idempotency_key"),
+            # Legacy date aliases and the flight-level economics fields. The REST body
+            # accepts and forwards all five; A2A dropped them, so a buyer rescheduling a
+            # flight or changing currency/pacing/daily cap over A2A had those edits
+            # silently discarded while the same payload applied over REST.
+            flight_start_date=params.get("flight_start_date"),
+            flight_end_date=params.get("flight_end_date"),
+            currency=params.get("currency"),
+            pacing=params.get("pacing"),
+            daily_budget=params.get("daily_budget"),
+            # targeting_overlay and creatives are DELIBERATELY not forwarded, matching the
+            # REST route's identical omission: update_media_buy_raw accepts both in its
+            # signature but drops them before _build_update_request, so forwarding them
+            # would be a silent no-op that reads like working plumbing (see #1417).
             identity=identity,
             external_task_id=a2a_task_id,
         )
