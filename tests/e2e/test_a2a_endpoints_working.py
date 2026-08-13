@@ -323,11 +323,11 @@ class TestA2ARequestHandler:
     async def test_unknown_task_id_raises_task_not_found(self, request_cls, method_name):
         """An unknown task id raises TaskNotFoundError, not the generic internal
         error a bare None return produces — cancel is the same not-found condition
-        as get, and both route through the shared ``_get_task_or_raise``.
+        as get, and both route through the shared ``_require_owned_task``.
 
         Fast smoke check on the raise only. It does NOT prove the wire code: the
         exception carries no code, and the client actually sees -32603 — see
-        ``_get_task_or_raise`` (src/a2a_server/adcp_a2a_server.py) and #1670 for
+        ``_require_owned_task`` (src/a2a_server/adcp_a2a_server.py) and #1670 for
         why, plus the xfail'd live-server test in TestA2AServerIntegration that
         grades the code on the wire. Assert on str(exc), not exc.code — there is
         none.
@@ -422,7 +422,7 @@ class TestA2AServerIntegration:
         locked in when #1670 lands.
 
         STRICT xfail against #1670: the code is -32603 today, not the spec's
-        -32001 — see ``_get_task_or_raise`` (src/a2a_server/adcp_a2a_server.py) and
+        -32001 — see ``_require_owned_task`` (src/a2a_server/adcp_a2a_server.py) and
         #1670 for the enable_v0_3_compat dispatch path that flattens it. Both
         `tasks/get` and `tasks/cancel` reach that path, so both are -32603 today
         whether they raise TaskNotFoundError or return None.
