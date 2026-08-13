@@ -832,6 +832,66 @@ class TestA2ASkillInvocation:
         assert self._step_status(tenant_id, pending) == "canceled"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "step_status",
+        ["pending", "in_progress", "requires_approval", "pending_approval", "approval", "approved"],
+    )
+    async def test_complete_task_accepts_every_nonterminal_step(
+        self, sample_tenant, sample_principal, mock_identity, step_status
+    ):
+        """``complete_task``'s pre-check must admit exactly what its authoritative guard admits.
+
+        The guard it fronts is ``transition_if_nonterminal``, which keys on
+        ``TERMINAL_STEP_STATUSES``. The pre-check used to hand-list the three states it
+        remembered ("pending", "in_progress", "requires_approval"), so ``pending_approval``
+        and the legacy adapter-emitted ``approval`` alias raised ``AdCPConflictError`` on
+        steps the guard would have accepted. Reverting to that literal reddens the
+        ``pending_approval`` / ``approval`` / ``approved`` rows here.
+        """
+        from src.core.tools.task_management import complete_task
+
+        tenant_id = sample_tenant["tenant_id"]
+        step_id = self._persist_a2a_step(
+            tenant_id,
+            sample_principal["principal_id"],
+            f"task_complete_{step_status}",
+            None,
+            status=step_status,
+        )
+
+        result = await complete_task(task_id=step_id, status="completed", identity=mock_identity)
+
+        assert result["status"] == "completed"
+        assert self._step_status(tenant_id, step_id) == "completed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("step_status", ["completed", "rejected", "failed", "canceled"])
+    async def test_complete_task_refuses_every_terminal_step(
+        self, sample_tenant, sample_principal, mock_identity, step_status
+    ):
+        """The counter-control: every terminal status must still be refused.
+
+        Without it, widening the pre-check to "not terminal" could not be told apart from
+        removing it entirely.
+        """
+        from src.core.exceptions import AdCPConflictError
+        from src.core.tools.task_management import complete_task
+
+        tenant_id = sample_tenant["tenant_id"]
+        step_id = self._persist_a2a_step(
+            tenant_id,
+            sample_principal["principal_id"],
+            f"task_terminal_{step_status}",
+            None,
+            status=step_status,
+        )
+
+        with pytest.raises(AdCPConflictError, match="cannot be completed"):
+            await complete_task(task_id=step_id, status="completed", identity=mock_identity)
+
+        assert self._step_status(tenant_id, step_id) == step_status
+
+    @pytest.mark.asyncio
     async def test_natural_language_get_products(
         self, handler, sample_tenant, sample_principal, sample_products, mock_identity, validator
     ):

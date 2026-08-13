@@ -16,6 +16,7 @@ from fastmcp.server.context import Context
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import require_identity, require_principal_id, require_tenant
 from src.core.database.repositories.uow import WorkflowUoW
+from src.core.database.repositories.workflow import TERMINAL_STEP_STATUSES
 from src.core.exceptions import (
     AdCPConflictError,
     AdCPValidationError,
@@ -37,7 +38,10 @@ async def list_tasks(
     """List workflow tasks with filtering options.
 
     Args:
-        status: Filter by task status ("pending", "in_progress", "completed", "failed", "requires_approval")
+        status: Filter by workflow-step status. Terminal: "completed", "rejected", "failed",
+            "canceled" (``TERMINAL_STEP_STATUSES``). Non-terminal: "pending", "in_progress",
+            "approved", "requires_approval", "pending_approval", and the legacy
+            awaiting-decision alias "approval".
         object_type: Filter by object type ("media_buy", "creative", "product")
         object_id: Filter by specific object ID
         limit: Maximum number of tasks to return (default: 20)
@@ -217,7 +221,12 @@ async def complete_task(
 
         task = uow.workflows.get_by_step_id_or_raise(task_id)
 
-        if task.status not in ["pending", "in_progress", "requires_approval"]:
+        # Derived from the canonical terminal set, not a hand-listed positive set: a
+        # literal enumerating the states that MAY complete silently omits every
+        # non-terminal state it forgot — it omitted ``pending_approval`` and the legacy
+        # ``approval`` alias, so this pre-check refused steps the authoritative guard
+        # (``transition_if_nonterminal``, which keys on ``TERMINAL_STEP_STATUSES``) accepts.
+        if task.status in TERMINAL_STEP_STATUSES:
             raise AdCPConflictError(f"Task {task_id} is already {task.status} and cannot be completed")
 
         completed_time = datetime.now(UTC)
