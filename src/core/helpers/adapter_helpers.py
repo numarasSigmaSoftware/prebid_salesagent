@@ -95,12 +95,21 @@ def _mock_adapter_config(*, manual_approval_required: bool) -> dict[str, Any]:
     previously typed out separately and could drift on any key besides this one
     without either branch noticing.
 
-    A THIRD mock construction exists and is NOT unified here: ``get_adapter``'s
-    ``if not selected_adapter:`` fallback (a tenant with no ``AdapterConfig`` row at
-    all) builds its own bare ``{"enabled": True}`` and never sets
-    ``manual_approval_required``. That path is general "no adapter configured"
-    default logic, not sandbox-specific, so folding it into this helper is out of
-    scope here.
+    TWO further mock constructions exist in ``get_adapter`` and are NOT unified here:
+    the ``if selected_adapter == "mock":`` branch and the final ``else:`` "Default to
+    mock for unsupported adapters" branch both instantiate ``MockAdServerAdapter``
+    directly from ``adapter_config`` without going through this helper, so neither
+    sets ``manual_approval_required`` when they're reached with the bare dict. That
+    bare dict is not built by the ``if not selected_adapter:`` fallback — it comes
+    from the unconditional ``adapter_config: dict[str, Any] = {"enabled": True}``
+    initializer set right after ``with get_db_session() as session:``, before
+    ``if config_row:`` even runs; ``if not selected_adapter:`` only re-applies the
+    same literal when ``adapter_config`` is falsy at that point, and for a mock
+    tenant it's dead code anyway (``selected_adapter`` is already ``"mock"`` from
+    ``tenant.ad_server or "mock"`` at function entry, so it's never falsy there).
+    Both non-unified branches are general "no adapter configured" / "unsupported
+    adapter type" default logic, not sandbox-specific, so folding them into this
+    helper is out of scope here (tracked as #1976).
     """
     return {"enabled": True, "manual_approval_required": manual_approval_required}
 
