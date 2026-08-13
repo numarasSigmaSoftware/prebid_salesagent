@@ -510,10 +510,12 @@ class TestBddTransportTagSetsDoNotOverlap:
 
     # name -> anchor member proving the parser matched (None for a set that is
     # currently empty, which the parser must still resolve to an empty set
-    # rather than to a parse failure).
+    # rather than to a parse failure). Every set here is populated, so every
+    # entry carries a real anchor: a None would let a silently-broken parse
+    # count as a pass.
     E2E_GATED_SETS = {
-        "_NO_E2E_REST_TAGS": None,
-        "_UC004_E2E_WEBHOOK_INTERNAL_TAGS": None,
+        "_NO_E2E_REST_TAGS": "T-UC-004-webhook-ssrf-blocked",
+        "_UC004_E2E_WEBHOOK_INTERNAL_TAGS": "T-UC-004-webhook-sequence",
         "_UC005_E2E_FIXTURE_INJECTION_TAGS": "T-UC-005-dim-boundary",
     }
 

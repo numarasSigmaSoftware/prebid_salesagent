@@ -597,17 +597,33 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # CircuitBreaker state, neither of which is visible through the Docker
         # HTTP path.
         #
-        # EMPTY, and not by accident — the same rot that hollowed out
-        # _NO_E2E_REST_TAGS. All eleven former entries
-        # (webhook-bearer/hmac/notification-type/no-aggregated/circuit-open/
-        # circuit-recovery/retry-success/retry-5xx/retry-network/no-retry-4xx/
-        # sequence) are routed as transport-independent, so
-        # pytest_generate_tests never emits an e2e_rest param for them and
-        # `is_e2e_rest` below could not be True. Being transport-independent
-        # SUBSUMES this xfail; the entries read as protection while excluding
-        # nothing. Entries here are only meaningful for a webhook scenario that
-        # still parametrizes. TestBddTransportTagSetsDoNotOverlap keeps that true.
-        _UC004_E2E_WEBHOOK_INTERNAL_TAGS: set[str] = set()
+        # These eleven entries were briefly emptied on this branch on the premise
+        # that they were unreachable: all eleven were also in
+        # _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, which returns early in
+        # pytest_generate_tests, so no e2e_rest param was ever emitted for them and
+        # `is_e2e_rest` below could not be True. That premise died with the
+        # registry — _TRANSPORT_INDEPENDENT_SCENARIO_TAGS is now empty and hard-
+        # asserted empty, so these scenarios parametrize again and this gate is the
+        # only thing keeping them off e2e_rest. Restored to the set they hold on
+        # main: measured against main the delta is zero, so the shrink-only rule is
+        # not in play — leaving them out would have replaced eleven documented
+        # exclusions with implicit StepDefinitionNotFound auto-xfail.
+        # TestBddTransportTagSetsDoNotOverlap keeps the reachability true.
+        _UC004_E2E_WEBHOOK_INTERNAL_TAGS: set[str] = {
+            "T-UC-004-webhook-bearer",
+            "T-UC-004-webhook-hmac",
+            "T-UC-004-webhook-notification-type",
+            "T-UC-004-webhook-no-aggregated",
+            "T-UC-004-webhook-circuit-open",
+            "T-UC-004-webhook-circuit-recovery",
+            "T-UC-004-webhook-retry-success",
+            # jdy1-M4: retry/sequence observability — assert on env.mock['post']
+            # call counts / args, not visible over the Docker HTTP path.
+            "T-UC-004-webhook-retry-5xx",
+            "T-UC-004-webhook-retry-network",
+            "T-UC-004-webhook-no-retry-4xx",
+            "T-UC-004-webhook-sequence",
+        }
         if is_e2e_rest and (marker_names & _UC004_E2E_WEBHOOK_INTERNAL_TAGS):
             item.add_marker(
                 pytest.mark.xfail(
@@ -2767,9 +2783,10 @@ _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 # populated, 476 passed with it emptied, zero failures either way. So it was
 # suppressing 56 passing variants and protecting nothing. The rationale offered
 # for it — that these scenarios assert in-process mock / circuit-breaker state the
-# Docker path cannot see — is true of e2e_rest, which _NO_E2E_REST_TAGS and
-# _NO_REST_UC_TAG_PREFIXES already handle; a2a/mcp/rest are all in-process, so the
-# mock state is visible and the assertions hold.
+# Docker path cannot see — is true of e2e_rest, which _UC004_E2E_WEBHOOK_INTERNAL_TAGS
+# (carrying eleven of them), _NO_E2E_REST_TAGS and _NO_REST_UC_TAG_PREFIXES already
+# handle; a2a/mcp/rest are all in-process, so the mock state is visible and the
+# assertions hold.
 #
 # A scenario with genuinely no request surface (a pure background emission) is an
 # integration test, not a four-way scenario claiming parametrization — move it,
@@ -2817,14 +2834,20 @@ _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 # Send-time webhook scenarios that assert in-process mock/circuit-breaker state.
 # Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
 #
-# EMPTY, and not by accident: its sole entry (T-UC-004-webhook-ssrf-blocked) became
-# unreachable once that scenario was routed as transport-independent above. That
-# check returns before this one is consulted, so a scenario in BOTH sets is
-# excluded from e2e_rest by never being parametrized at all — the entry here was
-# protecting nothing while reading as though it were. Being transport-independent
-# SUBSUMES this exclusion; entries are only meaningful for scenarios that still
-# parametrize. test_no_e2e_rest_tags_are_reachable keeps that true.
-_NO_E2E_REST_TAGS: frozenset[str] = frozenset()
+# Its sole entry (T-UC-004-webhook-ssrf-blocked) was briefly removed on this branch
+# on the premise that it was unreachable: the scenario was also in
+# _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, whose check returns before this one is
+# consulted, so the scenario was excluded from e2e_rest by never being parametrized
+# at all. That premise died with the registry — _TRANSPORT_INDEPENDENT_SCENARIO_TAGS
+# is now empty and hard-asserted empty, so the scenario parametrizes again and this
+# exclusion is the only thing keeping it off e2e_rest. Restored to main's content;
+# measured against main the delta is zero, so this is not exemption growth.
+# test_e2e_gated_tags_are_reachable keeps the reachability true.
+_NO_E2E_REST_TAGS: frozenset[str] = frozenset(
+    {
+        "T-UC-004-webhook-ssrf-blocked",
+    }
+)
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
