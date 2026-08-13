@@ -30,6 +30,7 @@ from src.core.exceptions import (
     AdCPValidationError,
 )
 from src.core.helpers import enum_value
+from src.core.helpers.account_helpers import sandbox_wire_marker
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
@@ -761,6 +762,7 @@ async def _get_products_impl(
         products=cast(list[LibraryProduct], eligible_products),
         errors=None,
         context=req.context,
+        sandbox=sandbox_wire_marker(identity.sandbox),
     )
 
     # Log successful get_products call
