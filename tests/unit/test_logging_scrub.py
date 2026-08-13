@@ -370,7 +370,15 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
 # Why a ratchet rather than 48 fixes: widening the criterion is the correctness
 # change (a new raw-URL site in an unscanned module was invisible), and it is
 # separable from remediating 48 pre-existing sites across four untouched
-# modules. #1953 tracks order_approval_service.py and core/webhook_delivery.py.
+# modules. #1953 tracks order_approval_service.py's raw-exception sites.
+#
+# LIMIT, stated because the ratchet's "every module NOT listed here is held at
+# ZERO" is only true of modules the scan set REACHES. The set is derived from
+# mentioning a sanitizer or URL helper, so a module that sanitizes NOTHING is
+# never scanned at all — not held at zero. src/core/webhook_delivery.py is
+# exactly that: zero markers, and two raw buyer-URL log sites this guard cannot
+# see. Closing it needs the derivation to catch a zero-marker module with a raw
+# URL f-string, which is tracked, not patched here.
 # Every module NOT listed here is held at zero, so the modules this PR touched
 # cannot regress.
 _PREEXISTING_RAW_CHANNELS: dict[str, int] = {
