@@ -437,7 +437,18 @@ class TestA2AMissingTokenRecordsTheBoundaryError:
             ),
             error_code="AUTH_REQUIRED",
         )
+        # Grade the WRITE, not the factory. assert_called_once_with("A2A", …)
+        # only confirms get_audit_logger(...) was constructed — a regression
+        # dropping log_operation, or flipping success=True, would not redden it.
         audit_logger.assert_called_once_with("A2A", sample_tenant["tenant_id"])
+        audit_logger.return_value.log_operation.assert_called_once_with(
+            operation="message_processing",
+            principal_name="anonymous",
+            principal_id="anonymous",
+            adapter_id="a2a_boundary",
+            success=False,
+            error="Authentication required - Bearer token required in Authorization header",
+        )
 
     @pytest.mark.asyncio
     async def test_the_buyer_still_receives_the_auth_envelope(self, integration_db):

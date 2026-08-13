@@ -279,7 +279,10 @@ class TestAuthOptionalSkills:
         # matching REST and MCP (#1546 re-review item 7). This request simply
         # carries no headers to resolve one FROM, so there is no tenant to scope
         # a row to. The durable-row parity is graded by
-        # TestA2AMissingTokenIsRecordedDurably below, with a resolvable tenant.
+        # tests/integration/test_error_paths.py::TestA2AMissingTokenRecordsTheBoundaryError
+        # ::test_a_resolvable_tenant_gets_a_durable_row_not_just_a_log_line,
+        # which supplies a resolvable tenant. (The name cited here previously
+        # did not exist anywhere in the tree.)
         activity_feed.log_error.assert_not_called()
         audit_logger.assert_not_called()
         assert self.handler.tasks == {}
