@@ -104,6 +104,12 @@ MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE = (
 # Shared so both admin approve routes report the event with a single wording.
 MEDIA_BUY_VANISHED_MESSAGE = "Media buy no longer exists — nothing was approved"
 
+# The buy statuses from which a reject can still CLAIM the single-winner decision:
+# undecided (``pending_approval``) or approved-but-held-on-creatives
+# (``pending_creatives``). Both admin reject routes gate on this set and
+# ``finalize_media_buy_rejection`` CAS's against it, so the three must never drift.
+REJECTABLE_MEDIA_BUY_STATUSES: tuple[str, ...] = ("pending_approval", "pending_creatives")
+
 
 def workflow_step_snapshot(step: WorkflowStep) -> dict[str, Any]:
     """Snapshot the fields a finalize/webhook call needs from a WorkflowStep row.
@@ -1166,7 +1172,7 @@ def finalize_media_buy_rejection(
     step_id: str,
     step_data: dict[str, Any],
     reason: str,
-    expected_status: str | tuple[str, ...] = ("pending_approval", "pending_creatives"),
+    expected_status: str | tuple[str, ...] = REJECTABLE_MEDIA_BUY_STATUSES,
 ) -> FinalizeOutcome:
     """Atomic, single-winner reject finalizer (operations + workflow reject routes).
 

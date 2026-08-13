@@ -13,6 +13,7 @@ from src.services.media_buy_completion import (
     MEDIA_BUY_ALREADY_DECIDED_MESSAGE,
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
     MEDIA_BUY_VANISHED_MESSAGE,
+    REJECTABLE_MEDIA_BUY_STATUSES,
     FinalizeOutcome,
     claim_pending_creatives_hold,
     classify_finalize_outcome,
@@ -509,7 +510,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 )
                 attributes.flag_modified(step, "comments")
 
-                if media_buy and media_buy.status in ("pending_approval", "pending_creatives"):
+                if media_buy and media_buy.status in REJECTABLE_MEDIA_BUY_STATUSES:
                     # Atomic, single-winner reject: CLAIM buy → rejected (+revision bump),
                     # workflow step terminalized with the rejection artifact, then the
                     # rejection webhook carrying rejection_reason (the pinned 3.1.1 spec

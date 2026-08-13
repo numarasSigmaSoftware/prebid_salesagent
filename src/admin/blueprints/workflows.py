@@ -23,6 +23,7 @@ from src.services.media_buy_completion import (
     MEDIA_BUY_ALREADY_DECIDED_MESSAGE,
     MEDIA_BUY_FINALIZE_IN_PROGRESS_MESSAGE,
     MEDIA_BUY_VANISHED_MESSAGE,
+    REJECTABLE_MEDIA_BUY_STATUSES,
     WORKFLOW_STEP_ALREADY_DECIDED_MESSAGE,
     FinalizeOutcome,
     claim_pending_creatives_hold,
@@ -444,7 +445,7 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 # already decided) the claim loses → 409 and the step is left untouched,
                 # so we never pair an active/decided buy with a rejected task.
                 media_buy = MediaBuyRepository(db, tenant_id).get_by_id(mapping.object_id)
-                if media_buy is None or media_buy.status not in ("pending_approval", "pending_creatives"):
+                if media_buy is None or media_buy.status not in REJECTABLE_MEDIA_BUY_STATUSES:
                     return jsonify({"success": False, "error": MEDIA_BUY_ALREADY_DECIDED_MESSAGE}), 409
                 outcome = finalize_media_buy_rejection(
                     db,
