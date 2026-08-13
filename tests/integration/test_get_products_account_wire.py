@@ -221,3 +221,73 @@ class TestGetProductsSandboxMarkerOnWire:
                 f"[{transport.value}] live-scoped get_products must omit the sandbox marker "
                 f"(None, not False, per AdCP 3.1.1), got {result.payload.sandbox!r}"
             )
+
+
+class TestGetProductsRequestAccountFieldWiring:
+    """``req.account`` on the request built by ``create_get_products_request`` is
+    actually SET from the input ``account`` reference at all 3 callers.
+
+    ``req.account`` itself has no production reader — enrichment happens from the raw
+    ``account`` kwarg via ``enrich_identity_with_account``, not by reading ``req.account``
+    back out (see ``create_get_products_request``'s docstring). This test does not claim
+    otherwise. It pins the WIRING behind the schema-conformance comments at each of the
+    3 ``create_get_products_request(...)`` call sites (MCP wrapper, ``get_products_raw``,
+    the REST route in ``api_v1.py``) — before this test, nothing reddened if
+    ``account=account`` were silently dropped from any of them, even though the pinned
+    3.1.1 ``get-products-request.json`` schema declares the field.
+
+    Captures ``req`` by patching ``_get_products_impl`` at its SOURCE module
+    (``src.core.tools.products``) with a side effect that records ``req.account`` and then
+    delegates to the original — the same interception pattern already used in
+    ``tests/harness/test_forward_compat_acceptance.py``'s ``TestDataPreservationE2E``.
+    Transport.IMPL is intentionally excluded: ``ProductMixin.call_impl`` (in
+    ``tests/harness/_mixins.py``) imports ``_get_products_impl`` via ``from ... import``
+    at module load time, so patching the source module's attribute does not intercept
+    that binding.
+    """
+
+    @staticmethod
+    def _capture_req_account(*, transport: Transport) -> Any:
+        import src.core.tools.products as products_mod
+
+        captured: dict[str, Any] = {}
+        original_impl = products_mod._get_products_impl
+
+        async def capturing_impl(req: Any, identity: Any = None) -> Any:
+            captured["account"] = req.account
+            return await original_impl(req, identity)
+
+        with ProductEnv(
+            tenant_id=f"t-gp-reqacct-{transport.value}", principal_id=f"p-gp-reqacct-{transport.value}"
+        ) as env:
+            tenant, principal = env.setup_default_data()
+            env.set_policy_approved()
+            env.set_ranking_disabled()
+
+            product = ProductFactory(tenant=tenant, product_id=f"prod-gp-reqacct-{transport.value}")
+            PricingOptionFactory(product=product)
+
+            AccountFactory(tenant=tenant, account_id="acc_gp_reqacct", sandbox=False)
+            AgentAccountAccessFactory(
+                tenant_id=tenant.tenant_id,
+                principal_id=principal.principal_id,
+                account_id="acc_gp_reqacct",
+            )
+
+            with patch.object(products_mod, "_get_products_impl", side_effect=capturing_impl):
+                result = env.call_via(
+                    transport,
+                    brief="video ads",
+                    account={"account_id": "acc_gp_reqacct"},
+                )
+            assert not result.is_error, f"[{transport.value}] dispatch failed: {result.error!r}"
+
+        return captured.get("account")
+
+    @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST], ids=lambda t: t.value)
+    def test_req_account_wired_from_input_account(self, integration_db, transport):
+        account = self._capture_req_account(transport=transport)
+        assert account is not None, f"[{transport.value}] req.account must be set from the input account reference"
+        assert account.account_id == "acc_gp_reqacct", (
+            f"[{transport.value}] req.account.account_id must equal the input account_id, got {account!r}"
+        )
