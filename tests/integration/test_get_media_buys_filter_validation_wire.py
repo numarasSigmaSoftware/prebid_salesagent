@@ -43,7 +43,7 @@ class TestGetMediaBuysFilterValidationWire:
     ``GetMediaBuysBody`` achieves parity rather than merely claiming to."""
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
-    def test_wrong_type_media_buy_ids_emits_validation_error_on_every_transport(self, integration_db, transport):
+    def test_wrong_type_media_buy_ids_emits_invalid_request_on_every_transport(self, integration_db, transport):
         """media_buy_ids as a bare string (not an array) reaches the shared
         GetMediaBuysRequest boundary on every transport -> INVALID_REQUEST/correctable.
 
@@ -64,7 +64,7 @@ class TestGetMediaBuysFilterValidationWire:
             result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
-    def test_wrong_type_status_filter_emits_validation_error_on_every_transport(self, integration_db, transport):
+    def test_wrong_type_status_filter_emits_invalid_request_on_every_transport(self, integration_db, transport):
         """status_filter as an invalid-shaped value reaches the shared
         GetMediaBuysRequest boundary on every transport -> INVALID_REQUEST/correctable.
         Same split risk as media_buy_ids if this field is ever typed concretely.
