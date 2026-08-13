@@ -1061,24 +1061,7 @@ def when_validate_webhook_config(ctx: dict) -> None:
     rejection happens in PRODUCTION, not in test code. A 32-char credential is
     accepted and the create succeeds.
     """
-    from tests.bdd.steps.generic.given_media_buy import _ensure_request_defaults, _pricing_option_id
-
-    secret = ctx.get("webhook_secret", "")
-    kwargs = _ensure_request_defaults(ctx)
-    product = ctx.get("default_product")
-    pricing_option = ctx.get("default_pricing_option")
-    if product is not None:
-        kwargs["packages"][0]["product_id"] = product.product_id
-    if pricing_option is not None:
-        kwargs["packages"][0]["pricing_option_id"] = _pricing_option_id(pricing_option)
-    kwargs["reporting_webhook"] = {
-        "url": _WEBHOOK_URL,
-        "reporting_frequency": "daily",
-        "authentication": {"schemes": ["Bearer"], "credentials": secret},
-    }
-    # Dispatch the flat body (no typed construction) so a short credential reaches
-    # the production transport boundary instead of being rejected in test code.
-    dispatch_request(ctx, **kwargs)
+    _dispatch_create_with_reporting_webhook(ctx, schemes=["Bearer"], credentials=ctx.get("webhook_secret", ""))
 
 
 @when(parsers.parse('the webhook scheduler evaluates "{mb_id}"'))
@@ -3146,6 +3129,14 @@ def _assert_wire_rejection(ctx: dict, field: str) -> None:
 # step asserts it on the harness wire envelope). attribution_window is the first.
 _WIRE_ASSERTED_FIELDS = {"attribution_window"}
 
+# Fields whose bare "invalid" Examples reject with ONE known wire code — graded
+# exactly (code + pin-sourced recovery on the two-layer envelope) rather than via
+# the generic client-rejection fallback below. ``credentials``: both invalid rows
+# (a scheme outside the reporting_webhook Authentication enum, and a credential
+# under MinLen=32) fail production's Pydantic boundary with VALIDATION_ERROR —
+# the same code the creds-short invariant scenario pins (BR-RULE-029).
+_INVALID_WIRE_CODE_BY_FIELD = {"credentials": "VALIDATION_ERROR"}
+
 
 def _assert_partition_or_boundary(ctx: dict, expected: str, field: str = "unknown") -> None:
     """Assert partition/boundary outcome with field-aware content validation."""
@@ -3157,6 +3148,10 @@ def _assert_partition_or_boundary(ctx: dict, expected: str, field: str = "unknow
         _assert_valid_content(ctx, field)
         return
     if expected == "invalid":
+        exact_code = _INVALID_WIRE_CODE_BY_FIELD.get(field)
+        if exact_code is not None:
+            _assert_error_outcome(ctx, exact_code, field, require_suggestion=False)
+            return
         _assert_wire_rejection(ctx, field)
         return
 
@@ -3354,48 +3349,41 @@ def _credential_label_to_config(label: str) -> tuple[str, str]:
     return scheme, credentials
 
 
-def _validate_reporting_webhook_credentials(ctx: dict, auth_scheme: str, credentials: str) -> None:
-    """Drive webhook credentials through the real create_media_buy request boundary.
+def _dispatch_create_with_reporting_webhook(ctx: dict, *, schemes: list[str], credentials: str) -> None:
+    """Dispatch a real create_media_buy carrying a reporting_webhook authentication block.
 
-    The reporting webhook's Authentication (scheme enum + credentials min_length=32,
-    BR-RULE-029) is validated when ``CreateMediaBuyRequest`` is parsed — the same
-    validation production performs at the create_media_buy boundary. A valid config is
-    accepted; an invalid one raises a ``ValidationError`` located on the credentials or
-    scheme. Only credential/scheme errors count as the rejection under test; any other
-    validation error means the test's base request is wrong (fail loudly).
+    The reporting webhook's Authentication (scheme enum + credentials MinLen=32,
+    BR-RULE-029) is enforced by production's Pydantic boundary. We send the RAW flat
+    body through the scenario's parametrized transport so an out-of-enum scheme or a
+    short credential is rejected in PRODUCTION (VALIDATION_ERROR on the wire), never
+    by a typed construction in test code — the latter would grade the schema while
+    still carrying transport labels.
+
+    Single source for every UC-004 step that drives a credential through create:
+    both the creds-short/-valid invariants and the credentials partition/boundary
+    outlines route here so one shape (flat body + product/pricing defaults +
+    reporting_webhook) is built in one place.
     """
-    from datetime import UTC, datetime
+    from tests.bdd.steps.generic.given_media_buy import _ensure_request_defaults, _pricing_option_id
 
-    from pydantic import ValidationError
-
-    from src.core.schemas import CreateMediaBuyRequest
-
-    reporting_webhook = {
-        "url": "https://buyer.example.com/reporting",
-        "authentication": {"schemes": [auth_scheme], "credentials": credentials},
+    kwargs = _ensure_request_defaults(ctx)
+    product = ctx.get("default_product")
+    pricing_option = ctx.get("default_pricing_option")
+    if product is not None:
+        kwargs["packages"][0]["product_id"] = product.product_id
+    if pricing_option is not None:
+        kwargs["packages"][0]["pricing_option_id"] = _pricing_option_id(pricing_option)
+    kwargs["reporting_webhook"] = {
+        "url": _WEBHOOK_URL,
         "reporting_frequency": "daily",
+        "authentication": {"schemes": schemes, "credentials": credentials},
     }
-    ctx.pop("error", None)
-    try:
-        ctx["response"] = CreateMediaBuyRequest(
-            brand={"domain": "buyer.example.com"},
-            start_time=datetime(2025, 1, 1, tzinfo=UTC),
-            end_time=datetime(2025, 2, 1, tzinfo=UTC),
-            reporting_webhook=reporting_webhook,
-            # Required field — a valid key keeps this step's ValidationError
-            # assertions scoped to the webhook credentials under test.
-            idempotency_key="bdd-webhook-cred-key-0001",
-        )
-    except ValidationError as exc:
-        offending = {".".join(str(p) for p in err["loc"]) for err in exc.errors()}
-        credential_locs = {
-            loc for loc in offending if "authentication.credentials" in loc or "authentication.schemes" in loc
-        }
-        assert credential_locs, (
-            "Expected a credential/scheme validation error from the create_media_buy "
-            f"boundary, but the base request failed elsewhere: {sorted(offending)}"
-        )
-        ctx["error"] = exc
+    dispatch_request(ctx, **kwargs)
+
+
+def _validate_reporting_webhook_credentials(ctx: dict, auth_scheme: str, credentials: str) -> None:
+    """Drive a labeled webhook credential config through the create_media_buy wire."""
+    _dispatch_create_with_reporting_webhook(ctx, schemes=[auth_scheme], credentials=credentials)
 
 
 # The account values the UC-004 delivery_account/boundary scenarios assert are

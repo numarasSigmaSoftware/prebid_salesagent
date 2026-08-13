@@ -3179,12 +3179,20 @@ def _detect_uc011_harness(marker_names: set[str]) -> str:
 def _detect_delivery_harness(request: pytest.FixtureRequest) -> str:
     """Detect which delivery harness a UC-004 scenario needs."""
     marker_names = {m.name for m in request.node.iter_markers()}
-    # Webhook-credential-length scenarios assert that a too-short reporting_webhook
-    # credential is rejected at the create_media_buy boundary (the SDK
-    # Authentication.credentials MinLen=32 fires on the wire). They need the
-    # create transport wrappers, not the delivery/circuit-breaker harness — route
-    # them to MediaBuyCreateEnv so production Pydantic does the rejecting.
-    if {"T-UC-004-webhook-creds-short", "T-UC-004-webhook-creds-valid"} & marker_names:
+    # Webhook-credential scenarios assert that a too-short reporting_webhook
+    # credential — or an auth scheme outside the enum — is rejected at the
+    # create_media_buy boundary (the SDK Authentication.credentials MinLen=32 and
+    # the schemes enum fire on the wire). They need the create transport wrappers,
+    # not the delivery/circuit-breaker harness — route them to MediaBuyCreateEnv so
+    # production Pydantic does the rejecting. The partition/boundary outlines are
+    # routed here for the same reason: without the create dispatch they would grade
+    # the schema in test code while still carrying [a2a]/[mcp]/[rest] labels.
+    if {
+        "T-UC-004-webhook-creds-short",
+        "T-UC-004-webhook-creds-valid",
+        "T-UC-004-partition-credentials",
+        "T-UC-004-boundary-credentials",
+    } & marker_names:
         return "create"
     if "T-UC-004-webhook-scheduled" in marker_names:
         return "poll"
