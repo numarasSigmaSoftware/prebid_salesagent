@@ -286,6 +286,14 @@ jobs:
           docker container prune -f 2>/dev/null || true
           docker network prune -f 2>/dev/null || true
           docker volume prune -f 2>/dev/null || true
+      # The e2e stack exposes its narrowly scoped setup controls only when both
+      # ADCP_TESTING=true and this per-run secret are present. run_all_tests.sh
+      # generates it for local runs; this job invokes pytest directly, so it has
+      # to generate its own — the compose stack (docker-compose.e2e.yml) and the
+      # tests both read it from the environment and must see the same value.
+      - name: Generate the per-run e2e control token
+        run: |
+          echo "ADCP_TEST_CONTROL_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
       # No coverage: the server under test runs inside Docker, so host-side
       # coverage would measure the client harness, not src/.
       - uses: ./.github/actions/_pytest

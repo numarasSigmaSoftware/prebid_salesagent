@@ -11,7 +11,7 @@ This test validates the actual HTTP endpoints that our A2A server exposes.
 import json
 import os
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
@@ -340,7 +340,27 @@ class TestA2ARequestHandler:
         alone would let ``data={"task_id": ...}`` be deleted with the suite still
         green, since the id appears in the message either way.
         """
-        with pytest.raises(TaskNotFoundError) as exc:
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+        from src.core.resolved_identity import ResolvedIdentity
+
+        # Task lookup is durable and ownership-scoped, so both entry points now
+        # resolve an identity and read the task through A2ATaskUoW. Both are
+        # stubbed rather than given a database: this is the fast smoke check on
+        # the raise, and a real DB would grade persistence, not the error shape.
+        # The UoW yields no record, which is exactly the not-found condition.
+        identity = ResolvedIdentity(tenant_id="t-smoke", principal_id="p-smoke", protocol="a2a")
+        uow = MagicMock()
+        uow.__enter__.return_value = uow
+        uow.__exit__.return_value = False
+        uow.tasks.get_owned.return_value = None
+        uow.tasks.get_owned_for_update.return_value = None
+
+        with (
+            patch.object(AdCPRequestHandler, "_resolve_a2a_identity", return_value=identity),
+            patch.object(AdCPRequestHandler, "_get_auth_token", return_value="tok-smoke"),
+            patch("src.a2a_server.adcp_a2a_server.A2ATaskUoW", return_value=uow),
+            pytest.raises(TaskNotFoundError) as exc,
+        ):
             await getattr(self.handler, method_name)(request_cls(id="task_does_not_exist"), MagicMock())
         assert "task_does_not_exist" in str(exc.value)  # the requested id is surfaced
         assert exc.value.data == {"task_id": "task_does_not_exist"}  # ...and machine-readable

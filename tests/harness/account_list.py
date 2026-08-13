@@ -75,9 +75,33 @@ class AccountListEnv(IntegrationEnv):
     REST_ENDPOINT = "/api/v1/accounts"
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Serialize the full list-accounts read envelope."""
-        fields = ("status", "sandbox", "pagination", "idempotency_key", "context")
-        return {key: kwargs[key] for key in fields if key in kwargs and kwargs[key] is not None}
+        """Serialize the full list-accounts read envelope.
+
+        This env is called in two shapes and must serve both. BDD steps build a
+        typed ``ListAccountsRequest`` and pass it as ``req``; integration tests
+        pass flat boundary fields (``idempotency_key`` for the read-idempotency
+        persistence tests, ``status`` for the validation-parity tests).
+
+        Handling only the flat shape sent an EMPTY body for every ``req=``
+        caller, and the endpoint answers an empty body with unfiltered,
+        unpaginated results — so the status-filter and pagination scenarios
+        asserted against the full account list and failed on REST while passing
+        on MCP and A2A, whose dispatchers unpack ``req`` themselves.
+        """
+        from pydantic import BaseModel as PydanticBaseModel
+
+        req = kwargs.pop("req", None)
+        body: dict[str, Any] = super().build_rest_body(req=req) if req is not None else {}
+        for key in ("status", "sandbox", "pagination", "idempotency_key", "context"):
+            value = kwargs.get(key)
+            if value is None:
+                continue
+            # Explicit boundary fields win over the request's own, matching the
+            # base's overlay order.
+            body[key] = (
+                value.model_dump(mode="json", exclude_none=True) if isinstance(value, PydanticBaseModel) else value
+            )
+        return body
 
     def parse_rest_response(self, data: dict[str, Any]) -> ListAccountsResponse:
         """Parse REST JSON into ListAccountsResponse."""
