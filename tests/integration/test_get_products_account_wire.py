@@ -30,12 +30,14 @@ from tests.factories import (
     ProductFactory,
     TenantFactory,
 )
-from tests.harness.assertions import assert_rejected
+from tests.harness.assertions import assert_rejected, assert_wire_omits_unset
 from tests.harness.product import ProductEnv
 from tests.harness.transport import Transport
 from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
+
+_GET_PRODUCTS_SCHEMA = "media-buy/get-products-response.json"
 
 
 class TestGetProductsAccountWirePassthrough:
@@ -157,8 +159,15 @@ class TestGetProductsSandboxMarkerOnWire:
         )
 
     def test_live_account_omits_the_marker(self, integration_db):
-        """Negative control — 'always sandbox: true' would pass the test above."""
+        """Negative control — 'always sandbox: true' would pass the test above.
+
+        Routed through ``assert_wire_omits_unset`` rather than a bare
+        ``.get("sandbox") is None`` check: the pinned schema types ``sandbox`` as
+        ``{"type": "boolean"}`` with no null variant, so a plain ``is None`` check
+        can't distinguish an omitted key from an explicit (schema-violating) JSON
+        ``null`` — the exact #1710/#1868 null-leak class this helper regression-tests.
+        """
         result = self._dispatch(account_sandbox=False)
-        assert result.wire_response.get("sandbox") is None, (
-            f"live-scoped get_products must omit sandbox, got {result.wire_response.get('sandbox')!r}"
+        assert_wire_omits_unset(
+            result, schema=_GET_PRODUCTS_SCHEMA, absent_paths=["sandbox"], transport=Transport.MCP
         )
