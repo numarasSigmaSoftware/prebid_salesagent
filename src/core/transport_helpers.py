@@ -147,12 +147,13 @@ def enrich_identity_with_account(
 
     # The SOLE writer of ResolvedIdentity.sandbox in src/ — but not a funnel every
     # request passes through, and the difference matters. This function is invoked from
-    # seven per-tool sites (create_media_buy x2, get_media_buy_delivery x2,
-    # sync_creatives x2, the REST route), so a NEW tool that accepts an account
-    # reference and forgets to call it gets sandbox=False for a real sandbox account,
-    # silently and with every guard still green. get_products and
-    # get_adcp_capabilities are the standing examples: both accept or declare an
-    # account and neither enriches.
+    # ten per-tool sites (create_media_buy x2, get_media_buy_delivery x2, get_products
+    # x2, sync_creatives x2, and the get_products + get_media_buy_delivery REST routes),
+    # so a NEW tool that accepts an account reference and forgets to call it gets
+    # sandbox=False for a real sandbox account, silently and with every guard still
+    # green. get_adcp_capabilities is the standing example: it declares no account
+    # field at all (GetAdcpCapabilitiesRequest has none in the pinned SDK), so it has
+    # no enrichment call to forget.
     #
     # Downstream has no other way to learn the mode: adapters are selected per-tenant,
     # so the Account row never reaches adapter selection otherwise.
