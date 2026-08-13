@@ -3219,10 +3219,11 @@ def _assert_account_scope(ctx: dict, deliveries: list) -> None:
 
     ``deliveries`` (the reconstructed ``response.media_buy_deliveries``) is accepted only
     for the non-empty check its callers already ran; the scope assertion itself reads
-    ``wire_dict(ctx)`` — a transport that dropped or renamed ``media_buy_id`` during
-    serialization would leave the decoy present on the wire while the parsed model still
-    looked correct, and this is the security-critical filter that whole class of gap
-    matters most for.
+    ``wire_dict(ctx)`` rather than the parsed model, which is the harness's general
+    wire-over-model grading practice — in this particular harness the IMPL payload is
+    already produced by re-parsing the real wire, so the divergence this specific test can
+    catch is narrower than "a transport dropped the field," but wire grading remains the
+    right default regardless.
     """
     decoy = ctx.get("account_decoy_buy_id")
     assert decoy, (
@@ -3230,7 +3231,7 @@ def _assert_account_scope(ctx: dict, deliveries: list) -> None:
         "grade nothing. _seed_decoy_buy_on_another_account must run in the When step."
     )
     wire_deliveries = wire_dict(ctx).get("media_buy_deliveries") or []
-    returned = {d.get("media_buy_id") for d in wire_deliveries}
+    returned = {d["media_buy_id"] for d in wire_deliveries}
     if ctx.get("account_boundary_named"):
         assert decoy not in returned, (
             f"the request named an account, but delivery for {decoy!r} — which belongs to a "
