@@ -170,6 +170,13 @@ def review_workflow_step(tenant_id, workflow_id, step_id):
         )
 
 
+# A plain (non-media-buy) step that ``update_status`` could not find: the row is gone
+# between this request's read and its write, so NOTHING was recorded. Distinct from the
+# media-buy vanished message — that one is about the mapped buy, this one about the step
+# itself. Shared by the approve and reject arms so both report the event identically.
+WORKFLOW_STEP_VANISHED_MESSAGE = "Workflow step no longer exists — nothing was recorded"
+
+
 def _approval_in_progress_response():
     """202: the decision is claimed / in flight and completes automatically."""
     return jsonify(
@@ -413,8 +420,11 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     return _respond_to_non_approvable_media_buy(media_buy)
             else:
                 # Plain (non-media-buy) workflow step — no buy decision to own, so mark the
-                # step approved directly.
-                workflow_repo.update_status(step_id, status="approved")
+                # step approved directly. ``update_status`` returns None when the row is
+                # gone; committing and reporting success then would tell the operator a
+                # step was approved that no longer exists.
+                if workflow_repo.update_status(step_id, status="approved") is None:
+                    return jsonify({"success": False, "error": WORKFLOW_STEP_VANISHED_MESSAGE}), 404
                 db.commit()
                 flash("Workflow step approved successfully", "success")
 
@@ -482,7 +492,10 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 require_finalize_applied(outcome)
             else:
                 # No mapped media buy — a plain workflow step; record the rejection only.
-                workflow_repo.update_status(step_id, status="rejected", error_message=reason)
+                # Same shape as the approve arm: a vanished row recorded nothing, so the
+                # route must not report a rejection it did not persist.
+                if workflow_repo.update_status(step_id, status="rejected", error_message=reason) is None:
+                    return jsonify({"success": False, "error": WORKFLOW_STEP_VANISHED_MESSAGE}), 404
                 db.commit()
 
             flash("Workflow step rejected", "info")
