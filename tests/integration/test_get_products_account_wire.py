@@ -86,17 +86,18 @@ class TestGetProductsAccountReferenceRoutesTheAdapter:
     """
 
     @staticmethod
-    def _adapter_modes(*, account_sandbox: bool) -> MagicMock:
+    def _adapter_modes(*, transport: Transport, account_sandbox: bool) -> MagicMock:
         mode = "sbx" if account_sandbox else "live"
+        suffix = transport.value
         with patch("src.core.helpers.adapter_helpers.get_adapter") as mock_get_adapter:
             mock_get_adapter.return_value.get_supported_pricing_models.return_value = []
 
-            with ProductEnv(tenant_id=f"t-gp-route-{mode}", principal_id=f"p-gp-route-{mode}") as env:
+            with ProductEnv(tenant_id=f"t-gp-route-{mode}-{suffix}", principal_id=f"p-gp-route-{mode}-{suffix}") as env:
                 tenant, principal = env.setup_default_data()
                 env.set_policy_approved()
                 env.set_ranking_disabled()
 
-                product = ProductFactory(tenant=tenant, product_id=f"prod-gp-route-{mode}")
+                product = ProductFactory(tenant=tenant, product_id=f"prod-gp-route-{mode}-{suffix}")
                 PricingOptionFactory(product=product)
 
                 AccountFactory(tenant=tenant, account_id="acc_gp_route", sandbox=account_sandbox)
@@ -106,21 +107,42 @@ class TestGetProductsAccountReferenceRoutesTheAdapter:
                     account_id="acc_gp_route",
                 )
 
-                result = env.call_via(
-                    Transport.MCP,
-                    brief="video ads",
-                    account={"account_id": "acc_gp_route"},
-                )
-                assert not result.is_error, f"dispatch failed: {result.error!r}"
+                call_kwargs: dict[str, Any] = {
+                    "brief": "video ads",
+                    "account": {"account_id": "acc_gp_route"},
+                }
+                if transport is Transport.IMPL:
+                    # ProductMixin.call_impl (tests/harness/_mixins.py) has no branch that
+                    # replicates the boundary's account-enrichment step, so identity.sandbox
+                    # would stay at its unenriched default regardless of account_sandbox.
+                    # Mirrors TestGetProductsSandboxMarkerOnWire._dispatch's IMPL handling
+                    # in this same file — enrich_identity_with_account is the exact
+                    # production helper the real MCP/A2A/REST wrappers call before _impl
+                    # runs.
+                    from src.core.schema_helpers import to_account_reference
+                    from src.core.transport_helpers import enrich_identity_with_account
+
+                    call_kwargs["identity"] = enrich_identity_with_account(
+                        env.identity_for(transport), to_account_reference(call_kwargs["account"])
+                    )
+
+                result = env.call_via(transport, **call_kwargs)
+                assert not result.is_error, f"[{suffix}] dispatch failed: {result.error!r}"
 
             return mock_get_adapter
 
-    def test_sandbox_account_reference_routes_to_the_sandbox_adapter(self, integration_db):
-        assert_all_sandbox(self._adapter_modes(account_sandbox=True), context="get_products (account ref)")
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_sandbox_account_reference_routes_to_the_sandbox_adapter(self, integration_db, transport):
+        assert_all_sandbox(
+            self._adapter_modes(transport=transport, account_sandbox=True), context="get_products (account ref)"
+        )
 
-    def test_live_account_reference_routes_to_the_live_adapter(self, integration_db):
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_live_account_reference_routes_to_the_live_adapter(self, integration_db, transport):
         """Negative control — 'always sandbox' would disable real credential reads and still pass above."""
-        assert_all_live(self._adapter_modes(account_sandbox=False), context="get_products (account ref)")
+        assert_all_live(
+            self._adapter_modes(transport=transport, account_sandbox=False), context="get_products (account ref)"
+        )
 
 
 class TestGetProductsSandboxMarkerOnWire:
