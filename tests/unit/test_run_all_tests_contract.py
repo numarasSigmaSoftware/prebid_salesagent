@@ -25,10 +25,28 @@ _ALL_SUITES = "unit,integration,bdd,admin,e2e,ui"
 
 
 def _resolve(*args: str) -> str:
+    """Ask the runner what it WOULD resolve, with no ambient interval in scope.
+
+    ``DELIVERY_WEBHOOK_INTERVAL`` is scrubbed from the inherited environment on
+    purpose. The runner's scoping is written as ``${DELIVERY_WEBHOOK_INTERVAL:-5}``
+    / ``${DELIVERY_WEBHOOK_INTERVAL:-}``, so an inherited value wins over the
+    suite-based decision -- which is correct production behaviour, pinned by
+    ``test_an_explicit_operator_value_still_wins``, and fatal to every other test
+    here. Running the unit suite from inside ``run_all_tests.sh`` puts exactly that
+    value in scope, so without the scrub each case measured the ambient export
+    instead of the script's decision: the ``<off>`` cases failed and the ``5``
+    cases passed for the wrong reason. The tests pass standalone and under CI's
+    separate unit job, which is why this stayed hidden until a full in-network run.
+
+    Scrubbed here rather than in a fixture so it cannot be skipped by a caller
+    that builds its own env -- the one that does (``test_an_explicit_operator_value_still_wins``)
+    sets the variable deliberately and does not use this helper.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "DELIVERY_WEBHOOK_INTERVAL"}
     proc = subprocess.run(
         ["bash", str(_RUNNER), *args],
         cwd=_REPO_ROOT,
-        env={**os.environ, "RUN_ALL_TESTS_RESOLVE_ONLY": "1"},
+        env={**env, "RUN_ALL_TESTS_RESOLVE_ONLY": "1"},
         capture_output=True,
         text=True,
         timeout=30,
