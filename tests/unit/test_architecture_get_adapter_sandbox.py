@@ -355,9 +355,7 @@ def test_collector_also_extracts_adapter_for_mode_calls() -> None:
     )
     missing = _adapter_calls_in(ast.parse("a = adapter_for_mode(principal, tenant=t)\n"), "synthetic.py")
 
-    assert len(present) == 1 and len(missing) == 1, (
-        "the collector no longer finds an adapter_for_mode call at all"
-    )
+    assert len(present) == 1 and len(missing) == 1, "the collector no longer finds an adapter_for_mode call at all"
     assert present[0].value is not None, "adapter_for_mode's sandbox= keyword was not extracted"
     assert missing[0].value is None, "the missing arm should still see an absent sandbox= as None"
     assert _missing_sandbox_offenders(missing), (

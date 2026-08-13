@@ -141,9 +141,7 @@ class TestGetProductsSandboxMarkerOnWire:
     def _dispatch(*, transport: Transport, account_sandbox: bool):
         mode = "sbx" if account_sandbox else "live"
         suffix = transport.value
-        with ProductEnv(
-            tenant_id=f"t-gp-marker-{mode}-{suffix}", principal_id=f"p-gp-marker-{mode}-{suffix}"
-        ) as env:
+        with ProductEnv(tenant_id=f"t-gp-marker-{mode}-{suffix}", principal_id=f"p-gp-marker-{mode}-{suffix}") as env:
             tenant, principal = env.setup_default_data()
             env.set_policy_approved()
             env.set_ranking_disabled()
@@ -217,9 +215,7 @@ class TestGetProductsSandboxMarkerOnWire:
         """
         result = self._dispatch(transport=transport, account_sandbox=False)
         if result.wire_response is not None:
-            assert_wire_omits_unset(
-                result, schema=_GET_PRODUCTS_SCHEMA, absent_paths=["sandbox"], transport=transport
-            )
+            assert_wire_omits_unset(result, schema=_GET_PRODUCTS_SCHEMA, absent_paths=["sandbox"], transport=transport)
         else:
             assert result.payload.sandbox is None, (
                 f"[{transport.value}] live-scoped get_products must omit the sandbox marker "
