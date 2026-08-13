@@ -395,7 +395,12 @@ def _approval_creative_gate(
     media_buy_id: str,
     principal_id: str,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Return whether the buy has at least one assignment and all are approved."""
+    """Return whether the buy has at least one assignment and all are approved.
+
+    ``approved`` is the only creative status that satisfies the gate. The other
+    members of the creative status enum — ``processing``, ``pending_review``,
+    ``suspended``, ``rejected``, ``archived`` — all block.
+    """
     creative_ids = list(
         dict.fromkeys(assignment.creative_id for assignment in assignments.get_by_media_buy(media_buy_id))
     )
@@ -403,9 +408,7 @@ def _approval_creative_gate(
         return False, ()
     creative_rows = creatives.get_by_ids(creative_ids, principal_id)
     status_by_id = {creative.creative_id: creative.status for creative in creative_rows}
-    blocking_ids = tuple(
-        creative_id for creative_id in creative_ids if status_by_id.get(creative_id) not in {"approved", "active"}
-    )
+    blocking_ids = tuple(creative_id for creative_id in creative_ids if status_by_id.get(creative_id) != "approved")
     return not blocking_ids, blocking_ids
 
 

@@ -1529,7 +1529,7 @@ def push_creative_to_existing_buy(
             creative = uow.creatives.admin_get_by_id(creative_id)
             if not creative:
                 return False, f"Creative {creative_id} not found"
-            if creative.status not in {"approved", "active"}:
+            if creative.status != "approved":
                 return False, f"Creative {creative_id} is not approved (status={creative.status})"
 
             if (creative.data or {}).get("platform_creative_id"):

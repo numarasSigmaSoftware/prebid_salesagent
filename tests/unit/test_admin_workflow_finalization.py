@@ -728,20 +728,20 @@ def test_not_executable_is_distinct_from_claim_refused():
     ("creative_status", "expected_status"),
     [
         ("approved", ApprovalExecutionStatus.READY),
-        ("active", ApprovalExecutionStatus.READY),
+        ("active", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
         ("pending_review", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
         ("rejected", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
     ],
 )
-def test_creative_gate_admits_active_as_well_as_approved(creative_status, expected_status):
-    """``active`` satisfies the gate, and that is a DECISION this PR made.
+def test_creative_gate_admits_only_approved(creative_status, expected_status):
+    """``approved`` is the only creative status that satisfies the gate.
 
     The two approve routes had drifted: one used ``not in ["approved", "active"]`` while the
-    other used ``!= "approved"``, so an ``active`` creative blocked execution on one path and
-    not the other. The reconciliation resolved to the permissive rule — and nothing pinned it.
-    Restoring the strict rule left 36 tests green, because no test anywhere fed the gate a
-    creative with status ``active``: every scaffold supplied ``approved``, ``pending_review``,
-    ``rejected`` or a bogus value.
+    other used ``!= "approved"``. The reconciliation had resolved to the permissive rule, but
+    ``active`` is not a member of the creative status enum (``processing``, ``pending_review``,
+    ``approved``, ``suspended``, ``rejected``, ``archived``) and no producer writes it for a
+    creative — so the permissive branch graded nothing real. The ``active`` row is kept here on
+    the REFUSAL side so the gate is pinned against re-admitting it.
 
     Parametrized rather than added as a fifth near-identical scaffold, because the missing row
     is exactly what a table makes visible and four copy-pasted mock blocks hid.
