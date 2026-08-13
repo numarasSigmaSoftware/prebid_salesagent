@@ -384,7 +384,7 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # immediate-activation paths set confirmed_at EXPLICITLY from the persisted MediaBuy (see
     # media_buy_completion.finalize_media_buy / the sync-success tool path), so a real
     # COMMITTED CreateMediaBuySuccess on the wire always carries a non-null confirmed_at.
-    # (The prose/schema divergence is re-grounded to 3.1.1.)
+    # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
     #
     # ``revision`` is NON-nullable: 3.1.1 requires it present as a non-null int >= 1 and —
     # unlike confirmed_at — it has NO spec-sanctioned null arm (a would-be-fresh buy is
@@ -676,7 +676,7 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     # every wire-emitting update path (dry-run / pause-resume / finalizer) passes the real
     # persisted revision explicitly, overriding the default (adapter-layer builders leave the
     # default; the tool rebuilds the wire success with the persisted counter).
-    # (The prose/schema divergence is re-grounded to 3.1.1.)
+    # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
     status: Literal["completed"] = "completed"
     revision: int = Field(default=1, ge=1)
 

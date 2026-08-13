@@ -2222,9 +2222,9 @@ def then_response_confirmed_at_is_iso(ctx: dict) -> None:
     ``confirmed_at``/``revision`` are schema-REQUIRED on the success arm
     (create-media-buy-response.json ``oneOf[0].required`` =
     [media_buy_id, confirmed_at, revision, packages]). The pinned SDK types
-    ``confirmed_at`` as non-nullable while the
-    spec schema types it ``["string","null"]`` (nullable) — SDK-required-non-nullable
-    vs spec-nullable; a committed success carries a real ISO instant regardless.
+    ``confirmed_at`` as non-nullable while the spec schema types it
+    ``["string","null"]`` (nullable) — SDK-required-non-nullable vs spec-nullable,
+    tracked in #1564; a committed success carries a real ISO instant regardless.
     """
     body = _serialized_success_body(ctx)
     confirmed_at = body.get("confirmed_at")
