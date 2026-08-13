@@ -205,6 +205,15 @@ def validate_push_notification_config_url(
     )
     if not url:
         return None
+    # The typed model declares ``url`` as a Pydantic ``AnyUrl``, NOT a str, so the two
+    # entry points hand this different types for the same field: create's wrappers
+    # deserialize JSON into a dict of plain strings, while update passes
+    # ``req.push_notification_config`` through as the model. Coerce BEFORE the type
+    # guard — guarding ``isinstance(url, str)`` first is right for the dict path and
+    # rejects EVERY typed config on the update path, safe or not. A rejection-only test
+    # cannot catch that: it passes just as well when everything is rejected.
+    if not isinstance(url, str | dict | list):
+        url = str(url)
     if not isinstance(url, str):
         raise AdCPValidationError(
             "Push notification URL must resolve to a public HTTPS endpoint",
