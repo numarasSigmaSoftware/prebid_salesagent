@@ -22,8 +22,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.schema_helpers import to_account_reference
-from src.core.transport_helpers import enrich_identity_with_account
 from tests.factories import (
     AccountFactory,
     AgentAccountAccessFactory,
@@ -100,10 +98,12 @@ class TestGetProductsAccountReferenceRoutesTheAdapter:
                     account_id="acc_gp_route",
                 )
 
-                identity = env.identity_for(Transport.MCP)
-                identity = enrich_identity_with_account(identity, to_account_reference({"account_id": "acc_gp_route"}))
-                response = env.call_impl(brief="video ads", identity=identity)
-                assert not response.errors, f"dispatch failed: {response.errors!r}"
+                result = env.call_via(
+                    Transport.MCP,
+                    brief="video ads",
+                    account={"account_id": "acc_gp_route"},
+                )
+                assert not result.is_error, f"dispatch failed: {result.error!r}"
 
             return mock_get_adapter
 
