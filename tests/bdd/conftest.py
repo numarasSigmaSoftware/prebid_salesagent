@@ -2866,6 +2866,17 @@ _UC010_VERSION_NEGOTIATION_WIRED: set[str] = {
     "T-UC-010-v31-version-unsupported-prerelease",
 }
 
+# UC-003 scenarios bound to MediaBuyDualEnv. Hoisted to module level so
+# _wired_scenario_tags() can SEE them: as function-locals they were bound but
+# unguarded, so unbinding a step degraded them to a silent xfail. The
+# derivation scans module globals, which is exactly why their scope mattered.
+_UC003_MANUAL_APPROVAL_WIRED: set[str] = {
+    "T-UC-003-alt-manual",
+    "T-UC-003-approval-tenant",
+    "T-UC-003-approval-adapter",
+}
+_UC003_REQUIRED_IDEMPOTENCY_WIRED: set[str] = {"T-UC-003-local-required-idempotency-v311"}
+
 _UC010_CAPABILITY_FILTER_WIRED: set[str] = {
     "T-UC-010-local-capability-filter-v311",
     "T-UC-010-local-capability-filter-invalid-v311",
@@ -2891,13 +2902,17 @@ def _wired_scenario_tags() -> frozenset[str]:
 
     - ``"context" in marker_names`` and ``_is_brand_shorthand_media_buy(...)``
       also bind an env in ``_harness_env``, and neither is a ``*_WIRED`` set.
-      Unbinding a ``@context`` step yields xfails, not failures.
-    - UC-003's ``_UC003_TARGETING_OVERLAY`` is function-local, so it is not a
-      module global and cannot be discovered here.
+      Unbinding a ``@context`` step yields xfails, not failures. These are
+      separate binding mechanisms, not missing entries — see
+      ``test_wired_union_is_derived_not_enumerated`` for the completeness
+      oracle they would join under if promoted to a module-level set.
+    - UC-003's ``_UC003_TARGETING_OVERLAY`` — still function-local. Its two
+      flat siblings (``_UC003_MANUAL_APPROVAL_WIRED``,
+      ``_UC003_REQUIRED_IDEMPOTENCY_WIRED``) WERE hoisted and are now guarded;
+      the overlay set stays local because it is also read by a sibling branch.
 
-    Those are separate binding mechanisms, not missing entries. Promoting them
-    to module-level ``*_WIRED`` sets is how they would join; see
-    ``test_wired_union_is_derived_not_enumerated`` for the completeness oracle.
+    Promoting a mechanism to a module-level ``*_WIRED`` set is how it joins;
+    ``test_wired_union_is_derived_not_enumerated`` grades the derivation.
     """
     return frozenset().union(
         *(value for name, value in globals().items() if name.endswith("_WIRED") and isinstance(value, set))
@@ -3394,16 +3409,10 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         # too (they exercise UpdateMediaBuySubmitted cross-transport, adcp 6.6 /
         # spec 3.1.1). Every other UC-003 scenario stays dormant; graduating the
         # full UC-003 file is tracked separately. See the BOUNDED branch below.
-        _UC003_MANUAL_APPROVAL = {
-            "T-UC-003-alt-manual",
-            "T-UC-003-approval-tenant",
-            "T-UC-003-approval-adapter",
-        }
-        _UC003_REQUIRED_IDEMPOTENCY = {"T-UC-003-local-required-idempotency-v311"}
         if (
             any(t.startswith("T-UC-003-ext-") for t in marker_names)
             or (marker_names & _UC003_TARGETING_OVERLAY)
-            or (marker_names & _UC003_REQUIRED_IDEMPOTENCY)
+            or (marker_names & _UC003_REQUIRED_IDEMPOTENCY_WIRED)
         ):
             # Extension/error scenarios: budget, currency, auth, creative,
             # placement, keyword, and immutable-field validation on the update
@@ -3426,7 +3435,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 _setup_existing_media_buy(ctx, env, tenant, principal, product)
                 env._seeded_media_buy_id = ctx["existing_media_buy"].media_buy_id
                 yield
-        elif marker_names & _UC003_MANUAL_APPROVAL:
+        elif marker_names & _UC003_MANUAL_APPROVAL_WIRED:
             # BOUNDED (PR #1567): the 3 manual-approval submitted-envelope
             # scenarios are graded here (they exercise UpdateMediaBuySubmitted
             # cross-transport). Every other non-extension UC-003 scenario stays
