@@ -16,6 +16,7 @@ from tests.helpers.secret_scrub import (
     _SECRET_TOKENS,
     SECRET_BEARING_MESSAGE,
     assert_no_secret_leak,
+    assert_sanitized_wire_error,
 )
 
 # INDEPENDENT restatement of what the oracle must detect — deliberately NOT derived from
@@ -138,3 +139,159 @@ def test_expected_sanitized_message_keys_match_production_table():
         "_EXPECTED_SANITIZED_MESSAGE (tests/helpers/secret_scrub.py) drifted from "
         "_SANITIZED_BY_WIRE_CODE (src/core/exceptions.py) — update both deliberately"
     )
+
+
+# ---------------------------------------------------------------------------
+# Known-bad self-tests for ``assert_sanitized_wire_error``
+#
+# The sibling of the ``assert_no_secret_leak`` block above, which this file
+# previously lacked. ``assert_sanitized_wire_error`` pins two EQUALITIES — the
+# canonical scrubbed message and the pinned suggestion — on both envelope layers.
+# Weakening either to a truthiness check (``assert error.get("message")``) leaves
+# every one of its ~160 callers green while proving only that SOME text is present:
+# an envelope echoing the raw, unscrubbed error would satisfy it. The cases below
+# feed the oracle values that are non-empty but WRONG, so a truthiness weakening
+# reddens here.
+# ---------------------------------------------------------------------------
+
+_SANITIZED_CASE_CODE = "VALIDATION_ERROR"
+
+
+def _canonical_sanitized_envelope(code: str = _SANITIZED_CASE_CODE) -> dict:
+    """A two-layer envelope that ``assert_sanitized_wire_error`` must ACCEPT."""
+    from tests.helpers.pinned_schema import pinned_error_code_suggestion
+
+    layer = {
+        "code": code,
+        "message": _EXPECTED_SANITIZED_MESSAGE[code],
+        "suggestion": pinned_error_code_suggestion(code),
+    }
+    return {"adcp_error": dict(layer), "errors": [dict(layer)]}
+
+
+def test_sanitized_oracle_accepts_the_canonical_envelope():
+    """Counter-control: the canonical scrub must PASS.
+
+    Without it, an oracle that raised unconditionally would satisfy every known-bad
+    case below while making all of its callers vacuous in the opposite direction.
+    """
+    assert_sanitized_wire_error(_canonical_sanitized_envelope(), _SANITIZED_CASE_CODE)
+
+
+@pytest.mark.parametrize("layer", ["adcp_error", "errors"])
+@pytest.mark.parametrize(
+    ("field", "wrong_value", "expected_match"),
+    [
+        (
+            "message",
+            "Something went wrong while validating your request.",
+            "did not use the canonical VALIDATION_ERROR scrub",
+        ),
+        (
+            "suggestion",
+            "Please try again later or contact support.",
+            "did not use the canonical VALIDATION_ERROR guidance",
+        ),
+    ],
+)
+def test_sanitized_oracle_rejects_wrong_but_non_empty_text(layer, field, wrong_value, expected_match):
+    """A plausible-but-wrong message/suggestion must trip the oracle, on EITHER layer.
+
+    Reddens if the corresponding equality pin is weakened to truthiness — the exact
+    defang the oracle cannot otherwise see, since every value fed here is non-empty.
+    Parametrized across both layers because asserting only ``adcp_error`` would let a
+    divergence between the two layers pass every call site.
+    """
+    envelope = _canonical_sanitized_envelope()
+    if layer == "adcp_error":
+        envelope["adcp_error"][field] = wrong_value
+    else:
+        envelope["errors"][0][field] = wrong_value
+
+    with pytest.raises(AssertionError, match=expected_match):
+        assert_sanitized_wire_error(envelope, _SANITIZED_CASE_CODE)
+
+
+def test_sanitized_oracle_rejects_a_leaked_rejected_fragment():
+    """``rejected_fragments`` must actually be scanned, case-insensitively."""
+    envelope = _canonical_sanitized_envelope()
+    envelope["adcp_error"]["details"] = {"echo": "SuperSecretBrief"}
+
+    with pytest.raises(AssertionError, match="leaked through the sanitized"):
+        assert_sanitized_wire_error(
+            envelope,
+            _SANITIZED_CASE_CODE,
+            rejected_fragments=("supersecretbrief",),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Known-bad self-test for ``assert_failed_task_no_secret_leak``'s SURFACE
+#
+# That oracle's whole reason to exist is that a failed A2A Task has MORE than one
+# client-facing carrier: the structured DataPart envelope AND every human-readable
+# TextPart. Narrowing the scanned surface to the envelope alone leaves all 62 tests
+# in test_a2a_error_routing.py green — none of them produces a Task whose TextPart
+# carries a secret the envelope does not. The case below is exactly that Task.
+# ---------------------------------------------------------------------------
+
+
+def _failed_task_with(text: str, envelope: dict) -> object:
+    """A failed Task whose error artifact carries ``text`` and ``envelope``."""
+    from a2a.types import Artifact, Part, Task, TaskState, TaskStatus
+
+    from tests.utils.a2a_helpers import _dict_to_value
+
+    return Task(
+        id="t-scrub",
+        status=TaskStatus(state=TaskState.TASK_STATE_FAILED),
+        artifacts=[
+            Artifact(
+                artifact_id="e1",
+                name="error_result",
+                parts=[Part(text=text), Part(data=_dict_to_value(envelope))],
+            )
+        ],
+    )
+
+
+_CLEAN_FAILED_ENVELOPE = {
+    "adcp_error": {"code": "SERVICE_UNAVAILABLE", "message": "Request failed."},
+    "errors": [{"code": "SERVICE_UNAVAILABLE", "message": "Request failed."}],
+}
+
+
+def test_failed_task_oracle_scans_the_textpart_not_only_the_envelope():
+    """A clean DataPart envelope with a secret-bearing TextPart must TRIP the oracle.
+
+    Reddens if the scanned surface is narrowed to the envelope alone — the one
+    weakening no existing A2A error-routing test would catch, because none of them
+    produces a Task whose TextPart leaks something its envelope does not.
+    """
+    from tests.utils.a2a_helpers import assert_failed_task_no_secret_leak
+
+    task = _failed_task_with(SECRET_BEARING_MESSAGE, _CLEAN_FAILED_ENVELOPE)
+
+    with pytest.raises(AssertionError, match="leaked to the buyer-facing wire"):
+        assert_failed_task_no_secret_leak(task)
+
+
+def test_failed_task_oracle_still_scans_the_envelope():
+    """The mirror case: a clean TextPart cannot excuse a leaking DataPart."""
+    from tests.utils.a2a_helpers import assert_failed_task_no_secret_leak
+
+    leaking = {
+        "adcp_error": {"code": "SERVICE_UNAVAILABLE", "message": SECRET_BEARING_MESSAGE},
+        "errors": [{"code": "SERVICE_UNAVAILABLE", "message": SECRET_BEARING_MESSAGE}],
+    }
+    task = _failed_task_with("Request failed.", leaking)
+
+    with pytest.raises(AssertionError, match="leaked to the buyer-facing wire"):
+        assert_failed_task_no_secret_leak(task)
+
+
+def test_failed_task_oracle_passes_a_fully_clean_task():
+    """Counter-control: a Task clean on BOTH carriers must not trip the oracle."""
+    from tests.utils.a2a_helpers import assert_failed_task_no_secret_leak
+
+    assert_failed_task_no_secret_leak(_failed_task_with("Request failed.", _CLEAN_FAILED_ENVELOPE))
