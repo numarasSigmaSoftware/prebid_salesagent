@@ -1503,6 +1503,14 @@ _SANITIZED_BY_WIRE_CODE: dict[str, tuple[str, str]] = {
         "The request is malformed or contains unsupported fields; review it and resubmit.",
         INVALID_REQUEST_SUGGESTION,
     ),
+    # DELIBERATE mismatch, do not "fix" by rewording: VALIDATION_ERROR_SUGGESTION reads
+    # "review error details and fix field values", yet the scrub branch in
+    # ``safe_adcp_error`` withholds ``details`` — so the buyer is pointed at a payload
+    # this path does not send. The suggestion is nevertheless kept verbatim because it is
+    # the code's canonical ``enumMetadata`` text from the pinned error-code enum, and
+    # ``test_sanitized_suggestions_match_pinned_spec_enum`` holds it there. Diverging from
+    # the enum to describe OUR scrub would trade a spec violation for a wording nicety;
+    # the ``field`` that IS forwarded remains the actionable half.
     "VALIDATION_ERROR": (
         "The request could not be validated; review the submitted fields and resubmit.",
         VALIDATION_ERROR_SUGGESTION,

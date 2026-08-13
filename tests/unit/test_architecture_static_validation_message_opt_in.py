@@ -27,7 +27,29 @@ from tests.unit._architecture_helpers import assert_violations_match_allowlist, 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIR = REPO_ROOT / "src"
 
-_TARGET_CLASSES = {"AdCPValidationError", "AdCPInvalidRequestError"}
+
+def _target_class_names() -> set[str]:
+    """The class names the scrub actually applies to, derived from the closure.
+
+    ``safe_adcp_error`` gates on ``isinstance(exc, AdCPValidationError)``, so the
+    scanned set is ``AdCPValidationError`` plus every subclass, transitively — NOT a
+    hand-listed pair. A new subclass would otherwise be scrubbed by production while
+    invisible to this guard, which is the exact silent downgrade the guard exists to
+    catch.
+    """
+    from src.core.exceptions import AdCPValidationError
+
+    names = {AdCPValidationError.__name__}
+    frontier = [AdCPValidationError]
+    while frontier:
+        for sub in frontier.pop().__subclasses__():
+            if sub.__name__ not in names:
+                names.add(sub.__name__)
+                frontier.append(sub)
+    return names
+
+
+_TARGET_CLASSES = _target_class_names()
 
 # Empty by design. A new bare-literal raise site without the opt-in is a diagnostic
 # regression, not debt to be parked here — add ``_wire_safe_message=True`` instead.
@@ -42,11 +64,11 @@ KNOWN_VIOLATIONS: set[tuple[str, int]] = set()
 AUDITED_INTERPOLATED_OPT_INS: dict[tuple[str, int], str] = {
     (
         "src/core/tools/media_buy_create.py",
-        2544,
+        2558,
     ): "interpolates the duplicate product_ids from the buyer's OWN packages[] — their data, echoed back",
     (
         "src/core/tools/media_buy_create.py",
-        2900,
+        2914,
     ): "interpolates targeting-validator violations describing the buyer's OWN targeting_overlay",
     (
         "src/core/validation_helpers.py",

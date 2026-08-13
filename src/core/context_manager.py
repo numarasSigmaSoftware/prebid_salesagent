@@ -26,7 +26,7 @@ from src.core.database.repositories.workflow import WorkflowRepository
 # audit_workflow_step_failure passes the ORIGINAL exception to safe_adcp_error
 # instead — pre-wrapping with normalize_to_adcp_error is the webhook secret-leak
 # this PR fixed, so those two names are unused here by design.
-from src.core.exceptions import build_two_layer_error_envelope
+from src.core.exceptions import build_two_layer_error_envelope, safe_adcp_error
 from src.core.webhook_validator import (
     resolve_webhook_task_id,
     validate_webhook_task_type,
@@ -399,8 +399,6 @@ class ContextManager(DatabaseManager):
         hiccup during audit doesn't replace the original exception that the
         caller is about to re-raise.
         """
-        from src.core.exceptions import safe_adcp_error
-
         try:
             source = safe_adcp_error(exc)
             response_data = build_two_layer_error_envelope(source)
@@ -791,7 +789,12 @@ class ContextManager(DatabaseManager):
             from src.core.database.models import PushNotificationConfig
 
             # Get object mappings for this step
-            stmt = select(ObjectWorkflowMapping).filter_by(step_id=step.step_id)
+            # Deterministic order: ``mappings[0]`` below picks ONE mapping, so an
+            # unordered select makes which one arbitrary. Same order_by as the
+            # sibling ObjectWorkflowMapping select above.
+            stmt = (
+                select(ObjectWorkflowMapping).filter_by(step_id=step.step_id).order_by(ObjectWorkflowMapping.created_at)
+            )
             mappings = session.scalars(stmt).all()
 
             if not mappings:

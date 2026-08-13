@@ -63,6 +63,7 @@ from src.core.database.models import CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.exceptions import (
+    AdCPAuthRequiredError,
     AdCPCapabilityNotSupportedError,
     AdCPValidationError,
 )
@@ -114,7 +115,10 @@ def _get_media_buys_impl(
             media_buys=[],
             errors=[
                 Error(  # structural-guard: advisory: get_media_buys degrades to empty list + error, not a raise
-                    code="AUTH_REQUIRED", message="Principal ID not found in context"
+                    # Code taken from the typed class that owns it, not restated as a
+                    # literal: the raise path and this degraded path must never drift.
+                    code=AdCPAuthRequiredError._default_error_code,
+                    message="Principal ID not found in context",
                 )
             ],
         )
@@ -125,7 +129,8 @@ def _get_media_buys_impl(
             media_buys=[],
             errors=[
                 Error(  # structural-guard: advisory: get_media_buys degrades to empty list + error, not a raise
-                    code="AUTH_REQUIRED", message=f"Principal {principal_id} not found"
+                    code=AdCPAuthRequiredError._default_error_code,
+                    message=f"Principal {principal_id} not found",
                 )
             ],
         )

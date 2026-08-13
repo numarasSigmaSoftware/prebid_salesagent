@@ -145,7 +145,11 @@ def _boundary_recording_spy():
     records: list[tuple[str, str, str, str | None, str]] = []
 
     def record(transport, operation, error, *, tenant_id, principal_id):
-        records.append((transport, operation, error.wire_error_code, tenant_id, principal_id))
+        # ``error_code``, matching BOTH the sibling spy above and what production's
+        # ``record_boundary_error`` actually stores (``extract_error_info`` reads
+        # ``error.error_code``). Recording ``wire_error_code`` here graded a
+        # translation the boundary recorder never performs.
+        records.append((transport, operation, error.error_code, tenant_id, principal_id))
 
     return records, record
 

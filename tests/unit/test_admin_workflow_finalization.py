@@ -613,6 +613,9 @@ def test_shared_preparation_applies_creative_gate_before_execution_claim():
         approved_at=ANY,
         approved_by="approver@example.com",
     )
+    # ``ANY`` above matches a naive datetime just as happily as an aware one, so pin
+    # the tzinfo the same way the completed_at sibling does.
+    assert media_buy_repo.update_status.call_args.kwargs["approved_at"].tzinfo is UTC
     creatives.get_by_ids.assert_called_once_with(["creative_1"], "principal_1")
     media_buy_repo.claim_approved_execution.assert_not_called()
 
@@ -795,6 +798,9 @@ def test_shared_preparation_blocks_buy_without_creative_assignments():
         approved_at=ANY,
         approved_by="approver@example.com",
     )
+    # ``ANY`` above matches a naive datetime just as happily as an aware one, so pin
+    # the tzinfo the same way the completed_at sibling does.
+    assert media_buy_repo.update_status.call_args.kwargs["approved_at"].tzinfo is UTC
     media_buy_repo.claim_approved_execution.assert_not_called()
 
 

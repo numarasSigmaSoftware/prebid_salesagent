@@ -452,7 +452,7 @@ def then_failure_is_a_failed_task(ctx: dict) -> None:
     """
     from a2a.types import Task, TaskState
 
-    task = ctx["env"]._last_a2a_task
+    task = ctx["env"].last_a2a_task
     assert isinstance(task, Task), (
         f"no A2A Task was captured — the request never reached the failed-Task path (got {type(task).__name__})"
     )

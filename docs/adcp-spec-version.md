@@ -41,17 +41,18 @@ uv run python -c "import adcp; print(adcp.get_adcp_spec_version())"
 across `pyproject.toml`, the test's `EXPECTED_SPEC_VERSION` constant, and
 this document.
 
-## Behavior target vs SDK pin
+## Behavior sources vs SDK pin
 
-The SDK **pin** (3.1.1) fixes the request/response *type shapes* we
-build against. It does not replace the authoritative prose and compliance
-storyboards for protocol behavior. For example, the published **3.1.1**
-`pending_creatives_to_start.yaml` storyboard grades `media_buy_status`
-  as `field_value` (the DOMAIN status) and the top-level `status` as
-  `field_value` `'completed'` (the PROTOCOL `TaskStatus`, protocol envelope).
-  The two are DIFFERENT namespaces and are NOT identical.
+The pin and the behavior target are the same version (3.1.1). What differs is
+the ROLE of each artifact: the SDK **pin** fixes the request/response *type
+shapes* we build against, and it does not replace the authoritative prose and
+compliance storyboards for protocol behavior. For example, the published
+**3.1.1** `pending_creatives_to_start.yaml` storyboard grades `media_buy_status`
+as `field_value` (the DOMAIN status) and the top-level `status` as
+`field_value` `'completed'` (the PROTOCOL `TaskStatus`, protocol envelope).
+The two are DIFFERENT namespaces and are NOT identical.
 
-Our wire already implements the divergent (target GA) model:
+Our wire implements that two-namespace model:
 `TaskResultEnvelope._serialize` sets the top-level `status` to the protocol
 `TaskStatus`, while the domain status survives under `media_buy_status`
 (`src/core/schemas/_base.py` `_mirror_media_buy_status`). The dual-emit

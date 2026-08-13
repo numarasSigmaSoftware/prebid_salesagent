@@ -1315,6 +1315,9 @@ class TestRESTBoundaryAdCPErrorTranslation:
         ):
             response = _envelope_response(request, wire_error, original=original)
 
+        # Count-guarded: ``call_args`` reads only the LAST call, so without this the
+        # sole oracle for this path would pass on a duplicate (or extra) boundary record.
+        assert mock_record.call_count == 1, f"expected exactly one boundary record, got {mock_record.call_count}"
         assert mock_record.call_args.args[2] is original
         # The wire still carries the sanitized error, never the original's text.
         assert response.status_code == wire_error.status_code
