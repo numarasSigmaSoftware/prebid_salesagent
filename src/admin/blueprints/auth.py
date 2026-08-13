@@ -1014,6 +1014,10 @@ def gam_callback():
                 "grant_type": "authorization_code",
                 "redirect_uri": callback_uri,
             },
+            # Unbounded, this exchange pins an admin worker for as long as the remote
+            # endpoint holds the socket open. Matches the repo's bounded-HTTP precedent
+            # in protocol_webhook_service.
+            timeout=10.0,
         )
 
         if not token_response.ok:
