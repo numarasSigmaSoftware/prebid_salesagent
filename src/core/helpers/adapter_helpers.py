@@ -86,12 +86,21 @@ from src.core.schemas import Principal
 def _mock_adapter_config(*, manual_approval_required: bool) -> dict[str, Any]:
     """Config dict for MockAdServerAdapter.
 
-    ``manual_approval_required`` is the one field the sandbox short-circuit and the
-    tenant-configured mock branch intentionally set differently (see the sandbox
-    branch below). Naming it as an argument here — rather than each branch hand-
-    building its own dict literal — means a field added to one automatically
-    reaches the other; the two config dicts were previously typed out separately
-    and could drift on any key besides this one without either branch noticing.
+    Unifies exactly two construction paths: the sandbox short-circuit (below, in
+    ``get_adapter``) and the tenant-configured mock branch (``adapter_type ==
+    "mock"`` under the ``AdapterConfig`` lookup). ``manual_approval_required`` is the
+    one field those two intentionally set differently; naming it as an argument here
+    — rather than each branch hand-building its own dict literal — means a field
+    added to one automatically reaches the other, where the two config dicts were
+    previously typed out separately and could drift on any key besides this one
+    without either branch noticing.
+
+    A THIRD mock construction exists and is NOT unified here: ``get_adapter``'s
+    ``if not selected_adapter:`` fallback (a tenant with no ``AdapterConfig`` row at
+    all) builds its own bare ``{"enabled": True}`` and never sets
+    ``manual_approval_required``. That path is general "no adapter configured"
+    default logic, not sandbox-specific, so folding it into this helper is out of
+    scope here.
     """
     return {"enabled": True, "manual_approval_required": manual_approval_required}
 
