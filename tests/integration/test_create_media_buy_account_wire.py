@@ -106,7 +106,7 @@ class TestAccountReferenceRoutesTheAdapter:
     """
 
     @staticmethod
-    def _adapter_modes(*, account_sandbox: bool):
+    def _adapter_modes(*, transport: Transport, account_sandbox: bool):
         from tests.factories import AccountFactory, AgentAccountAccessFactory
 
         with MediaBuyCreateEnv() as env:
@@ -120,7 +120,8 @@ class TestAccountReferenceRoutesTheAdapter:
                 account_id="acc_route",
             )
             now = datetime.now(UTC)
-            env.call_impl(
+            result = env.call_via(
+                transport,
                 # The wire shape a buyer sends: a constructed model does not survive
                 # A2A/REST serialization, and the boundary resolves the dict identically.
                 account={"account_id": "acc_route"},
@@ -130,14 +131,21 @@ class TestAccountReferenceRoutesTheAdapter:
                 end_time=(now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 po_number="ACCOUNT-ROUTE-1",
             )
+            assert not result.is_error, f"[{transport.value}] dispatch failed: {result.error!r}"
             return env.mock["adapter"]
 
-    def test_sandbox_account_reference_builds_the_sandbox_adapter(self, integration_db):
-        assert_all_sandbox(self._adapter_modes(account_sandbox=True), context="create_media_buy (account ref)")
+    @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+    def test_sandbox_account_reference_builds_the_sandbox_adapter(self, integration_db, transport):
+        assert_all_sandbox(
+            self._adapter_modes(transport=transport, account_sandbox=True), context="create_media_buy (account ref)"
+        )
 
-    def test_live_account_reference_builds_the_live_adapter(self, integration_db):
+    @pytest.mark.parametrize("transport", [Transport.MCP, Transport.A2A, Transport.REST])
+    def test_live_account_reference_builds_the_live_adapter(self, integration_db, transport):
         """Negative control — 'always sandbox' would disable real bookings and still pass above."""
-        assert_all_live(self._adapter_modes(account_sandbox=False), context="create_media_buy (account ref)")
+        assert_all_live(
+            self._adapter_modes(transport=transport, account_sandbox=False), context="create_media_buy (account ref)"
+        )
 
 
 _CREATE_MEDIA_BUY_SCHEMA = "media-buy/create-media-buy-response.json"
