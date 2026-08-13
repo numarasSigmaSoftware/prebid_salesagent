@@ -14,7 +14,7 @@ beads: salesagent-a3xo, salesagent-8hu9
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 from unittest.mock import MagicMock, patch
 
 from src.core.schemas import UpdateMediaBuyRequest
@@ -56,7 +56,7 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         self._configure_update_mocks()
         return result
 
-    def __exit__(self, *exc: object) -> bool:
+    def __exit__(self, *exc: object) -> Literal[False]:
         for patcher in reversed(self._update_patchers):
             try:
                 patcher.stop()

@@ -27,7 +27,7 @@ Available mocks via env.mock:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -87,7 +87,7 @@ class CircuitBreakerEnv(CircuitBreakerMixin, IntegrationEnv):
         self.captured_logs = self._log_handler.records
         return result  # type: ignore[return-value]
 
-    def __exit__(self, *exc: object) -> bool:
+    def __exit__(self, *exc: object) -> Literal[False]:
         # Remove log capture handler
         if self._log_handler is not None:
             webhook_logger = logging.getLogger("src.services.webhook_delivery_service")

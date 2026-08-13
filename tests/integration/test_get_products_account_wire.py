@@ -171,7 +171,7 @@ class TestGetProductsSandboxMarkerOnWire:
     """
 
     @staticmethod
-    def _dispatch(*, transport: Transport, account_sandbox: bool) -> TransportResult:  # type: ignore[return]
+    def _dispatch(*, transport: Transport, account_sandbox: bool) -> TransportResult:
         mode = "sbx" if account_sandbox else "live"
         suffix = transport.value
         with ProductEnv(tenant_id=f"t-gp-marker-{mode}-{suffix}", principal_id=f"p-gp-marker-{mode}-{suffix}") as env:

@@ -23,7 +23,7 @@ Multi-transport support (subclasses may also override):
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # The MCP transport boots the real FastMCP app lifespan, which starts the
@@ -1170,7 +1170,7 @@ class BaseTestEnv:
 
         return self
 
-    def __exit__(self, *exc: object) -> bool:
+    def __exit__(self, *exc: object) -> Literal[False]:
         errors: list[Exception] = []
 
         # 1. Clean up REST client
