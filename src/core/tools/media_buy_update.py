@@ -94,6 +94,7 @@ from src.core.tools.financial_validation import (
     validate_max_daily_package_spend,
     validate_min_package_budget,
 )
+from src.core.tools.media_buy_create import validate_push_notification_config_url
 from src.core.transport_helpers import resolve_identity_from_context
 from src.core.utils import utc_flight_start
 from src.core.validation_helpers import adcp_validation_boundary, package_field_path
@@ -454,6 +455,12 @@ def _update_media_buy_impl(
 
             # Extract testing context early (needed for dry_run check)
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
+
+            # Reject an unsafe callback before ContextManager persists a context or
+            # workflow step — the same fence create applies, through the same validator.
+            # Without it an update accepts a private callback, reports success, and
+            # silently never delivers.
+            validate_push_notification_config_url(req.push_notification_config)
 
             # Create or get persistent context and workflow step
             # (ctx_manager + step were hoisted before the try block so the

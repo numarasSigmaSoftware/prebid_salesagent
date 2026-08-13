@@ -184,11 +184,25 @@ from src.services.targeting_capabilities import (
 # See: adcp 2.12.0 changelog
 
 
-def _validate_push_notification_config_url(push_notification_config: dict[str, Any] | None) -> str | None:
-    """Validate a protocol callback before any durable create-media-buy writes."""
+def validate_push_notification_config_url(
+    push_notification_config: dict[str, Any] | PushNotificationConfig | None,
+) -> str | None:
+    """Validate a protocol callback before any durable media-buy writes.
+
+    Shared by create and update: both accept the same buyer-supplied callback, so
+    both must reject an unsafe one synchronously. Accepting it and never delivering
+    is indistinguishable to the buyer from a callback that simply never fired.
+
+    Accepts the typed model (update carries ``req.push_notification_config``) as
+    well as the dict create's wrappers serialize to.
+    """
     if not push_notification_config:
         return None
-    url = push_notification_config.get("url")
+    url = (
+        push_notification_config.get("url")
+        if isinstance(push_notification_config, dict)
+        else push_notification_config.url
+    )
     if not url:
         return None
     if not isinstance(url, str):
@@ -2352,7 +2366,7 @@ async def _create_media_buy_impl(
     # Reject an unsafe callback before ContextManager persists a context or
     # workflow step. The delivery service validates again at connection time to
     # cover DNS rebinding between registration and delivery.
-    push_notification_url = _validate_push_notification_config_url(push_notification_config)
+    push_notification_url = validate_push_notification_config_url(push_notification_config)
     _validate_registered_format_agents(req, tenant["tenant_id"])
 
     # Context management and workflow step creation - create workflow step FIRST
