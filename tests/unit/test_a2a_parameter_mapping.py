@@ -82,6 +82,12 @@ class TestA2AParameterMapping:
                 "currency": "USD",
                 "pacing": "even",
                 "daily_budget": 500.0,
+                # Same class of drop, fixed later and previously ungraded: the retry-safety
+                # key, the extension payload and the reporting webhook are accepted by the
+                # raw wrapper and forwarded by MCP/REST, so A2A must forward them too.
+                "idempotency_key": "idem-key-1",
+                "ext": {"vendor_field": "v1"},
+                "reporting_webhook": {"url": "https://buyer.example/reporting"},
             }
 
             # Call the skill handler (synchronous wrapper for async method)
@@ -114,6 +120,9 @@ class TestA2AParameterMapping:
             assert call_kwargs["currency"] == "USD"
             assert call_kwargs["pacing"] == "even"
             assert call_kwargs["daily_budget"] == 500.0
+            assert call_kwargs["idempotency_key"] == "idem-key-1"
+            assert call_kwargs["ext"] == {"vendor_field": "v1"}
+            assert call_kwargs["reporting_webhook"] == {"url": "https://buyer.example/reporting"}
 
     def test_update_media_buy_invalid_revision_emits_invalid_request(self):
         """A schema-invalid revision emits INVALID_REQUEST on the A2A skill path.
