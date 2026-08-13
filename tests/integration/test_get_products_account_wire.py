@@ -113,3 +113,52 @@ class TestGetProductsAccountReferenceRoutesTheAdapter:
     def test_live_account_reference_routes_to_the_live_adapter(self, integration_db):
         """Negative control — 'always sandbox' would disable real credential reads and still pass above."""
         assert_all_live(self._adapter_modes(account_sandbox=False), context="get_products (account ref)")
+
+
+class TestGetProductsSandboxMarkerOnWire:
+    """``GetProductsResponse.sandbox`` echoes the resolved account's mode on the real wire.
+
+    Mirrors the sandbox-marker pattern in ``test_creative_sync_transport.py``: asserts on
+    ``result.wire_response``, not the parsed payload, and pairs a positive case with a
+    negative control so 'always sandbox: true' can't pass silently.
+    """
+
+    @staticmethod
+    def _dispatch(*, account_sandbox: bool):
+        mode = "sbx" if account_sandbox else "live"
+        with ProductEnv(tenant_id=f"t-gp-marker-{mode}", principal_id=f"p-gp-marker-{mode}") as env:
+            tenant, principal = env.setup_default_data()
+            env.set_policy_approved()
+            env.set_ranking_disabled()
+
+            product = ProductFactory(tenant=tenant, product_id=f"prod-gp-marker-{mode}")
+            PricingOptionFactory(product=product)
+
+            AccountFactory(tenant=tenant, account_id="acc_gp_marker", sandbox=account_sandbox)
+            AgentAccountAccessFactory(
+                tenant_id=tenant.tenant_id,
+                principal_id=principal.principal_id,
+                account_id="acc_gp_marker",
+            )
+
+            result = env.call_via(
+                Transport.MCP,
+                brief="video ads",
+                account={"account_id": "acc_gp_marker"},
+            )
+            assert not result.is_error, f"dispatch failed: {result.error!r}"
+            assert result.wire_response is not None, "MCP must capture a real wire response"
+            return result
+
+    def test_sandbox_account_marks_the_response_on_the_wire(self, integration_db):
+        result = self._dispatch(account_sandbox=True)
+        assert result.wire_response.get("sandbox") is True, (
+            f"sandbox-scoped get_products must carry sandbox: true on the wire, got {result.wire_response.get('sandbox')!r}"
+        )
+
+    def test_live_account_omits_the_marker(self, integration_db):
+        """Negative control — 'always sandbox: true' would pass the test above."""
+        result = self._dispatch(account_sandbox=False)
+        assert result.wire_response.get("sandbox") is None, (
+            f"live-scoped get_products must omit sandbox, got {result.wire_response.get('sandbox')!r}"
+        )
