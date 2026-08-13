@@ -1676,9 +1676,9 @@ def _build_update_request(
         request_params["revision"] = revision
 
     # The generated UC-003 contract grades request-schema violations as
-    # INVALID_REQUEST. Keep translation at the shared boundary while selecting
-    # the scenario's typed error class.
-    with adcp_validation_boundary(context="update_media_buy request", error_type=AdCPInvalidRequestError):
+    # INVALID_REQUEST, which is exactly the shared boundary's own default error
+    # type — so translation stays there and this site names no class of its own.
+    with adcp_validation_boundary(context="update_media_buy request"):
         req = UpdateMediaBuyRequest(**request_params)
 
     # BR-RULE-022: reject empty updates (no updatable fields beyond identifier).
