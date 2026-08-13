@@ -438,12 +438,16 @@ _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
 ]
 
 
-# MCP selective xfails: previously the MCP wrapper did not accept the
-# disclosure_positions keyword. #1417 added disclosure_positions +
-# disclosure_persistence to the MCP list_creative_formats wrapper, so the param
-# is now accepted on MCP exactly like A2A/REST. The disclosure *filter* gap
-# (_impl does not filter by disclosure) is all-transport and handled by
-# _UC005_PARTIAL_TAGS / _XFAIL_TAGS, so no MCP-specific entries remain.
+# MCP selective xfails. The former DISCLOSURE entries are gone: the MCP wrapper
+# once did not accept the disclosure_positions keyword, but #1417 added
+# disclosure_positions + disclosure_persistence to the MCP list_creative_formats
+# wrapper, so the param is now accepted on MCP exactly like A2A/REST — and the
+# disclosure *filter* gap (_impl does not filter by disclosure) is all-transport,
+# handled by _UC005_PARTIAL_TAGS / _XFAIL_TAGS.
+#
+# ONE MCP-specific entry remains below, T-UC-002-ext-h-agent, whose cause is
+# genuinely MCP-only (rfc8785 canonicalization of a structured FormatId carried in
+# raw_wire_payload — A2A/REST never reach that path).
 # (tag, example_substrings, reason, strict)
 _MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = [
     (
@@ -2686,8 +2690,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 if not substrings or any(s in nodeid for s in substrings):
                     item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
 
-        # --- UC-011: xfails for spec-production gaps ---
-        # FIXME(salesagent-7wan): Production doesn't implement these UC-011 features.
+        # --- UC-011: no xfails remain. Every entry below graduated; the notes are
+        # kept so a re-introduced failure is recognisable as a regression rather
+        # than a never-implemented feature.
         # Graduated: T-UC-011-list-status-filter payment_required (all 4 transports pass — status now mapped)
         # Graduated: T-UC-011-ext-g-echo list_accounts (all 4 transports pass — context echo implemented)
 
