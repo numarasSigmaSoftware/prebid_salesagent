@@ -177,6 +177,30 @@ def review_workflow_step(tenant_id, workflow_id, step_id):
 WORKFLOW_STEP_VANISHED_MESSAGE = "Workflow step no longer exists — nothing was recorded"
 
 
+def _record_plain_step_decision(
+    workflow_repo,
+    db,
+    step_id: str,
+    *,
+    status: str,
+    flash_message: str,
+    flash_category: str,
+    error_message: str | None = None,
+) -> tuple[Response, int]:
+    """Persist a plain (non-media-buy) step decision and answer the request.
+
+    ``update_status`` returns ``None`` when the row is gone between this request's read
+    and its write: nothing was recorded, so the route must not report success. Owning
+    both outcomes here keeps each caller free of a branch that would only re-derive this
+    decision, and keeps the approve and reject arms the same shape.
+    """
+    if workflow_repo.update_status(step_id, status=status, error_message=error_message) is None:
+        return jsonify({"success": False, "error": WORKFLOW_STEP_VANISHED_MESSAGE}), 404
+    db.commit()
+    flash(flash_message, flash_category)
+    return jsonify({"success": True}), 200
+
+
 def _approval_in_progress_response():
     """202: the decision is claimed / in flight and completes automatically."""
     return jsonify(
@@ -420,13 +444,16 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     return _respond_to_non_approvable_media_buy(media_buy)
             else:
                 # Plain (non-media-buy) workflow step — no buy decision to own, so mark the
-                # step approved directly. ``update_status`` returns None when the row is
-                # gone; committing and reporting success then would tell the operator a
-                # step was approved that no longer exists.
-                if workflow_repo.update_status(step_id, status="approved") is None:
-                    return jsonify({"success": False, "error": WORKFLOW_STEP_VANISHED_MESSAGE}), 404
-                db.commit()
-                flash("Workflow step approved successfully", "success")
+                # step approved directly. The helper owns the vanished-row outcome too, so
+                # this arm answers the request outright.
+                return _record_plain_step_decision(
+                    workflow_repo,
+                    db,
+                    step_id,
+                    status="approved",
+                    flash_message="Workflow step approved successfully",
+                    flash_category="success",
+                )
 
             return jsonify({"success": True}), 200
 
@@ -492,11 +519,17 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 require_finalize_applied(outcome)
             else:
                 # No mapped media buy — a plain workflow step; record the rejection only.
-                # Same shape as the approve arm: a vanished row recorded nothing, so the
+                # Same helper as the approve arm: a vanished row recorded nothing, so the
                 # route must not report a rejection it did not persist.
-                if workflow_repo.update_status(step_id, status="rejected", error_message=reason) is None:
-                    return jsonify({"success": False, "error": WORKFLOW_STEP_VANISHED_MESSAGE}), 404
-                db.commit()
+                return _record_plain_step_decision(
+                    workflow_repo,
+                    db,
+                    step_id,
+                    status="rejected",
+                    error_message=reason,
+                    flash_message="Workflow step rejected",
+                    flash_category="info",
+                )
 
             flash("Workflow step rejected", "info")
             return jsonify({"success": True}), 200
