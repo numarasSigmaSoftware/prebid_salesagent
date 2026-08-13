@@ -104,9 +104,16 @@ def _mock_adapter_config(*, manual_approval_required: bool) -> dict[str, Any]:
     from the unconditional ``adapter_config: dict[str, Any] = {"enabled": True}``
     initializer set right after ``with get_db_session() as session:``, before
     ``if config_row:`` even runs; ``if not selected_adapter:`` only re-applies the
-    same literal when ``adapter_config`` is falsy at that point, and for a mock
-    tenant it's dead code anyway (``selected_adapter`` is already ``"mock"`` from
-    ``tenant.ad_server or "mock"`` at function entry, so it's never falsy there).
+    same literal when ``adapter_config`` is falsy at that point. Whether that fallback
+    is reachable depends on the SHAPE of ``tenant`` at ``get_adapter``'s entry, not on
+    "mock tenant" alone: the ORM branch (``tenant.ad_server or "mock"``) coerces a
+    falsy ``ad_server`` to ``"mock"`` immediately, so ``selected_adapter`` is already
+    truthy by the time the fallback is checked — dead code there. The dict branch
+    (``tenant.get("ad_server", "mock")``) only substitutes the default when the
+    ``"ad_server"`` key is ABSENT, not when its value is ``None`` — a tenant row with
+    ``ad_server IS NULL`` serializes to a dict carrying ``"ad_server": None``, leaving
+    ``selected_adapter = None`` and reaching the fallback for real. Any caller passing
+    a dict-shaped tenant is subject to this, not just the ones enumerated today.
     Both non-unified branches are general "no adapter configured" / "unsupported
     adapter type" default logic, not sandbox-specific, so folding them into this
     helper is out of scope here (tracked as #1976).
