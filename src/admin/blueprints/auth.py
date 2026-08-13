@@ -15,6 +15,7 @@ import logging
 import os
 from urllib.parse import unquote, urlsplit
 
+import requests
 from authlib.integrations.flask_client import OAuth
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from sqlalchemy import select
@@ -999,9 +1000,10 @@ def gam_callback():
         else:
             callback_uri = url_for("auth.gam_callback", _external=True)
 
-        # Exchange authorization code for tokens
-        import requests
-
+        # Exchange authorization code for tokens.
+        # ``requests`` is imported at module scope, not here: the handler below names
+        # ``requests.exceptions`` and would raise NameError while handling an exception
+        # raised earlier in this try block, masking it and losing the catch-all.
         logger.info(f"Exchanging authorization code for tokens - tenant: {tenant_id}, callback_uri: {callback_uri}")
         logger.debug(f"Token exchange request - client_id: {gam_config.client_id[:20]}...")
 
@@ -1095,6 +1097,17 @@ def gam_callback():
         else:
             return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
 
+    except requests.exceptions.RequestException as e:
+        # The token exchange is bounded by a timeout, so this arm is reachable — and it is
+        # a token-exchange failure like the four above it, not an auth failure. Report it
+        # the way they do (specific message, back to tenant settings) instead of letting
+        # the catch-all send the operator to the LOGIN page with a generic error.
+        logger.error(f"GAM OAuth token exchange failed to reach Google: {e}", exc_info=True)
+        flash(
+            "Timed out reaching Google to exchange the authorization code. Please try again.",
+            "error",
+        )
+        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
     except Exception as e:
         logger.error(f"Error in GAM OAuth callback: {e}", exc_info=True)
         flash("OAuth callback failed. Please try again.", "error")
