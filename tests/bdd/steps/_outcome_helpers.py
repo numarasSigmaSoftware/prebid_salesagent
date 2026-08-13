@@ -69,7 +69,7 @@ def wire_integer(ctx: dict, container: dict, field: str) -> int:
     type is ``double`` — an integer arrives as a whole-number float (e.g.
     ``1.0``). Both are the same integer value. Rejects strings, null, bool, and
     fractional values on every transport; returns the value as ``int`` for
-    comparisons. The wire-type divergence remains — tighten this to
+    comparisons. The wire-type divergence is tracked in #1583 — tighten this to
     require ``int`` everywhere if A2A gains a JSON-native serialization.
     """
     value = container.get(field)

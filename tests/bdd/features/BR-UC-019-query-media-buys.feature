@@ -798,7 +798,7 @@ Feature: BR-UC-019 Query Media Buys
     #         ref tracks the repo's pinned spec version)
     # NOTE: hand-authored obligation (neighbors are generated from adcp-req with
     #       ref=v3.1-<sha>). Reconcile upstream into adcp-req so this is generated
-    #       and its @source aligns automatically.
+    #       and its @source aligns automatically — tracked in #1565.
 
   @T-UC-019-inv-confirmed-at-null-provisional @invariant @confirmed_at @schema-v3.1
   Scenario: Provisional buy - the wire carries confirmed_at present-as-null with revision present
@@ -816,7 +816,7 @@ Feature: BR-UC-019 Query Media Buys
     # @source repo=adcp ref=v3.1.1 path=static/schemas/source/media-buy/get-media-buys-response.json
     # NOTE: hand-authored obligation (neighbors are generated from adcp-req with
     #       ref=v3.1-<sha>). Reconcile upstream into adcp-req so this is generated
-    #       and its @source aligns automatically.
+    #       and its @source aligns automatically — tracked in #1565.
 
   @T-UC-019-partition-confirmed-at @partition @confirmed_at @schema-v3.1
   Scenario: Production-created media buy carries confirmed_at
