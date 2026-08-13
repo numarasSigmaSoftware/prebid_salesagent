@@ -18,6 +18,7 @@ built the tenant's real adapter (``sandbox=False`` was hard-wired). Like
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,6 +39,11 @@ from tests.helpers.sandbox_assertions import assert_all_live, assert_all_sandbox
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 _GET_PRODUCTS_SCHEMA = "media-buy/get-products-response.json"
+
+# Mirrors test_creative_sync_transport.py's ALL_TRANSPORTS — IMPL is in-process by
+# definition and never carries a wire (see ImplDispatcher's docstring in
+# tests/harness/dispatchers.py); A2A/REST/MCP all capture the real wire for ProductEnv.
+ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.REST, Transport.MCP]
 
 
 class TestGetProductsAccountWirePassthrough:
@@ -120,20 +126,29 @@ class TestGetProductsAccountReferenceRoutesTheAdapter:
 class TestGetProductsSandboxMarkerOnWire:
     """``GetProductsResponse.sandbox`` echoes the resolved account's mode on the real wire.
 
-    Mirrors the sandbox-marker pattern in ``test_creative_sync_transport.py``: asserts on
-    ``result.wire_response``, not the parsed payload, and pairs a positive case with a
-    negative control so 'always sandbox: true' can't pass silently.
+    Mirrors the sandbox-marker pattern in ``test_creative_sync_transport.py``:
+    parametrized across all four transports, asserting on ``result.wire_response`` where
+    a real wire is captured (A2A/REST/MCP — ProductEnv's ``call_a2a``/``call_mcp`` drive
+    the real ``AdCPRequestHandler``/FastMCP pipelines, and REST goes through a real
+    ``TestClient`` route, so all three dispatchers stash the literal wire body), and
+    falling back to the parsed ``payload`` for IMPL, which is in-process by definition
+    and never has a wire (see ``ImplDispatcher``'s docstring in
+    ``tests/harness/dispatchers.py``). Pairs a positive case with a negative control so
+    'always sandbox: true' can't pass silently.
     """
 
     @staticmethod
-    def _dispatch(*, account_sandbox: bool):
+    def _dispatch(*, transport: Transport, account_sandbox: bool):
         mode = "sbx" if account_sandbox else "live"
-        with ProductEnv(tenant_id=f"t-gp-marker-{mode}", principal_id=f"p-gp-marker-{mode}") as env:
+        suffix = transport.value
+        with ProductEnv(
+            tenant_id=f"t-gp-marker-{mode}-{suffix}", principal_id=f"p-gp-marker-{mode}-{suffix}"
+        ) as env:
             tenant, principal = env.setup_default_data()
             env.set_policy_approved()
             env.set_ranking_disabled()
 
-            product = ProductFactory(tenant=tenant, product_id=f"prod-gp-marker-{mode}")
+            product = ProductFactory(tenant=tenant, product_id=f"prod-gp-marker-{mode}-{suffix}")
             PricingOptionFactory(product=product)
 
             AccountFactory(tenant=tenant, account_id="acc_gp_marker", sandbox=account_sandbox)
@@ -143,22 +158,52 @@ class TestGetProductsSandboxMarkerOnWire:
                 account_id="acc_gp_marker",
             )
 
-            result = env.call_via(
-                Transport.MCP,
-                brief="video ads",
-                account={"account_id": "acc_gp_marker"},
-            )
-            assert not result.is_error, f"dispatch failed: {result.error!r}"
-            assert result.wire_response is not None, "MCP must capture a real wire response"
+            call_kwargs: dict[str, Any] = {
+                "brief": "video ads",
+                "account": {"account_id": "acc_gp_marker"},
+            }
+            if transport is Transport.IMPL:
+                # IMPL calls _get_products_impl directly (ProductMixin.call_impl in
+                # tests/harness/_mixins.py), which — unlike CreativeSyncEnv.call_impl —
+                # has no branch that replicates the boundary's account-enrichment step,
+                # so identity.sandbox would stay at its unenriched default regardless of
+                # account_sandbox. enrich_identity_with_account is the exact production
+                # helper the real MCP/A2A/REST wrappers call before _impl runs; invoking
+                # it here (rather than reimplementing its logic) makes IMPL exercise the
+                # same identity.sandbox _impl actually reads, matching the enrichment
+                # CreativeSyncEnv.call_impl already performs for its own IMPL path.
+                from src.core.schema_helpers import to_account_reference
+                from src.core.transport_helpers import enrich_identity_with_account
+
+                call_kwargs["identity"] = enrich_identity_with_account(
+                    env.identity_for(transport), to_account_reference(call_kwargs["account"])
+                )
+
+            result = env.call_via(transport, **call_kwargs)
+            assert not result.is_error, f"[{suffix}] dispatch failed: {result.error!r}"
+            if transport in (Transport.A2A, Transport.REST, Transport.MCP):
+                assert result.wire_response is not None, (
+                    f"[{suffix}] {transport.value} must capture a real wire response — a regression "
+                    "here would silently fall back to the weaker payload-only assertion below"
+                )
             return result
 
-    def test_sandbox_account_marks_the_response_on_the_wire(self, integration_db):
-        result = self._dispatch(account_sandbox=True)
-        assert result.wire_response.get("sandbox") is True, (
-            f"sandbox-scoped get_products must carry sandbox: true on the wire, got {result.wire_response.get('sandbox')!r}"
-        )
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_sandbox_account_marks_the_response_on_the_wire(self, integration_db, transport):
+        result = self._dispatch(transport=transport, account_sandbox=True)
+        if result.wire_response is not None:
+            assert result.wire_response.get("sandbox") is True, (
+                f"[{transport.value}] sandbox-scoped get_products must carry sandbox: true on the wire, "
+                f"got {result.wire_response.get('sandbox')!r}"
+            )
+        else:
+            assert result.payload.sandbox is True, (
+                f"[{transport.value}] sandbox-scoped get_products must carry sandbox: true, "
+                f"got {result.payload.sandbox!r}"
+            )
 
-    def test_live_account_omits_the_marker(self, integration_db):
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    def test_live_account_omits_the_marker(self, integration_db, transport):
         """Negative control — 'always sandbox: true' would pass the test above.
 
         Routed through ``assert_wire_omits_unset`` rather than a bare
@@ -166,8 +211,17 @@ class TestGetProductsSandboxMarkerOnWire:
         ``{"type": "boolean"}`` with no null variant, so a plain ``is None`` check
         can't distinguish an omitted key from an explicit (schema-violating) JSON
         ``null`` — the exact #1710/#1868 null-leak class this helper regression-tests.
+        IMPL has no wire (see ``_dispatch``), so it falls back to the payload check —
+        ``payload.sandbox is None`` is weaker (can't distinguish omission from null) but
+        it is the only signal IMPL can carry.
         """
-        result = self._dispatch(account_sandbox=False)
-        assert_wire_omits_unset(
-            result, schema=_GET_PRODUCTS_SCHEMA, absent_paths=["sandbox"], transport=Transport.MCP
-        )
+        result = self._dispatch(transport=transport, account_sandbox=False)
+        if result.wire_response is not None:
+            assert_wire_omits_unset(
+                result, schema=_GET_PRODUCTS_SCHEMA, absent_paths=["sandbox"], transport=transport
+            )
+        else:
+            assert result.payload.sandbox is None, (
+                f"[{transport.value}] live-scoped get_products must omit the sandbox marker "
+                f"(None, not False, per AdCP 3.1.1), got {result.payload.sandbox!r}"
+            )
