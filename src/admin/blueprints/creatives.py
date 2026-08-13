@@ -573,7 +573,9 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             assignment_buy_ids = [a.media_buy_id for a in assignments]
 
             logger.info(
-                f"[CREATIVE APPROVAL] Creative {creative_id} approved, checking {len(assignments)} media buy assignments"
+                "[CREATIVE APPROVAL] Creative %s approved, checking %s media buy assignments",
+                log_safe(creative_id),
+                len(assignments),
             )
 
             # Snapshot buy statuses here to avoid a second UoW after commit
@@ -586,7 +588,11 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     continue
 
                 assignment_buy_statuses[media_buy_id] = media_buy.status
-                logger.info(f"[CREATIVE APPROVAL] Media buy {media_buy_id} status: {media_buy.status}")
+                logger.info(
+                    "[CREATIVE APPROVAL] Media buy %s status: %s",
+                    log_safe(media_buy_id),
+                    log_safe(media_buy.status),
+                )
 
                 # The eligible source states for THIS trigger are derived from the
                 # canonical set beside its declaration, not restated here. The bare
@@ -610,22 +616,22 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 elif preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
                     logger.info(
                         "[CREATIVE APPROVAL] Media buy %s still waiting for %s creatives: %s",
-                        media_buy_id,
+                        log_safe(media_buy_id),
                         len(preparation.blocking_creative_ids),
                         log_safe(preparation.blocking_creative_ids),
                     )
                 elif preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
                     logger.info(
                         "[CREATIVE APPROVAL] Media buy %s execution was already claimed",
-                        media_buy_id,
+                        log_safe(media_buy_id),
                     )
                 else:
                     # NOT_EXECUTABLE. Most often the buy is still awaiting a human
                     # decision, which this trigger deliberately may not promote.
                     logger.info(
                         "[CREATIVE APPROVAL] Media buy %s is not executable by a creative unblock (status %s)",
-                        media_buy_id,
-                        media_buy.status,
+                        log_safe(media_buy_id),
+                        log_safe(media_buy.status),
                     )
 
             # UoW auto-commits here
@@ -643,7 +649,8 @@ def approve_creative(tenant_id, creative_id, **kwargs):
         # Execute adapter creation for unblocked media buys
         for action in media_buy_actions:
             logger.info(
-                f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
+                "[CREATIVE APPROVAL] All creatives approved for media buy %s, executing adapter creation",
+                log_safe(action["media_buy_id"]),
             )
 
             outcome = execute_and_finalize_media_buy_approval(
@@ -654,7 +661,10 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             )
 
             if outcome.status is ApprovalExecutionStatus.SUCCEEDED:
-                logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
+                logger.info(
+                    "[CREATIVE APPROVAL] Media buy %s successfully created in adapter",
+                    log_safe(action["media_buy_id"]),
+                )
             elif outcome.status is ApprovalExecutionStatus.FAILED:
                 logger.error(
                     "[CREATIVE APPROVAL] Adapter creation failed for %s: %s",
@@ -664,12 +674,12 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             elif outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
                 logger.error(
                     "[CREATIVE APPROVAL] External media buy creation succeeded but activation remains pending for %s",
-                    action["media_buy_id"],
+                    log_safe(action["media_buy_id"]),
                 )
             else:
                 logger.warning(
                     "[CREATIVE APPROVAL] Adapter outcome could not finalize workflow for media buy %s",
-                    action["media_buy_id"],
+                    log_safe(action["media_buy_id"]),
                 )
 
         # Retroactive push for already-live buys (#1038):
@@ -682,7 +692,11 @@ def approve_creative(tenant_id, creative_id, **kwargs):
         ]
 
         for buy_id in buys_to_push:
-            logger.info(f"[CREATIVE APPROVAL] Retroactive push: creative {creative_id} → live buy {buy_id}")
+            logger.info(
+                "[CREATIVE APPROVAL] Retroactive push: creative %s → live buy %s",
+                log_safe(creative_id),
+                log_safe(buy_id),
+            )
             push_success, push_err = push_creative_to_existing_buy(
                 creative_id=creative_id,
                 media_buy_id=buy_id,
@@ -690,7 +704,10 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             )
             if not push_success:
                 logger.error(
-                    f"[CREATIVE APPROVAL] Retroactive push failed for creative {creative_id} → buy {buy_id}: {push_err}"
+                    "[CREATIVE APPROVAL] Retroactive push failed for creative %s → buy %s: %s",
+                    log_safe(creative_id),
+                    log_safe(buy_id),
+                    log_safe(push_err),
                 )
                 push_warnings.append(f"Creative push to buy {buy_id} failed — see server logs for details")
 
