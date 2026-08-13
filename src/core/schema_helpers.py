@@ -239,6 +239,14 @@ def create_get_products_request(
     Returns:
         GetProductsRequest
 
+    Note:
+        ``account`` on the returned ``req`` is schema conformance only (adcp 3.1.1
+        declares ``account`` on ``GetProductsRequest``) — it has no production reader.
+        Account-based identity enrichment happens via the raw ``account`` argument
+        through ``enrich_identity_with_account``, independently of where this call sits
+        relative to that enrichment step at each caller (the relative ordering differs
+        per caller, so don't assume "above" or "below").
+
     Examples:
         >>> req = create_get_products_request(
         ...     brand=BrandReference(domain="acme.com"),

@@ -820,10 +820,6 @@ async def get_products(
         ToolResult with human-readable text and structured data
     """
     # create_get_products_request coerces string/dict brand via to_brand_reference
-    # Note: `account` on the built `req` is schema conformance only (adcp 3.1.1 declares
-    # `account` on GetProductsRequest) — it has no production reader. Account-based
-    # enrichment happens above from the raw `account` kwarg via enrich_identity_with_account,
-    # not by reading req.account back out.
     try:
         with adcp_validation_boundary(context="get_products request"):
             req = create_get_products_request(
@@ -897,10 +893,6 @@ async def get_products_raw(
         identity = enrich_identity_with_account(identity, account)
 
     # Create request object - adcp library validates schema
-    # Note: `account` on the built `req` is schema conformance only (adcp 3.1.1 declares
-    # `account` on GetProductsRequest) — it has no production reader. Account-based
-    # enrichment happens above from the raw `account` kwarg via enrich_identity_with_account,
-    # not by reading req.account back out.
     req = create_get_products_request(
         brief=brief or "",
         brand=brand,
