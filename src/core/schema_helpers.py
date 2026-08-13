@@ -33,7 +33,9 @@ from src.core.schemas.product import GetProductsRequest
 from src.core.validation_helpers import adcp_validation_boundary
 
 
-def _coerce_wire_object[ModelT: BaseModel](value: Any, model_cls: type[ModelT], context: str) -> ModelT | None:
+def _coerce_wire_object[ModelT: BaseModel](
+    value: Any, model_cls: type[ModelT], context: str, *, strict: bool = False
+) -> ModelT | None:
     """Shared dict → typed-model coercion with the boundary BUILT IN.
 
     Single home for the ``to_*`` helpers' isinstance ladder. The internal
@@ -42,12 +44,23 @@ def _coerce_wire_object[ModelT: BaseModel](value: Any, model_cls: type[ModelT], 
     from EVERY call site — callers cannot forget the boundary
     (#1417; mirrors ``coerce_creative_filters``).
 
-    Returns ``None`` for non-dict unexpected types, preserving the helpers'
-    long-standing fallback behavior.
+    ``strict`` decides what an unexpected NON-dict type means:
+
+    * ``False`` (default) — return ``None``, preserving the helpers'
+      long-standing degrade-to-missing fallback. Required for ``context``,
+      whose schema calls it opaque correlation data that is "never parsed by
+      AdCP agents"; hard-failing a non-dict ``context`` would contradict that.
+    * ``True`` — route the value through ``model_validate`` anyway so Pydantic
+      rejects it and the boundary raises ``AdCPValidationError``. Used where a
+      silent ``None`` would be a fail-OPEN: a dropped ``account`` leaves
+      ``identity.sandbox`` ``False`` and dispatches to the LIVE adapter. Sharing
+      the boundary (rather than hand-rolling a raise) keeps the buyer-facing
+      message/field/suggestion identical for "bad account" whichever way it was
+      malformed.
     """
     if value is None or isinstance(value, model_cls):
         return value
-    if isinstance(value, dict):
+    if isinstance(value, dict) or strict:
         with adcp_validation_boundary(context=context):
             # model_validate handles plain models and RootModels alike
             # (AccountReference is a RootModel — field-unpacking would break it).
@@ -176,8 +189,16 @@ def to_brand_reference(brand: dict[str, Any] | BrandReference | str | None) -> B
 
 
 def to_account_reference(account: dict[str, Any] | AccountReference | None) -> AccountReference | None:
-    """Convert dict to AccountReference for adcp compatibility."""
-    return _coerce_wire_object(account, AccountReference, "account value")
+    """Convert dict to AccountReference for adcp compatibility.
+
+    Strict: an unexpected non-dict ``account`` raises ``AdCPValidationError``
+    instead of degrading to ``None``. The A2A skills read ``account`` straight
+    off raw ``parameters`` with no model in front of them, so a coerced-away
+    account would skip identity enrichment, leave ``identity.sandbox`` ``False``,
+    and route a sandbox request to the LIVE adapter — a quiet failure on exactly
+    the axis account isolation defends.
+    """
+    return _coerce_wire_object(account, AccountReference, "account value", strict=True)
 
 
 def to_property_list_reference(
