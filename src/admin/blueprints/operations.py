@@ -547,6 +547,12 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # step to rejected (that would pair an active/decided buy with a
                     # rejected task). Discard the pending comment and surface a conflict.
                     db_session.rollback()
+                    if media_buy is None:
+                        # Same reason the approve arm reports a vanished buy in THIS
+                        # response: the redirect target answers a missing buy with a
+                        # bare-string 404 that renders no template, so a flash queued here
+                        # would surface on some unrelated later page instead.
+                        return MEDIA_BUY_VANISHED_MESSAGE, 404
                     flash(MEDIA_BUY_ALREADY_DECIDED_MESSAGE, "warning")
 
             return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))

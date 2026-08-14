@@ -500,7 +500,11 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 # already decided) the claim loses → 409 and the step is left untouched,
                 # so we never pair an active/decided buy with a rejected task.
                 media_buy = MediaBuyRepository(db, tenant_id).get_by_id(mapping.object_id)
-                if media_buy is None or media_buy.status not in REJECTABLE_MEDIA_BUY_STATUSES:
+                # A VANISHED buy is not an already-decided one — nothing was rejected and
+                # nothing ever will be. Same split the approve arm already encodes.
+                if media_buy is None:
+                    return jsonify({"success": False, "error": MEDIA_BUY_VANISHED_MESSAGE}), 404
+                if media_buy.status not in REJECTABLE_MEDIA_BUY_STATUSES:
                     return jsonify({"success": False, "error": MEDIA_BUY_ALREADY_DECIDED_MESSAGE}), 409
                 outcome = finalize_media_buy_rejection(
                     db,

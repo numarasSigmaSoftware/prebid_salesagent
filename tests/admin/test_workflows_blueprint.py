@@ -499,6 +499,43 @@ class TestWorkflowDecisionOwnership:
         assert _step_status(test_tenant, step_id) == "in_progress"
         assert _buy_status(test_tenant, mbid) == "active"
 
+    def test_reject_when_mapped_buy_vanished_returns_404_not_already_decided(
+        self, client, test_tenant, factory_session
+    ):
+        """A vanished buy is not an already-decided one — the reject arm must say which.
+
+        The approve arm already splits these two outcomes; the reject arm answered BOTH
+        with ``MEDIA_BUY_ALREADY_DECIDED_MESSAGE`` + 409, telling the operator a decision
+        was made that never was. Restoring the conflated arm turns this 404 back into 409.
+        """
+        from src.core.database.models import MediaBuy
+        from src.services.media_buy_completion import MEDIA_BUY_VANISHED_MESSAGE
+
+        _auth_session(client, test_tenant)
+        media_buy_id, context_id, step_id = _setup_mapped_media_buy_step(
+            factory_session,
+            test_tenant,
+            buy_status="pending_approval",
+            step_status="in_progress",
+            with_assignment=False,
+        )
+        # Delete the buy but KEEP the step→buy mapping: the vanished case the route reads.
+        factory_session.delete(factory_session.get(MediaBuy, media_buy_id))
+        factory_session.commit()
+
+        r = client.post(
+            f"/tenant/{test_tenant}/workflows/{context_id}/steps/{step_id}/reject",
+            content_type="application/json",
+            json={"reason": "gone"},
+        )
+
+        assert r.status_code == 404
+        body = r.get_json()
+        assert body.get("success") is False, f"a vanished buy must not report success: {body}"
+        assert body.get("error") == MEDIA_BUY_VANISHED_MESSAGE
+        # The step follows the buy decision; with no buy there is nothing to reject.
+        assert _step_status(test_tenant, step_id) == "in_progress"
+
     def test_reject_of_held_buy_succeeds(self, client, test_tenant, factory_session):
         """A sequential reject of a genuinely held (pending_creatives) buy still succeeds."""
         _auth_session(client, test_tenant)
@@ -568,6 +605,42 @@ class TestOperationsDecisionOwnership:
         assert r.status_code == 302
         assert _step_status(test_tenant, step_id) == "pending_approval"
         assert _buy_status(test_tenant, mbid) == "active"
+
+    def test_operations_reject_when_buy_vanished_reports_in_this_response(self, client, test_tenant, factory_session):
+        """A vanished buy is reported in THIS response, not flashed toward a dead redirect.
+
+        The redirect target (``media_buy_detail``) answers a missing buy with a bare-string
+        404 that renders no template, so ``get_flashed_messages()`` never runs there — a
+        flash queued here would surface on some unrelated later page. Same rationale the
+        approve arm already encodes. Restoring the flash+redirect turns this 404 into a 302.
+        """
+        from src.core.database.models import MediaBuy
+        from src.services.media_buy_completion import MEDIA_BUY_ALREADY_DECIDED_MESSAGE, MEDIA_BUY_VANISHED_MESSAGE
+
+        _auth_session(client, test_tenant)
+        mbid, _context_id, step_id = _setup_mapped_media_buy_step(
+            factory_session,
+            test_tenant,
+            buy_status="pending_approval",
+            step_status="pending_approval",
+            with_assignment=False,
+        )
+        factory_session.delete(factory_session.get(MediaBuy, mbid))
+        factory_session.commit()
+
+        r = client.post(
+            f"/tenant/{test_tenant}/media-buy/{mbid}/approve",
+            data={"action": "reject", "reason": "gone"},
+        )
+
+        assert r.status_code == 404
+        assert MEDIA_BUY_VANISHED_MESSAGE in r.get_data(as_text=True)
+        with client.session_transaction() as sess:
+            flashes = sess.get("_flashes", [])
+        assert ("warning", MEDIA_BUY_ALREADY_DECIDED_MESSAGE) not in flashes, (
+            f"a vanished buy must not be reported as already-decided: {flashes}"
+        )
+        assert _step_status(test_tenant, step_id) == "pending_approval"
 
     def test_operations_approve_on_completed_step_no_revert(self, client, test_tenant, factory_session):
         """Operations approve when the step is already completed → 302 (no pending step
