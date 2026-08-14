@@ -1102,9 +1102,18 @@ def gam_callback():
         # a token-exchange failure like the four above it, not an auth failure. Report it
         # the way they do (specific message, back to tenant settings) instead of letting
         # the catch-all send the operator to the LOGIN page with a generic error.
-        logger.error(f"GAM OAuth token exchange failed to reach Google: {e}", exc_info=True)
+        #
+        # The catch stays broad because it must keep that routing for the WHOLE requests
+        # family, so the message describes the family rather than one member of it:
+        # ``requests.exceptions.JSONDecodeError`` is a RequestException subclass, and BOTH
+        # ``.json()`` calls in this block can raise it — the content-type-guarded one in
+        # the ``not token_response.ok`` branch (the header can claim JSON over a malformed
+        # body) and the unguarded ``token_data = token_response.json()``. Naming a timeout
+        # here told the operator the request never arrived when in fact it did.
+        logger.error(f"GAM OAuth token exchange with Google failed: {e}", exc_info=True)
         flash(
-            "Timed out reaching Google to exchange the authorization code. Please try again.",
+            "Could not complete the token exchange with Google — the request failed or "
+            "its response could not be read. Please try again.",
             "error",
         )
         return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))

@@ -9,6 +9,8 @@ These tests verify that the OAuth configuration system correctly handles:
 import os
 from unittest.mock import patch
 
+import pytest
+
 
 class TestGetOAuthConfig:
     """Tests for get_oauth_config function."""
@@ -377,3 +379,60 @@ class TestInitOAuth:
             result = init_oauth(app)
 
         assert result is None
+
+
+class TestGamCallbackTokenExchangeFailureMessage:
+    """The GAM OAuth callback's ``RequestException`` arm must describe the whole family.
+
+    ``requests.exceptions.JSONDecodeError`` is a ``RequestException`` subclass, and BOTH
+    ``.json()`` calls in the token-exchange block can raise it — the content-type-guarded
+    one in the ``not token_response.ok`` branch and the unguarded ``token_response.json()``
+    that builds ``token_data``. The arm's message named a timeout, so a response that
+    ARRIVED and was merely unreadable told the operator the request never got there.
+    """
+
+    def _drive_callback_with(self, response_mock):
+        from unittest.mock import patch
+
+        from src.admin.app import create_app
+
+        app = create_app()
+        app.config["TESTING"] = True
+        app.config["WTF_CSRF_ENABLED"] = False
+
+        gam_config = type("GamCfg", (), {"client_id": "c" * 40, "client_secret": "s"})()
+
+        with app.test_client() as client:
+            with (
+                patch("src.core.config.get_gam_oauth_config", return_value=gam_config),
+                patch("src.admin.blueprints.auth.requests.post", return_value=response_mock),
+            ):
+                resp = client.get("/auth/gam/callback?code=abc&state=tenant_x")
+            with client.session_transaction() as sess:
+                flashes = sess.get("_flashes", [])
+        return resp, flashes
+
+    @pytest.mark.parametrize("response_ok", [True, False], ids=["unguarded_json", "error_branch_json"])
+    def test_malformed_body_is_not_reported_as_a_timeout(self, response_ok):
+        """A 200 (or a 4xx claiming JSON) whose body will not parse is not a timeout."""
+        from unittest.mock import MagicMock
+
+        import requests
+
+        response_mock = MagicMock()
+        response_mock.ok = response_ok
+        response_mock.status_code = 200 if response_ok else 400
+        response_mock.headers = {"content-type": "application/json"}
+        response_mock.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+
+        resp, flashes = self._drive_callback_with(response_mock)
+
+        assert flashes, "the token-exchange failure must be reported to the operator"
+        category, message = flashes[-1]
+        assert category == "error"
+        assert "timed out" not in message.lower(), f"an arrived-but-unreadable response is not a timeout: {message!r}"
+        assert "could not be read" in message, f"the message must cover the unreadable-response case: {message!r}"
+        # The arm's other job: keep the operator on tenant settings rather than letting the
+        # catch-all bounce them to the login page.
+        assert resp.status_code == 302
+        assert "/login" not in resp.headers["Location"], resp.headers["Location"]
