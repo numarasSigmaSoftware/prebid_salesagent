@@ -17,9 +17,13 @@ established. ``to_property_list_reference`` in particular is reached from a raw
 A2A read of ``parameters`` — the same unmodelled surface that motivated the
 account narrowing — where a non-dict ``property_list`` degrades to ``None`` and
 silently drops the buyer's scoping request. Whether that should also be strict
-needs a spec cross-check and is tracked separately; the tests below pin only
+needs a spec cross-check and is tracked at #1997; the tests below pin only
 today's behavior, and are not an argument that it is correct.
 """
+
+import contextlib
+import inspect
+from unittest import mock
 
 import pytest
 from adcp.types import (
@@ -52,22 +56,55 @@ _DEGRADING_CONVERTERS = [
 ]
 
 
-def test_every_exported_converter_is_classified() -> None:
-    """A new ``to_*`` helper must be classified, not silently degrade untested.
+def test_every_coercing_converter_is_classified() -> None:
+    """Every exported helper routed through ``_coerce_wire_object`` must be classified.
 
     ``strict=False`` is ``_coerce_wire_object``'s default, so a converter added
     tomorrow degrades a non-dict to ``None`` by default AND is absent from
     ``_DEGRADING_CONVERTERS`` above — untested on exactly the axis that made the
-    account case a fail-open. Pinning membership against the module's ``__all__``
-    turns that silence into a failure until someone classifies the new name.
+    account case a fail-open.
+
+    Discovered by CALLING each exported helper with the delegate spied, not by a
+    ``to_*`` name prefix and not by reading source. The prefix form was escapable:
+    this module also exports ``coerce_*`` helpers (``coerce_creative_filters``), so
+    the identical hazard under that spelling passed silently. Delegation is what
+    creates the hazard, so delegation is what the pin observes — which also means
+    ``to_brand_reference`` needs no hand-written exemption; it is excluded because
+    it demonstrably does not delegate.
     """
-    exported = {name for name in schema_helpers.__all__ if name.startswith("to_")}
-    classified = (
-        {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS}
-        | {"to_account_reference"}  # strict: rejects non-dict (tested above)
-        | {"to_brand_reference"}  # own boundary: not routed through _coerce_wire_object
+    delegated: set[str] = set()
+    real = schema_helpers._coerce_wire_object
+
+    def spy(value, model_cls, context, **kwargs):
+        # The IMMEDIATE caller, so a request builder that reaches the helper only
+        # through a converter (create_get_products_request -> to_account_reference)
+        # is attributed to the converter, which is the thing being classified.
+        delegated.add(inspect.stack()[1].function)
+        return real(value, model_cls, context, **kwargs)
+
+    candidates = [
+        name
+        for name in schema_helpers.__all__
+        if inspect.isfunction(getattr(schema_helpers, name, None))
+        and getattr(schema_helpers, name).__module__ == schema_helpers.__name__
+    ]
+    with mock.patch.object(schema_helpers, "_coerce_wire_object", spy):
+        for name in candidates:
+            fn = getattr(schema_helpers, name)
+            params = list(inspect.signature(fn).parameters.values())
+            if not params or params[0].kind not in (params[0].POSITIONAL_ONLY, params[0].POSITIONAL_OR_KEYWORD):
+                continue
+            with contextlib.suppress(Exception):
+                fn({"__probe__": True})  # a dict reaches the delegate on every coercing helper
+    delegated &= set(schema_helpers.__all__)  # ignore private intermediates
+
+    classified = {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS} | {
+        "to_account_reference"  # strict: rejects non-dict (tested above)
+    }
+    assert delegated == classified, (
+        "a helper delegating to _coerce_wire_object is unclassified — decide whether it "
+        "degrades (add it to _DEGRADING_CONVERTERS) or rejects (strict=True, and test it)"
     )
-    assert exported == classified
 
 
 @pytest.mark.parametrize("value", _UNEXPECTED_TYPES)
@@ -109,12 +146,17 @@ def test_to_account_reference_rejection_names_the_request_field_not_the_model(va
     ``AccountReference1``/``AccountReference2``. Neither name appears in any buyer
     request, so leaking one into ``field`` (a JSONPath-lite path into the REQUEST)
     or into ``suggestion`` tells the buyer to correct a field they never sent.
+
+    Scope, stated so it is not mistaken for more: these are the two DIRECTIVE
+    channels. The same names still appear in ``message`` and
+    ``details.validation_errors[].loc``, which ``format_validation_error`` builds
+    from the raw pydantic error for every boundary in the codebase — pre-existing,
+    tracked at #1996, and deliberately not scrubbed here.
     """
     with pytest.raises(AdCPValidationError) as excinfo:
         to_account_reference(value)  # type: ignore[arg-type]
 
     assert excinfo.value.field == "account"
-    assert "AccountReference" not in str(excinfo.value.field)
     assert "AccountReference" not in str(excinfo.value.suggestion)
 
 
