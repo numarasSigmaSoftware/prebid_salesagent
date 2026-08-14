@@ -57,7 +57,10 @@ def test_to_account_reference_rejection_matches_malformed_dict_shape() -> None:
 
     The unexpected-type rejection routes through the same
     ``adcp_validation_boundary`` as a malformed dict, so a buyer sees one
-    consistent error shape for "bad account" regardless of which way it was bad.
+    consistent error shape for "bad account" regardless of which way it was bad:
+    the same code, recovery, ``field`` and ``suggestion``, and the same
+    ``Invalid account value:`` message prefix. The message *after* that prefix
+    still carries the differing pydantic detail — that is not claimed identical.
     """
     with pytest.raises(AdCPValidationError) as from_bad_type:
         to_account_reference("acc_123")  # type: ignore[arg-type]
@@ -66,8 +69,27 @@ def test_to_account_reference_rejection_matches_malformed_dict_shape() -> None:
 
     assert from_bad_type.value.error_code == from_bad_dict.value.error_code
     assert from_bad_type.value.recovery == from_bad_dict.value.recovery
+    assert from_bad_type.value.field == from_bad_dict.value.field == "account"
+    assert from_bad_type.value.suggestion == from_bad_dict.value.suggestion
     assert str(from_bad_type.value).startswith("Invalid account value:")
     assert str(from_bad_dict.value).startswith("Invalid account value:")
+
+
+@pytest.mark.parametrize("value", [*_UNEXPECTED_TYPES, {}, {"wrong_key": 1}])
+def test_to_account_reference_rejection_names_the_request_field_not_the_model(value: object) -> None:
+    """The buyer-visible field/suggestion name ``account``, never the pydantic model.
+
+    ``AccountReference`` is a generated union whose members pydantic reports as
+    ``AccountReference1``/``AccountReference2``. Neither name appears in any buyer
+    request, so leaking one into ``field`` (a JSONPath-lite path into the REQUEST)
+    or into ``suggestion`` tells the buyer to correct a field they never sent.
+    """
+    with pytest.raises(AdCPValidationError) as excinfo:
+        to_account_reference(value)  # type: ignore[arg-type]
+
+    assert excinfo.value.field == "account"
+    assert "AccountReference" not in str(excinfo.value.field)
+    assert "AccountReference" not in str(excinfo.value.suggestion)
 
 
 def test_to_account_reference_still_accepts_valid_inputs() -> None:

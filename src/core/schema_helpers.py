@@ -34,7 +34,13 @@ from src.core.validation_helpers import adcp_validation_boundary
 
 
 def _coerce_wire_object[ModelT: BaseModel](
-    value: Any, model_cls: type[ModelT], context: str, *, strict: bool = False
+    value: Any,
+    model_cls: type[ModelT],
+    context: str,
+    *,
+    strict: bool = False,
+    field: str | None = None,
+    suggestion: str | None = None,
 ) -> ModelT | None:
     """Shared dict → typed-model coercion with the boundary BUILT IN.
 
@@ -53,15 +59,20 @@ def _coerce_wire_object[ModelT: BaseModel](
     * ``True`` — route the value through ``model_validate`` anyway so Pydantic
       rejects it and the boundary raises ``AdCPValidationError``. Used where a
       silent ``None`` would be a fail-OPEN: a dropped ``account`` leaves
-      ``identity.sandbox`` ``False`` and dispatches to the LIVE adapter. Sharing
-      the boundary (rather than hand-rolling a raise) keeps the buyer-facing
-      message/field/suggestion identical for "bad account" whichever way it was
-      malformed.
+      ``identity.sandbox`` ``False`` and dispatches to the LIVE adapter.
+
+    ``field``/``suggestion`` pin the buyer-visible request field and hint. Without
+    them both are derived from the pydantic location, which for these coercions is
+    the *model* name (``AccountReference1``) — a name that appears in no buyer
+    request. Passing them makes the two ways of malforming one value (non-dict and
+    malformed dict) report an identical ``field`` and ``suggestion``, and share the
+    ``Invalid <context>:`` message prefix; the message text after that prefix still
+    carries the differing pydantic detail.
     """
     if value is None or isinstance(value, model_cls):
         return value
     if isinstance(value, dict) or strict:
-        with adcp_validation_boundary(context=context):
+        with adcp_validation_boundary(context=context, field=field, suggestion=suggestion):
             # model_validate handles plain models and RootModels alike
             # (AccountReference is a RootModel — field-unpacking would break it).
             return model_cls.model_validate(value)
@@ -197,8 +208,19 @@ def to_account_reference(account: dict[str, Any] | AccountReference | None) -> A
     account would skip identity enrichment, leave ``identity.sandbox`` ``False``,
     and route a sandbox request to the LIVE adapter — a quiet failure on exactly
     the axis account isolation defends.
+
+    Both rejection paths are tagged ``field="account"`` (like ``to_brand_reference``'s
+    ``field="brand"``) so wire envelopes name the request field rather than the
+    pydantic union-member model name.
     """
-    return _coerce_wire_object(account, AccountReference, "account value", strict=True)
+    return _coerce_wire_object(
+        account,
+        AccountReference,
+        "account value",
+        strict=True,
+        field="account",
+        suggestion="Correct the 'account' field to match the AdCP specification and resend.",
+    )
 
 
 def to_property_list_reference(

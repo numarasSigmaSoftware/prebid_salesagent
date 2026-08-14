@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def adcp_validation_boundary(context: str = "parameters", field: str | None = None) -> Iterator[None]:
+def adcp_validation_boundary(
+    context: str = "parameters", field: str | None = None, suggestion: str | None = None
+) -> Iterator[None]:
     """Translate a Pydantic ``ValidationError`` into a typed ``AdCPValidationError``.
 
     Transport wrappers and skill handlers validate buyer parameters at the
@@ -46,6 +48,13 @@ def adcp_validation_boundary(context: str = "parameters", field: str | None = No
     under a named request field: coercing a ``BrandReference`` reports
     ``field="brand"``, not the nested pydantic location (e.g. ``industries``).
     When ``None`` (default) the field is derived from the validation error.
+
+    ``suggestion`` is the companion override: the derived hint is built from the
+    same pydantic location as the derived field, so pinning only ``field`` would
+    leave the internal model name in the buyer-visible hint (e.g. "Correct the
+    'AccountReference1' field..."). Pass both together wherever the pydantic
+    location is not a request field path. When ``None`` (default) the hint is
+    derived from the validation error, unchanged.
     """
     try:
         yield
@@ -54,7 +63,7 @@ def adcp_validation_boundary(context: str = "parameters", field: str | None = No
         raise AdCPValidationError(
             format_validation_error(e, context=context),
             field=field if field is not None else first_validation_error_field(e),
-            suggestion=suggest_validation_fix(e),
+            suggestion=suggestion if suggestion is not None else suggest_validation_fix(e),
             details=build_validation_error_details(errors),
         ) from e
 
