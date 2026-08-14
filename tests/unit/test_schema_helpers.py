@@ -8,10 +8,17 @@ The asymmetry is deliberate. The A2A skills read ``account`` straight off raw
 ``parameters`` with no model in front of them, so a silently-dropped account
 skips identity enrichment, leaves ``identity.sandbox`` ``False``, and dispatches
 a sandbox request to the LIVE adapter — a quiet failure on the axis account
-isolation exists to defend. ``context``, by contrast, is opaque correlation data
-the pinned schema says is "never parsed by AdCP agents", so hard-failing a
-non-dict ``context`` would contradict the spec; the same reasoning covers the
-other three, whose callers all sit behind a typed request model.
+isolation exists to defend. ``context``, by contrast, is exempt by spec: it is
+opaque correlation data the pinned schema says is "never parsed by AdCP agents",
+so hard-failing a non-dict ``context`` would contradict the spec.
+
+The remaining converters degrade for reasons that have NOT been individually
+established. ``to_property_list_reference`` in particular is reached from a raw
+A2A read of ``parameters`` — the same unmodelled surface that motivated the
+account narrowing — where a non-dict ``property_list`` degrades to ``None`` and
+silently drops the buyer's scoping request. Whether that should also be strict
+needs a spec cross-check and is tracked separately; the tests below pin only
+today's behavior, and are not an argument that it is correct.
 """
 
 import pytest
