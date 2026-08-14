@@ -211,16 +211,27 @@ def to_account_reference(account: dict[str, Any] | AccountReference | None) -> A
 
     Both rejection paths are tagged ``field="account"`` (like ``to_brand_reference``'s
     ``field="brand"``) so wire envelopes name the request field rather than the
-    pydantic union-member model name.
+    pydantic union-member model name. That covers the two DIRECTIVE channels only;
+    the generated names still reach ``message`` and ``details`` via
+    ``format_validation_error`` — pre-existing across every boundary, tracked at #1996.
     """
     # Error-code note for anyone tempted to "fix" this: the strict non-dict path
     # deliberately emits the SAME code as the pre-existing malformed-dict path
-    # (both go through ``adcp_validation_boundary`` → VALIDATION_ERROR). Whether
-    # VALIDATION_ERROR or INVALID_REQUEST is the spec-correct code for the account
-    # surface is tracked separately and is NOT settled here. Changing one path
-    # alone would give a buyer two different codes for "bad account" depending on
-    # how it was malformed, which is precisely what routing both through one
-    # boundary exists to prevent. The two must move together, or not at all.
+    # (both go through ``adcp_validation_boundary`` → VALIDATION_ERROR).
+    #
+    # The conflict this note exists to answer: the repo's own generated features
+    # grade a malformed account as INVALID_REQUEST, routed to xfail as C1/C2/C4 in
+    # docs/test-debt-bdd-strict-markers.md (#1319), and #1984 records that #1544
+    # converged schema failures on INVALID_REQUEST at every boundary — so this is
+    # the non-converged side of an open convergence. It is deliberate, not an
+    # oversight: the emission is enum-conformant (error-code.json lists both codes
+    # with recovery=correctable) and no 3.1.1 storyboard step sends a malformed
+    # account, so nothing upstream grades the choice today.
+    #
+    # Changing one path alone would give a buyer two different codes for "bad
+    # account" depending on how it was malformed, which is precisely what routing
+    # both through one boundary exists to prevent. The two must move together,
+    # under #1319/#1984 — or not at all.
     return _coerce_wire_object(
         account,
         AccountReference,
