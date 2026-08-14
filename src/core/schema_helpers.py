@@ -213,6 +213,14 @@ def to_account_reference(account: dict[str, Any] | AccountReference | None) -> A
     ``field="brand"``) so wire envelopes name the request field rather than the
     pydantic union-member model name.
     """
+    # Error-code note for anyone tempted to "fix" this: the strict non-dict path
+    # deliberately emits the SAME code as the pre-existing malformed-dict path
+    # (both go through ``adcp_validation_boundary`` → VALIDATION_ERROR). Whether
+    # VALIDATION_ERROR or INVALID_REQUEST is the spec-correct code for the account
+    # surface is tracked separately and is NOT settled here. Changing one path
+    # alone would give a buyer two different codes for "bad account" depending on
+    # how it was malformed, which is precisely what routing both through one
+    # boundary exists to prevent. The two must move together, or not at all.
     return _coerce_wire_object(
         account,
         AccountReference,
