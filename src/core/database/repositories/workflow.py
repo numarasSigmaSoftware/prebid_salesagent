@@ -175,6 +175,15 @@ class WorkflowRepository:
         surviving a server restart (the admin approval that terminalized the step runs
         in a different process, so the in-memory task map is not enough).
 
+        INVARIANT — one writer, one step: an ``external_task_id`` must be written by an
+        operation that produces AT MOST ONE workflow step, because this lookup returns a
+        single row for the key. It is deliberately unordered and ungated: with the
+        invariant held there is nothing to order or count. A caller that writes the same
+        id across N steps (``sync_creatives`` creates one step per creative) makes the
+        key ambiguous, and every reader — durable poll, cancel, webhook correlation —
+        silently acts on an arbitrary one of the N. Such an operation must address its
+        steps by ``step_id`` instead of being threaded through here.
+
         Scoped to BOTH the tenant and the owning ``principal_id`` — see
         :meth:`_principal_scoped_steps` for why the tenant alone is not an
         authorization boundary here.

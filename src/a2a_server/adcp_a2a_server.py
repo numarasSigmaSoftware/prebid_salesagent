@@ -199,21 +199,27 @@ def _dict_to_struct(d: dict) -> struct_pb2.Struct:
 DISCOVERY_SKILLS = AUTH_OPTIONAL_SKILLS
 
 # Skills whose result can be NON-TERMINAL (submitted, awaiting an out-of-band decision).
-# The buyer is handed a ``task_*`` id for these, so the id MUST be persisted on the
-# durable workflow step: ``tasks/get`` reconciles against it, ``tasks/cancel`` refuses
-# without it, and ``resolve_webhook_task_id`` keys the completion webhook on it.
-#
-# One definition, read by both the push-notification injection and the task-id
-# threading, because they are the same set for the same reason: a skill that can notify
-# asynchronously is exactly a skill that can be polled and canceled. They were separate
-# literals, and only one of them listed sync_creatives — so a submitted sync got its
-# webhook config but no task id, and cancel then fabricated CANCELED for a workflow that
-# kept running.
+# This set governs the push-notification injection: a skill that can answer
+# asynchronously is exactly the one whose buyer needs a completion callback.
 _ASYNC_TASK_SKILLS = frozenset({"create_media_buy", "sync_creatives", "update_media_buy"})
 
-# create_media_buy takes the id positionally through a wider signature (it also needs the
-# raw wire payload); the rest take it as a keyword.
-_TASK_ID_BEARING_SKILLS = _ASYNC_TASK_SKILLS - {"create_media_buy"}
+# The subset whose outer ``task_*`` id is threaded through to the durable workflow step,
+# so ``tasks/get`` reconciles against it, ``tasks/cancel`` resolves it, and
+# ``resolve_webhook_task_id`` keys the completion webhook on it. Derived from the set
+# above rather than maintained as a second literal.
+#
+# ``create_media_buy`` and ``update_media_buy`` bear the id: each call produces at most
+# ONE approval step, so the buyer's id names exactly one durable row.
+#
+# ``sync_creatives`` does NOT, and must not: it creates one workflow step PER CREATIVE
+# (``_create_sync_workflow_steps`` loops the creatives needing approval). Stamping the
+# single outer id on every one of them makes the key ambiguous — the lookup resolves an
+# arbitrary one of N, so a cancel would report CANCELED while the other N-1 kept running
+# and later fired their own webhooks. With no id persisted, a sync task resolves to no
+# durable step and ``tasks/cancel`` returns an honest ``TaskNotCancelableError``; the
+# completion webhook keys on ``step_id`` instead, which is the pre-existing behavior and
+# is graded by ``tests/unit/test_creative_webhook_correlation.py``.
+_TASK_ID_BEARING_SKILLS = _ASYNC_TASK_SKILLS - {"sync_creatives"}
 
 
 def _sanitized_envelope(exc: Exception) -> tuple[AdCPError, dict[str, Any]]:
@@ -1683,9 +1689,10 @@ class AdCPRequestHandler(RequestHandler):
         resolves nothing, an in-memory hit raises ``TaskNotCancelableError`` rather than
         stamping CANCELED: the in-memory task is this process's view, so cancelling only
         that would tell the buyer the work stopped while the workflow step kept running
-        and later fired its own completed webhook. Every skill that can return a
-        non-terminal task persists its outer id (``_ASYNC_TASK_SKILLS``), so a missing
-        durable counterpart means the task is genuinely not cancellable here.
+        and later fired its own completed webhook. Only ``_TASK_ID_BEARING_SKILLS``
+        persist their outer id, so a missing durable counterpart means the task is not
+        cancellable through this id — which is the honest answer for a ``sync_creatives``
+        task, whose N per-creative steps no single id can name.
         """
         task_id = params.id
         identity: ResolvedIdentity | None = None
@@ -2186,12 +2193,10 @@ class AdCPRequestHandler(RequestHandler):
             if skill_name == "create_media_buy":
                 result = await handler(parameters, identity, raw_wire_payload=raw_wire_payload, a2a_task_id=task_id)
             elif skill_name in _TASK_ID_BEARING_SKILLS:
-                # Every skill that can return a NON-TERMINAL task must persist the outer
-                # task id, or the buyer holds an id with no durable counterpart: cancel
-                # cannot find the workflow it names, and the completion webhook keys on
-                # step_id instead. Kept as one set beside the push-notification set below,
-                # because a skill that can notify asynchronously is exactly a skill that
-                # can be polled and canceled.
+                # create_media_buy is caught by the branch above (it also needs the raw
+                # wire payload); the other id-bearing skill takes the outer id as a plain
+                # keyword. See _TASK_ID_BEARING_SKILLS for which skills bear the id and
+                # why sync_creatives does not.
                 result = await handler(parameters, identity, a2a_task_id=task_id)
             else:
                 result = await handler(parameters, identity)
@@ -2351,14 +2356,13 @@ class AdCPRequestHandler(RequestHandler):
 
         return response
 
-    async def _handle_sync_creatives_skill(
-        self,
-        parameters: dict,
-        identity: ResolvedIdentity,
-        *,
-        a2a_task_id: str | None = None,
-    ) -> dict:
-        """Handle explicit sync_creatives skill invocation (AdCP spec endpoint)."""
+    async def _handle_sync_creatives_skill(self, parameters: dict, identity: ResolvedIdentity) -> dict:
+        """Handle explicit sync_creatives skill invocation (AdCP spec endpoint).
+
+        Takes no outer ``a2a_task_id``: a sync creates one workflow step per creative, so
+        the single buyer-facing id cannot name one durable row. See
+        ``_TASK_ID_BEARING_SKILLS``.
+        """
         # DEBUG: Log incoming parameters
         logger.info("[A2A sync_creatives] Received parameters keys: %s", list(parameters.keys()))
         logger.info("[A2A sync_creatives] assignments param: %s", parameters.get("assignments"))
@@ -2403,7 +2407,6 @@ class AdCPRequestHandler(RequestHandler):
             context=context,
             account=to_account_reference(parameters.get("account")),
             identity=identity,
-            external_task_id=a2a_task_id,
         )
 
         return response

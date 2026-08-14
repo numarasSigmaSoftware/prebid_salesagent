@@ -951,56 +951,90 @@ class TestEnvelopeFreeProtocolRaises:
 
 
 class TestAsyncTaskSkillsThreadTheOuterTaskId:
-    """Every skill that can return a NON-terminal task must receive the outer task id.
+    """Which async skills carry the buyer's outer task id down to the workflow step.
 
-    The buyer is handed a ``task_*`` id for these skills, and that id is only useful if it
-    reaches the durable workflow step: ``tasks/get`` reconciles against it,
-    ``tasks/cancel`` refuses without it, and ``resolve_webhook_task_id`` keys the
-    completion webhook on it.
+    Two sets, deliberately different, one derived from the other:
 
-    This is a signature-and-set pin rather than a wire test on purpose — the defect it
-    guards is a NEW async skill being added to the set (or to the push-notification
-    injection, which reads the same set) while the task-id threading is forgotten. That is
-    what happened to ``sync_creatives``: it received a push-notification config but no
-    task id, so a submitted sync produced a task id with no durable counterpart, and
-    cancel then reported CANCELED for a workflow that kept running.
+    * ``_ASYNC_TASK_SKILLS`` — can answer non-terminally, so they get the
+      push-notification config injected.
+    * ``_TASK_ID_BEARING_SKILLS`` — additionally persist the outer ``task_*`` id on the
+      durable step, so ``tasks/get`` reconciles against it, ``tasks/cancel`` resolves it,
+      and ``resolve_webhook_task_id`` keys the completion webhook on it.
+
+    ``sync_creatives`` is in the first and NOT the second, and that asymmetry is the
+    contract these tests pin. It creates one workflow step PER CREATIVE, so a single
+    outer id stamped across all of them resolves to an arbitrary one of N: cancel would
+    report CANCELED while the other N-1 kept running and later fired their own webhooks.
+
+    Signature-and-set pins rather than wire tests on purpose — the defect they guard is a
+    membership edit made without confronting how many steps the skill creates.
     """
 
-    def test_every_async_task_skill_handler_accepts_the_outer_task_id(self):
+    def test_every_task_id_bearing_skill_handler_accepts_the_outer_task_id(self):
         import inspect
 
-        from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS, AdCPRequestHandler
+        from src.a2a_server.adcp_a2a_server import _TASK_ID_BEARING_SKILLS, AdCPRequestHandler
 
         handler_map = AdCPRequestHandler._skill_handler_map(AdCPRequestHandler)
         missing = []
-        for skill in sorted(_ASYNC_TASK_SKILLS):
-            assert skill in handler_map, f"{skill} is in _ASYNC_TASK_SKILLS but has no handler"
+        for skill in sorted(_TASK_ID_BEARING_SKILLS):
+            assert skill in handler_map, f"{skill} is in _TASK_ID_BEARING_SKILLS but has no handler"
             params = inspect.signature(handler_map[skill]).parameters
             if "a2a_task_id" not in params:
                 missing.append(skill)
 
         assert not missing, (
-            f"{missing} can return a non-terminal task but their handlers do not accept "
+            f"{missing} are declared task-id-bearing but their handlers do not accept "
             "a2a_task_id, so the buyer's task id is never persisted on the workflow step — "
             "tasks/cancel cannot resolve it and the completion webhook keys on step_id."
         )
 
-    def test_the_push_notification_set_and_the_task_id_set_are_the_same_source(self):
+    def test_sync_creatives_is_async_but_does_not_bear_the_outer_task_id(self):
+        """The asymmetry is the contract, and re-adding sync must be a deliberate act.
+
+        ``sync_creatives`` gets the push-notification config (it is async) but must NOT
+        get the outer task id: ``_create_sync_workflow_steps`` creates one step per
+        creative, and ``WorkflowRepository.get_by_external_task_id`` returns ONE row for
+        the key. Stamping one id on N steps makes every reader — durable poll, cancel,
+        webhook correlation — act on an arbitrary one of them, so cancel answers CANCELED
+        while the remaining steps keep running.
+
+        Pinned on BOTH the set and the handler signature: re-adding it requires editing
+        the set AND widening the handler, so neither half can drift back in on its own.
+        The honest behavior without the id is a ``TaskNotCancelableError`` refusal, graded
+        end-to-end by
+        ``tests/integration/test_a2a_skill_invocation.py::test_cancel_of_multi_creative_sync_task_refuses``.
+        """
+        import inspect
+
+        from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS, _TASK_ID_BEARING_SKILLS, AdCPRequestHandler
+
+        assert "sync_creatives" in _ASYNC_TASK_SKILLS, "sync_creatives is async — it must still receive a push config"
+        assert "sync_creatives" not in _TASK_ID_BEARING_SKILLS, (
+            "sync_creatives creates one workflow step per creative; a single outer task id "
+            "cannot name one of them. Address its steps by step_id instead."
+        )
+
+        handler = AdCPRequestHandler._skill_handler_map(AdCPRequestHandler)["sync_creatives"]
+        assert "a2a_task_id" not in inspect.signature(handler).parameters, (
+            "the sync_creatives handler must not accept a2a_task_id — a parameter that is "
+            "never passed reads like working correlation"
+        )
+
+    def test_the_task_id_set_is_derived_from_the_async_set(self):
         """One definition, not two literals that can drift.
 
-        The push-notification injection and the task-id threading select the same skills
-        for the same reason: a skill that can notify asynchronously is one that can be
-        polled and canceled. They were two separate literals and only one listed
-        ``sync_creatives``.
+        The task-id-bearing set is a proper subset of the async set, computed from it —
+        so a new async skill cannot silently appear in one and not the other without the
+        subtraction being edited on purpose.
         """
         from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS, _TASK_ID_BEARING_SKILLS
 
         assert _TASK_ID_BEARING_SKILLS < _ASYNC_TASK_SKILLS, (
             "_TASK_ID_BEARING_SKILLS must be derived from _ASYNC_TASK_SKILLS, not maintained as an independent literal"
         )
-        # create_media_buy is threaded on its own branch (it also needs the raw wire
-        # payload), so it is the one member handled outside the keyword branch.
-        assert _ASYNC_TASK_SKILLS - _TASK_ID_BEARING_SKILLS == {"create_media_buy"}
+        # sync_creatives is the sole subtraction, for the N-steps-per-call reason above.
+        assert _ASYNC_TASK_SKILLS - _TASK_ID_BEARING_SKILLS == {"sync_creatives"}
 
     def test_the_set_names_every_skill_that_can_return_a_non_terminal_task(self):
         """Membership pin: the three skills whose result can be ``submitted``.
@@ -1008,8 +1042,8 @@ class TestAsyncTaskSkillsThreadTheOuterTaskId:
         Derived from what each skill can RETURN, not from what the dispatch happens to
         thread — create_media_buy and update_media_buy can answer with a submitted
         result awaiting approval, and sync_creatives with creatives pending review.
-        A fourth async skill added without joining this set gets neither a persisted
-        task id nor a push-notification config, which is the drift this pins.
+        A fourth async skill added without joining this set gets no push-notification
+        config, which is the drift this pins.
         """
         from src.a2a_server.adcp_a2a_server import _ASYNC_TASK_SKILLS
 

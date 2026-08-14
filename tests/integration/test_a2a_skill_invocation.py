@@ -30,6 +30,7 @@ from sqlalchemy import text
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from tests.factories.creative_asset import build_assets, image_spec
+from tests.factories.format import AGENT_URL as FORMAT_AGENT_URL
 from tests.helpers.a2a_adcp_validation import validate_a2a_skill_payload
 from tests.utils.a2a_helpers import (
     assert_delivery_forwarded_account,
@@ -435,6 +436,98 @@ class TestA2ASkillInvocation:
         assert handler.tasks[task_id].status.state == TaskState.TASK_STATE_WORKING, (
             "the in-memory task must NOT be stamped CANCELED when the cancel was refused"
         )
+
+    @pytest.mark.asyncio
+    async def test_cancel_of_multi_creative_sync_task_refuses(
+        self, handler, sample_tenant, sample_principal, mock_identity
+    ):
+        """A REAL multi-creative ``sync_creatives`` task id must never yield a CANCELED answer.
+
+        A sync creates one workflow step PER CREATIVE, while the buyer is handed ONE
+        ``task_*`` id. ``get_by_external_task_id`` resolves a key to a single row, so
+        stamping that one id across all N steps let ``tasks/cancel`` cancel an arbitrary
+        one of them, commit, and answer CANCELED — while the other N-1 kept running and
+        later fired their own webhooks. The id is therefore not threaded into sync at all.
+
+        Driven through the real skill so the outcome is production's, not a fixture's:
+        three creatives go in, three ``requires_approval`` steps come out, and none of
+        them carries an outer task id. Both cancel legs are then graded:
+
+        * in-process — the sync answered terminally, so the in-memory task is COMPLETED
+          and the cancel is refused on terminal grounds (``TaskNotCancelableError``).
+          This leg reads the same either way; it is here to pin that a completed sync is
+          never silently re-stamped CANCELED.
+        * cross-process (a fresh handler, i.e. after a restart or on another worker) —
+          this is the leg the threading broke. With no in-memory task the cancel falls
+          straight to the durable lookup, which found one of the three steps and returned
+          a CANCELED Task. It must now find nothing and raise ``TaskNotFoundError``, with
+          all three steps left awaiting approval.
+        """
+        from tests.a2a_helpers import make_a2a_context
+
+        handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
+
+        creatives = [
+            {
+                "creative_id": f"creative_multi_sync_{i}",
+                "name": f"Multi Sync Creative {i}",
+                "format_id": {"agent_url": FORMAT_AGENT_URL, "id": "display_300x250_image"},
+                "assets": build_assets(image_spec(f"asset_{i}", url=f"https://example.com/creative_{i}.jpg")),
+            }
+            for i in range(3)
+        ]
+
+        with patch("src.core.resolved_identity.resolve_identity", return_value=mock_identity):
+            ctx = make_a2a_context(headers={"host": f"{sample_tenant['subdomain']}.example.com"})
+            message = create_a2a_message_with_skill("sync_creatives", {"creatives": creatives})
+            task = await handler.on_message_send(SendMessageRequest(message=message), context=ctx)
+
+        assert isinstance(task, Task)
+        buyer_task_id = task.id
+
+        steps = self._pending_sync_steps(sample_tenant["tenant_id"], sample_principal["principal_id"])
+        assert len(steps) == len(creatives), (
+            "the sync must have produced one approval step per creative — without N>1 steps "
+            "this scenario would not exercise the ambiguity it exists to pin"
+        )
+        assert all("external_task_id" not in data for data in steps), (
+            "no creative-approval step may carry the buyer's outer task id: one id across N "
+            "steps resolves to an arbitrary one of them"
+        )
+
+        # Leg 1 — same process: refused because the sync already answered terminally.
+        with patch.object(handler, "_resolve_a2a_identity", return_value=mock_identity):
+            with pytest.raises(TaskNotCancelableError):
+                await handler.on_cancel_task(CancelTaskRequest(id=buyer_task_id), context=None)
+        assert handler.tasks[buyer_task_id].status.state != TaskState.TASK_STATE_CANCELED, (
+            "a refused cancel must not stamp the in-memory task CANCELED"
+        )
+
+        # Leg 2 — a different process: only the durable store can answer, and it must not.
+        restarted = AdCPRequestHandler()
+        assert buyer_task_id not in restarted.tasks, "a fresh handler must have no in-memory view of the task"
+        restarted._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
+        with patch.object(restarted, "_resolve_a2a_identity", return_value=mock_identity):
+            with pytest.raises(TaskNotFoundError):
+                await restarted.on_cancel_task(CancelTaskRequest(id=buyer_task_id), context=None)
+
+        after = self._pending_sync_steps(sample_tenant["tenant_id"], sample_principal["principal_id"])
+        assert len(after) == len(creatives), (
+            "every creative-approval step must still be awaiting approval — cancelling an "
+            "arbitrary one of N and reporting CANCELED is the defect this pins"
+        )
+
+    def _pending_sync_steps(self, tenant_id: str, principal_id: str) -> list[dict]:
+        """``request_data`` of this principal's still-pending sync_creatives approval steps."""
+        from src.core.database.repositories.uow import WorkflowUoW
+
+        with WorkflowUoW(tenant_id) as uow:
+            assert uow.workflows is not None
+            return [
+                step.request_data or {}
+                for step in uow.workflows.list_by_tenant(principal_id=principal_id, status="requires_approval")
+                if step.tool_name == "sync_creatives"
+            ]
 
     @pytest.mark.asyncio
     async def test_get_in_memory_task_is_principal_isolated(

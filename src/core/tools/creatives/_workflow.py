@@ -24,15 +24,17 @@ def _sync_step_request_data(
     push_notification_config: PushNotificationConfig | dict | None,
     context: ContextObject | dict | None,
     identity: ResolvedIdentity | None,
-    external_task_id: str | None,
 ) -> dict[str, Any]:
     """Build the ``request_data`` persisted on a creative-approval workflow step.
 
     One home for what a creative-approval step carries, because the readers are spread
-    out: the webhook payload builder reads ``protocol`` and ``context``,
-    ``resolve_webhook_task_id`` reads ``external_task_id``, and the admin UI reads the
-    creative fields. Optional keys are OMITTED rather than written as None — the readers
-    test presence.
+    out: the webhook payload builder reads ``protocol`` and ``context``, and the admin UI
+    reads the creative fields. Optional keys are OMITTED rather than written as None —
+    the readers test presence.
+
+    No outer transport task id is written here. A sync creates one step per creative, so
+    a single ``external_task_id`` would name N rows ambiguously; ``resolve_webhook_task_id``
+    therefore falls back to ``step_id`` for creative approvals.
     """
     request_data: dict[str, Any] = {
         "creative_id": creative_info["creative_id"],
@@ -49,11 +51,6 @@ def _sync_step_request_data(
         request_data["context"] = context
     # Drives webhook payload construction.
     request_data["protocol"] = identity.protocol if identity else "mcp"
-    # The buyer's outer A2A task id, so tasks/get, tasks/cancel and the completion
-    # webhook all key on the id the buyer actually holds. Absent on MCP/REST, which
-    # have no outer task id.
-    if external_task_id:
-        request_data["external_task_id"] = external_task_id
     return request_data
 
 
@@ -65,18 +62,15 @@ def _create_sync_workflow_steps(
     push_notification_config: PushNotificationConfig | dict | None,
     context: ContextObject | dict | None,
     identity: ResolvedIdentity | None = None,
-    external_task_id: str | None = None,
 ) -> None:
     """Create workflow steps for creatives requiring approval.
 
     Creates a persistent async context and one workflow step per creative,
     plus ``ObjectWorkflowMapping`` records linking each creative to its step.
 
-    ``external_task_id`` is the buyer's outer A2A ``task_*`` id, persisted so the id
-    the buyer holds resolves to the durable step. Without it ``tasks/cancel`` finds no
-    durable counterpart for a submitted sync, and the completion webhook keys on
-    ``step_id`` rather than the id the buyer was handed. None on MCP/REST, which have
-    no outer task id.
+    ONE STEP PER CREATIVE is why no transport-level outer task id is carried in here:
+    a single id stamped across N steps resolves to an arbitrary one of them. Each step
+    is addressed by its own ``step_id``.
     """
     from src.core.context_manager import get_context_manager
 
@@ -128,7 +122,6 @@ def _create_sync_workflow_steps(
                 push_notification_config=push_notification_config,
                 context=context,
                 identity=identity,
-                external_task_id=external_task_id,
             )
 
             step = ctx_manager.create_workflow_step(
