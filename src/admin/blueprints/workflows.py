@@ -225,9 +225,15 @@ def _respond_to_non_approvable_media_buy(media_buy: MediaBuy | None) -> tuple[Re
     """Respond for a buy that can no longer be approved — the two outcomes differ.
 
     An already-decided (terminal) buy is an idempotent success. A buy that is simply gone
-    approved nothing and never will, so neither its flash nor its JSON arm may claim
-    success — the distinction ``operations.py`` already encodes. Owning both arms here
-    keeps the caller free of a branch that would only re-derive this decision.
+    approved nothing and never will, so neither arm may claim success — the distinction
+    ``operations.py`` already encodes. Owning both arms here keeps the caller free of a
+    branch that would only re-derive this decision.
+
+    Both outcomes are reported in the JSON body only. This route is fetch-called and
+    returns JSON on every path, so a flash queued here is never rendered — it survives in
+    the session and surfaces on some unrelated later page instead. The body already
+    carries each signal (``error`` for the vanished arm, ``success: true`` for the replay),
+    and ``templates/workflow_review.html`` reports both.
     """
     logger.warning(
         "[APPROVAL] Media buy not executed: media_buy=%s, status=%s",
@@ -235,9 +241,7 @@ def _respond_to_non_approvable_media_buy(media_buy: MediaBuy | None) -> tuple[Re
         sanitize_log_value(media_buy.status if media_buy else "N/A"),
     )
     if media_buy is None:
-        flash(MEDIA_BUY_VANISHED_MESSAGE, "warning")
         return jsonify({"success": False, "error": MEDIA_BUY_VANISHED_MESSAGE}), 404
-    flash("Workflow step approved successfully", "success")
     return jsonify({"success": True}), 200
 
 

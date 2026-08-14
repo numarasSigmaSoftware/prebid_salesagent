@@ -434,11 +434,13 @@ class TestWorkflowDecisionOwnership:
         body = r.get_json()
         assert body.get("success") is False, f"a vanished buy must not report success: {body}"
         assert body.get("error") == MEDIA_BUY_VANISHED_MESSAGE
-        # The flash channel is the operator's other report of the same event; it must
-        # carry the same warning, not the shared "approved successfully" success.
+        # The JSON body is the ONLY report channel here: this route is fetch-called and
+        # returns JSON on every path, so a flash queued for it is never rendered — it
+        # survives in the session and surfaces on some unrelated later page. Re-adding
+        # the flash reddens this.
         with client.session_transaction() as sess:
             flashes = sess.get("_flashes", [])
-        assert ("warning", MEDIA_BUY_VANISHED_MESSAGE) in flashes, f"vanished flash missing: {flashes}"
+        assert flashes == [], f"a JSON-only route must strand no flash: {flashes}"
         # The step follows the buy decision; with no buy there is nothing to approve.
         assert _step_status(test_tenant, step_id) == "pending_approval"
 
@@ -465,9 +467,12 @@ class TestWorkflowDecisionOwnership:
         assert r.status_code == 200
         body = r.get_json()
         assert body.get("success") is True, f"an already-decided buy replays as success: {body}"
+        # Same stranded-flash mechanism as the vanished arm: the fetch caller reads
+        # ``success`` from the body, so a success flash queued here would only ever be
+        # rendered on an unrelated later page. Re-adding it reddens this.
         with client.session_transaction() as sess:
             flashes = sess.get("_flashes", [])
-        assert ("success", "Workflow step approved successfully") in flashes, f"success flash missing: {flashes}"
+        assert flashes == [], f"a JSON-only route must strand no flash: {flashes}"
 
     def test_reject_on_terminal_step_returns_409(self, client, test_tenant, factory_session):
         """Replaying reject on a rejected step → 409; the step stays rejected."""
