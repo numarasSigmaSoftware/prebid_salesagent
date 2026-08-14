@@ -15,7 +15,6 @@ from pydantic import ValidationError
 
 from src.core.exceptions import (
     AdCPInvalidRequestError,
-    AdCPValidationError,
     build_validation_error_details,
 )
 from src.core.exceptions import (
@@ -29,8 +28,6 @@ logger = logging.getLogger(__name__)
 def adcp_validation_boundary(
     context: str = "parameters",
     field: str | None = None,
-    *,
-    error_type: type[AdCPValidationError] = AdCPInvalidRequestError,
 ) -> Iterator[None]:
     """Translate a Pydantic ``ValidationError`` into a typed ``AdCPInvalidRequestError``.
 
@@ -59,7 +56,7 @@ def adcp_validation_boundary(
         yield
     except ValidationError as e:
         errors = e.errors()
-        raise error_type(
+        raise AdCPInvalidRequestError(
             format_validation_error(e, context=context),
             field=field if field is not None else first_validation_error_field(e),
             suggestion=suggest_validation_fix(e),
