@@ -30,6 +30,7 @@ from adcp.types import (
     ReportingWebhook,
 )
 
+from src.core import schema_helpers
 from src.core.exceptions import AdCPValidationError
 from src.core.schema_helpers import (
     to_account_reference,
@@ -49,6 +50,24 @@ _DEGRADING_CONVERTERS = [
     (to_push_notification_config, PushNotificationConfig),
     (to_property_list_reference, PropertyListReference),
 ]
+
+
+def test_every_exported_converter_is_classified() -> None:
+    """A new ``to_*`` helper must be classified, not silently degrade untested.
+
+    ``strict=False`` is ``_coerce_wire_object``'s default, so a converter added
+    tomorrow degrades a non-dict to ``None`` by default AND is absent from
+    ``_DEGRADING_CONVERTERS`` above — untested on exactly the axis that made the
+    account case a fail-open. Pinning membership against the module's ``__all__``
+    turns that silence into a failure until someone classifies the new name.
+    """
+    exported = {name for name in schema_helpers.__all__ if name.startswith("to_")}
+    classified = (
+        {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS}
+        | {"to_account_reference"}  # strict: rejects non-dict (tested above)
+        | {"to_brand_reference"}  # own boundary: not routed through _coerce_wire_object
+    )
+    assert exported == classified
 
 
 @pytest.mark.parametrize("value", _UNEXPECTED_TYPES)
