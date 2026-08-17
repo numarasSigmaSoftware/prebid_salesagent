@@ -125,7 +125,7 @@ from src.core.helpers.creative_helpers import (
     process_and_upload_package_creatives,
 )
 from src.core.idempotency_logging import redact_idempotency_key
-from src.core.logging_config import log_safe
+from src.core.logging_config import log_safe, scrub_control_chars
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import to_brand_reference, to_context_object, to_reporting_webhook
 from src.core.schemas import (
@@ -1733,7 +1733,7 @@ def _raise_degraded_replay_outcome(
         existing = uow.media_buys.find_by_idempotency_key(idempotency_key, principal_id, account_id=account_id)
         if existing is None:
             raise AdCPValidationError(
-                f"Idempotency key {redact_idempotency_key(idempotency_key)} not found after race resolution",
+                f"Idempotency key {scrub_control_chars(redact_idempotency_key(idempotency_key))} not found after race resolution",
                 recovery="terminal",
             )
 
@@ -1949,14 +1949,14 @@ def _cache_and_return(
     except IntegrityError:
         logger.info(
             "Idempotency cache race for key %s (tenant %s, principal %s) — winner already stored",
-            redact_idempotency_key(req.idempotency_key),
+            scrub_control_chars(redact_idempotency_key(req.idempotency_key)),
             identity.tenant_id,
             identity.principal_id,
         )
     except Exception:
         logger.warning(
             "Best-effort idempotency cache write failed for key %s (tenant %s, principal %s)",
-            redact_idempotency_key(req.idempotency_key),
+            scrub_control_chars(redact_idempotency_key(req.idempotency_key)),
             identity.tenant_id,
             identity.principal_id,
             exc_info=True,
@@ -2161,7 +2161,7 @@ def _resolve_idempotency_race_or_raise(
         "Idempotency race: another request won the commit for key %s%s. "
         "Resolving via the winner's cached response (fail-closed transient if not "
         "yet visible). An orphan adapter-side order may exist.",
-        redact_idempotency_key(idempotency_key),
+        scrub_control_chars(redact_idempotency_key(idempotency_key)),
         f" ({media_buy_id})" if media_buy_id else "",
     )
     return _replay_after_race(
@@ -2388,7 +2388,7 @@ async def _create_media_buy_work(
         if replay is not None:
             logger.info(
                 "Idempotency replay: returning cached success for key %s",
-                redact_idempotency_key(req.idempotency_key),
+                scrub_control_chars(redact_idempotency_key(req.idempotency_key)),
             )
             return replay
         # Miss or unusable cached envelope — proceed as a fresh execution; the

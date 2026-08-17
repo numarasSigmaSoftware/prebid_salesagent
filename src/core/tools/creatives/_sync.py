@@ -15,6 +15,7 @@ from src.core.database.repositories.uow import CreativeUoW, IdempotencyUoW
 from src.core.exceptions import AdCPError
 from src.core.helpers import log_tool_activity
 from src.core.idempotency_canonical import canonical_payload_hash
+from src.core.logging_config import scrub_control_chars
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
 from src.core.schemas._base import validate_idempotency_key_shape
@@ -204,7 +205,7 @@ def _sync_creatives_impl(
 
             logger.info(
                 "Idempotency replay: returning cached sync_creatives success for key %s",
-                redact_idempotency_key(idempotency_key),
+                scrub_control_chars(redact_idempotency_key(idempotency_key)),
             )
             return reservation.replay
         reservation_attempt_id = reservation.attempt_id

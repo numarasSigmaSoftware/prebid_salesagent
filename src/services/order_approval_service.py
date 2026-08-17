@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig, SyncJob
+from src.core.logging_config import scrub_control_chars
 from src.core.security.webhook_http import BEARER_AUTH_SCHEME, is_auth_scheme
 from src.core.thread_registry import ThreadRegistry
 from src.core.webhook_validator import reject_unsafe_outbound_webhook_url, webhook_url_for_log
@@ -358,6 +359,34 @@ def _approval_webhook_headers(config: PushNotificationConfig | None) -> dict[str
         headers["Authorization"] = f"Bearer {config.authentication_token}"
     elif is_auth_scheme(config.authentication_type, _BASIC_AUTH_SCHEME) and config.authentication_token:
         headers["Authorization"] = f"Basic {config.authentication_token}"
+    elif config.authentication_type:
+        # Two DIFFERENT causes reach here, and conflating them misdirects the
+        # operator. The elif fires whenever the scheme-match ifs failed for ANY
+        # reason — including a RECOGNISED scheme with no token — so a
+        # Bearer-configured row with authentication_token=None used to log
+        # "scheme Bearer is not supported here (expected Bearer or Basic)",
+        # naming Bearer in both halves of the sentence and pointing at scheme
+        # support when the real problem is a missing credential.
+        #
+        # No auth configured at all (falsy authentication_type) is legitimate
+        # and stays quiet. This path supports Bearer and Basic; the delivery
+        # path supports HMAC-SHA256 and Bearer — the sets differ deliberately
+        # (only delivery signs), so they are named rather than merged.
+        recognised = is_auth_scheme(config.authentication_type, BEARER_AUTH_SCHEME) or is_auth_scheme(
+            config.authentication_type, _BASIC_AUTH_SCHEME
+        )
+        if recognised:
+            logger.warning(
+                "Approval webhook auth scheme %s is configured with no token; sending UNAUTHENTICATED",
+                scrub_control_chars(config.authentication_type),
+            )
+        else:
+            logger.warning(
+                "Approval webhook auth scheme %s is not supported here (expected %s or %s); sending UNAUTHENTICATED",
+                scrub_control_chars(config.authentication_type),
+                BEARER_AUTH_SCHEME,
+                _BASIC_AUTH_SCHEME,
+            )
     if config.validation_token:
         headers["X-Webhook-Token"] = config.validation_token
     return headers

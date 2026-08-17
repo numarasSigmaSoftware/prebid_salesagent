@@ -372,3 +372,62 @@ class TestApprovalWebhookAuthSchemeIsCaseInsensitive:
         from src.services.order_approval_service import _approval_webhook_headers
 
         assert "Authorization" not in _approval_webhook_headers(self._config("Digest"))
+
+
+class TestUnrecognisedSchemeIsNotSilent:
+    """An unrecognised scheme means UNAUTHENTICATED delivery — it must say so.
+
+    Fixing the lowercase-literal bug left this shape open: both scheme
+    dispatches fell through with no `else`, so a configured-but-unmatched
+    scheme sent the notification with no Authorization header and no signal.
+    "No auth configured at all" is a different, legitimate case and stays
+    quiet.
+    """
+
+    def test_configured_but_unknown_scheme_warns(self, caplog):
+        import logging
+
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        config = TestApprovalWebhookAuthSchemeIsCaseInsensitive._config("Digest")
+        with caplog.at_level(logging.WARNING, logger="src.services.order_approval_service"):
+            headers = _approval_webhook_headers(config)
+
+        assert "Authorization" not in headers
+        assert any("UNAUTHENTICATED" in r.message or "UNAUTHENTICATED" in r.getMessage() for r in caplog.records), (
+            "an unrecognised scheme sent an unauthenticated notification without warning"
+        )
+
+    def test_recognised_scheme_with_no_token_names_the_TOKEN_not_the_scheme(self, caplog):
+        """The two causes must not be conflated.
+
+        The elif fires whenever the scheme-match ifs failed for ANY reason, so a
+        Bearer row with no token logged "scheme Bearer is not supported here
+        (expected Bearer or Basic)" — Bearer in both halves of the sentence,
+        pointing the operator at scheme support when the credential is missing.
+        """
+        import logging
+
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        config = TestApprovalWebhookAuthSchemeIsCaseInsensitive._config("Bearer")
+        config.authentication_token = None
+        with caplog.at_level(logging.WARNING, logger="src.services.order_approval_service"):
+            headers = _approval_webhook_headers(config)
+
+        assert "Authorization" not in headers
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "configured with no token" in message, f"wrong axis: {message!r}"
+        assert "is not supported" not in message, f"a recognised scheme must not be called unsupported: {message!r}"
+
+    def test_no_configured_scheme_stays_quiet(self, caplog):
+        """Absence of auth is legitimate; only a MISMATCH is noteworthy."""
+        import logging
+
+        from src.services.order_approval_service import _approval_webhook_headers
+
+        config = TestApprovalWebhookAuthSchemeIsCaseInsensitive._config(None)
+        with caplog.at_level(logging.WARNING, logger="src.services.order_approval_service"):
+            _approval_webhook_headers(config)
+
+        assert not [r for r in caplog.records if "UNAUTHENTICATED" in r.getMessage()]

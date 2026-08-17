@@ -48,6 +48,7 @@ from src.core.exceptions import (
 )
 from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
 from src.core.lifecycle import run_all_shutdown_callbacks
+from src.core.logging_config import scrub_control_chars
 from src.core.main import mcp
 from src.core.resolved_identity import resolve_identity
 from src.core.tool_error_logging import handle_tool_error, record_boundary_error
@@ -164,6 +165,39 @@ async def _rest_application_context(request: Request) -> dict[str, object] | Non
     return None
 
 
+def _safe_request_path(request: Request) -> str:
+    """The request path for a log line, without trusting the read to succeed."""
+    try:
+        return scrub_control_chars(request.url.path)
+    except Exception:  # noqa: BLE001 - a path we cannot read must not cost the buyer the envelope
+        logger.debug("REST boundary: request path unreadable for logging", exc_info=True)
+        return "<unreadable-path>"
+
+
+def _safe_status_code(exc: AdCPError) -> int:
+    """`exc.status_code` without trusting the attribute to exist or be an int."""
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else 500
+
+
+def _minimal_envelope(exc: AdCPError) -> dict[str, object]:
+    """The last envelope the buyer can still be given, from guarded reads only.
+
+    Every access is defensive because this runs after two prior attempts have
+    already failed: a custom `__str__` that raises, or a missing/odd
+    `error_code`, must not turn a degraded response into no response.
+    """
+    code = getattr(exc, "error_code", None)
+    if not isinstance(code, str) or not code:
+        code = "INTERNAL_ERROR"
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 - a raising __str__ must not cost the buyer the envelope
+        message = "An internal error occurred and its detail could not be rendered."
+    minimal = {"code": code, "message": message}
+    return {"adcp_error": minimal, "errors": [minimal]}
+
+
 async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
     """Build a JSONResponse carrying the two-layer envelope for ``exc``.
 
@@ -186,24 +220,61 @@ async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
         exc = normalize_to_adcp_error(exc, context=await _rest_application_context(request))
     tenant_id, principal_id = _best_effort_rest_identity(request)
     record_boundary_error("rest", request.url.path, exc, tenant_id=tenant_id, principal_id=principal_id)
-    envelope = build_two_layer_error_envelope(exc)
+    envelope: dict[str, object] | None = None
     try:
+        # BOTH calls are inside the try. build_two_layer_error_envelope walks
+        # the buyer's context and is the likelier of the two to raise; leaving
+        # it one line above the try meant the guard covered only JSONResponse,
+        # so the failure it exists to prevent — a raise inside the exception
+        # handler, hence no response at all — still had an open path.
+        envelope = build_two_layer_error_envelope(exc)
         return JSONResponse(status_code=exc.status_code, content=envelope)
     except (ValueError, TypeError):
         # Last-resort guard, not the primary defence: `context` is coerced to
         # JSON-safe values by `serialize_application_context` before it ever
-        # gets here. But this is an exception handler — a raise at this line
-        # does not surface as itself, it REPLACES the buyer's real error with
-        # no response at all. Whatever the unencodable value turns out to be,
-        # the buyer is better served by their error code without the context
-        # echo than by silence, so drop the echo and emit the envelope.
+        # gets here. But this is an exception handler — a raise here does not
+        # surface as itself, it REPLACES the buyer's real error with no
+        # response at all. The buyer is better served by their error code
+        # without the context echo than by silence.
         logger.exception(
             "REST envelope was not JSON-encodable; emitting it without the context echo (code=%s, path=%s)",
             exc.error_code,
-            request.url.path,
+            scrub_control_chars(request.url.path),
         )
-        envelope.pop("context", None)
+
+    # `context` is the only unbounded, buyer-controlled value in the envelope,
+    # so dropping it is the retry. `envelope is None` means the BUILDER raised
+    # rather than the encoder, in which case there is nothing to pop from —
+    # clear the context on the error and rebuild.
+    try:
+        if envelope is None:
+            exc.context = None
+            envelope = build_two_layer_error_envelope(exc)
+        else:
+            envelope.pop("context", None)
         return JSONResponse(status_code=exc.status_code, content=envelope)
+    except (ValueError, TypeError):
+        # Terminal net. The comment here used to claim it was "built by hand from
+        # scalar attributes so it cannot depend on anything that has already
+        # failed twice" — but `str(exc)` is a method call, not a scalar read, and
+        # an exception whose __str__ raises would propagate straight out of this
+        # handler. That is the exact failure this three-tier chain exists to
+        # prevent, reintroduced at its own last line. Nothing in
+        # src/core/exceptions.py overrides __str__ today; the point is that the
+        # tier must not depend on that staying true.
+        #
+        # So every read here is now guarded, and the whole tier is wrapped: past
+        # this point there is no fourth tier to fall back to.
+        # No try around the log call: the only value in it that could plausibly
+        # raise is the buyer-controlled path, so that is read defensively into a
+        # local instead. A bare `except Exception: pass` here would be a silent
+        # except — which this repo forbids, and rightly: it would hide the very
+        # failure this tier exists to report.
+        logger.exception(
+            "REST envelope could not be rebuilt; emitting the minimal shape (path=%s)",
+            _safe_request_path(request),
+        )
+        return JSONResponse(status_code=_safe_status_code(exc), content=_minimal_envelope(exc))
 
 
 def _best_effort_rest_identity(request: Request) -> tuple[str | None, str | None]:
@@ -576,7 +647,7 @@ async def _handle_landing_page(request: Request):
             html_content = await asyncio.to_thread(generate_tenant_landing_page, result.tenant, result.effective_host)
             return HTMLResponse(content=html_content)
         except Exception as e:
-            logger.error(f"Error generating landing page: {e}", exc_info=True)
+            logger.error("Error generating landing page: %s", scrub_control_chars(str(e)), exc_info=True)
             return HTMLResponse(
                 content=generate_fallback_landing_page(
                     f"Error generating landing page for {result.tenant.get('name', 'tenant')}"

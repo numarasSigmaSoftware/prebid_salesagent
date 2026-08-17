@@ -14,7 +14,6 @@ default, retaining explicit legacy HMAC/Bearer selectors. It provides:
 import atexit
 import json
 import logging
-import random
 import threading
 import time
 from collections import deque
@@ -46,6 +45,7 @@ from src.core.security.webhook_http import (
     post_webhook_status,
     redact_webhook_url,
     validate_webhook_auth_selector,
+    webhook_retry_delay_seconds,
 )
 from src.core.webhook_validator import WebhookURLValidator
 from src.services.protocol_webhook_service import _default_webhook_signature_headers
@@ -564,14 +564,27 @@ class WebhookDeliveryService:
                     body=payload_bytes,
                 )
             )
+        # 1546's warn-and-send-UNAUTHENTICATED branch for a configured but
+        # unusable scheme is not carried over: validate_webhook_auth_selector
+        # above already REFUSES both causes it separated — an unsupported
+        # scheme, and a recognised scheme whose credentials are missing or
+        # under 32 chars. Refusing is strictly stronger than warning and then
+        # sending unauthenticated, and this profile signs by default anyway.
         return headers, payload_bytes
 
     @staticmethod
     def _wait_before_retry(attempt: int, max_retries: int) -> None:
-        """Apply exponential backoff plus jitter before a retry attempt."""
-        if attempt == 0:
+        """Sleep the shared backoff before a retry attempt.
+
+        The delay comes from `webhook_retry_delay_seconds`, the same function
+        the deadline derives its budget from. This used to hardcode
+        `(2**attempt) + random.uniform(0, 1)` while `_worst_case_delivery_seconds`
+        re-expressed the identical formula, so the two could drift apart with
+        nothing noticing.
+        """
+        delay = webhook_retry_delay_seconds(attempt)
+        if delay == 0.0:
             return
-        delay = (2**attempt) + random.uniform(0, 1)
         logger.debug(f"Retrying webhook delivery after {delay:.2f}s (attempt {attempt + 1}/{max_retries})")
         time.sleep(delay)
 

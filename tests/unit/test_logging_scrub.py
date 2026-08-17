@@ -168,7 +168,23 @@ _BUYER_ID_NAMES = frozenset({"media_buy_id", "buyer_ref", "creative_id", "packag
 _BUYER_ATTRS = frozenset({"url", "text", "body"}) | _BUYER_ID_NAMES
 # Calls whose result cannot carry raw buyer bytes into the record.
 _SANITIZING_OR_SAFE_CALLS = frozenset(
-    {"scrub_control_chars", "log_safe", "len", "type", "id", "bool", "int", "float", "sorted", "list"}
+    {
+        "scrub_control_chars",
+        "log_safe",
+        # Scrubs internally and returns a placeholder when the read fails; its
+        # whole purpose is to yield a log-safe path. Listed because the Call
+        # branch is deny-by-default, so an unrecognised call is flagged even
+        # when it sanitizes — which is the branch behaving correctly.
+        "_safe_request_path",
+        "len",
+        "type",
+        "id",
+        "bool",
+        "int",
+        "float",
+        "sorted",
+        "list",
+    }
 )
 
 # A URL needs MORE than control-char scrubbing. A buyer's callback URL routinely
@@ -313,10 +329,15 @@ def _raw_buyer_channel_hits(tree) -> list[str]:
                         if raw is not None:
                             hits.append(f"line {value.value.lineno}: raw {{{raw}}} in a logger f-string")
             elif isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod):
-                # "...%s..." % value
-                raw = is_raw_buyer_channel(arg.right)
-                if raw is not None:
-                    hits.append(f"line {arg.lineno}: raw {raw} via the %-operator")
+                # "...%s..." % value  AND  "...%s %s..." % (a, b). Only the
+                # scalar form was modelled, so every multi-value %-form was
+                # invisible — the commonest shape in this codebase's log calls.
+                rhs = arg.right
+                operands = rhs.elts if isinstance(rhs, ast.Tuple) else [rhs]
+                for operand in operands:
+                    raw = is_raw_buyer_channel(operand)
+                    if raw is not None:
+                        hits.append(f"line {arg.lineno}: raw {raw} via the %-operator")
             elif isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute) and arg.func.attr == "format":
                 for fmt_arg in arg.args:
                     raw = is_raw_buyer_channel(fmt_arg)
@@ -341,16 +362,47 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    modules = sorted((root / "src" / "services").glob("*webhook*.py"))
-    # Buyer log seams outside src/services that also call the scrubber.
-    modules.append(root / "src" / "a2a_server" / "adcp_a2a_server.py")
-    modules.append(root / "src" / "services" / "a2a_task_lifecycle.py")
-    modules.append(root / "src" / "core" / "context_manager.py")
-    modules.append(root / "src" / "core" / "webhook_validator.py")
-    # The pinned-egress layer: same buyer URLs, same log seam, different dir —
-    # so the src/services glob never reached it.
-    modules.append(root / "src" / "core" / "security" / "webhook_http.py")
-    return [m for m in modules if m.exists()]
+    modules = set((root / "src" / "services").glob("*webhook*.py"))
+
+    # DERIVED from "handles buyer URLs", not from "already calls the scrubber".
+    # The previous criterion was self-limiting: a module that sanitizes nothing
+    # was structurally exempt, so the completeness test could only pull in
+    # modules that were already partly safe. Adding a raw-URL logger call to
+    # order_approval_service.py left this file at 48 passed.
+    url_seam_markers = ("webhook_url_for_log", "sanitize_webhook_url_for_log", "scrub_control_chars")
+    for path in sorted((root / "src").rglob("*.py")):
+        text = path.read_text()
+        if any(marker in text for marker in url_seam_markers):
+            modules.add(path)
+
+    return [m for m in sorted(modules) if m.exists()]
+
+
+# Pre-existing violations in modules the widened criterion newly reaches. This
+# is a RATCHET, the repo's established pattern for exactly this situation
+# (.duplication-baseline, .type-ignore-baseline, .ruff-complexity-baseline) —
+# NOT an allowlist. Counts may only fall.
+#
+# Why a ratchet rather than 48 fixes: widening the criterion is the correctness
+# change (a new raw-URL site in an unscanned module was invisible), and it is
+# separable from remediating 48 pre-existing sites across four untouched
+# modules. #1953 tracks order_approval_service.py's raw-exception sites.
+#
+# LIMIT, stated because the ratchet's "every module NOT listed here is held at
+# ZERO" is only true of modules the scan set REACHES. The set is derived from
+# mentioning a sanitizer or URL helper, so a module that sanitizes NOTHING is
+# never scanned at all — not held at zero. src/core/webhook_delivery.py is
+# exactly that: zero markers, and two raw buyer-URL log sites this guard cannot
+# see. Closing it needs the derivation to catch a zero-marker module with a raw
+# URL f-string, which is tracked, not patched here.
+# Every module NOT listed here is held at zero, so the modules this PR touched
+# cannot regress.
+_PREEXISTING_RAW_CHANNELS: dict[str, int] = {
+    "_sync.py": 2,
+    "logging_config.py": 2,
+    "media_buy_create.py": 35,
+    "order_approval_service.py": 8,
+}
 
 
 class TestWebhookLogScrubCoverage:
@@ -371,14 +423,43 @@ class TestWebhookLogScrubCoverage:
             "scan set makes this guard pass vacuously"
         )
         violations: list[str] = []
+        over_budget: list[str] = []
         for module in modules:
-            for hit in _raw_buyer_channel_hits(ast.parse(module.read_text(), filename=str(module))):
-                violations.append(f"{module.name}: {hit}")
-        assert not violations, (
+            hits = [
+                f"{module.name}: {hit}"
+                for hit in _raw_buyer_channel_hits(ast.parse(module.read_text(), filename=str(module)))
+            ]
+            budget = _PREEXISTING_RAW_CHANNELS.get(module.name, 0)
+            if len(hits) > budget:
+                over_budget.append(f"{module.name}: {len(hits)} raw channels, ratchet allows {budget}")
+                violations.extend(hits[budget:])
+        assert not over_budget, (
             "Buyer-controlled channels must route through scrub_control_chars in logger calls "
             "(wrap the value, e.g. scrub_control_chars(str(exc)); log a dict's shape with "
-            "sorted(x.keys()) rather than its content):\n  " + "\n  ".join(violations)
+            "sorted(x.keys()) rather than its content). Modules absent from "
+            "_PREEXISTING_RAW_CHANNELS are held at ZERO:\n  " + "\n  ".join(over_budget + violations)
         )
+
+    def test_the_ratchet_never_loosens(self):
+        """Counts may only fall. A module that gets clean must leave the dict.
+
+        Without this, remediating a site silently leaves slack behind for the
+        next raw one to occupy — which is how a ratchet quietly becomes an
+        allowlist.
+        """
+        import ast as _ast
+
+        stale, loosened = [], []
+        by_name = {m.name: m for m in _webhook_log_modules()}
+        for name, budget in _PREEXISTING_RAW_CHANNELS.items():
+            module = by_name.get(name)
+            if module is None:
+                stale.append(f"{name}: no longer in the scan set")
+                continue
+            actual = len(_raw_buyer_channel_hits(_ast.parse(module.read_text(), filename=str(module))))
+            if actual < budget:
+                loosened.append(f"{name}: now {actual} raw channels, ratchet still says {budget} — lower it")
+        assert not stale and not loosened, "\n  ".join(stale + loosened)
 
     def test_scan_set_covers_every_module_that_calls_the_scrubber(self):
         """A module that needs the scrubber must be inside the guard's scan set.

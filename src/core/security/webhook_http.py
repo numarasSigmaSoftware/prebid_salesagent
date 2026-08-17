@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -119,15 +120,39 @@ WEBHOOK_DNS_TIMEOUT_SECONDS = 2.0
 # budget it bounds does not "cap" the retries, it CANCELS them.
 WEBHOOK_DELIVERY_MAX_RETRIES = 3
 WEBHOOK_POST_TIMEOUT_SECONDS = 10.0
-# `_wait_before_retry`: no sleep before attempt 0, then 2**attempt + jitter(0,1).
 WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS = 1.0
 
 
+def webhook_retry_delay_seconds(attempt: int, *, jitter: float | None = None) -> float:
+    """The ONE definition of the pause before ``attempt``. No sleep before 0.
+
+    Both the loop that sleeps and the deadline that bounds it call this. They
+    used to compute it separately — the service hardcoded
+    ``(2**attempt) + random.uniform(0, 1)`` while this module re-expressed the
+    same formula to derive the deadline — so widening the real backoff to
+    ``3**attempt + uniform(0, 5)`` (52s against a 38s deadline, reinstating the
+    original defect) left 92 tests passing. A derivation that re-implements
+    what it derives from is not a derivation.
+
+    ``jitter=None`` draws the real random component; the deadline passes the
+    MAXIMUM so its budget is worst-case rather than a sample.
+    """
+    if attempt == 0:
+        return 0.0
+    drawn = random.uniform(0, WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS) if jitter is None else jitter
+    return (2**attempt) + drawn
+
+
 def _worst_case_delivery_seconds() -> float:
-    """Longest one target can legitimately take: every attempt times out."""
+    """Longest one target can legitimately take: every attempt times out.
+
+    Covers EXECUTION only. Admission is separate and deliberately excluded —
+    see the deadline comment below.
+    """
     posts = WEBHOOK_DELIVERY_MAX_RETRIES * WEBHOOK_POST_TIMEOUT_SECONDS
     backoff = sum(
-        2**attempt + WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS for attempt in range(1, WEBHOOK_DELIVERY_MAX_RETRIES)
+        webhook_retry_delay_seconds(attempt, jitter=WEBHOOK_RETRY_BACKOFF_MAX_JITTER_SECONDS)
+        for attempt in range(1, WEBHOOK_DELIVERY_MAX_RETRIES)
     )
     return posts + backoff
 
@@ -136,15 +161,30 @@ def _worst_case_delivery_seconds() -> float:
 # legitimately run 36-38s (3 x 10s POST + 2-3s + 4-5s backoff) — the SECOND
 # attempt alone exceeded it. So the TimeoutError branch was not an outlier
 # path, it was the normal outcome for any slow endpoint, and it cancelled the
-# retries that exist to tolerate exactly that. All four callers discard the
-# returned bool, so the only trace was one log line.
+# retries that exist to tolerate exactly that.
 #
-# Trade-off, deliberate: a slow target now occupies a bulkhead worker for up to
-# ~38s instead of 12s. That is the cost of the retry policy actually running;
-# the previous value bought worker turnover by making retries a no-op. Tighten
-# the RETRY POLICY above if that occupancy is too high — do not re-cap the
-# deadline below the budget, which just restores the silent cancellation.
-WEBHOOK_DELIVERY_DEADLINE_SECONDS = _worst_case_delivery_seconds()
+# The budget covers EXECUTION plus ADMISSION plus DNS. Admission matters
+# because the bulkhead starts this clock BEFORE a permit is granted and there
+# are only WEBHOOK_DELIVERY_MAX_WORKERS of them: with an execution-only budget
+# the 5th concurrent target spends its wait queuing and then has its retries
+# cancelled — precisely the defect this deadline was raised to fix, just moved
+# from the retry loop to the queue. `_enqueue_and_deliver_target`'s docstring
+# claims the deadline "covers admission", so an execution-only figure made
+# that claim false.
+#
+# Admission term: in the worst case every worker is busy for a full execution
+# budget before this target is admitted. That is deliberately the pessimistic
+# bound — the point is that a queued target is not punished for queuing.
+#
+# Trade-off, deliberate: a slow target holds a bulkhead worker for up to its
+# execution budget. That is the cost of the retry policy actually running.
+# Tighten the RETRY POLICY above if that occupancy is too high — do not re-cap
+# the deadline below the budget, which just restores the silent cancellation.
+WEBHOOK_DELIVERY_DEADLINE_SECONDS = (
+    _worst_case_delivery_seconds()  # this target's own retries
+    + _worst_case_delivery_seconds()  # worst-case wait for a bulkhead permit
+    + WEBHOOK_DNS_TIMEOUT_SECONDS  # the pinning adapter's resolution step
+)
 WEBHOOK_DELIVERY_MAX_WORKERS = 4
 _DELIVERY_DNS_BULKHEAD = SyncThreadPoolBulkhead(
     max_workers=WEBHOOK_DELIVERY_MAX_WORKERS,

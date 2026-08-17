@@ -99,6 +99,33 @@ class TestRestBoundaryNeverGoesSilentOnAnUnencodableEnvelope:
     keeping it means grading it, so the unencodable value is injected here.
     """
 
+    def test_a_raising_envelope_BUILDER_still_yields_the_error(self, monkeypatch, integration_db):
+        """The builder, not just the encoder, is inside the guard.
+
+        `build_two_layer_error_envelope` walks the buyer's context and is the
+        likelier of the two calls to raise. It sat one line ABOVE the try, so
+        the guard covered only `JSONResponse` and a raise in the builder still
+        produced no response at all — the exact failure the guard exists for.
+        """
+        import src.app as app_module
+
+        real_builder = app_module.build_two_layer_error_envelope
+        calls = {"n": 0}
+
+        def _raises_once(exc):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("builder blew up on the buyer's context")
+            return real_builder(exc)
+
+        monkeypatch.setattr(app_module, "build_two_layer_error_envelope", _raises_once)
+
+        response = _put_with_non_json_context()
+
+        assert response.status_code == 401, "a raising builder must not cost the buyer their error"
+        assert response.json()["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert calls["n"] == 2, "the guard should have retried the build without the context"
+
     def test_an_unencodable_envelope_still_yields_the_error_without_the_echo(self, monkeypatch, integration_db):
         import src.app as app_module
 
@@ -117,3 +144,66 @@ class TestRestBoundaryNeverGoesSilentOnAnUnencodableEnvelope:
         body = response.json()
         assert body["adcp_error"]["code"] == "AUTH_REQUIRED"
         assert "context" not in body, "the unencodable echo must be dropped, not emitted"
+
+
+class TestTheTerminalNetCannotItselfRaise:
+    """Tier 3 must survive an exception that fights back.
+
+    The chain is: build+encode → rebuild without context → minimal envelope.
+    Tier 3's comment claimed it was "built by hand from scalar attributes so it
+    cannot depend on anything that has already failed twice" — but it read
+    `str(exc)`, a method call. An exception whose `__str__` raises propagated
+    straight out of the handler: no response at all, which is the failure the
+    whole chain exists to prevent, at its own last line.
+
+    No AdCPError subclass overrides `__str__` today. The point is that this tier
+    must not depend on that remaining true, and it had zero coverage.
+    """
+
+    def test_all_three_tiers_failing_still_produces_an_envelope(self, monkeypatch, integration_db):
+        import src.app as app_module
+
+        class _HostileError(Exception):
+            """Raises from every accessor the terminal net might touch."""
+
+            status_code = 401
+            error_code = "AUTH_REQUIRED"
+            context = None
+            recovery = "correctable"
+
+            def __str__(self) -> str:
+                raise RuntimeError("__str__ is hostile")
+
+        def _always_raises(exc):
+            raise ValueError("builder is hostile")
+
+        monkeypatch.setattr(app_module, "build_two_layer_error_envelope", _always_raises)
+
+        response = _put_with_non_json_context()
+
+        assert response.status_code == 401, "the buyer must still get their status"
+        assert response.json()["adcp_error"]["code"] == "AUTH_REQUIRED"
+
+    def test_a_raising_str_degrades_to_a_readable_message(self, integration_db):
+        """The unit of the fix: guarded reads, not a guarded caller."""
+        from src.app import _minimal_envelope
+
+        class _Hostile(Exception):
+            error_code = "AUTH_REQUIRED"
+
+            def __str__(self) -> str:
+                raise RuntimeError("nope")
+
+        envelope = _minimal_envelope(_Hostile())
+
+        assert envelope["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert "could not be rendered" in envelope["adcp_error"]["message"]
+
+    def test_a_missing_error_code_degrades_to_internal_error(self):
+        from src.app import _minimal_envelope, _safe_status_code
+
+        class _Bare(Exception):
+            pass
+
+        assert _minimal_envelope(_Bare())["adcp_error"]["code"] == "INTERNAL_ERROR"
+        assert _safe_status_code(_Bare()) == 500

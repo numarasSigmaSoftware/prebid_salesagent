@@ -643,6 +643,24 @@ class AdCPRequestHandler(RequestHandler):
                 status=status,
             )
 
+    def _best_effort_a2a_identity(self, context: ServerCallContext | None) -> ResolvedIdentity | None:
+        """Resolve a header-only identity for boundary observability ONLY.
+
+        Mirrors REST's ``_best_effort_rest_identity``: never an authorization
+        decision, only the tenant scope for ``record_boundary_error``'s
+        activity-feed and audit sinks. No token is supplied — the caller has
+        none, which is why we are here — so this resolves the tenant from the
+        request headers alone.
+
+        Any failure degrades to ``None``. Observability must never shadow the
+        buyer's original error, and this runs on the rejection path.
+        """
+        try:
+            return self._resolve_a2a_identity(None, require_valid_token=False, context=context)
+        except Exception:
+            logger.debug("A2A boundary: best-effort identity resolution failed", exc_info=True)
+            return None
+
     async def on_message_send(
         self,
         params: SendMessageRequest,
@@ -762,12 +780,25 @@ class AdCPRequestHandler(RequestHandler):
                 # the `except A2AError: raise` below re-raises it untouched — so
                 # this rejection reached the wire having written nothing, while
                 # the sibling INVALID-token path (and REST, and MCP) all record.
-                # Measured across the real transports: A2A 0, REST 1, MCP 1.
-                # `record_boundary_error`'s own docstring says all three
-                # boundaries delegate to it so severity, activity feed and audit
-                # stay in lockstep; identity is None here, so the helper degrades
-                # tenant_id to None and correctly skips the tenant-scoped sinks.
-                record_boundary_error_for_identity("a2a", "message_processing", missing_token_error, None)
+                #
+                # Passing None here wrote only a log line: record_boundary_error
+                # returns before the activity feed and the audit row when it has
+                # no tenant, so "recorded" meant nothing durable, and the
+                # docstring's claim that the three boundaries stay in lockstep
+                # was still false. REST resolves a header-only tenant for exactly
+                # this case (_best_effort_rest_identity), and the same capability
+                # sits twenty lines below — an unauthenticated DISCOVERY request
+                # already resolves its tenant from headers with no token.
+                #
+                # A tenant resolved from headers alone is not an authorization
+                # decision: it only scopes where the rejection is recorded. The
+                # caller is still unauthenticated and is still refused.
+                record_boundary_error_for_identity(
+                    "a2a",
+                    "message_processing",
+                    missing_token_error,
+                    self._best_effort_a2a_identity(context),
+                )
                 raise InvalidRequestError(
                     message="Missing authentication token - Bearer token required in Authorization header",
                     data=build_two_layer_error_envelope(missing_token_error),
@@ -2734,17 +2765,34 @@ def create_agent_card() -> AgentCard:
     # Get sales agent version from package metadata or pyproject.toml
     sales_agent_version = get_version()
 
-    # Two DIFFERENT versions, deliberately. The extension URI is a schema PATH
-    # (dist/schemas/3.1.1/...), which exists at patch precision; the advertised
-    # `adcp_version` is a NEGOTIATION value a buyer will pin on its next
-    # request, and the wire envelope is release precision. Advertising the
-    # patch version there told buyers to pin "3.1.1", which this agent's own
-    # _RELEASE_PIN_RE then rejects with VERSION_UNSUPPORTED.
+    # Two DIFFERENT values here, and only ONE of them is justified by the spec.
+    #
+    # `params.adcp_version` IS spec-grounded: it is a NEGOTIATION value a buyer
+    # pins on its next request, and core/version-envelope.json (3.1.1) is
+    # release precision. Advertising the SDK's patch pin told buyers to pin
+    # "3.1.1", which this agent's own _RELEASE_PIN_RE rejects with
+    # VERSION_UNSUPPORTED.
+    #
+    # The URI is NOT justified by "it is a schema path that exists at patch
+    # precision" — an earlier version of this comment claimed that, and it is
+    # false: dist/schemas/3.1.1/protocols is 404 and adcp-extension.json was
+    # removed upstream in v3. The URI is a legacy extension IDENTIFIER, held at
+    # its historical value so existing clients matching on the exact string
+    # keep working. It is an opaque key, not something to resolve. It also
+    # diverges from the identifier the pinned guide tells clients to match on;
+    # changing it is wire-affecting and is tracked separately, not folded in
+    # here.
+    # Function-local deliberately: this is the ONLY use of the SDK's patch pin
+    # in this module, and keeping it here stops a module-scope import reading
+    # like the sanctioned source of wire versions (it is not —
+    # wire_adcp_version is, imported at module scope above).
     from adcp import get_adcp_spec_version
 
-    schema_version = get_adcp_spec_version()
+    # Named for what it is: the historical identifier component, not a
+    # resolvable schema version.
+    legacy_extension_id_version = get_adcp_spec_version()
     adcp_extension = AgentExtension(
-        uri=f"https://adcontextprotocol.org/schemas/{schema_version}/protocols/adcp-extension.json",
+        uri=f"https://adcontextprotocol.org/schemas/{legacy_extension_id_version}/protocols/adcp-extension.json",
         description="AdCP protocol version and supported domains",
         params=_dict_to_struct(
             {

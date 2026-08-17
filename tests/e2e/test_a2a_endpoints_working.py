@@ -86,11 +86,15 @@ class TestA2AEndpointsActual:
                 # The advertised adcp_version is a NEGOTIATION value the buyer
                 # will pin on its next request, so it is release precision —
                 # NOT the SDK's patch-precision spec pin, which this agent's
-                # own inbound parser rejects. The extension URI keeps the
-                # patch version because it is a schema path.
+                # own inbound parser rejects.
                 assert _parse_release_pin(adcp_ext["params"]["adcp_version"]) is not None
                 assert adcp_ext["params"]["adcp_version"] in supported_adcp_versions()
-                assert get_adcp_spec_version() in adcp_ext["uri"], "the URI is a schema path"
+                # The URI is a legacy extension IDENTIFIER pinned at its
+                # historical value so existing clients keep matching. It is NOT
+                # a resolvable schema path — dist/schemas/3.1.1/protocols is
+                # 404 — and an earlier revision of this assertion pinned that
+                # false reasoning in its message.
+                assert get_adcp_spec_version() in adcp_ext["uri"], "legacy extension identifier changed"
                 assert "media_buy" in adcp_ext["params"]["protocols_supported"]
 
         except (requests.ConnectionError, requests.Timeout):
@@ -221,8 +225,12 @@ class TestA2AAgentCardCreation:
         assert adcp_ext is not None, "AdCP extension not found in capabilities.extensions"
 
         # Validate AdCP extension structure
-        adcp_version = get_adcp_spec_version()
-        assert adcp_ext.uri == f"https://adcontextprotocol.org/schemas/{adcp_version}/protocols/adcp-extension.json"
+        # The URI is pinned as a LITERAL. Rebuilding it from
+        # get_adcp_spec_version() — the same call production uses — asserted
+        # production against production: both sides moved together, so the
+        # assertion could not fail. This is a legacy identifier whose whole
+        # value is that it does not change, so a literal is the honest pin.
+        assert adcp_ext.uri == "https://adcontextprotocol.org/schemas/3.1.1/protocols/adcp-extension.json"
         assert adcp_ext.params is not None
         # protobuf Struct: access fields dict-like
         params = adcp_ext.params

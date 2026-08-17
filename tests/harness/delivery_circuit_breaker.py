@@ -69,7 +69,10 @@ class CircuitBreakerEnv(CircuitBreakerMixin, IntegrationEnv):
         "post_status": "src.services.webhook_delivery_service.post_webhook_status",
         "session": "src.services.webhook_delivery_service.create_pinned_webhook_session",
         "sleep": "src.services.webhook_delivery_service.time.sleep",
-        "random": "src.services.webhook_delivery_service.random.uniform",
+        # The jitter moved with the backoff: webhook_retry_delay_seconds is now
+        # the single definition both the sleeping loop and the deadline read,
+        # so the randomness lives in webhook_http, not here.
+        "random": "src.core.security.webhook_http.random.uniform",
         **SSRF_EXTERNAL_PATCH,
     }
 

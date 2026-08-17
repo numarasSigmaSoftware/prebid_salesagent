@@ -119,9 +119,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Gener
                 f"{report.longrepr}\n\n"
                 "This scenario's tag appears in a *_WIRED set in tests/bdd/conftest.py, which "
                 "declares it bound to a harness and therefore required to RUN. It was NOT "
-                "auto-xfailed. Either bind the missing step / implement the stub, or remove the "
-                "tag from the wired set — a wired scenario that cannot execute is dormant "
-                "coverage, and dormant coverage reads as green."
+                "auto-xfailed. Bind the missing step, or implement the stub.\n\n"
+                "Do NOT resolve this by deleting the tag from the wired set. For UC-002 that "
+                "one-line edit turns this guard green and silently restores the dormancy it "
+                "exists to prevent, because the UC-002 catch-all in _harness_env is "
+                "pytest.xfail (UC-010's raises, so it happens to be safe there — the "
+                "difference is not something a reader should have to know). The wired sets are "
+                "pinned shrink-only by test_wired_sets_never_shrink; removing a tag is a "
+                "deliberate change that must edit that baseline too."
             )
             return
 
@@ -2861,6 +2866,17 @@ _UC010_VERSION_NEGOTIATION_WIRED: set[str] = {
     "T-UC-010-v31-version-unsupported-prerelease",
 }
 
+# UC-003 scenarios bound to MediaBuyDualEnv. Hoisted to module level so
+# _wired_scenario_tags() can SEE them: as function-locals they were bound but
+# unguarded, so unbinding a step degraded them to a silent xfail. The
+# derivation scans module globals, which is exactly why their scope mattered.
+_UC003_MANUAL_APPROVAL_WIRED: set[str] = {
+    "T-UC-003-alt-manual",
+    "T-UC-003-approval-tenant",
+    "T-UC-003-approval-adapter",
+}
+_UC003_REQUIRED_IDEMPOTENCY_WIRED: set[str] = {"T-UC-003-local-required-idempotency-v311"}
+
 _UC010_CAPABILITY_FILTER_WIRED: set[str] = {
     "T-UC-010-local-capability-filter-v311",
     "T-UC-010-local-capability-filter-invalid-v311",
@@ -2870,17 +2886,36 @@ _UC010_CAPABILITY_FILTER_WIRED: set[str] = {
 
 
 def _wired_scenario_tags() -> frozenset[str]:
-    """Every tag declared bound to a harness env, across all use cases.
+    """Every tag declared bound to a harness env, DERIVED from this module.
 
-    Single source for the makereport guard above. A tag listed here is a promise
-    that the scenario executes; the guard turns a broken promise into a failure
-    instead of a silent xfail. Add new *_WIRED sets here when you add them.
+    Single source for the makereport guard above. A tag in one of these sets is
+    a promise that the scenario executes; the guard turns a broken promise into
+    a failure instead of a silent xfail.
+
+    Derived by scanning this module's globals for ``*_WIRED`` rather than
+    listing four names, because the previous version's completeness rule was a
+    docstring sentence ("Add new *_WIRED sets here when you add them") with no
+    test behind it — the same shape as the defects this guard was added for. A
+    new ``*_WIRED`` set now joins by existing.
+
+    NOT covered, stated plainly rather than implied:
+
+    - ``"context" in marker_names`` and ``_is_brand_shorthand_media_buy(...)``
+      also bind an env in ``_harness_env``, and neither is a ``*_WIRED`` set.
+      Unbinding a ``@context`` step yields xfails, not failures. These are
+      separate binding mechanisms, not missing entries — see
+      ``test_wired_union_is_derived_not_enumerated`` for the completeness
+      oracle they would join under if promoted to a module-level set.
+    - UC-003's ``_UC003_TARGETING_OVERLAY`` — still function-local. Its two
+      flat siblings (``_UC003_MANUAL_APPROVAL_WIRED``,
+      ``_UC003_REQUIRED_IDEMPOTENCY_WIRED``) WERE hoisted and are now guarded;
+      the overlay set stays local because it is also read by a sibling branch.
+
+    Promoting a mechanism to a module-level ``*_WIRED`` set is how it joins;
+    ``test_wired_union_is_derived_not_enumerated`` grades the derivation.
     """
-    return frozenset(
-        _UC002_IDEMPOTENCY_WIRED
-        | _UC002_MANUAL_APPROVAL_WIRED
-        | _UC010_VERSION_NEGOTIATION_WIRED
-        | _UC010_CAPABILITY_FILTER_WIRED
+    return frozenset().union(
+        *(value for name, value in globals().items() if name.endswith("_WIRED") and isinstance(value, set))
     )
 
 
@@ -3374,16 +3409,10 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         # too (they exercise UpdateMediaBuySubmitted cross-transport, adcp 6.6 /
         # spec 3.1.1). Every other UC-003 scenario stays dormant; graduating the
         # full UC-003 file is tracked separately. See the BOUNDED branch below.
-        _UC003_MANUAL_APPROVAL = {
-            "T-UC-003-alt-manual",
-            "T-UC-003-approval-tenant",
-            "T-UC-003-approval-adapter",
-        }
-        _UC003_REQUIRED_IDEMPOTENCY = {"T-UC-003-local-required-idempotency-v311"}
         if (
             any(t.startswith("T-UC-003-ext-") for t in marker_names)
             or (marker_names & _UC003_TARGETING_OVERLAY)
-            or (marker_names & _UC003_REQUIRED_IDEMPOTENCY)
+            or (marker_names & _UC003_REQUIRED_IDEMPOTENCY_WIRED)
         ):
             # Extension/error scenarios: budget, currency, auth, creative,
             # placement, keyword, and immutable-field validation on the update
@@ -3406,7 +3435,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 _setup_existing_media_buy(ctx, env, tenant, principal, product)
                 env._seeded_media_buy_id = ctx["existing_media_buy"].media_buy_id
                 yield
-        elif marker_names & _UC003_MANUAL_APPROVAL:
+        elif marker_names & _UC003_MANUAL_APPROVAL_WIRED:
             # BOUNDED (PR #1567): the 3 manual-approval submitted-envelope
             # scenarios are graded here (they exercise UpdateMediaBuySubmitted
             # cross-transport). Every other non-extension UC-003 scenario stays
@@ -3441,7 +3470,12 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 yield
         else:
             pytest.xfail(
-                "UC-003 harness not yet wired for non-extension scenarios (full graduation pending, PR #1567 follow-up)"
+                "UC-003 harness not yet wired for non-extension scenarios (full graduation pending, PR #1567 "
+                "follow-up). NOTE for whoever wires it: the three `revision` rows in the generated feature "
+                "encode the POST-#1689 contract (matches_current -> success, stale/ahead -> CONFLICT) and "
+                "contradict shipped behavior, which rejects every schema-valid revision with "
+                "UNSUPPORTED_FEATURE until optimistic-concurrency lands. Wiring them turns them RED — "
+                "'not yet wired' understates it. Graduation is gated on #1607/#1689, not on harness work."
             )
 
     elif uc == "UC-006":

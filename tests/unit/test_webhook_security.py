@@ -779,6 +779,63 @@ class TestDeliveryDeadlineCoversTheRetryBudget:
             "the deadline is shorter than the retry loop it wraps, so retries are cancelled, not capped"
         )
 
+    def test_the_deadline_moves_when_the_REAL_backoff_moves(self):
+        """The derivation must read the same function the loop sleeps on.
+
+        This is the oracle the first version lacked. The service hardcoded
+        `(2**attempt) + random.uniform(0, 1)` while the deadline re-expressed
+        the identical formula, so widening the real backoff to
+        `3**attempt + uniform(0, 5)` — 52s against a 38s deadline, reinstating
+        the original defect — left 92 tests passing. Two homes for one number
+        cannot be pinned by asserting the number.
+        """
+        from unittest.mock import patch
+
+        from src.core.security import webhook_http
+
+        baseline = webhook_http._worst_case_delivery_seconds()
+
+        def _wider(attempt: int, *, jitter: float | None = None) -> float:
+            return 0.0 if attempt == 0 else (3**attempt) + (5.0 if jitter is not None else 0.0)
+
+        with patch.object(webhook_http, "webhook_retry_delay_seconds", _wider):
+            widened = webhook_http._worst_case_delivery_seconds()
+
+        assert widened > baseline, (
+            "widening the retry delay did not move the derived budget — the deadline is "
+            "computing its own copy of the backoff instead of reading the one that sleeps"
+        )
+
+    def test_the_service_sleeps_the_shared_delay(self):
+        """The other half: the loop must CALL the shared definition."""
+        from unittest.mock import patch
+
+        from src.services.webhook_delivery_service import WebhookDeliveryService
+
+        with (
+            patch("src.services.webhook_delivery_service.webhook_retry_delay_seconds", return_value=0.0) as delay,
+            patch("src.services.webhook_delivery_service.time.sleep") as slept,
+        ):
+            WebhookDeliveryService._wait_before_retry(2, 3)
+
+        delay.assert_called_once_with(2)
+        slept.assert_not_called()  # a 0.0 delay must not sleep
+
+    def test_the_deadline_includes_an_admission_term(self):
+        """A queued target must not be punished for queuing.
+
+        The bulkhead starts the clock BEFORE granting a permit and there are
+        only WEBHOOK_DELIVERY_MAX_WORKERS of them, so an execution-only budget
+        cancels the 5th concurrent target's retries — the same defect, moved
+        from the retry loop to the queue. `_enqueue_and_deliver_target`'s
+        docstring claims the deadline covers admission.
+        """
+        from src.core.security import webhook_http
+
+        assert webhook_http.WEBHOOK_DELIVERY_DEADLINE_SECONDS > webhook_http._worst_case_delivery_seconds(), (
+            "the deadline equals the execution budget, so it leaves nothing for admission"
+        )
+
     def test_the_worst_case_matches_the_documented_arithmetic(self):
         """Pins the derivation itself: 3 POSTs plus backoff before attempts 1 and 2.
 
@@ -797,3 +854,52 @@ class TestDeliveryDeadlineCoversTheRetryBudget:
         from src.core.security import webhook_http
 
         assert webhook_http.WEBHOOK_POST_TIMEOUT_SECONDS < webhook_http.WEBHOOK_DELIVERY_DEADLINE_SECONDS
+
+
+class TestWebhookUrlForLogIsTotal:
+    """The helper documented as total must not raise, on any input.
+
+    Folding `scrub_control_chars` into `webhook_url_for_log` put a `urlparse`
+    call behind a docstring promising "never raw" — and `urlparse` RAISES on
+    some malformed input rather than degrading: `urlparse("https://[fe80::1")`
+    is `ValueError: Invalid IPv6 URL`. The helper is installed at fourteen
+    sites in the delivery service, several inside `except` handlers where the
+    `scrub_control_chars` it replaced was total by construction. A raise there
+    replaces the delivery failure being logged with an unrelated one.
+
+    Reachability is bounded — registration rejects such URLs — but a helper
+    called from exception handlers has to be total by construction, not by
+    the good behaviour of its callers.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[fe80::1",  # the ValueError case
+            "https://[",
+            "https://[]",
+            None,
+            "",
+            "   ",
+            "not-a-url",
+            "://missing-scheme",
+            "https://h/cb\r\nFAKE",
+        ],
+    )
+    def test_never_raises(self, url):
+        from src.core.webhook_validator import webhook_url_for_log
+
+        result = webhook_url_for_log(url)
+
+        assert isinstance(result, str) and result, f"{url!r} produced {result!r}"
+
+    def test_malformed_input_degrades_to_the_placeholder(self):
+        from src.core.webhook_validator import UNPARSEABLE_WEBHOOK_URL_FOR_LOG, webhook_url_for_log
+
+        assert webhook_url_for_log("https://[fe80::1") == UNPARSEABLE_WEBHOOK_URL_FOR_LOG
+
+    def test_well_formed_ipv6_still_parses(self):
+        """The fix must not turn valid IPv6 into the placeholder."""
+        from src.core.webhook_validator import webhook_url_for_log
+
+        assert webhook_url_for_log("http://[::1]:8080/cb") == "http://::1/cb"

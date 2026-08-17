@@ -5,6 +5,7 @@ import json
 import pytest
 
 from src.core.security.webhook_http import (
+    BEARER_AUTH_SCHEME,
     HMAC_AUTH_SCHEME,
     redact_webhook_url,
     validate_webhook_auth_selector,
@@ -90,6 +91,26 @@ def test_capabilities_do_not_advertise_partial_configuration(monkeypatch) -> Non
 def test_legacy_credentials_enforce_pinned_minimum(credentials) -> None:
     with pytest.raises(ValueError, match="at least 32"):
         validate_webhook_auth_selector(HMAC_AUTH_SCHEME, credentials)
+
+
+def test_unusable_auth_scheme_is_refused_by_cause() -> None:
+    """The two causes stay distinguishable, and both refuse rather than warn.
+
+    #1546 split one warning into these two cases because
+    "Bearer is not supported (expected Bearer or Basic)" points an operator at
+    the wrong axis when the real problem is a missing token. That fix warned
+    and then sent the webhook UNAUTHENTICATED; this path refuses instead, so
+    the split is preserved in the refusal messages rather than in log lines —
+    and nothing is delivered on a credential the buyer cannot verify.
+    """
+    # Cause 1: the scheme itself is not one this path can sign or send.
+    with pytest.raises(ValueError, match="Unsupported webhook authentication scheme"):
+        validate_webhook_auth_selector("Basic", "x" * 32)
+
+    # Cause 2: a recognised scheme, no usable credential — a different message,
+    # so an operator is not sent looking at scheme support.
+    with pytest.raises(ValueError, match="at least 32"):
+        validate_webhook_auth_selector(BEARER_AUTH_SCHEME, None)
 
 
 def test_callback_url_redaction_drops_userinfo_path_and_query() -> None:
