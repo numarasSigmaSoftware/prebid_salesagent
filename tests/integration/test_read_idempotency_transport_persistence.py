@@ -21,6 +21,7 @@ from tests.harness.delivery_poll import DeliveryPollEnv
 from tests.harness.media_buy_list import MediaBuyListEnv
 from tests.harness.product import ProductEnv
 from tests.harness.transport import Transport
+from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -109,7 +110,19 @@ def test_each_read_replays_through_every_exposed_transport(integration_db, case:
             assert replay.wire_response["context"] == {"correlation_id": "retry"}
 
 
-def test_anonymous_rest_read_persists_null_principal_within_tenant(integration_db) -> None:
+def test_anonymous_rest_read_with_a_key_is_refused_and_persists_nothing(integration_db) -> None:
+    """An anonymous keyed read is refused on the wire and leaves no durable row.
+
+    The row is the point. AdCP 3.1.1 scopes keys per (authenticated agent,
+    account); an anonymous caller has neither, and the lookup index is NULLS
+    NOT DISTINCT, so a persisted (tenant, NULL, NULL) row is ONE row-space
+    shared by every anonymous caller of the tenant. Keys are client-chosen, so
+    a second anonymous caller reusing the key would either collide or be handed
+    the first caller's cached envelope.
+
+    Asserting only the error would leave that reachable: the durable absence is
+    what proves the fusion cannot occur.
+    """
     suffix = uuid.uuid4().hex[:10]
     key = f"anonymous-read-{uuid.uuid4().hex}"
     with CapabilitiesEnv(
@@ -118,33 +131,27 @@ def test_anonymous_rest_read_persists_null_principal_within_tenant(integration_d
     ) as env:
         env.setup_default_data()
         anonymous = env.identity_for(Transport.REST).model_copy(update={"principal_id": None, "account_id": None})
-        first = env.call_via(
+
+        result = env.call_via(
             Transport.REST,
             identity=anonymous,
             idempotency_key=key,
             context={"correlation_id": "first"},
         )
-        replay = env.call_via(
-            Transport.REST,
-            identity=anonymous,
-            idempotency_key=key,
-            context={"correlation_id": "retry"},
-        )
+
+        assert result.is_error, "an anonymous keyed read must be refused, not scoped to NULL"
+        assert_envelope_shape(result.wire_error_envelope, "AUTH_REQUIRED", recovery="correctable")
+
         with IdempotencyUoW(anonymous.tenant_id) as uow:
             assert uow.idempotency_attempts is not None
-            attempt = uow.idempotency_attempts.find_by_key(
-                principal_id=None,
-                account_id=None,
-                idempotency_key=key,
-            )
-            assert attempt is not None
-            assert attempt.principal_id is None
-            assert attempt.tool_name == "get_adcp_capabilities"
-
-    assert first.is_success, first.error
-    assert replay.is_success, replay.error
-    assert replay.wire_response is not None
-    assert replay.wire_response["replayed"] is True
+            assert (
+                uow.idempotency_attempts.find_by_key(
+                    principal_id=None,
+                    account_id=None,
+                    idempotency_key=key,
+                )
+                is None
+            ), "the refused read must not leave a tenant-wide anonymous row behind"
 
 
 @pytest.mark.parametrize("transport", _MCP_A2A)

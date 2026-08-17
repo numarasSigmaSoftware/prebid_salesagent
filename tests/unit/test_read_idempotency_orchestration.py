@@ -1,11 +1,11 @@
 """Universal read idempotency uses the same durable reservation flow."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastmcp.tools.tool import ToolResult
 
-from src.core.exceptions import AdCPIdempotencyConflictError
+from src.core.exceptions import AdCPAuthRequiredError, AdCPIdempotencyConflictError
 from src.services.idempotency_replay import (
     ReservationResult,
     _decode_read_response,
@@ -16,26 +16,31 @@ from tests.factories import PrincipalFactory
 
 
 @pytest.mark.asyncio
-async def test_anonymous_read_reserves_in_read_class_and_completes() -> None:
+async def test_anonymous_read_with_a_key_is_refused_not_scoped_to_null() -> None:
+    """An unauthenticated caller has no scope to replay within, so the key is refused.
+
+    AdCP 3.1.1 security.mdx: keys "are scoped per (authenticated agent,
+    account)" and "have no meaning across agents on the same seller". Accepting
+    one anonymously used to persist (tenant, NULL, NULL); because the lookup
+    index is NULLS NOT DISTINCT that is ONE row-space shared by every anonymous
+    caller of the tenant, so a client-chosen key could collide across callers
+    and replay one caller's envelope to another.
+
+    Refusing is the only spec-consistent option: a seller that accepts a key
+    MUST apply the replay contract, and it cannot be applied without an agent.
+    """
     identity = PrincipalFactory.make_identity(
         tenant_id="tenant-1",
         tenant={"tenant_id": "tenant-1"},
         principal_id=None,
     )
-    response = {"items": []}
-    uow = MagicMock()
-    uow.__enter__.return_value = uow
-    work = AsyncMock(return_value=response)
+    work = AsyncMock()
 
     with (
-        patch(
-            "src.services.idempotency_replay.reserve_idempotent",
-            return_value=ReservationResult(attempt_id="attempt-1"),
-        ) as reserve,
-        patch("src.core.database.repositories.uow.IdempotencyUoW", return_value=uow),
-        patch("src.services.idempotency_replay.complete_idempotent") as complete,
+        patch("src.services.idempotency_replay.reserve_idempotent") as reserve,
+        pytest.raises(AdCPAuthRequiredError, match="scoped to the authenticated agent"),
     ):
-        result = await execute_idempotent_read(
+        await execute_idempotent_read(
             tool_name="get_adcp_capabilities",
             idempotency_key="anonymous-read-key",
             identity=identity,
@@ -44,18 +49,11 @@ async def test_anonymous_read_reserves_in_read_class_and_completes() -> None:
             work=work,
         )
 
-    assert result == response
-    assert reserve.call_args.kwargs["principal_id"] is None
-    assert reserve.call_args.kwargs["operation_class"] == "read"
-    complete.assert_called_once_with(
-        uow,
-        attempt_id="attempt-1",
-        response_model=response,
-        protocol_status="completed",
-    )
+    # Refused BEFORE any durable row is reserved and before the read runs.
+    reserve.assert_not_called()
+    work.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 async def test_read_replay_never_executes_work() -> None:
     work = AsyncMock()
     with patch(
@@ -68,7 +66,7 @@ async def test_read_replay_never_executes_work() -> None:
             identity=PrincipalFactory.make_identity(
                 tenant_id="tenant-1",
                 tenant={"tenant_id": "tenant-1"},
-                principal_id=None,
+                principal_id="principal-1",
             ),
             raw_wire_payload={"idempotency_key": "read-replay-key"},
             response_type=None,

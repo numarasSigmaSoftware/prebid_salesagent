@@ -506,8 +506,27 @@ def release_reservation_on_error(
         raise
 
 
-def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str | None, str | None]:
-    """Resolve the durable read scope, including anonymous principals."""
+def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None]:
+    """Resolve the durable read scope. An authenticated agent is required.
+
+    AdCP 3.1.1 (security.mdx, "Idempotency"): "Keys are scoped per
+    ``(authenticated agent, account)`` — they have no meaning across agents on
+    the same seller, across accounts under the same agent, or across sellers."
+    An unauthenticated caller supplies neither half of that tuple, so there is
+    no scope in which the replay contract can be honored.
+
+    Persisting such a request under ``(tenant, NULL, NULL)`` does not weaken the
+    scope, it FUSES it: the lookup index is NULLS NOT DISTINCT, so every
+    anonymous caller of a tenant shares one row-space and one insert-rate
+    bucket. Keys are client-chosen, so one caller can induce a collision and
+    receive another caller's cached envelope, and one caller's read burst
+    rate-limits every other anonymous reader tenant-wide.
+
+    Refusing is the only option the spec leaves open. It says a seller that
+    accepts a supplied key MUST apply the replay contract; silently ignoring
+    the key would not apply it, and applying it without an agent is what
+    produces the cross-caller replay above.
+    """
     tenant_id = identity.tenant_id if identity is not None else None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
         tenant_id = identity.tenant.get("tenant_id")
@@ -518,7 +537,16 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str | None, str
             "A tenant scope is required to honor the supplied idempotency_key",
             retry_after=1,
         )
-    return tenant_id, identity.principal_id if identity else None, identity.account_id if identity else None
+    principal_id = identity.principal_id if identity else None
+    if not principal_id:
+        from src.core.exceptions import AdCPAuthRequiredError
+
+        raise AdCPAuthRequiredError(
+            "idempotency_key is scoped to the authenticated agent and account; "
+            "an unauthenticated request has no scope to replay within",
+            suggestion="Authenticate the request, or omit idempotency_key on anonymous reads.",
+        )
+    return tenant_id, principal_id, identity.account_id if identity else None
 
 
 def _response_with_current_context(response: Any, context: Any) -> Any:
