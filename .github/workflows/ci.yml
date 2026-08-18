@@ -373,9 +373,30 @@ jobs:
           # No host uvx in this job (no _setup-env); the dedicated Security
           # Audit check owns the uv-secure scan.
           RUN_ALL_SKIP_AUDIT: 1
+          # Fixed rather than the default adcp-innet-$$ (PID-derived, unknown
+          # to any later step) so the log-capture step below can reach the
+          # same compose project after run_all_tests.sh exits.
+          COMPOSE_PROJECT_NAME: ci-bdd-e2e-rest
+      # Diagnostic only, no behavior change: this job has intermittently failed
+      # with unrelated scenarios reporting INTERNAL_ERROR / HTTP 500 from
+      # account resolution and create_media_buy, on three separate runs with
+      # three disjoint failing-test sets and 0/428 failures on an identical
+      # local run each time (see PR #1689 review-triage notes). The live
+      # server here runs the delivery-webhook and media-buy-status background
+      # schedulers concurrently with foreground requests (not disabled in this
+      # compose file), and any OperationalError/DisconnectionError anywhere
+      # trips a process-wide 10s "unhealthy" circuit breaker
+      # (src/core/database/database_session.py) that fails every OTHER request
+      # in that window — a plausible single root cause for disjoint collateral
+      # failures. Captures the server's own traceback so the next occurrence
+      # is diagnosed from evidence instead of another blind re-run.
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.e2e.yml -p ci-bdd-e2e-rest logs --no-color --timestamps adcp-server postgres 2>&1 | tail -2000 || true
       - name: Cleanup Docker services
         if: always()
-        run: docker compose -f docker-compose.e2e.yml down -v 2>/dev/null || true
+        run: docker compose -f docker-compose.e2e.yml -p ci-bdd-e2e-rest down -v 2>/dev/null || true
 
   admin-ui-tests:
     name: Admin UI Tests
