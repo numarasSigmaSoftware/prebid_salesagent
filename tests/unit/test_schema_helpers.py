@@ -200,11 +200,12 @@ def test_to_account_reference_rejection_names_the_request_field_not_the_model(va
     request, so leaking one into ``field`` (a JSONPath-lite path into the REQUEST)
     or into ``suggestion`` tells the buyer to correct a field they never sent.
 
-    Scope, stated so it is not mistaken for more: these are the two DIRECTIVE
-    channels. The same names still appear in ``message`` and
-    ``details.validation_errors[].loc``, which ``format_validation_error`` builds
-    from the raw pydantic error for every boundary in the codebase — pre-existing,
-    tracked at #1996, and deliberately not scrubbed here.
+    Scope, stated so it is not mistaken for more: these two DIRECTIVE channels are
+    the whole of the guarantee, and ``message``/``details`` still carry the
+    generated names. Which builder puts them in each, how far that actually reaches,
+    and why the two rejection paths have DIFFERENT provenance (pre-existing on the
+    malformed-dict path, new on the non-dict path) are stated once in
+    ``to_account_reference``'s docstring rather than restated — and drifted — here.
     """
     with pytest.raises(AdCPValidationError) as excinfo:
         to_account_reference(value)  # type: ignore[arg-type]

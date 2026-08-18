@@ -209,11 +209,26 @@ def to_account_reference(account: dict[str, Any] | AccountReference | None) -> A
     and route a sandbox request to the LIVE adapter — a quiet failure on exactly
     the axis account isolation defends.
 
-    Both rejection paths are tagged ``field="account"`` (like ``to_brand_reference``'s
-    ``field="brand"``) so wire envelopes name the request field rather than the
-    pydantic union-member model name. That covers the two DIRECTIVE channels only;
-    the generated names still reach ``message`` and ``details`` via
-    ``format_validation_error`` — pre-existing across every boundary, tracked at #1996.
+    Both rejection paths are tagged ``field="account"`` with a matching
+    ``suggestion`` (like ``to_brand_reference``'s ``field="brand"``) so wire
+    envelopes name the request field rather than the pydantic union-member model
+    name. On the malformed-dict path that is a FIX, not merely a scope note: the
+    previous behavior derived both channels from the pydantic location and told the
+    buyer to correct ``AccountReference1.account_id`` — a field no buyer request
+    contains.
+
+    That fix covers those two DIRECTIVE channels only. The generated names still
+    reach ``message`` (built by ``format_validation_error``) and
+    ``details.validation_errors[].loc`` (built by ``build_validation_error_details``)
+    — two different builders, both assembled inside ``adcp_validation_boundary``. So
+    the reach is every caller of that boundary plus ``format_validation_error``'s
+    three direct callers, NOT every boundary in the codebase:
+    ``normalize_to_adcp_error``, the three-transport normalizer, does not call it.
+
+    Provenance differs by path and is not one story. On the malformed-DICT path the
+    unscrubbed ``message``/``details`` are pre-existing, tracked at #1996. The
+    non-dict path is a NEW emission site introduced here: before this narrowing it
+    returned ``None`` with no error at all, so there was nothing to leak from.
     """
     # Error-code note for anyone tempted to "fix" this: the strict non-dict path
     # deliberately emits the SAME code as the pre-existing malformed-dict path
