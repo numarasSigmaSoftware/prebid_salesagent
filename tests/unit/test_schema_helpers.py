@@ -55,31 +55,81 @@ _DEGRADING_CONVERTERS = [
     (to_property_list_reference, PropertyListReference),
 ]
 
+# How a wire-value converter is spelled in this module. Both spellings are here on
+# purpose: ``coerce_creative_filters`` already establishes that a converter need
+# not be spelled ``to_*``, so keying membership on ``to_`` alone was escapable.
+_CONVERTER_PREFIXES = ("to_", "coerce_")
 
-def test_every_coercing_converter_is_classified() -> None:
-    """Every exported helper routed through ``_coerce_wire_object`` must be classified.
+# Converters that own their dict → model boundary directly instead of routing
+# through ``_coerce_wire_object``. They cannot inherit the ``strict=False``
+# default, so they are not a fail-open hazard — but they ARE exported converter
+# names, so the membership pin needs them classified explicitly. They are
+# invisible to the delegation pin by construction.
+_OWN_BOUNDARY_CONVERTERS = {"to_brand_reference", "coerce_creative_filters"}
+
+
+def test_every_exported_converter_is_classified() -> None:
+    """Pin 1 of 2 (NAME) — every exported converter name is accounted for.
 
     ``strict=False`` is ``_coerce_wire_object``'s default, so a converter added
     tomorrow degrades a non-dict to ``None`` by default AND is absent from
     ``_DEGRADING_CONVERTERS`` above — untested on exactly the axis that made the
     account case a fail-open.
 
-    Discovered by CALLING each exported helper with the delegate spied, not by a
-    ``to_*`` name prefix and not by reading source. The prefix form was escapable:
-    this module also exports ``coerce_*`` helpers (``coerce_creative_filters``), so
-    the identical hazard under that spelling passed silently. Delegation is what
-    creates the hazard, so delegation is what the pin observes — which also means
-    ``to_brand_reference`` needs no hand-written exemption; it is excluded because
-    it demonstrably does not delegate.
+    This pin and the delegation pin below are COMPLEMENTARY, not alternatives:
+    they catch disjoint escapes. Membership fires on the NAME, so it holds
+    whatever the new helper does internally — a hand-rolled ``return None`` that
+    never touches ``_coerce_wire_object``, or a signature the delegation pin
+    cannot probe positionally (keyword-only first parameter), is still an
+    exported converter name here. Both of those are invisible to a
+    behavior-keyed pin.
+
+    The price of that reach is the two hand-written ``_OWN_BOUNDARY_CONVERTERS``
+    exemptions, which is why ``to_brand_reference`` does need classifying here.
     """
-    delegated: set[str] = set()
+    exported = {
+        name
+        for name in schema_helpers.__all__
+        if name.startswith(_CONVERTER_PREFIXES) and inspect.isfunction(getattr(schema_helpers, name, None))
+    }
+    classified = (
+        {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS}
+        | {"to_account_reference"}  # strict: rejects non-dict (tested above)
+        | _OWN_BOUNDARY_CONVERTERS
+    )
+    assert exported == classified, (
+        "an exported converter is unclassified — decide whether it degrades (add it to "
+        "_DEGRADING_CONVERTERS), rejects (strict=True, and test it), or owns its own "
+        "boundary (add it to _OWN_BOUNDARY_CONVERTERS)"
+    )
+
+
+def test_every_coercing_converter_is_classified() -> None:
+    """Pin 2 of 2 (DELEGATION) — every helper reaching the delegate is classified.
+
+    Complements the membership pin above rather than replacing it. Membership is
+    keyed on the name, so a helper that delegates under neither spelling in
+    ``_CONVERTER_PREFIXES`` escapes it entirely; this pin is keyed on BEHAVIOR,
+    observed by CALLING each exported helper with the delegate spied — never by a
+    name prefix and never by reading source.
+
+    Attribution is by sentinel IDENTITY: a helper is credited only when the
+    delegate receives the exact probe object that helper was handed. That keeps
+    the real discovery intact — a request builder reaching the delegate only
+    transitively is attributed to the converter, not to itself
+    (``create_get_products_request`` forwards its own ``account`` argument to
+    ``to_account_reference``, never the probe) — and, unlike reading the calling
+    frame, it still credits a converter that delegates through a private
+    intermediate, where the frame read named the intermediate and failed open.
+    """
+    probe = {"__probe__": True}  # identity, not value, is the attribution key
+    delegating: set[str] = set()
     real = schema_helpers._coerce_wire_object
+    probing = ""
 
     def spy(value, model_cls, context, **kwargs):
-        # The IMMEDIATE caller, so a request builder that reaches the helper only
-        # through a converter (create_get_products_request -> to_account_reference)
-        # is attributed to the converter, which is the thing being classified.
-        delegated.add(inspect.stack()[1].function)
+        if value is probe:
+            delegating.add(probing)
         return real(value, model_cls, context, **kwargs)
 
     candidates = [
@@ -89,19 +139,18 @@ def test_every_coercing_converter_is_classified() -> None:
         and getattr(schema_helpers, name).__module__ == schema_helpers.__name__
     ]
     with mock.patch.object(schema_helpers, "_coerce_wire_object", spy):
-        for name in candidates:
-            fn = getattr(schema_helpers, name)
+        for probing in candidates:
+            fn = getattr(schema_helpers, probing)
             params = list(inspect.signature(fn).parameters.values())
             if not params or params[0].kind not in (params[0].POSITIONAL_ONLY, params[0].POSITIONAL_OR_KEYWORD):
                 continue
             with contextlib.suppress(Exception):
-                fn({"__probe__": True})  # a dict reaches the delegate on every coercing helper
-    delegated &= set(schema_helpers.__all__)  # ignore private intermediates
+                fn(probe)  # a dict reaches the delegate on every coercing helper
 
     classified = {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS} | {
         "to_account_reference"  # strict: rejects non-dict (tested above)
     }
-    assert delegated == classified, (
+    assert delegating == classified, (
         "a helper delegating to _coerce_wire_object is unclassified — decide whether it "
         "degrades (add it to _DEGRADING_CONVERTERS) or rejects (strict=True, and test it)"
     )
