@@ -221,8 +221,15 @@ class TestBlobLogContext:
 
     def test_crlf_in_ids_is_neutralized(self):
         # A buyer-supplied id carrying CR/LF would forge log entries (CodeQL py/log-injection).
-        # Every id routes through log_safe here, so the newline is stripped and the suffix stays
-        # a single line. Reddens if the log_safe wrap is removed from any slot.
+        # Every id routes through log_safe here, so no raw newline survives into the suffix and
+        # it stays a single line. Reddens if the log_safe wrap is removed from any slot.
+        #
+        # log_safe ESCAPES control characters (``\n`` renders as the two characters ``\`` and
+        # ``n``) rather than deleting them — it delegates to the shared sanitize_log_value escape
+        # table so both sanitizers neutralize identically. Escaping satisfies this test's
+        # invariant exactly as deletion did (the assertion below still holds: no raw CR/LF
+        # reaches the log line) and additionally keeps the id correlatable instead of silently
+        # rewriting it to a different value.
         suffix = _blob_log_context("c\r\n9", "t\n9", "p\r9")
         assert "\n" not in suffix and "\r" not in suffix
-        assert suffix == " (creative_id=c9 tenant_id=t9 principal_id=p9)"
+        assert suffix == r" (creative_id=c\r\n9 tenant_id=t\n9 principal_id=p\r9)"
