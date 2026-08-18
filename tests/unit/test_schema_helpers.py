@@ -23,6 +23,7 @@ today's behavior, and are not an argument that it is correct.
 
 import contextlib
 import inspect
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -33,6 +34,7 @@ from adcp.types import (
     PushNotificationConfig,
     ReportingWebhook,
 )
+from pydantic import BaseModel
 
 from src.core import schema_helpers
 from src.core.exceptions import AdCPValidationError
@@ -127,7 +129,9 @@ def test_every_coercing_converter_is_classified() -> None:
     real = schema_helpers._coerce_wire_object
     probing = ""
 
-    def spy(value, model_cls, context, **kwargs):
+    # Annotated to mirror ``_coerce_wire_object``'s own signature, so a change to
+    # the delegate that this spy no longer matches is visible at the seam.
+    def spy[ModelT: BaseModel](value: Any, model_cls: type[ModelT], context: str, **kwargs: Any) -> ModelT | None:
         if value is probe:
             delegating.add(probing)
         return real(value, model_cls, context, **kwargs)
