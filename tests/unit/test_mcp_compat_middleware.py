@@ -140,7 +140,7 @@ class TestShouldRetry:
             title="call[create_media_buy]",
             line_errors=[],
         )
-        with patch("src.core.config.is_production", return_value=True):
+        with patch("src.core.config.declares_production_explicitly", return_value=True):
             assert middleware._should_retry(exc) is True
 
     def test_business_logic_validation_error_does_not_retry(self, middleware):
@@ -152,7 +152,7 @@ class TestShouldRetry:
             title="CreateMediaBuyRequest",
             line_errors=[],
         )
-        with patch("src.core.config.is_production", return_value=True):
+        with patch("src.core.config.declares_production_explicitly", return_value=True):
             assert middleware._should_retry(exc) is False
 
     def test_non_production_never_retries(self, middleware):
@@ -163,7 +163,7 @@ class TestShouldRetry:
             title="call[get_products]",
             line_errors=[],
         )
-        with patch("src.core.config.is_production", return_value=False):
+        with patch("src.core.config.declares_production_explicitly", return_value=False):
             assert middleware._should_retry(exc) is False
 
     def test_tool_error_does_not_retry(self, middleware):
@@ -171,13 +171,13 @@ class TestShouldRetry:
         from fastmcp.exceptions import ToolError
 
         exc = ToolError("1 validation error for call[get_products]\ncount\n  Field required [type=missing]")
-        with patch("src.core.config.is_production", return_value=True):
+        with patch("src.core.config.declares_production_explicitly", return_value=True):
             assert middleware._should_retry(exc) is False
 
     def test_unrelated_exception_does_not_retry(self, middleware):
         """Non-ValidationError exceptions never retry."""
         exc = RuntimeError("unexpected")
-        with patch("src.core.config.is_production", return_value=True):
+        with patch("src.core.config.declares_production_explicitly", return_value=True):
             assert middleware._should_retry(exc) is False
 
 
@@ -220,7 +220,7 @@ class TestTypeAdapterValidationEnvelope:
         validation_error = _typeadapter_validation_error(tool_name, line_error)
         call_next = AsyncMock(side_effect=validation_error)
 
-        with patch("src.core.config.is_production", return_value=False):
+        with patch("src.core.config.declares_production_explicitly", return_value=False):
             with pytest.raises(AdCPToolError) as exc_info:
                 await middleware.on_call_tool(ctx, call_next)
 
@@ -252,7 +252,7 @@ class TestTypeAdapterValidationEnvelope:
         )
 
         with (
-            patch("src.core.config.is_production", return_value=False),
+            patch("src.core.config.declares_production_explicitly", return_value=False),
             patch("src.core.mcp_compat_middleware.record_boundary_error") as record_error,
             pytest.raises(AdCPToolError),
         ):
@@ -289,3 +289,51 @@ class TestMiddlewareEdgeCases:
             await middleware.on_call_tool(ctx, call_next)
 
             call_next.assert_called_once_with(ctx)
+
+
+class TestCompatLooseningFollowsDeclaredProductionOnly:
+    """The compat loosenings follow declares_production_explicitly(), not is_production().
+
+    The patch-based tests above cannot grade WHICH predicate is used: is_production()
+    is `declares_production_explicitly() or PRODUCTION or FLY_APP_NAME`, so patching
+    the narrow one to True makes the broad one True as well. Pointing production back
+    at is_production() would leave every one of them green.
+
+    These drive the real env vars instead, where the two predicates genuinely diverge:
+    FLY_APP_NAME alone answers True for is_production() and False for
+    declares_production_explicitly(). A deployment that never declared production must
+    keep the loud dev path -- retrying a validation failure with a deep strip is a
+    forward-compat loosening it did not opt into.
+    """
+
+    @staticmethod
+    def _clear_production_signals(monkeypatch):
+        for var in ("ENVIRONMENT", "PRODUCTION", "FLY_APP_NAME"):
+            monkeypatch.delenv(var, raising=False)
+
+    @staticmethod
+    def _typeadapter_error():
+        return _typeadapter_validation_error("create_media_buy", {"type": "missing", "loc": ("brief",), "input": {}})
+
+    def test_declared_production_retries(self, middleware, monkeypatch):
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert middleware._should_retry(self._typeadapter_error()) is True
+
+    @pytest.mark.parametrize(
+        ("signal", "value"),
+        [("FLY_APP_NAME", "salesagent-prod"), ("PRODUCTION", "true")],
+    )
+    def test_inferred_production_does_not_retry(self, middleware, monkeypatch, signal, value):
+        from src.core.config import is_production
+
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv(signal, value)
+
+        # Negative control: the broad predicate DOES fire here, so this is a real
+        # divergence and not a case where both predicates happen to agree.
+        assert is_production() is True
+        assert middleware._should_retry(self._typeadapter_error()) is False, (
+            f"{signal} alone must not enable the deep-strip retry -- that deployment "
+            "never declared production and changed nothing"
+        )

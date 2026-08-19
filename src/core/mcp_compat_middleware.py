@@ -58,14 +58,21 @@ class RequestCompatMiddleware(Middleware):
         if compat_result.translations_applied:
             modified = True
 
-        # Step 2: Strip unknown fields (schema-aware, production only)
+        # Step 2: Strip unknown fields (schema-aware, declared production only)
         # In dev mode, unknown fields reach TypeAdapter and fail loudly —
         # this is how we detect that the seller agent doesn't support a
         # field the spec requires. In production, strip silently to avoid
         # rejecting callers using newer schema versions.
-        from src.core.config import is_production
+        #
+        # declares_production_explicitly(), not is_production(): silently
+        # stripping fields is the same forward-compat loosening as
+        # get_pydantic_extra_mode and follows the same opt-in signal. A
+        # deployment that never declared production keeps the loud dev path
+        # it had before, rather than being switched to silent stripping on
+        # upgrade.
+        from src.core.config import declares_production_explicitly
 
-        if is_production():
+        if declares_production_explicitly():
             known_params = await self._get_known_params(context, tool_name)
             if known_params is not None:
                 normalized, stripped = strip_unknown_params(normalized, known_params)
@@ -145,16 +152,19 @@ class RequestCompatMiddleware(Middleware):
     def _should_retry(exc: Exception) -> bool:
         """Determine if the exception is a TypeAdapter structural error worth retrying.
 
-        Only retries in production mode. Only retries Pydantic ValidationErrors
-        that come from FastMCP's TypeAdapter (not from our business logic).
+        Only retries under declared production (ENVIRONMENT=production) -- the deep
+        strip this retry performs is the same forward-compat loosening as the strip
+        in on_call_tool, so it follows the same opt-in signal rather than the broader
+        is_production(). Only retries Pydantic ValidationErrors that come from
+        FastMCP's TypeAdapter (not from our business logic).
 
         FastMCP's TypeAdapter raises raw pydantic.ValidationError with title
         "call[tool_name]". Business logic ValidationErrors (from model construction
         inside _impl) have the model class name (e.g. "CreateMediaBuyRequest").
         """
-        from src.core.config import is_production
+        from src.core.config import declares_production_explicitly
 
-        return is_production() and RequestCompatMiddleware._is_typeadapter_validation_error(exc)
+        return declares_production_explicitly() and RequestCompatMiddleware._is_typeadapter_validation_error(exc)
 
     @staticmethod
     def _is_typeadapter_validation_error(exc: Exception) -> bool:

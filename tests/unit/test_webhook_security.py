@@ -1499,3 +1499,71 @@ class TestRedactionRequiresKeyStrengthNotJustPresence:
         assert just_enough.startswith("https://<redacted:v1:"), (
             f"a key at exactly the minimum must still produce a keyed digest, got {just_enough}"
         )
+
+
+class TestStrictModeFollowsDeclaredProductionOnly:
+    """SSRF strict mode follows declares_production_explicitly(), not is_production().
+
+    _strict_mode() had no behavioral test under the signals is_production() newly
+    recognises, which is how it came to be reclassified without anyone choosing it.
+    Strict mode is a TIGHTENING -- it withdraws plain HTTP -- so gating it on the
+    broad predicate would make a deployment that merely has FLY_APP_NAME populated
+    start REJECTING webhooks it had been delivering successfully, on upgrade, for a
+    configuration its operator never changed.
+
+    Both directions are driven through the real validator rather than asserted on
+    _strict_mode()'s return value, so the test grades the behavior the buyer sees.
+    Forcing _strict_mode() to False reddens the declared case; pointing it back at
+    is_production() reddens the two inferred cases.
+    """
+
+    PLAIN_HTTP_PUBLIC_URL = "http://buyer.example.com/hook"
+
+    @staticmethod
+    def _clear_production_signals(monkeypatch):
+        for var in ("ENVIRONMENT", "PRODUCTION", "FLY_APP_NAME", "ADCP_TESTING"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_declared_production_rejects_plain_http(self, monkeypatch):
+        from src.core.webhook_validator import WEBHOOK_SSRF_SUGGESTION, webhook_ssrf_suggestion
+
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+
+        is_valid, error = WebhookURLValidator.validate_webhook_url_registration(self.PLAIN_HTTP_PUBLIC_URL)
+        assert is_valid is False
+        assert "https" in error.lower()
+        assert webhook_ssrf_suggestion() == WEBHOOK_SSRF_SUGGESTION
+
+    @pytest.mark.parametrize(
+        ("signal", "value"),
+        [("FLY_APP_NAME", "salesagent-prod"), ("PRODUCTION", "true")],
+    )
+    def test_inferred_production_still_accepts_plain_http(self, monkeypatch, signal, value):
+        """The upgrade-safety case: a deployment we only INFER is production keeps
+        delivering over plain HTTP instead of being broken by an upgrade."""
+        from src.core.config import is_production
+        from src.core.webhook_validator import WEBHOOK_SSRF_SUGGESTION_DEV, webhook_ssrf_suggestion
+
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv(signal, value)
+
+        # Negative control: the broad predicate DOES fire here, so this is a real
+        # divergence and not a case where both predicates happen to agree.
+        assert is_production() is True
+
+        is_valid, error = WebhookURLValidator.validate_webhook_url_registration(self.PLAIN_HTTP_PUBLIC_URL)
+        assert is_valid is True, (
+            f"{signal} alone must not withdraw plain HTTP -- that deployment never declared "
+            f"production and changed nothing (error was: {error})"
+        )
+        assert webhook_ssrf_suggestion() == WEBHOOK_SSRF_SUGGESTION_DEV
+
+    def test_adcp_testing_still_overrides_declared_production(self, monkeypatch):
+        """The pre-existing ADCP_TESTING bypass survives the routing change."""
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        monkeypatch.setenv("ADCP_TESTING", "true")
+
+        is_valid, _ = WebhookURLValidator.validate_webhook_url_registration(self.PLAIN_HTTP_PUBLIC_URL)
+        assert is_valid is True

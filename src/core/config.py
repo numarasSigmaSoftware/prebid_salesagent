@@ -334,21 +334,34 @@ def declares_production_explicitly() -> bool:
     on is_production() changes for a deployment that has FLY_APP_NAME or a truthy
     PRODUCTION but never set ENVIRONMENT:
 
-    - ``webhook_validator._strict_mode`` — SSRF policy. HTTPS becomes REQUIRED and the
-      testing localhost bypass is withdrawn. This is the one with teeth: a Fly-only
-      deployment that delivered webhooks over plain HTTP now has them REJECTED.
-    - ``get_pydantic_extra_mode`` — forbid to ignore, so unknown request fields are
-      accepted instead of rejected.
-    - ``mcp_compat_middleware`` (two sites) — unknown fields are stripped silently, and
-      a validation failure is retried with a deep strip.
     - ``product_conversion`` — a product missing delivery_measurement takes the adapter
-      default with an info log rather than the non-production path.
+      default with an info log rather than a warning. Log level only; both branches
+      apply the same default, which is why this one stays on the broad predicate:
+      verbosity is a deploy-shape concern, the same family as auth.py's verbose-auth
+      suppression below.
     - ``validate_configuration`` — the webhook-audit HMAC key requirement, which is
       warned rather than enforced for exactly this newly-inferred set (above).
 
-    Note the directions differ: the SSRF change is a tightening that can break a
-    working deployment, while the extra-mode and compat changes are loosenings. A
-    reader who only saw the loosenings would misjudge the upgrade risk.
+    Four consumers that WOULD have been reached are gated on THIS predicate instead,
+    so they do not move when a deployment is merely inferred to be production. Each
+    was doing declared-production work under a shared name, which is how they got
+    reclassified without anyone choosing it:
+
+    - ``webhook_validator._strict_mode`` — SSRF policy (HTTPS required, testing
+      localhost bypass withdrawn). The one with teeth: on the broad predicate a
+      Fly-only deployment that had been delivering webhooks over plain HTTP would
+      have them REJECTED on upgrade. Same reasoning as the HMAC split above — do not
+      break a working deployment for a configuration its operator never changed.
+    - ``get_pydantic_extra_mode`` — forbid to ignore. Schema strictness is an opt-in
+      contract; see its own docstring.
+    - ``mcp_compat_middleware`` (two sites) — unknown fields stripped silently, and a
+      validation failure retried with a deep strip. Same forward-compat family as
+      extra-mode, so it follows the same signal.
+
+    Note the directions differ, which is why routing was decided per consumer rather
+    than in bulk: the SSRF change is a tightening that can break a working deployment,
+    while the extra-mode and compat changes are loosenings. A reader who only saw the
+    loosenings would misjudge the upgrade risk.
 
     These callers do NOT change on the broadening axis -- for a Fly-only or
     PRODUCTION-truthy deployment they already agreed with is_production() before
@@ -393,7 +406,19 @@ def declares_production_explicitly() -> bool:
 def get_pydantic_extra_mode() -> Literal["ignore", "forbid"]:
     """Get Pydantic extra field handling mode based on environment.
 
-    Production: "ignore" - Accept extra fields for forward compatibility
-    Non-production: "forbid" - Reject extra fields to catch bugs early
+    Declared production (ENVIRONMENT=production): "ignore" -- accept extra fields
+    for forward compatibility. Everything else: "forbid" -- reject extra fields to
+    catch bugs early.
+
+    Gated on :func:`declares_production_explicitly`, NOT :func:`is_production`.
+    Schema strictness is a contract an operator opts into, and it is the contract
+    this project documents (CLAUDE.md Pattern #7 names ENVIRONMENT=production as
+    the signal). Routing it through the broader predicate silently switched a
+    Fly-only deployment -- one that never declared production and changed nothing
+    -- from strict extra="forbid" to permissive extra="ignore", so unknown request
+    fields it had been rejecting would start being accepted on upgrade.
+
+    TestExtraModeFollowsDeclaredProductionOnly (tests/unit/test_schema_validation_modes.py)
+    reddens if this is pointed back at is_production().
     """
-    return "ignore" if is_production() else "forbid"
+    return "ignore" if declares_production_explicitly() else "forbid"

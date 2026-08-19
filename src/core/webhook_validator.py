@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from adcp.types import ContextObject, PushNotificationConfig, ReportingWebhook, TaskType
 
-from src.core.config import MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH, get_config, is_production
+from src.core.config import MIN_WEBHOOK_AUDIT_HMAC_KEY_LENGTH, declares_production_explicitly, get_config
 from src.core.exceptions import AdCPValidationError
 from src.core.security.url_validator import check_url_ssrf
 
@@ -53,8 +53,21 @@ def _adcp_testing() -> bool:
 
 
 def _strict_mode() -> bool:
-    """Production SSRF policy: HTTPS required and no testing localhost bypass."""
-    return is_production() and not _adcp_testing()
+    """Production SSRF policy: HTTPS required and no testing localhost bypass.
+
+    Gated on declares_production_explicitly(), NOT is_production(). This is a
+    TIGHTENING: it withdraws plain HTTP. On the broad predicate a deployment that
+    merely has FLY_APP_NAME populated -- and never declared production, and changed
+    nothing -- would have webhooks it was successfully delivering start being
+    REJECTED on upgrade. That is the same "do not brick a working deployment on
+    upgrade" reasoning validate_configuration() already applies to the
+    WEBHOOK_AUDIT_HMAC_KEY requirement, and it lands the same way: enforce where
+    production was declared.
+
+    TestStrictModeFollowsDeclaredProductionOnly (tests/unit/test_webhook_security.py)
+    grades both directions of this through the real validator.
+    """
+    return declares_production_explicitly() and not _adcp_testing()
 
 
 def validate_webhook_task_type(task_type: str, fallback: str = WEBHOOK_TASK_TYPE_FALLBACK) -> str:

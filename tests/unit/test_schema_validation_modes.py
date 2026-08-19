@@ -260,3 +260,49 @@ class TestProductionModeBehavior:
 
             with pytest.raises(ValidationError, match="unknown_field"):
                 DevModel(brief="test", unknown_field="should_fail")
+
+
+class TestExtraModeFollowsDeclaredProductionOnly:
+    """Schema strictness follows declares_production_explicitly(), not is_production().
+
+    is_production() also answers True for a deployment that merely has FLY_APP_NAME
+    populated or PRODUCTION truthy. Gating extra-mode on it silently switched such a
+    deployment -- one that never declared production and changed nothing -- from
+    strict extra="forbid" to permissive extra="ignore", so unknown request fields it
+    had been rejecting would start being accepted on upgrade.
+
+    These assert the two predicates DIVERGE here: is_production() is True in the
+    inferred cases while the mode stays "forbid". Pointing get_pydantic_extra_mode
+    back at is_production() reddens the two inferred cases.
+    """
+
+    @staticmethod
+    def _clear_production_signals(monkeypatch):
+        for var in ("ENVIRONMENT", "PRODUCTION", "FLY_APP_NAME"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_declared_production_gets_forward_compatible_ignore(self, monkeypatch):
+        from src.core.config import get_pydantic_extra_mode
+
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert get_pydantic_extra_mode() == "ignore"
+
+    @pytest.mark.parametrize(
+        ("signal", "value"),
+        [("FLY_APP_NAME", "salesagent-prod"), ("PRODUCTION", "true")],
+    )
+    def test_inferred_production_keeps_strict_forbid(self, monkeypatch, signal, value):
+        """The upgrade-safety case: inferred production must not loosen the schema."""
+        from src.core.config import get_pydantic_extra_mode, is_production
+
+        self._clear_production_signals(monkeypatch)
+        monkeypatch.setenv(signal, value)
+
+        # Negative control: the broad predicate DOES fire here, so this is a real
+        # divergence and not a case where both predicates happen to agree.
+        assert is_production() is True
+        assert get_pydantic_extra_mode() == "forbid", (
+            f"{signal} alone must not loosen schema validation -- that deployment never "
+            "declared production and changed nothing"
+        )
