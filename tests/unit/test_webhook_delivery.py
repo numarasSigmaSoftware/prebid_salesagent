@@ -7,24 +7,31 @@ import requests
 
 from src.core.webhook_delivery import WebhookDelivery, deliver_webhook_with_retry
 
+# A genuinely public, non-blocked address (example.com's own) — the repo-wide
+# idiom for stubbing socket.gethostbyname, matching tests/unit/test_webhook_security.py,
+# tests/unit/test_ssrf_url_validator.py and tests/harness/delivery_poll.py. The
+# SSRF gate's IP-range check still runs on it for real and allows it.
+_DNS_RESOLVED_IP = "93.184.216.34"
+
 
 @patch("src.core.webhook_delivery.time.sleep")
 class TestWebhookDelivery:
     """Test cases for webhook delivery with exponential backoff retry."""
 
     @pytest.fixture(autouse=True)
-    def _stub_valid_webhook_url(self, request):
-        if request.node.name in {
-            "test_invalid_webhook_url_validation",
-            "test_localhost_webhook_url_rejected",
-        }:
-            yield
-            return
+    def _resolve_webhook_hostname(self):
+        """Stub only DNS resolution; the SSRF gate itself stays live.
 
-        with patch(
-            "src.core.webhook_delivery.WebhookURLValidator.validate_webhook_url",
-            return_value=(True, None),
-        ):
+        Stubbing ``validate_webhook_url`` to ``(True, None)`` disabled the gate
+        outright, which is why the two tests that exist to prove it rejects
+        something had to opt out by hardcoded test name — a list nothing keeps in
+        step with the tests around it. The only part of the gate that needs a
+        network is the hostname lookup, so that is the only part faked here (the
+        seam DeliveryPollEnv already uses). Scheme, blocked-hostname and
+        blocked-IP-range rejection all still run for real, for every test in the
+        class, so no test needs an exemption to reach them.
+        """
+        with patch("src.core.security.url_validator.socket.gethostbyname", return_value=_DNS_RESOLVED_IP):
             yield
 
     def test_successful_delivery_first_attempt(self, mock_sleep):

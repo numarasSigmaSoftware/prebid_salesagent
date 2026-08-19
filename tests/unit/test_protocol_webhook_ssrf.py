@@ -152,7 +152,6 @@ async def test_send_notification_posts_when_url_is_public() -> None:
     )
 
 
-@pytest.mark.asyncio
 def _loggable_metadata() -> dict[str, str]:
     """Metadata that makes _delivery_log_context() return a real context, not
     None: task_type must be in _LOGGABLE_DELIVERY_TASK_TYPES, and tenant_id/

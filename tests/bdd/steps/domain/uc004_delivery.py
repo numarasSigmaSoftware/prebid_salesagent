@@ -3375,8 +3375,8 @@ def _dispatch_create_with_reporting_webhook(ctx: dict, *, schemes: list[str], cr
     if pricing_option is not None:
         kwargs["packages"][0]["pricing_option_id"] = _pricing_option_id(pricing_option)
     kwargs["reporting_webhook"] = {
+        **DAILY_REPORTING_WEBHOOK,
         "url": _WEBHOOK_URL,
-        "reporting_frequency": "daily",
         "authentication": {"schemes": schemes, "credentials": credentials},
     }
     dispatch_request(ctx, **kwargs)
