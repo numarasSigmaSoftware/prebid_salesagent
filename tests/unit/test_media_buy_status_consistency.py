@@ -328,9 +328,11 @@ class TestCanonicalVocabularyPinnedToSdk:
         not one shared source of truth. If a future change widens
         WEBHOOK_REPORTABLE_CANONICAL_STATUSES (or the scheduler's SQL selection) to
         include "failed" without also updating WEBHOOK_TERMINAL_CANONICAL_STATUSES,
-        this reddens instead of silently letting a failed buy's webhook claim
-        notification_type="final" without ever taking the atomic final-send claim —
-        opening the door to duplicate "final" notifications for that buy.
+        this reddens instead of silently letting a failed buy's webhook carry
+        notification_type="final" while the is_final gate reads False — so
+        _should_skip_send would apply the 24h periodic dedup rather than the
+        final-ever skip, and later batches would emit more "final" notifications
+        for that buy.
         """
         for status in sorted(WEBHOOK_REPORTABLE_CANONICAL_STATUSES):
             would_be_final_notification = derive_notification_type([status]) == "final"
@@ -595,13 +597,14 @@ class TestSchedulerPassesDerivedStatusVocabulary:
 class TestSchedulerBatchIsolatesPerBuyFailures:
     """One buy's exception must not poison the shared session for the rest of the batch.
 
-    `_send_reports` shares ONE session across every buy in the batch;
-    `_claim_final_webhook` (reached via `_send_report_for_media_buy`) commits ON
-    that session mid-loop. A failed commit leaves a SQLAlchemy session unusable
-    until rolled back — Postgres itself refuses every further statement on an
-    aborted transaction. Without an explicit rollback in the per-buy except
-    handler, buy 1's failure would silently fail buy 2 too (logged as its own
-    unrelated-looking error), even though buy 2 was never actually broken.
+    `_send_reports` shares ONE session across every buy in the batch, and each
+    buy's `_send_report_for_media_buy` issues real statements on it (the dedup
+    read, the sequence and idempotency-key reads, the push-config lookup). A
+    failed statement leaves a SQLAlchemy session unusable until rolled back —
+    Postgres itself refuses every further statement on an aborted transaction.
+    Without an explicit rollback in the per-buy except handler, buy 1's failure
+    would silently fail buy 2 too (logged as its own unrelated-looking error),
+    even though buy 2 was never actually broken.
     """
 
     def test_one_buy_failing_does_not_block_the_next_buy(self):
@@ -628,9 +631,9 @@ class TestSchedulerBatchIsolatesPerBuyFailures:
 
         async def fake_send_report(media_buy, reporting_webhook, session, force=False):
             if media_buy.media_buy_id == "mb_1":
-                # Simulates _claim_final_webhook's session.commit() failing --
-                # e.g. a constraint violation or transient connection error.
-                raise RuntimeError("simulated commit failure inside _claim_final_webhook")
+                # Simulates a statement on the shared batch session failing --
+                # e.g. a transient connection error during the sequence read.
+                raise RuntimeError("simulated DB failure inside _send_report_for_media_buy")
             return True
 
         with (
@@ -704,7 +707,7 @@ class TestDeliveryErrorWarningCarriesThePayload:
             with pytest.raises(RuntimeError, match="ADAPTER_TIMEOUT"):
                 asyncio.run(
                     sched.DeliveryWebhookScheduler()._deliver_report(
-                        MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}, is_final=False
+                        MagicMock(), MagicMock(), media_buy, {"url": "https://example.com/w"}
                     )
                 )
 

@@ -310,10 +310,10 @@ class DeliveryRepository:
         guarantee exactly-once under concurrent workers, nor when the successful
         POST and its log write come apart. That second window is NOT crash-only:
         ``_write_delivery_log`` raises on a persistence failure, and the scheduler
-        classifies any exception from the send as a failed send — releasing the
-        final claim and leaving no success row — so a DB error on the post-2xx
-        write alone re-sends the final on the next batch. Closing it needs an
-        atomic reserve-before-send (a transactional outbox).
+        classifies any exception from the send as a failed send — leaving no
+        success row — so a DB error on the post-2xx write alone re-sends the final
+        on the next batch. Closing it needs an atomic reserve-before-send (a
+        transactional outbox).
 
         Uses ``successful_final_log_clauses`` — the same predicate
         ``MediaBuyRepository.get_reportable_for_delivery`` correlates against —

@@ -468,7 +468,7 @@ class DeliveryWebhookScheduler:
             if self._should_skip_send(delivery_repo, media_buy, is_final=is_final, force=force):
                 return False
 
-            return await self._deliver_report(session, delivery_repo, media_buy, reporting_webhook, is_final=is_final)
+            return await self._deliver_report(session, delivery_repo, media_buy, reporting_webhook)
 
         except Exception as e:
             # Re-raise for the caller (batch loop / manual trigger) to own the
@@ -483,8 +483,6 @@ class DeliveryWebhookScheduler:
         delivery_repo: DeliveryRepository,
         media_buy: MediaBuy,
         reporting_webhook: dict[str, Any],
-        *,
-        is_final: bool,
     ) -> bool:
         """Build the delivery report and POST it.
 

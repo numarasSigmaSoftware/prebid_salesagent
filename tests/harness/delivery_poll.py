@@ -76,7 +76,8 @@ def mock_webhook_post(
     the serialized outbound body is observable; if the service ever swaps its
     HTTP client this AttributeErrors loudly rather than silently no-op'ing.
     Everything above the HTTP call (delivery impl, derivation, sequence,
-    serialization, the atomic final claim) runs for real.
+    serialization) runs for real — including the delivery-log write that the
+    success-final anti-join reads, which a stubbed ``send_notification`` skips.
 
     Yields the ``mock_post`` patch object so callers can assert on
     ``call_count`` / ``call_args_list`` after driving one or more sends.
@@ -124,12 +125,17 @@ def mock_delivery_response(response: Any) -> Iterator[Any]:
 def mock_send_notification(scheduler: DeliveryWebhookScheduler, *, delivered: bool = True) -> Iterator[AsyncMock]:
     """Stub a scheduler's ``webhook_service.send_notification`` with a fixed outcome.
 
-    Single source of truth for the mocked-``send_notification`` shape the claim/dedup
-    integration tests need (CLAUDE.md DRY invariant — they were each hand-rolling the
-    identical ``patch.object(..., new_callable=AsyncMock, return_value=<bool>)``). This
-    is one seam ABOVE ``mock_webhook_post``: it short-circuits the whole send (payload
-    build, POST, delivery-log write) with a boolean, where ``delivered=False`` models a
-    permanent failure that makes ``_deliver_report`` raise ``RuntimeError``.
+    Single source of truth for the mocked-``send_notification`` shape the dedup and
+    failed-send integration tests need (CLAUDE.md DRY invariant — they were each
+    hand-rolling the identical ``patch.object(..., new_callable=AsyncMock,
+    return_value=<bool>)``). This is one seam ABOVE ``mock_webhook_post``: it
+    short-circuits the whole send (payload build, POST, delivery-log write) with a
+    boolean, where ``delivered=False`` models a permanent failure that makes
+    ``_deliver_report`` raise ``RuntimeError``.
+
+    Because it skips the delivery-log write, NO success row is recorded — so a test
+    grading "the final is not re-sent" must drive ``mock_webhook_post`` instead, or
+    the success-final anti-join has nothing to read.
 
     Yields the ``AsyncMock`` so callers keep ``await_count`` / ``assert_not_awaited()``.
     """

@@ -742,7 +742,7 @@ async def test_serving_persisted_status_is_selected_for_delivery_webhook(integra
 async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
     """A batch that suppressed every buy must not read like one with no work.
 
-    Every skip returns False — dedup, unsupported cadence, no claim won — so a
+    Every skip returns False — dedup, unsupported cadence, nothing to report — so a
     summary counting only sends and errors prints "0 sent, 0 errors" whether the
     scheduler found nothing to do or silently suppressed everything it found. An
     operator cannot tell a healthy idle scheduler from one dropping every webhook,
