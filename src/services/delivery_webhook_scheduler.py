@@ -48,22 +48,6 @@ DEFAULT_SLEEP_INTERVAL_SECONDS = 3600
 # Configurable via env var for testing
 SLEEP_INTERVAL_SECONDS = int(os.getenv("DELIVERY_WEBHOOK_INTERVAL") or str(DEFAULT_SLEEP_INTERVAL_SECONDS))
 
-# Lease for the best-effort atomic "final webhook" claim. A claim older
-# than this is treated as stale (crashed/failed worker) and can be re-claimed, so
-# a stuck claim never strands the final. Comfortably longer than a real send
-# (seconds) so an in-flight send is never reclaimed, and shorter than the hourly
-# batch so a failed/crashed final is retried on the next batch.
-FINAL_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
-
-# Lease for the best-effort atomic "periodic webhook" claim -- same value and
-# same reasoning as FINAL_WEBHOOK_CLAIM_LEASE, kept as a separate constant
-# since the two claims protect different sends and could legitimately diverge
-# later. This is NOT the 24h dedup window (that's a separate, read-only check
-# against send history in _should_skip_send) -- it's the short in-flight lock
-# preventing two concurrent workers from both winning that check and both
-# sending before either has logged a result.
-PERIODIC_WEBHOOK_CLAIM_LEASE = timedelta(minutes=15)
-
 
 @dataclass(frozen=True)
 class DeliveryBatchSummary:
@@ -271,16 +255,15 @@ class DeliveryWebhookScheduler:
                         )
                         errors += 1
 
-                        # This loop shares ONE session across every buy in the batch, and
-                        # _claim_final_webhook (called from _send_report_for_media_buy)
-                        # commits ON that session mid-loop. A failed flush/commit leaves
-                        # a SQLAlchemy session unusable until rolled back — Postgres
-                        # itself refuses every further statement on an aborted
-                        # transaction. Without this, one buy's DB error would silently
-                        # fail every remaining buy in the batch too (each logged as its
-                        # own unrelated-looking error), not just the one that actually
-                        # failed. Safe to call unconditionally: rolling back a session
-                        # with nothing pending is a no-op.
+                        # This loop shares ONE session across every buy in the batch, so
+                        # any failed statement on it poisons the rest of the run: a
+                        # failed flush/commit leaves a SQLAlchemy session unusable until
+                        # rolled back — Postgres itself refuses every further statement
+                        # on an aborted transaction. Without this, one buy's DB error
+                        # would silently fail every remaining buy in the batch too (each
+                        # logged as its own unrelated-looking error), not just the one
+                        # that actually failed. Safe to call unconditionally: rolling
+                        # back a session with nothing pending is a no-op.
                         try:
                             session.rollback()
                         except Exception:
@@ -293,8 +276,8 @@ class DeliveryWebhookScheduler:
                             )
 
                 # Suppressions are reported, not just sends and errors. Every skip on
-                # this path returns False — dedup, unsupported cadence, no claim won,
-                # nothing to report — so a summary of only sent+errors renders a batch
+                # this path returns False — dedup, unsupported cadence, nothing to
+                # report — so a summary of only sent+errors renders a batch
                 # that suppressed every buy identically to one with no work to do:
                 # "0 sent, 0 errors". That is the reading under which a population
                 # whose webhooks were skipped on every pass looks like a quiet, healthy
@@ -391,9 +374,9 @@ class DeliveryWebhookScheduler:
     ) -> bool:
         """BEST-EFFORT read-only de-dup — True if this delivery webhook should NOT be sent.
 
-        NOT a hard exactly-once guarantee. This is a pure read decision; the atomic
-        concurrency CLAIM is taken later, just before the POST (see _deliver_report),
-        so definitive no-send paths before the POST never hold a claim.
+        NOT a hard exactly-once guarantee. This is a pure read decision, so two
+        workers can both pass it and both POST; closing that needs the send reserved
+        durably before the POST, tracked separately.
           - final: skip if a SUCCESSFUL "final" was already logged for this buy.
             Applies EVEN under ``force`` — a manual re-trigger must never duplicate a
             delivered final. Keys on a *successful* final, so a retry after a FAILED
@@ -422,92 +405,6 @@ class DeliveryWebhookScheduler:
             )
             return True
         return False
-
-    def _claim_final_webhook(self, session: Session, media_buy: MediaBuy) -> datetime | None:
-        """Atomically claim the buy's ONE final webhook. Returns the claim token
-        (the exact ``claimed_at`` written) if THIS worker won, else None.
-
-        Best-effort concurrency guard: a conditional UPDATE that wins only
-        when the claim is unset or stale (older than FINAL_WEBHOOK_CLAIM_LEASE, so a
-        crashed worker's claim self-heals). Runs on the caller's ``session`` and
-        COMMITS it so the claim is immediately visible to a racing worker (whose
-        UPDATE then matches 0 rows and loses). The returned token is passed to
-        _release_final_webhook_claim on a definitive failure/no-send so the claim doesn't
-        block an immediate retry for the whole lease. Does NOT close the
-        post-POST window, which only a durable reserve-before-send closes. That window is not crash-only: a failure of the
-        success-path ``_write_delivery_log`` (which raises) is indistinguishable
-        here from a failed send, so the claim is released and the final re-sends.
-        """
-        now = datetime.now(UTC)
-        won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_final_webhook(
-            media_buy.media_buy_id,
-            now=now,
-            stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE,
-            periodic_stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE,
-        )
-        session.commit()
-        return now if won else None
-
-    def _release_final_webhook_claim(self, session: Session, media_buy: MediaBuy, claimed_at: datetime) -> None:
-        """Best-effort release of THIS worker's final claim after a definitive
-        failure/no-send, so an immediate retry isn't blocked for the whole lease.
-
-        Token-guarded by ``claimed_at`` (see release_final_webhook_claim) so it can
-        never clear a newer owner's claim. Swallows its own errors — the lease is the
-        real guarantee, so a failed release just falls back to lease recovery.
-        """
-        try:
-            MediaBuyRepository(session, media_buy.tenant_id).release_final_webhook_claim(
-                media_buy.media_buy_id, claimed_at=claimed_at
-            )
-            session.commit()
-        except Exception:  # best-effort; lease recovery is the guarantee
-            logger.debug(
-                "Failed to release final claim for media buy %s (lease will recover)",
-                media_buy.media_buy_id,
-                exc_info=True,
-            )
-
-    def _claim_periodic_webhook(self, session: Session, media_buy: MediaBuy) -> datetime | None:
-        """Atomically claim the buy's PERIODIC webhook send. Returns the claim token
-        (the exact ``claimed_at`` written) if THIS worker won, else None.
-
-        Same pattern as ``_claim_final_webhook`` -- see that docstring. Closes the
-        race the read-only 24h dedup in ``_should_skip_send`` leaves open: without
-        this, two concurrent workers (e.g. two replicas under horizontal scaling)
-        can both read "no recent send" and both POST, each with a different
-        idempotency_key, so the buyer's own idempotency dedup does not catch it.
-        """
-        now = datetime.now(UTC)
-        won = MediaBuyRepository(session, media_buy.tenant_id).try_claim_periodic_webhook(
-            media_buy.media_buy_id,
-            now=now,
-            stale_before=now - PERIODIC_WEBHOOK_CLAIM_LEASE,
-            final_stale_before=now - FINAL_WEBHOOK_CLAIM_LEASE,
-        )
-        session.commit()
-        return now if won else None
-
-    def _release_periodic_webhook_claim(self, session: Session, media_buy: MediaBuy, claimed_at: datetime) -> None:
-        """Best-effort release of THIS worker's periodic claim after a definitive
-        failure/no-send, so an immediate retry isn't blocked for the whole lease.
-
-        Token-guarded by ``claimed_at`` (see release_periodic_webhook_claim) so it
-        can never clear a newer owner's claim. Swallows its own errors — the
-        lease is the real guarantee, so a failed release just falls back to lease
-        recovery.
-        """
-        try:
-            MediaBuyRepository(session, media_buy.tenant_id).release_periodic_webhook_claim(
-                media_buy.media_buy_id, claimed_at=claimed_at
-            )
-            session.commit()
-        except Exception:  # best-effort; lease recovery is the guarantee
-            logger.debug(
-                "Failed to release periodic claim for media buy %s (lease will recover)",
-                media_buy.media_buy_id,
-                exc_info=True,
-            )
 
     async def _send_report_for_media_buy(
         self, media_buy: MediaBuy, reporting_webhook: dict[str, Any], session: Session, force: bool = False
@@ -556,9 +453,7 @@ class DeliveryWebhookScheduler:
             # send is not — the anti-join re-selects a buy until a success-final row
             # exists, so returning False here would mean that row is never written
             # and the terminal notification never goes out, for the whole life of
-            # the buy. That is the exact outcome the claim/lease machinery below
-            # exists to make exactly-once rather than never, and _should_skip_send
-            # is already final-aware for the same reason.
+            # the buy. _should_skip_send is already final-aware for the same reason.
             if not force and not is_final and raw_freq not in SUPPORTED_REPORTING_FREQUENCIES:
                 logger.warning(
                     "Skipping reporting webhook with frequency '%s' for media buy %s – "
@@ -569,8 +464,7 @@ class DeliveryWebhookScheduler:
                 )
                 return False
 
-            # Best-effort read-only de-dup (no claim here — the atomic concurrency
-            # claim is taken inside _deliver_report, just before the POST).
+            # Best-effort read-only de-dup.
             if self._should_skip_send(delivery_repo, media_buy, is_final=is_final, force=force):
                 return False
 
@@ -582,51 +476,6 @@ class DeliveryWebhookScheduler:
             # traceback on the common send_notification -> False path.
             logger.debug("Error sending delivery report for media buy %s: %s", media_buy.media_buy_id, e, exc_info=True)
             raise
-
-    def _claim_webhook_send(self, session: Session, media_buy: MediaBuy, *, is_final: bool) -> datetime | None:
-        """Take the atomic claim for this send (final or periodic).
-
-        Returns the claim token, or None (logging why) if another worker
-        already holds it. Both final and periodic sends take a claim (see
-        _claim_final_webhook / _claim_periodic_webhook): without it, two
-        concurrent workers (e.g. two replicas under horizontal scaling) can
-        both pass the read-only dedup checks above and both POST, each with a
-        different idempotency_key, so the buyer's own idempotency dedup does
-        not catch it.
-
-        The two claims are mutually exclusive, so this serializes ALL delivery
-        webhook sends for a buy, not just same-type ones. ``is_final`` is
-        computed per worker from the row and date each read, so a status flip or
-        a UTC midnight rollover between two workers produces one of each — and
-        per-type columns alone would let both win. See
-        MediaBuyRepository.try_claim_final_webhook.
-        """
-        claim_token = (
-            self._claim_final_webhook(session, media_buy)
-            if is_final
-            else self._claim_periodic_webhook(session, media_buy)
-        )
-        if claim_token is None:
-            logger.info(
-                "%s delivery webhook for media buy %s is claimed by another worker – skipping",
-                "Final" if is_final else "Periodic",
-                media_buy.media_buy_id,
-            )
-        return claim_token
-
-    def _release_webhook_claim(
-        self, session: Session, media_buy: MediaBuy, claim_token: datetime, *, is_final: bool
-    ) -> None:
-        """Release the claim taken by ``_claim_webhook_send``, routing to the
-        matching final/periodic release method.
-
-        Extracted from _deliver_report to keep it under the statement-count
-        guard (ADR-009) — pure refactor, no behavior change.
-        """
-        if is_final:
-            self._release_final_webhook_claim(session, media_buy, claim_token)
-        else:
-            self._release_periodic_webhook_claim(session, media_buy, claim_token)
 
     async def _deliver_report(
         self,
@@ -640,24 +489,14 @@ class DeliveryWebhookScheduler:
         """Build the delivery report and POST it.
 
         Returns True when a webhook was delivered, False on a definitive no-send
-        (no delivery data, no URL, or the claim was lost to a concurrent worker);
-        RAISES on a failed send so the batch counts an error.
+        (no delivery data, no URL); RAISES on a failed send so the batch counts an
+        error.
 
-        The atomic CLAIM — final or periodic, per ``is_final`` — is taken after
-        the no-send checks (so those never hold a claim) and BEFORE the sequence
-        allocation, so the number is read under it. It is NOT taken "immediately
-        before the POST": the sequence read, the idempotency-key read and the
-        payload build all run while it is held, and each of them can raise. All
-        of them therefore sit inside the ``try`` that RELEASES the claim
-        (token-guarded), so a raise anywhere between the claim and the POST frees
-        the buy instead of stranding it for the lease — which, with the two claims
-        mutually exclusive, would have stalled BOTH notification types for that
-        buy, not just this one. Graded by
-        ``TestClaimIsReleasedWhenPreSendWorkRaises``; narrowing that ``try`` back
-        to the POST alone reddens it.
-
-        A successful POST keeps the claim; the crash-after-POST duplicate window
-        is the best-effort residual, closable only by a durable reserve-before-send.
+        No concurrency guard runs here: the dedup checks in ``_should_skip_send``
+        are read-only, so two workers running their own scheduler against the same
+        database (e.g. two replicas) can both pass them and both POST. Making the
+        send exactly-once needs the send reserved durably BEFORE the POST (a
+        transactional outbox), which is tracked separately.
         """
         # Reporting period for daily frequency: yesterday (full day).
         start_date_obj = datetime.now(UTC).date() - timedelta(days=1)
@@ -795,117 +634,70 @@ class DeliveryWebhookScheduler:
             "media_buy_id": media_buy.media_buy_id,
         }
 
-        # Atomic concurrency claim, taken NOW — after every definitive no-send
-        # path above, so none of them ever holds a claim, and BEFORE the sequence
-        # number is allocated below. The loser skips; the winner's claim is
-        # released below on a failed send (token-guarded) so an immediate retry
-        # isn't blocked for the lease. The crash-after-POST residual is tracked
-        # by a durable reserve-before-send.
-        claim_token = self._claim_webhook_send(session, media_buy, is_final=is_final)
-        if claim_token is None:
-            return False
+        # Sequence number for this webhook: max SUCCESSFULLY DELIVERED sequence + 1
+        # (spec: "Sequential notification number ... starts at 1"). Failed/retrying
+        # sends also log the sequence they attempted; counting them — while the dedup
+        # above counts only successes — would burn numbers the buyer never received,
+        # so a buyer's first-ever webhook could start above 1. A query failure
+        # propagates and aborts this send loudly: a quiet fallback to 1 would put an
+        # already-consumed sequence on the wire.
+        sequence_number = (
+            delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
+        )
+        delivery_response.sequence_number = sequence_number
 
-        # EVERYTHING below runs under the claim, so it all belongs inside the try
-        # that releases it. The sequence read, the idempotency-key read and the
-        # payload build can each raise; before this block covered them, such a
-        # raise left the claim COMMITTED and unreleased, stranding the buy for the
-        # full lease — and, because the two claims are now mutually exclusive, that
-        # stranded BOTH notification types, not just this one.
-        #
-        # ``session`` stays open here — it's reused by the handler below to release
-        # the claim — only the claim's transaction was committed above (for
-        # cross-connection visibility, see _claim_final_webhook /
-        # _claim_periodic_webhook).
-        try:
-            # Sequence number for this webhook: max SUCCESSFULLY DELIVERED
-            # sequence + 1 (spec: "Sequential notification number ... starts at
-            # 1"). Failed/retrying sends also log the sequence they attempted;
-            # counting them — while the dedup above counts only successes —
-            # would burn numbers the buyer never received, so a buyer's
-            # first-ever webhook could start above 1. A query failure
-            # propagates and aborts this send loudly: a quiet fallback to 1
-            # would put an already-consumed sequence on the wire.
+        # A failed delivery does not consume its sequence number. Reuse the
+        # prior attempt's key when the scheduler retries the same logical
+        # notification in a later invocation.
+        idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
+            media_buy.media_buy_id,
+            task_type=DELIVERY_TASK_TYPE,
+            notification_type=derived,
+            sequence_number=sequence_number,
+        )
+
+        # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
+        # Serialize via webhook_payload(): the schema scopes aggregated_totals to
+        # "API responses (get_media_buy_delivery), not webhook notifications", and
+        # this is the exclusion seam (it also drops None fields, preserving the
+        # final-omits-next_expected_at contract).
+        media_buy_delivery_payload = create_mcp_webhook_payload(
+            task_id=media_buy.media_buy_id,
+            task_type=DELIVERY_TASK_TYPE,
+            result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
+            status=AdcpTaskStatus.completed,
+            token=reporting_webhook.get("token"),
+            idempotency_key=idempotency_key,
+        )
+
+        delivered = await self.webhook_service.send_notification(
+            push_notification_config=push_notification_config, payload=media_buy_delivery_payload, metadata=metadata
+        )
+        if not delivered:
+            # send_notification returns False (never raises) for FOUR distinct
+            # outcomes, and collapses them into one bool this caller cannot
+            # tell apart:
+            #   1. no URL configured        -> no HTTP attempt, NO log row
+            #   2. rejected by the SSRF gate -> no HTTP attempt, NO log row
+            #   3. permanent 4xx             -> HTTP attempted, log row written
+            #   4. retries exhausted         -> HTTP attempted, log row written
             #
-            # Allocated UNDER the claim. Read before it, the number was decided in a
-            # window any number of other workers could also be reading in — the claim
-            # would then serialize the POSTs while both carried the same sequence,
-            # which is not what "atomic claim" buys you. Here the claim is already
-            # held, so the value reflects every delivery committed up to this point
-            # and no concurrent sender can be between its own read and its own POST.
-            sequence_number = (
-                delivery_repo.get_max_sequence_number(media_buy.media_buy_id, task_type=DELIVERY_TASK_TYPE) + 1
+            # An earlier revision of this comment asserted 3/4 unconditionally
+            # ("has already written the failed WebhookDeliveryLog row") and the
+            # message sent the reader to "the HTTP failure detail". On 1 and 2
+            # there is no log row and no HTTP failure to find, so an operator
+            # hunting a delivery that never lands was pointed at evidence that
+            # does not exist.
+            #
+            # Say only what is known here. Distinguishing them properly means
+            # giving send_notification a typed outcome instead of a bool —
+            # a change across every caller (A2A, MCP, task webhooks), tracked
+            # separately rather than widened into this change.
+            raise RuntimeError(
+                f"Delivery report webhook send failed for media buy {media_buy.media_buy_id} "
+                "(webhook service reported failure; if no HTTP attempt is logged, the URL was "
+                "missing or rejected by the SSRF gate — those paths write no WebhookDeliveryLog row)"
             )
-            delivery_response.sequence_number = sequence_number
-
-            # A failed delivery does not consume its sequence number. Reuse the
-            # prior attempt's key when the scheduler retries the same logical
-            # notification in a later invocation.
-            idempotency_key = delivery_repo.get_idempotency_key_for_sequence(
-                media_buy.media_buy_id,
-                task_type=DELIVERY_TASK_TYPE,
-                notification_type=derived,
-                sequence_number=sequence_number,
-            )
-
-            # SDK 6.6.0 accepts the AdCP 3.1.1 media_buy_delivery task type.
-            # Serialize via webhook_payload(): the schema scopes aggregated_totals to
-            # "API responses (get_media_buy_delivery), not webhook notifications", and
-            # this is the exclusion seam (it also drops None fields, preserving the
-            # final-omits-next_expected_at contract).
-            media_buy_delivery_payload = create_mcp_webhook_payload(
-                task_id=media_buy.media_buy_id,
-                task_type=DELIVERY_TASK_TYPE,
-                result=delivery_response.webhook_payload(requested_metrics=reporting_webhook.get("requested_metrics")),
-                status=AdcpTaskStatus.completed,
-                token=reporting_webhook.get("token"),
-                idempotency_key=idempotency_key,
-            )
-
-            delivered = await self.webhook_service.send_notification(
-                push_notification_config=push_notification_config, payload=media_buy_delivery_payload, metadata=metadata
-            )
-            if not delivered:
-                # send_notification returns False (never raises) for FOUR distinct
-                # outcomes, and collapses them into one bool this caller cannot
-                # tell apart:
-                #   1. no URL configured        -> no HTTP attempt, NO log row
-                #   2. rejected by the SSRF gate -> no HTTP attempt, NO log row
-                #   3. permanent 4xx             -> HTTP attempted, log row written
-                #   4. retries exhausted         -> HTTP attempted, log row written
-                #
-                # An earlier revision of this comment asserted 3/4 unconditionally
-                # ("has already written the failed WebhookDeliveryLog row") and the
-                # message sent the reader to "the HTTP failure detail". On 1 and 2
-                # there is no log row and no HTTP failure to find, so an operator
-                # hunting a delivery that never lands was pointed at evidence that
-                # does not exist.
-                #
-                # Say only what is known here. Distinguishing them properly means
-                # giving send_notification a typed outcome instead of a bool —
-                # a change across every caller (A2A, MCP, task webhooks), tracked
-                # separately rather than widened into this change.
-                raise RuntimeError(
-                    f"Delivery report webhook send failed for media buy {media_buy.media_buy_id} "
-                    "(webhook service reported failure; if no HTTP attempt is logged, the URL was "
-                    "missing or rejected by the SSRF gate — those paths write no WebhookDeliveryLog row)"
-                )
-        except Exception:
-            # Definitive failure: release our claim (token-guarded) so an
-            # immediate retry isn't blocked for the lease. Lease recovery still
-            # covers an actual crash (where this release never runs).
-            self._release_webhook_claim(session, media_buy, claim_token, is_final=is_final)
-            raise
-
-        # Periodic claims are a transient lock around the send itself, not a
-        # lasting "already sent" marker — that's the WebhookDeliveryLog's job,
-        # read by the 24h dedup check in _should_skip_send. Release on success
-        # too, so the next LEGITIMATE periodic send (a later day's batch, or an
-        # operator's force re-trigger) is not blocked by a stale-but-still-fresh
-        # claim from this one. Final claims are the opposite: a successful final
-        # is meant to be permanent (no more sends ever), so that claim is
-        # deliberately kept.
-        if not is_final:
-            self._release_webhook_claim(session, media_buy, claim_token, is_final=False)
 
         logger.info("Sent delivery report webhook for media buy %s", media_buy.media_buy_id)
         return True

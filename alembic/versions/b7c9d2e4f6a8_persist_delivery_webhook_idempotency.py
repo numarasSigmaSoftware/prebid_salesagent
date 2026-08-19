@@ -19,7 +19,7 @@ this same chain: ``b5838b839548`` (two revisions later) creates it with
 ``IF NOT EXISTS`` is load-bearing there.
 
 Revision ID: b7c9d2e4f6a8
-Revises: d3f8a1c4b592
+Revises: 823974a5553e
 Create Date: 2026-07-27 00:00:00.000000
 
 """
@@ -32,7 +32,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "b7c9d2e4f6a8"
-down_revision: str | Sequence[str] | None = "d3f8a1c4b592"
+down_revision: str | Sequence[str] | None = "823974a5553e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
