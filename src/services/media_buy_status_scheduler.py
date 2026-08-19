@@ -26,9 +26,11 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyRepository
 from src.core.tools._media_buy_status import (
+    COMPLETED_PERSISTED_WRITE_TARGET,
     LEGACY_SERVING_ALIASES,
     PENDING_PERSISTED_STATUSES,
     SERVING_PERSISTED_STATUSES,
+    SERVING_PERSISTED_WRITE_TARGET,
 )
 from src.core.utils import utc_flight_end, utc_flight_start
 
@@ -276,8 +278,8 @@ class MediaBuyStatusScheduler:
 
         # Check if campaign has ended
         if now > end_time:
-            if current_status != "completed":
-                return "completed"
+            if current_status != COMPLETED_PERSISTED_WRITE_TARGET:
+                return COMPLETED_PERSISTED_WRITE_TARGET
             return None
 
         # Check if campaign should be active
@@ -285,13 +287,13 @@ class MediaBuyStatusScheduler:
             if current_status in PENDING_PERSISTED_STATUSES:
                 # Creative-gated: verify creatives are approved before activating
                 if self._are_creatives_approved(media_buy, session):
-                    return "active"
+                    return SERVING_PERSISTED_WRITE_TARGET
                 # Creatives not approved yet - stay pending
                 return None
             if current_status in LEGACY_SERVING_ALIASES:
                 # scheduled/ready/approved -> active: purely date-gated legacy
                 # serving aliases (already approved), no creative check needed
-                return "active"
+                return SERVING_PERSISTED_WRITE_TARGET
 
         return None
 

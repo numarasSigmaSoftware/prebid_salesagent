@@ -154,6 +154,22 @@ SERVING_PERSISTED_STATUSES: frozenset[str] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == CANONICAL_SERVING
 )
 
+# The persisted values the STATUS SCHEDULER WRITES BACK into MediaBuy.status when
+# it migrates a legacy alias or closes an ended flight. That column stores a map
+# KEY, not a canonical value, so these deliberately are NOT CANONICAL_SERVING /
+# CANONICAL_COMPLETED even though the strings currently coincide: a canonical
+# value that stopped being a valid persisted key would still read fine and write
+# a row nothing maps. Each is derived as the map's IDENTITY row for its canonical
+# group — the one modern spelling every legacy alias in that group is migrated
+# onto — so renaming the modern spelling in the map moves the scheduler's writes
+# with it instead of stranding a literal in a branch. Membership pinned in
+# test_media_buy_status_consistency.py.
+_IDENTITY_PERSISTED_STATUSES: dict[str, str] = {
+    canonical: persisted for persisted, canonical in PERSISTED_STATUS_TO_CANONICAL.items() if persisted == canonical
+}
+SERVING_PERSISTED_WRITE_TARGET: str = _IDENTITY_PERSISTED_STATUSES[CANONICAL_SERVING]
+COMPLETED_PERSISTED_WRITE_TARGET: str = _IDENTITY_PERSISTED_STATUSES[CANONICAL_COMPLETED]
+
 # The legacy serving aliases (everything serving EXCEPT the modern "active") the
 # STATUS SCHEDULER migrates to canonical "active"/"completed" once serving —
 # purely date-gated (already approved), no creative check. Lives here beside the

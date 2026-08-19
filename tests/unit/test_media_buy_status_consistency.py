@@ -21,12 +21,14 @@ from adcp.types import MediaBuyStatus, NotificationType
 from src.core.tools._media_buy_status import (
     CANONICAL_STATUSES,
     COMPLETED_PERSISTED_STATUSES,
+    COMPLETED_PERSISTED_WRITE_TARGET,
     LEGACY_SERVING_ALIASES,
     NO_MORE_DATA_STATUSES,
     PENDING_PERSISTED_STATUSES,
     PERSISTED_STATUS_TO_CANONICAL,
     REPORTABLE_PERSISTED_STATUSES,
     SERVING_PERSISTED_STATUSES,
+    SERVING_PERSISTED_WRITE_TARGET,
     TERMINAL_STATUSES,
     WEBHOOK_ONLY_FIELDS,
     WEBHOOK_REPORTABLE_CANONICAL_STATUSES,
@@ -179,6 +181,28 @@ class TestCanonicalVocabularyPinnedToSdk:
         scheduler migrates (the same drift class as the SERVING pin above).
         """
         assert LEGACY_SERVING_ALIASES == {"approved", "ready", "scheduled"}
+
+    def test_persisted_write_targets_are_pinned(self):
+        """Pin the values the STATUS SCHEDULER writes back into MediaBuy.status.
+
+        The scheduler used to return the strings "active"/"completed" inline in
+        the branches that decide a transition, in the same file that already
+        selected by SERVING_PERSISTED_STATUSES — a literal on the write side of
+        the very column the sets derive. Each target is the map's IDENTITY row
+        for its canonical group, so pin BOTH the derivation (it stays a valid
+        persisted key mapping to the intended canonical status) and the exact
+        value, or a map rename could silently move what the scheduler persists.
+        """
+        assert SERVING_PERSISTED_WRITE_TARGET == "active"
+        assert COMPLETED_PERSISTED_WRITE_TARGET == "completed"
+        # Each is a persisted KEY (what the column stores), not a canonical value.
+        assert PERSISTED_STATUS_TO_CANONICAL[SERVING_PERSISTED_WRITE_TARGET] == "active"
+        assert PERSISTED_STATUS_TO_CANONICAL[COMPLETED_PERSISTED_WRITE_TARGET] == "completed"
+        # The serving target is the one modern spelling the legacy aliases migrate
+        # ONTO, so it must not itself be one of them.
+        assert SERVING_PERSISTED_WRITE_TARGET in SERVING_PERSISTED_STATUSES
+        assert SERVING_PERSISTED_WRITE_TARGET not in LEGACY_SERVING_ALIASES
+        assert COMPLETED_PERSISTED_WRITE_TARGET in COMPLETED_PERSISTED_STATUSES
 
     def test_reportable_persisted_statuses_membership_is_pinned(self):
         """Pin the persisted statuses the DELIVERY webhook batch selects.
