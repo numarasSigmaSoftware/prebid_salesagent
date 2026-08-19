@@ -174,6 +174,7 @@ class TransportResult:
         recovery: str | None = None,
         require_suggestion: bool = False,
         message_substr: str | None = None,
+        field: str | None = None,
     ) -> None:
         """Assert this result carries the AdCP two-layer wire error ``code``.
 
@@ -184,6 +185,12 @@ class TransportResult:
         non-vacuous without per-scenario duplication. This is the single
         harness-provided way to verify an error on the wire — step definitions
         must not hand-roll envelope parsing.
+
+        ``field`` pins WHICH request field the rejection blames, on both layers
+        of the envelope. Two validators sharing one code and one message shape
+        are told apart only by this attribute, so without it here every caller
+        needing that distinction had to reach into the envelope by hand — the
+        parsing this method exists to keep out of test bodies.
         """
         self._assert_error_envelope(
             self.wire_error_envelope,
@@ -192,6 +199,7 @@ class TransportResult:
             recovery=recovery,
             require_suggestion=require_suggestion,
             message_substr=message_substr,
+            field=field,
         )
 
     def assert_synthesized_error(
@@ -231,8 +239,9 @@ class TransportResult:
         recovery: str | None,
         require_suggestion: bool,
         message_substr: str | None,
+        field: str | None = None,
     ) -> None:
-        """Shared code/recovery/suggestion assertion for an explicit source."""
+        """Shared code/recovery/suggestion/field assertion for an explicit source."""
         from tests.helpers import assert_envelope_shape
 
         meta = _pinned_error_metadata()
@@ -252,3 +261,17 @@ class TransportResult:
         if require_suggestion:
             suggestion = extract_wire_suggestion(envelope)
             assert suggestion, f"Expected a non-empty suggestion in the {code} {source} envelope: {envelope}"
+        if field is not None:
+            errors = envelope.get("errors") or []
+            assert errors, (
+                f"Expected the {code} {source} envelope to blame field {field!r}, "
+                f"but it carries no errors entry: {envelope}"
+            )
+            # Both layers, deliberately: the AdCP envelope mirrors the first error
+            # at the top level, and a rejection that names the field in only one of
+            # them is a half-populated envelope, not a passing one.
+            for layer, block in (("errors[0]", errors[0]), ("adcp_error", envelope.get("adcp_error") or {})):
+                assert block.get("field") == field, (
+                    f"Expected {layer}.field == {field!r} in the {code} {source} envelope, "
+                    f"got {block.get('field')!r}: {envelope}"
+                )
