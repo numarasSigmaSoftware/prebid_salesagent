@@ -595,9 +595,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 )
             )
 
-        # E2E_REST — webhook/circuit assertions observe env.mock['post'] or
-        # CircuitBreaker state, neither of which is visible through the Docker
-        # HTTP path.
+        # FIXME(#1712): E2E_REST — webhook/circuit assertions observe env.mock['post']
+        # or CircuitBreaker state, which only the in-process harness exposes.
+        #
+        # The exemption is interim, not structural. It is NOT that a webhook is
+        # unobservable over Docker HTTP: the e2e capture receiver added in this PR
+        # (tests/e2e/_webhook_capture.py::run_webhook_capture_server) receives real
+        # webhook POSTs over HTTP and can be asserted on. What is missing is the
+        # wiring — the BDD harness does not point these scenarios at that receiver,
+        # so they still reach for in-process state. Wire it and the set can shrink.
         #
         # These eleven entries were briefly emptied on this branch on the premise
         # that they were unreachable: all eleven were also in
@@ -620,7 +626,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "T-UC-004-webhook-circuit-recovery",
             "T-UC-004-webhook-retry-success",
             # jdy1-M4: retry/sequence observability — assert on env.mock['post']
-            # call counts / args, not visible over the Docker HTTP path.
+            # call counts / args, which the BDD harness exposes in-process only.
             "T-UC-004-webhook-retry-5xx",
             "T-UC-004-webhook-retry-network",
             "T-UC-004-webhook-no-retry-4xx",
@@ -629,7 +635,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if is_e2e_rest and (marker_names & _UC004_E2E_WEBHOOK_INTERNAL_TAGS):
             item.add_marker(
                 pytest.mark.xfail(
-                    reason="E2E: webhook POST mock + CircuitBreaker state not observable through Docker HTTP",
+                    reason="E2E: BDD harness not wired to the e2e webhook capture receiver",
                     strict=False,
                 )
             )
@@ -2834,7 +2840,10 @@ _ADMIN_TAG_PREFIX = "T-ADMIN-"
 # variant would 404). get_media_buys (UC-019) is A2A/MCP-only.
 _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 
-# Send-time webhook scenarios that assert in-process mock/circuit-breaker state.
+# FIXME(#1712): send-time webhook scenarios that assert in-process mock/circuit-breaker
+# state. Interim for the same reason as _UC004_E2E_WEBHOOK_INTERNAL_TAGS above — the
+# e2e capture receiver (tests/e2e/_webhook_capture.py::run_webhook_capture_server) can
+# observe these POSTs over HTTP; the BDD harness is simply not wired to it yet.
 # Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
 #
 # Its sole entry (T-UC-004-webhook-ssrf-blocked) was briefly removed on this branch
