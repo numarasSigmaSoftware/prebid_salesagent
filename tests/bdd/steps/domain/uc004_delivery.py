@@ -23,6 +23,7 @@ from tests.bdd.steps._outcome_helpers import _require, wire_dict
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
+from tests.harness.delivery_poll import webhook_body
 from tests.helpers.delivery_assertions import (
     WEBHOOK_ONLY_FIELDS,
     assert_next_expected_at_shape,
@@ -69,9 +70,9 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     """Extract the JSON payload from the most recent webhook POST call."""
     mock_post = ctx["env"].mock["post"]
     assert mock_post.called, "No webhook POST was made"
-    call_kwargs = mock_post.call_args_list[-1][1]  # kwargs of last call
-    payload = call_kwargs.get("json") or call_kwargs.get("data") or {}
-    assert payload, f"Webhook POST had no JSON payload: {call_kwargs}"
+    last_call = mock_post.call_args_list[-1]
+    payload = webhook_body(last_call)
+    assert payload, f"Webhook POST had no JSON payload: {last_call.kwargs}"
     return _delivery_webhook_body(payload)
 
 
@@ -3632,7 +3633,7 @@ def _get_webhook_payload(ctx: dict) -> dict:
     env = ctx["env"]
     call_args = env.mock["post"].call_args
     assert call_args is not None, "No POST call recorded"
-    return call_args.kwargs.get("json") or call_args[1].get("json", {})
+    return webhook_body(call_args)
 
 
 _DEFAULT_PLACEMENT_DATA: list[dict[str, Any]] = [

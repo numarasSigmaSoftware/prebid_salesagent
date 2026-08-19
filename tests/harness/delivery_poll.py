@@ -36,6 +36,7 @@ Available mocks via env.mock:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
@@ -99,6 +100,27 @@ def mock_webhook_post(
         if skip_retry_delays:
             stack.enter_context(patch("src.services.protocol_webhook_service.asyncio.sleep", new_callable=AsyncMock))
         yield mock_post
+
+
+def webhook_body(call: Any) -> dict[str, Any]:
+    """Return the parsed JSON body of one captured outbound webhook POST.
+
+    Single accessor for every reader of a ``mock_webhook_post`` call, because the
+    outbound body arrives under one of TWO kwargs: ``ProtocolWebhookService``
+    posts ``data=<bytes>`` whenever the buyer configured HMAC-SHA256 (the
+    signature has to cover the exact bytes on the wire) and ``json=<dict>``
+    otherwise. A reader keyed on ``json`` therefore KeyErrors on every signed
+    send, and one that falls back to ``data`` hands its caller raw bytes that
+    then fail on ``.get(...)`` — both of which look like a broken send rather
+    than a body the reader could not open. Callers get the same dict either way.
+    """
+    kwargs = call.kwargs
+    if "json" in kwargs:
+        body: dict[str, Any] = kwargs["json"]
+        return body
+    assert "data" in kwargs, f"webhook POST carried neither json= nor data=: {sorted(kwargs)}"
+    raw = kwargs["data"]
+    return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
 
 
 @contextmanager
@@ -230,7 +252,7 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
             )
         self.mock["post"] = mock_post
         assert mock_post.call_count == 1, "scheduler must send exactly one webhook"
-        return mock_post.call_args.kwargs["json"]
+        return webhook_body(mock_post.call_args)
 
     async def run_delivery_batch(self) -> list[dict[str, Any]]:
         """Run one REAL delivery-webhook batch (``_send_reports``); return the wire bodies sent.
@@ -252,4 +274,4 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         with mock_webhook_post(scheduler) as mock_post:
             self.last_batch_summary = await scheduler._send_reports()
         self.mock["post"] = mock_post
-        return [call.kwargs["json"] for call in mock_post.call_args_list]
+        return [webhook_body(call) for call in mock_post.call_args_list]

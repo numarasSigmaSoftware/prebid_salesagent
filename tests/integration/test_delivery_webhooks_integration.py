@@ -404,6 +404,34 @@ async def test_hmac_reporting_webhook_signs_the_exact_posted_body(integration_db
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+async def test_harness_webhook_readers_open_an_hmac_signed_body(integration_db):
+    """A captured signed send stays readable through the harness body accessor.
+
+    The test above pins the PRODUCTION side of the HMAC arm by reading the mock
+    directly. Every harness reader of a captured send sits on the OTHER side of
+    that same arm — ``run_delivery_batch`` / ``send_delivery_webhook`` here, and
+    the UC-004 BDD payload helpers — and a reader keyed on ``json=`` reports a
+    signed send as a missing body rather than a signed one. Only driving a real
+    signed batch through a reader grades that; reading the mock cannot.
+    """
+    from tests.harness import DeliveryPollEnv
+
+    tenant_id, principal_id = _create_test_tenant_and_principal()
+    media_buy_id = _create_basic_media_buy_with_webhook(
+        tenant_id,
+        principal_id,
+        reporting_webhook=HMAC_DAILY_REPORTING_WEBHOOK,
+    )
+
+    with DeliveryPollEnv(tenant_id=tenant_id, principal_id=principal_id) as env:
+        wires = await env.run_delivery_batch()
+
+    (wire,) = wires
+    assert wire["result"]["media_buy_deliveries"][0]["media_buy_id"] == media_buy_id
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
 async def test_reporting_configuration_reaches_the_scheduler_wire(integration_db):
     """Canonical cadence, metric projection, and validation token are wired end to end."""
     tenant_id, principal_id = _create_test_tenant_and_principal()
