@@ -234,19 +234,31 @@ def to_account_reference(account: dict[str, Any] | AccountReference | None) -> A
     # deliberately emits the SAME code as the pre-existing malformed-dict path
     # (both go through ``adcp_validation_boundary`` → VALIDATION_ERROR).
     #
-    # The conflict this note exists to answer: the repo's own generated features
-    # grade a malformed account as INVALID_REQUEST, routed to xfail as C1/C2/C4 in
-    # docs/test-debt-bdd-strict-markers.md (#1319), and #1984 records that #1544
-    # converged schema failures on INVALID_REQUEST at every boundary — so this is
-    # the non-converged side of an open convergence. It is deliberate, not an
-    # oversight: the emission is enum-conformant (error-code.json lists both codes
-    # with recovery=correctable) and no 3.1.1 storyboard step sends a malformed
-    # account, so nothing upstream grades the choice today.
+    # What that choice rests on, and only this: nothing upstream grades it. No 3.1.1
+    # conformance-storyboard step sends a malformed account, and the pinned
+    # ``error-code.json`` lists BOTH candidate codes with recovery=correctable — so
+    # either one is enum-conformant and tells the buyer the same thing about what to
+    # do next. That is a reason the choice is not urgent; it is not a reason it is
+    # right.
     #
-    # Changing one path alone would give a buyer two different codes for "bad
-    # account" depending on how it was malformed, which is precisely what routing
-    # both through one boundary exists to prevent. The two must move together,
-    # under #1319/#1984 — or not at all.
+    # It is explicitly NOT justified by consistency, and this note must not be read
+    # as claiming any. ``src/app.py``'s RequestValidationError handler states the
+    # repo's own storyboard-grounded rule — a structurally malformed field is
+    # INVALID_REQUEST, a bad VALUE on a well-formed field is VALIDATION_ERROR — and a
+    # non-dict ``account`` is structural under that rule. A REST body that fails
+    # FastAPI's own parse already takes that handler and emits INVALID_REQUEST, so the
+    # two codes for "bad account" ALREADY coexist across entry points; routing both of
+    # THIS helper's paths through one boundary keeps them consistent with each other,
+    # not with the rest of the surface. The generated corpus is split the same way
+    # (BR-UC-002 grades the mutually-exclusive account shape VALIDATION_ERROR;
+    # BR-UC-004 grades the identical shape INVALID_REQUEST).
+    #
+    # So this is deferred, not settled, and it is deferred because the fix is a
+    # taxonomy decision rather than a code swap here: the value-vs-structural rule for
+    # schema failures is #1984, and the account-boundary rows a rule would retire are
+    # C1 (#1316), C2 (#1317) and C4 (#1319) in docs/test-debt-bdd-strict-markers.md.
+    # Changing this emission alone, ahead of that rule, moves one site of a split
+    # without closing it.
     return _coerce_wire_object(
         account,
         AccountReference,
