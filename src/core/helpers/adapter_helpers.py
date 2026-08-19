@@ -75,6 +75,8 @@ def raise_mapped_adcp_error(exc: ADCPError, *, agent_label: str, logger: logging
     raise AdCPAdapterError(str(exc.message)) from exc
 
 
+from src.adapters import get_adapter_class
+from src.adapters.base import AdServerAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
@@ -117,6 +119,13 @@ def _mock_adapter_config(*, manual_approval_required: bool) -> dict[str, Any]:
     Both non-unified branches are general "no adapter configured" / "unsupported
     adapter type" default logic, not sandbox-specific, so folding them into this
     helper is out of scope here (tracked as #1976).
+
+    One field the sandbox branch sets is deliberately NOT routed through here:
+    ``supported_pricing_models``, the constraint profile of the tenant's declared adapter,
+    is a ``MockAdServer`` constructor argument rather than a config key. It must NOT reach
+    the other construction paths — a tenant that configured the mock as its own ad server
+    really may buy all seven models, and pushing the profile into this shared dict would
+    hand every mock construction a constraint that only the sandbox substitution needs.
     """
     return {"enabled": True, "manual_approval_required": manual_approval_required}
 
@@ -149,7 +158,11 @@ def get_adapter(
             items, etc.)" and "MUST NOT charge real money or create real billing records".
             Keyword-only and explicit at every call site — enforced by
             ``tests/unit/test_architecture_get_adapter_sandbox.py`` so a new call site
-            cannot silently default to the live adapter.
+            cannot silently default to the live adapter. The substitution covers who
+            EXECUTES, not what the tenant may buy: the returned mock still answers
+            ``get_supported_pricing_models()`` with the tenant's DECLARED adapter's models,
+            because the same spec section requires sandbox to "validate inputs the same way
+            as production".
     """
     import logging
 
@@ -177,6 +190,26 @@ def get_adapter(
         # simulator the spec asks for ("MUST return realistic response shapes with simulated
         # data"). Adapters are configured per-tenant, so this is the only layer that can tell
         # a sandbox request from a live one.
+        #
+        # The substitution covers EXECUTION only. Substituting the mock's own constraint
+        # DECLARATION as well would make the sandbox more permissive than production — the
+        # mock simulates all seven pricing models, so a cpcv buy a GAM tenant rejects would
+        # be accepted here — and AdCP 3.1.1 sandbox.mdx §Seller implementation requires
+        # sandbox to "validate inputs the same way as production" and to "Apply normal input
+        # validation (sandbox does not bypass validation)". What a tenant may buy is a
+        # property of the ad server it declared, so read that declaration off the declared
+        # adapter's CLASS — no instance, no credentials — and hand it to the simulator.
+        #
+        # An ad_server this process cannot resolve to an ad-server adapter — unregistered,
+        # or registered as something else entirely like "creative_engine" — is not an error
+        # here: the live path's final else-branch runs those on the mock too, so declaring
+        # anything narrower would make sandbox stricter than the production it mirrors.
+        try:
+            declared_adapter_class = get_adapter_class(selected_adapter or "mock")
+        except ValueError:
+            declared_adapter_class = MockAdServerAdapter
+        if not issubclass(declared_adapter_class, AdServerAdapter):
+            declared_adapter_class = MockAdServerAdapter
         logger.info("[ADAPTER_SELECT] sandbox account — forcing mock adapter, no real ad-platform calls")
         return MockAdServerAdapter(
             # manual_approval_required=False is deliberate, not inherited. The tenant's
@@ -197,6 +230,7 @@ def get_adapter(
             dry_run,
             tenant_id=tenant_id,
             strategy_context=testing_context,
+            supported_pricing_models=declared_adapter_class.supported_pricing_models,
         )
 
     # Get adapter config via repository

@@ -334,15 +334,26 @@ class AdServerAdapter(ABC):
             workflow_step_id=workflow_step_id,
         )
 
+    # Pricing models this adapter's ad server can execute (AdCP PR #88). Declared on the
+    # CLASS, not returned from an instance method, because a caller sometimes needs to ask
+    # "what may this tenant buy?" for an adapter it must NOT instantiate: the sandbox path
+    # executes on the mock but has to apply the tenant's declared adapter's constraints, and
+    # instantiating that adapter would mean loading its credentials. Override in subclasses;
+    # default is CPM only.
+    supported_pricing_models: frozenset[str] = frozenset({"cpm"})
+
     def get_supported_pricing_models(self) -> set[str]:
         """Return set of pricing models this adapter supports (AdCP PR #88).
 
-        Default implementation supports only CPM. Override in subclasses.
+        Reads ``supported_pricing_models``, which is normally the subclass's class-level
+        declaration but may be shadowed per-instance when an adapter is executing on
+        another adapter's behalf (see ``MockAdServer.__init__``). This is the single
+        reader of that declaration — callers ask the adapter, never a parallel table.
 
         Returns:
             Set of pricing model strings: {"cpm", "cpcv", "cpp", "cpc", "cpv", "flat_rate"}
         """
-        return {"cpm"}
+        return set(self.supported_pricing_models)
 
     def get_targeting_capabilities(self) -> TargetingCapabilities:
         """Return targeting capabilities this adapter supports.

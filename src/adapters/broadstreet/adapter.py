@@ -81,6 +81,9 @@ class BroadstreetAdapter(AdServerAdapter):
         supports_realtime_reporting=True,
     )
 
+    # Broadstreet can execute CPM and flat-rate pricing.
+    supported_pricing_models = frozenset({"cpm", "flat_rate"})
+
     def __init__(
         self,
         config: dict[str, Any],
@@ -240,13 +243,6 @@ class BroadstreetAdapter(AdServerAdapter):
                 failed.append(ad_id)
 
         return failed
-
-    def get_supported_pricing_models(self) -> set[str]:
-        """Return supported pricing models.
-
-        Broadstreet supports CPM and flat rate pricing.
-        """
-        return {"cpm", "flat_rate"}
 
     def get_targeting_capabilities(self) -> TargetingCapabilities:
         """Return targeting capabilities.
