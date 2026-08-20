@@ -2137,6 +2137,7 @@ Feature: BR-UC-003 Update Media Buy
   @T-UC-003-boundary-revision @boundary @revision @schema-v3.1
   Scenario Outline: Revision optimistic-concurrency boundary validation - <boundary_point>
     Given the media buy "mb_existing" is at revision <current>
+    And the media buy is in "<status>" status
     And a valid update_media_buy request with:
     | field        | value       |
     | media_buy_id | mb_existing |
@@ -2145,14 +2146,20 @@ Feature: BR-UC-003 Update Media Buy
     When the Buyer Agent sends the update_media_buy request
     Then the result should be <outcome>
     # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/media-buy/update-media-buy-request.json
+    # The <status> column carries the buy's lifecycle state so the last row can pin the
+    # PRECEDENCE between the two rejection gates: a buy that is BOTH stale-revision AND
+    # terminal answers CONFLICT (refetch-and-retry, carrying expected/current revisions),
+    # not INVALID_STATE. Every other row is "active", the Background's own status, so the
+    # column changes nothing for them. Graded on the wire across all four transports.
 
     Examples: Boundary values
-      | boundary_point                  | current | value          | outcome                            |
-      | revision absent (LWW)           | 7       | <not provided> | success                            |
-      | revision 1, buy at 1 (min match)| 1       | 1              | success                            |
-      | revision 0 (below minimum 1)    | 7       | 0              | error "INVALID_REQUEST" with suggestion |
-      | revision below current (stale)  | 7       | 6              | error "CONFLICT" with suggestion   |
-      | revision above current (ahead)  | 7       | 8              | error "CONFLICT" with suggestion   |
+      | boundary_point                  | current | status    | value          | outcome                            |
+      | revision absent (LWW)           | 7       | active    | <not provided> | success                            |
+      | revision 1, buy at 1 (min match)| 1       | active    | 1              | success                            |
+      | revision 0 (below minimum 1)    | 7       | active    | 0              | error "INVALID_REQUEST" with suggestion |
+      | revision below current (stale)  | 7       | active    | 6              | error "CONFLICT" with suggestion   |
+      | revision above current (ahead)  | 7       | active    | 8              | error "CONFLICT" with suggestion   |
+      | stale revision on terminal buy  | 7       | completed | 6              | error "CONFLICT" with suggestion   |
 
   @T-UC-003-revision-success-increments @invariant @BR-RULE-215 @concurrency @schema-v3.1 @post-s1
   Scenario: Successful update increments and returns the new revision (INV-4)
