@@ -271,10 +271,22 @@ def assert_next_expected_at_is_next_utc_midnight(payload: dict, *, context: str)
     #1624; do NOT apply this rule to the webhook_delivery_service payload
     until that lands.
 
-    A second tension the scheduler side carries, also for #1624: it promises
-    the next UTC midnight while ``_should_skip_send`` dedups on a 24h rolling
-    window from the last successful send, so a 23:50 UTC send promises a
-    notification ten minutes later that dedup then suppresses for ~24h.
+    A second, DIFFERENT tension the scheduler side carries — tracked in #1758,
+    NOT #1624: it promises the next UTC midnight while ``_should_skip_send``
+    dedups on a 24h rolling window from the last successful send, so a 23:50 UTC
+    send advertises an instant ten minutes later that the gate has already
+    committed to suppressing for ~24h. That is a contradiction INSIDE one
+    emitter — between what it promises and what it will do — so #1624, which is
+    about the two emitters converging on one cadence semantics, does not cover
+    it and sends the next reader to the wrong issue.
+
+    What that means for this assertion: it pins the scheduler emitter's CURRENT
+    contract, exactly as the emitter defines that contract today — and the
+    contract itself is what #1758 disputes. So if the cadence expression is ever
+    corrected, this assertion is expected to MOVE with it. It is not an
+    independent statement of what the instant ought to be, and it is not
+    something to work around by loosening; changing the emitter means changing
+    this in the same breath.
 
     Asserted as an INSTANT (exact UTC midnight, strictly ahead, at most 24h
     out) rather than as a gap from a test-side clock. A gap assertion would
