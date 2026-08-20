@@ -392,12 +392,10 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # present-as-null: the DRY-RUN / sandbox success arm (media_buy_create._dry_run branch),
     # where a simulation commits nothing, so confirmed_at is honestly null while the required
     # key stays present (the serializer below re-emits it as null so exclude_none does not
-    # drop it). The non-sandbox committed paths are the opposite: the approval finalizer
-    # publishes a confirmed serving status BEFORE building the success body, and the approve /
-    # immediate-activation paths set confirmed_at EXPLICITLY from the persisted MediaBuy (see
-    # media_buy_completion.finalize_media_buy / the sync-success tool path), so a real
-    # COMMITTED CreateMediaBuySuccess on the wire always carries a non-null confirmed_at.
-    # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
+    # drop it). The non-sandbox committed paths are the opposite: they set confirmed_at
+    # EXPLICITLY from the persisted MediaBuy (the sync-success tool path and the admin
+    # approve route both read the row the repository stamped), so a real COMMITTED
+    # CreateMediaBuySuccess on the wire always carries a non-null confirmed_at.
     #
     # ``revision`` is NON-nullable: 3.1.1 requires it present as a non-null int >= 1 and —
     # unlike confirmed_at — it has NO spec-sanctioned null arm (a would-be-fresh buy is
