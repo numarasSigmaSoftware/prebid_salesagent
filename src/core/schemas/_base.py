@@ -119,15 +119,30 @@ from pydantic import (
     Field,
     RootModel,
     SkipValidation,
+    StrictFloat,
+    StrictInt,
+    TypeAdapter,
     model_serializer,
     model_validator,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 # Transport wrappers must preserve malformed JSON values until the common
 # request boundary can emit the same AdCP error envelope on A2A, MCP, and REST.
 # ``SkipValidation`` does that without erasing the public JSON Schema: clients
 # still see the concrete AdCP types and constraints rather than ``Any``.
 RawRevision: TypeAlias = SkipValidation[Annotated[int, Field(ge=1)]]  # noqa: UP040 - Pydantic runtime alias
+# Runtime restatement of ``RawRevision``'s constraint, kept beside the alias so the
+# rule has one home. ``update-media-buy-request.json`` types ``revision`` as draft-07
+# ``{"type": "integer", "minimum": 1}``, and draft-07 ``integer`` matches any number
+# with a zero fractional part — so ``7.0`` (the shape A2A's protobuf doubles deliver an
+# integer in) is schema-VALID and must be accepted, then normalised to ``int``.
+# Strict members keep ``"7"`` and ``bool`` out; ``multiple_of=1`` keeps ``7.5`` out;
+# ``allow_inf_nan=False`` keeps ``inf``/``nan`` out (``int(inf)`` would raise a raw
+# OverflowError out of the validator instead of a buyer-facing envelope).
+RevisionValidator = TypeAdapter[int | float](
+    Annotated[StrictInt, Field(ge=1)] | Annotated[StrictFloat, Field(ge=1, multiple_of=1, allow_inf_nan=False)]
+)
 RawMediaBuyIds: TypeAlias = SkipValidation[Annotated[list[str], Field(min_length=1)]]  # noqa: UP040 - Pydantic runtime alias
 type RawMediaBuyStatusFilter = SkipValidation[MediaBuyStatus | Annotated[list[MediaBuyStatus], Field(min_length=1)]]
 
@@ -2226,11 +2241,13 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
         # enforced before Pydantic's default coercion. This bites at the raw-dict (A2A)
         # boundary, where the payload reaches this model before any typed coercion.
         # Transport wrappers preserve raw values with ``SkipValidation`` so this
-        # shared gate rejects numeric strings and booleans uniformly.
+        # shared gate rejects numeric strings and booleans uniformly, and accepts the
+        # whole-number float (7.0) draft-07 ``integer`` admits — see ``RevisionValidator``.
         if "revision" in values and values["revision"] is not None:
-            revision = values["revision"]
-            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-                raise ValueError("revision must be an integer greater than or equal to 1")
+            try:
+                values["revision"] = int(RevisionValidator.validate_python(values["revision"]))
+            except PydanticValidationError as exc:
+                raise ValueError("revision must be an integer greater than or equal to 1") from exc
 
         # Normalize package instances to dicts so the list[AdCPPackageUpdate] field
         # validates them. FastMCP coerces the incoming param to its annotated type

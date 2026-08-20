@@ -2123,17 +2123,19 @@ Feature: BR-UC-003 Update Media Buy
     # 3.1.1 conformance storyboard.
 
     Examples: Valid partitions
-      | partition       | value          | outcome |
-      | absent          | <not provided> | success |
-      | matches_current | 7              | success |
+      | partition          | value          | outcome |
+      | absent             | <not provided> | success |
+      | matches_current    | 7              | success |
+      | whole_number_float | 7.0            | success |
 
     Examples: Invalid partitions
-      | partition      | value          | outcome                                      |
-      | stale_revision | 5              | error "CONFLICT" with suggestion             |
-      | ahead_revision | 99             | error "CONFLICT" with suggestion             |
-      | below_min      | 0              | error "INVALID_REQUEST" with suggestion      |
-      | numeric_string | "7"            | error "INVALID_REQUEST" with suggestion      |
-      | wrong_type     | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
+      | partition          | value          | outcome                                      |
+      | stale_revision     | 5              | error "CONFLICT" with suggestion             |
+      | ahead_revision     | 99             | error "CONFLICT" with suggestion             |
+      | below_min          | 0              | error "INVALID_REQUEST" with suggestion      |
+      | numeric_string     | "7"            | error "INVALID_REQUEST" with suggestion      |
+      | wrong_type         | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
+      | non_integral_float | 7.5            | error "INVALID_REQUEST" with suggestion      |
 
   @T-UC-003-boundary-revision @boundary @revision @schema-v3.1
   Scenario Outline: Revision optimistic-concurrency boundary validation - <boundary_point>

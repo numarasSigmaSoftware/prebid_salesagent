@@ -111,17 +111,19 @@ overrides:
         # 3.1.1 conformance storyboard.
 
         Examples: Valid partitions
-          | partition       | value          | outcome |
-          | absent          | <not provided> | success |
-          | matches_current | 7              | success |
+          | partition          | value          | outcome |
+          | absent             | <not provided> | success |
+          | matches_current    | 7              | success |
+          | whole_number_float | 7.0            | success |
 
         Examples: Invalid partitions
-          | partition      | value          | outcome                                      |
-          | stale_revision | 5              | error "CONFLICT" with suggestion             |
-          | ahead_revision | 99             | error "CONFLICT" with suggestion             |
-          | below_min      | 0              | error "INVALID_REQUEST" with suggestion      |
-          | numeric_string | "7"            | error "INVALID_REQUEST" with suggestion      |
-          | wrong_type     | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
+          | partition          | value          | outcome                                      |
+          | stale_revision     | 5              | error "CONFLICT" with suggestion             |
+          | ahead_revision     | 99             | error "CONFLICT" with suggestion             |
+          | below_min          | 0              | error "INVALID_REQUEST" with suggestion      |
+          | numeric_string     | "7"            | error "INVALID_REQUEST" with suggestion      |
+          | wrong_type         | "not-an-int"  | error "INVALID_REQUEST" with suggestion      |
+          | non_integral_float | 7.5            | error "INVALID_REQUEST" with suggestion      |
   - feature: BR-UC-005-discover-creative-formats.feature
     scenario_id: T-UC-005-ext-b-disclosure-dupes
     authority: "AdCP 3.1.1 list-creative-formats-request schema: disclosure_positions.uniqueItems=true"

@@ -2403,7 +2403,9 @@ def given_request_revision(ctx: dict, value: str) -> None:
 
     Scenario Outline cells: ``<not provided>`` omits the field (LWW arm);
     a quoted cell (wrong-type partition) stays a raw string so the boundary
-    sees the type violation; a bare number becomes the integer token.
+    sees the type violation; a bare number becomes the numeric token — ``int``
+    for ``7``, ``float`` for ``7.0``/``7.5``, because draft-07 ``type: integer``
+    accepts a whole-number float and the partition tables now grade both shapes.
     """
     stripped = value.strip()
     if stripped == "<not provided>":
@@ -2412,7 +2414,7 @@ def given_request_revision(ctx: dict, value: str) -> None:
     if stripped.startswith('"') and stripped.endswith('"') and len(stripped) > 1:
         kwargs["revision"] = stripped[1:-1]
     else:
-        kwargs["revision"] = int(stripped)
+        kwargs["revision"] = float(stripped) if "." in stripped else int(stripped)
 
 
 @then(parsers.parse("the response should contain a revision with value {revision:d}"))

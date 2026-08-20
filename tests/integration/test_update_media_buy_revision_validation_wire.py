@@ -9,6 +9,10 @@ the harness (``result.wire_error_envelope`` + ``assert_envelope_shape``):
   everywhere -> ``INVALID_REQUEST`` on A2A, MCP, and REST alike.
 - wrong-type revisions (including numeric string ``"7"``): every transport
   emits ``INVALID_REQUEST`` at the shared request-schema boundary.
+- whole-number float (``1.0``): draft-07 ``type: integer`` matches any number
+  with a zero fractional part, so the pinned schema ACCEPTS it — on every
+  transport, not just the one whose wire happens to deliver protobuf doubles.
+- non-integral float (``7.5``): rejected as ``INVALID_REQUEST`` everywhere.
 """
 
 from __future__ import annotations
@@ -53,6 +57,31 @@ class TestUpdateRevisionValidationWire:
         result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=revision)
 
         assert result.is_error, "expected a validation error for a non-integer revision"
+        assert result.wire_error_envelope is not None, "wire envelope not captured"
+        assert_envelope_shape(result.wire_error_envelope, "INVALID_REQUEST", recovery="correctable")
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
+    def test_whole_number_float_revision_is_accepted_on_every_transport(self, env_with_media_buy, transport):
+        """``1.0`` satisfies draft-07 ``{"type": "integer", "minimum": 1}`` and matches
+        the fresh buy's revision, so it must SUCCEED — identically on all transports.
+
+        Before this pin the shared gate rejected any float, and A2A passed only because
+        the skill handler hand-coerced whole-number floats to int before the gate saw
+        them: A2A was the sole transport meeting the pinned schema.
+        """
+        env, media_buy = env_with_media_buy
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=1.0)
+
+        assert result.is_success, f"expected revision=1.0 to be accepted, got error: {result.error!r}"
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
+    def test_non_integral_float_revision_emits_invalid_request_on_every_transport(self, env_with_media_buy, transport):
+        """``7.5`` has a non-zero fractional part, so draft-07 ``integer`` rejects it —
+        accepting whole-number floats must not widen the gate to every float."""
+        env, media_buy = env_with_media_buy
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=7.5)
+
+        assert result.is_error, "expected a validation error for revision=7.5"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, "INVALID_REQUEST", recovery="correctable")
 
