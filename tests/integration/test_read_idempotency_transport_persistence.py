@@ -21,7 +21,6 @@ from tests.harness.delivery_poll import DeliveryPollEnv
 from tests.harness.media_buy_list import MediaBuyListEnv
 from tests.harness.product import ProductEnv
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -110,37 +109,43 @@ def test_each_read_replays_through_every_exposed_transport(integration_db, case:
             assert replay.wire_response["context"] == {"correlation_id": "retry"}
 
 
-def test_anonymous_rest_read_with_a_key_is_refused_and_persists_nothing(integration_db) -> None:
-    """An anonymous keyed read is refused on the wire and leaves no durable row.
+@pytest.mark.parametrize("transport", _MCP_A2A_REST)
+def test_anonymous_read_with_a_key_succeeds_and_persists_nothing(integration_db, transport: Transport) -> None:
+    """An anonymous keyed read succeeds normally and leaves no durable row.
 
-    The row is the point. AdCP 3.1.1 scopes keys per (authenticated agent,
-    account); an anonymous caller has neither, and the lookup index is NULLS
-    NOT DISTINCT, so a persisted (tenant, NULL, NULL) row is ONE row-space
-    shared by every anonymous caller of the tenant. Keys are client-chosen, so
-    a second anonymous caller reusing the key would either collide or be handed
-    the first caller's cached envelope.
+    Two things this pins together, because neither alone is the contract:
 
-    Asserting only the error would leave that reachable: the durable absence is
-    what proves the fusion cannot occur.
+    - The read succeeds. AUTH_OPTIONAL_TOOLS (get_adcp_capabilities among them)
+      is spec-designated public (authentication.mdx), and buyer SDKs send
+      idempotency_key uniformly on every call (security.mdx) — so an anonymous
+      SDK-originated discovery call carrying a key must not be rejected.
+    - No row is ever written. AdCP 3.1.1 scopes durable cache entries per
+      (authenticated_agent, account_id, idempotency_key); an anonymous caller
+      has no authenticated_agent. Persisting one anyway used to write
+      (tenant, NULL, NULL); because the lookup index is NULLS NOT DISTINCT that
+      is ONE row-space shared by every anonymous caller of the tenant, so a
+      client-chosen key could collide across callers and replay one caller's
+      envelope to another. Asserting only success would leave that reachable
+      again under a different implementation — the durable absence is what
+      proves no scope exists to fuse.
     """
     suffix = uuid.uuid4().hex[:10]
-    key = f"anonymous-read-{uuid.uuid4().hex}"
+    key = f"anonymous-read-{transport.value}-{uuid.uuid4().hex}"
     with CapabilitiesEnv(
         tenant_id=f"anonymous_read_{suffix}",
         principal_id=f"seed_agent_{suffix}",
     ) as env:
         env.setup_default_data()
-        anonymous = env.identity_for(Transport.REST).model_copy(update={"principal_id": None, "account_id": None})
+        anonymous = env.identity_for(transport).model_copy(update={"principal_id": None, "account_id": None})
 
         result = env.call_via(
-            Transport.REST,
+            transport,
             identity=anonymous,
             idempotency_key=key,
             context={"correlation_id": "first"},
         )
 
-        assert result.is_error, "an anonymous keyed read must be refused, not scoped to NULL"
-        assert_envelope_shape(result.wire_error_envelope, "AUTH_REQUIRED", recovery="correctable")
+        assert not result.is_error, f"an anonymous keyed read to a public tool must succeed: {result.error!r}"
 
         with IdempotencyUoW(anonymous.tenant_id) as uow:
             assert uow.idempotency_attempts is not None
@@ -151,7 +156,7 @@ def test_anonymous_rest_read_with_a_key_is_refused_and_persists_nothing(integrat
                     idempotency_key=key,
                 )
                 is None
-            ), "the refused read must not leave a tenant-wide anonymous row behind"
+            ), "an anonymous read must not leave a tenant-wide shared row behind"
 
 
 @pytest.mark.parametrize("transport", _MCP_A2A)

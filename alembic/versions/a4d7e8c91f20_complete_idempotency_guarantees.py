@@ -18,7 +18,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Enable anonymous read scopes, split admission classes, and add claims."""
+    """Widen principal_id, split admission classes, and add claims.
+
+    principal_id is nullable for BACKWARD COMPATIBILITY, not because current
+    code writes a NULL-principal row: an anonymous keyed read now skips
+    reservation entirely (see idempotency_replay._read_scope) rather than
+    persisting one under a shared (tenant, NULL, NULL) scope. This column stays
+    nullable to accommodate rows already written under the prior design;
+    see test_complete_idempotency_guarantees_migration.py for the prune this
+    enables downstream.
+    """
     op.alter_column("idempotency_attempts", "principal_id", existing_type=sa.String(length=50), nullable=True)
     op.add_column(
         "idempotency_attempts",

@@ -506,26 +506,41 @@ def release_reservation_on_error(
         raise
 
 
-def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None]:
-    """Resolve the durable read scope. An authenticated agent is required.
+def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None] | None:
+    """Resolve the durable read scope, or None when the caller cannot be safely scoped.
 
-    AdCP 3.1.1 (security.mdx, "Idempotency"): "Keys are scoped per
-    ``(authenticated agent, account)`` — they have no meaning across agents on
-    the same seller, across accounts under the same agent, or across sellers."
-    An unauthenticated caller supplies neither half of that tuple, so there is
-    no scope in which the replay contract can be honored.
+    AdCP 3.1.1 (security.mdx, "Idempotency"): cache entries are scoped per
+    ``(authenticated_agent, account_id, idempotency_key)`` — there is no
+    anonymous slot in that tuple. An unauthenticated caller has no
+    ``authenticated_agent``, so there is no scope the durable cache can safely
+    key on for them.
 
     Persisting such a request under ``(tenant, NULL, NULL)`` does not weaken the
     scope, it FUSES it: the lookup index is NULLS NOT DISTINCT, so every
-    anonymous caller of a tenant shares one row-space and one insert-rate
-    bucket. Keys are client-chosen, so one caller can induce a collision and
-    receive another caller's cached envelope, and one caller's read burst
-    rate-limits every other anonymous reader tenant-wide.
+    anonymous caller of a tenant would share one row-space and one insert-rate
+    bucket. Keys are client-chosen, so one caller could induce a collision and
+    receive another caller's cached envelope, and one caller's read burst would
+    rate-limit every other anonymous reader tenant-wide. [prior defect]
 
-    Refusing is the only option the spec leaves open. It says a seller that
-    accepts a supplied key MUST apply the replay contract; silently ignoring
-    the key would not apply it, and applying it without an agent is what
-    produces the cross-caller replay above.
+    Refusing the read outright is not spec-consistent either:
+    ``authentication.mdx`` designates ``get_products``, ``get_adcp_capabilities``
+    and ``list_creative_formats`` public (no auth required), and
+    ``security.mdx`` states buyer SDKs send ``idempotency_key`` uniformly across
+    every tool call and that a seller accepting a supplied key on a pure-read
+    task MUST apply the replay contract. A blanket refusal turns every
+    SDK-originated anonymous discovery call into ``AUTH_REQUIRED``, which is not
+    "applying" the contract, it is breaking the public operation.
+
+    The resolution: for an unauthenticated caller, this returns ``None`` so the
+    reservation/replay/rate-limit machinery is skipped entirely — no row is
+    ever written, so no fusion is possible either. The caller falls through to
+    running the read directly, exactly as it would with no ``idempotency_key``
+    supplied at all; the underlying tool's own authorization (if it has one)
+    still applies inside that call, unaffected by this function, which makes a
+    caching decision, not an authorization one. This mirrors the existing
+    write-path precedent (media_buy_create.py: skip the cache, not the
+    operation, when ``principal_id`` is ``None``) rather than adding a second
+    mechanism for the same shape of decision.
     """
     tenant_id = identity.tenant_id if identity is not None else None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
@@ -539,13 +554,7 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
         )
     principal_id = identity.principal_id if identity else None
     if not principal_id:
-        from src.core.exceptions import AdCPAuthRequiredError
-
-        raise AdCPAuthRequiredError(
-            "idempotency_key is scoped to the authenticated agent and account; "
-            "an unauthenticated request has no scope to replay within",
-            suggestion="Authenticate the request, or omit idempotency_key on anonymous reads.",
-        )
+        return None
     return tenant_id, principal_id, identity.account_id if identity else None
 
 
@@ -668,7 +677,14 @@ def execute_idempotent_read_sync[T: BaseModel | dict[str, Any]](
     from src.core.database.repositories.uow import IdempotencyUoW
     from src.core.idempotency_canonical import canonical_payload_hash
 
-    tenant_id, principal_id, account_id = _read_scope(identity)
+    scope = _read_scope(identity)
+    if scope is None:
+        # No authenticated agent to scope a durable cache entry to (see
+        # _read_scope). Run the read directly, exactly as with no
+        # idempotency_key at all; the tool's own authorization, if any,
+        # still applies inside work().
+        return work()
+    tenant_id, principal_id, account_id = scope
     reservation = reserve_idempotent(
         IdempotencyUoW,
         tenant_id,
@@ -714,7 +730,14 @@ async def execute_idempotent_read[T: BaseModel | dict[str, Any]](
     from src.core.database.repositories.uow import IdempotencyUoW
     from src.core.idempotency_canonical import canonical_payload_hash
 
-    tenant_id, principal_id, account_id = _read_scope(identity)
+    scope = _read_scope(identity)
+    if scope is None:
+        # No authenticated agent to scope a durable cache entry to (see
+        # _read_scope). Run the read directly, exactly as with no
+        # idempotency_key at all; the tool's own authorization, if any,
+        # still applies inside work().
+        return await work()
+    tenant_id, principal_id, account_id = scope
     reservation = reserve_idempotent(
         IdempotencyUoW,
         tenant_id,

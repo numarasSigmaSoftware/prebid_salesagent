@@ -169,11 +169,16 @@ campaigns' inclusive flight lifetime rather than a rolling 30-day window.
 The agent-wide capability now declares `supported: true`,
 `replay_ttl_seconds: 86400`, and `in_flight_max_seconds: 300`.
 
-- Every supplied read key on every transport-exposed standard read is reserved
-  before execution, stores the canonical typed response durably, and returns
-  that immutable response with `replayed: true`. Read-key omission remains
-  accepted only under the explicit 3.1.x grace. Anonymous public reads use
-  `principal_id=NULL` inside the resolved tenant/account scope.
+- Every supplied read key on every transport-exposed standard read from an
+  AUTHENTICATED caller is reserved before execution, stores the canonical typed
+  response durably, and returns that immutable response with `replayed: true`.
+  Read-key omission remains accepted only under the explicit 3.1.x grace. A
+  supplied key from an UNAUTHENTICATED caller (the three public read tools,
+  `authentication.mdx`) skips reservation entirely rather than persisting under
+  a shared `principal_id=NULL` scope — the durable cache key is
+  `(authenticated_agent, account_id, idempotency_key)` per `security.mdx`, and
+  there is no anonymous slot in that tuple. Anonymous reads still succeed; they
+  simply are not replayed or rate-limited by this layer.
 - `create_media_buy`, `update_media_buy`, `sync_accounts`, and
   `sync_creatives` reserve the
   `(tenant, principal, account, idempotency_key)` tuple before work begins.
@@ -260,15 +265,14 @@ grades both compiler paths.
 The upstream supported-true phases this seller does NOT yet implement
 (in-flight tracking, expired-window, canonical-comparison, conflict-details)
 remain visible in the generated feature but unwired — tracked for the
-reservation-subsystem rebuild (#1683). The local applicability guard asserts
-the live discriminant is `IdempotencyUnsupported(supported=False)` — NOT
-`supported: true`, which this note previously described. That inversion
-mattered more here than in the source docstrings: this file is the
-Spec-Grounding-Gate artifact, so it is what a reviewer reads to check the
-claim against the spec, and it described the guard as asserting the opposite
-of what it asserts (see `capabilities.py` and
-`test_idempotency_capability_applicability.py`). The guard also pins that the
-unimplemented phases stay visible-not-claimed.
+reservation-subsystem rebuild (#1683). The local applicability guard is gated on the SHIPPED discriminant
+(`if _get_adcp_capabilities_impl(None, None).adcp.idempotency.supported: return`)
+so it inverts with production rather than going stale — and on this tree,
+`capabilities.py` ships `supported=True` (matching line 169 above, not
+contradicting it), so the guard's body is a no-op here. A prior revision of
+this note claimed the opposite discriminant; that was wrong on this tree and
+is corrected. The guard also pins that the unimplemented phases stay
+visible-not-claimed on whichever branch they remain unwired.
 
 ## Outbound adcp_version precision (agent card, webhook payloads)
 
