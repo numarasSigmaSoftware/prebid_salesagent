@@ -13,16 +13,20 @@ beads: salesagent-t735 (foundation), salesagent-2lp8 (epic), salesagent-to9i (ad
 from __future__ import annotations
 
 import datetime
+import logging
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, joinedload, object_session
 
-from src.core.database.models import MediaBuy, MediaPackage
+from src.core.database.models import MediaBuy, MediaPackage, is_media_buy_seller_confirmed
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
+
+logger = logging.getLogger(__name__)
 
 
 class MediaBuyRepository:
@@ -39,7 +43,9 @@ class MediaBuyRepository:
         tenant_id: Tenant scope for all queries.
     """
 
-    _MEDIA_BUY_IMMUTABLE_FIELDS: frozenset[str] = frozenset({"tenant_id", "media_buy_id", "created_at"})
+    # "revision" is repository-managed (bumped on every successful mutation);
+    # callers may never write it directly — see _bump_revision.
+    _MEDIA_BUY_IMMUTABLE_FIELDS: frozenset[str] = frozenset({"tenant_id", "media_buy_id", "created_at", "revision"})
     _PACKAGE_IMMUTABLE_FIELDS: frozenset[str] = frozenset({"media_buy_id", "package_id"})
 
     def __init__(self, session: Session, tenant_id: str) -> None:
@@ -54,14 +60,81 @@ class MediaBuyRepository:
     # Single MediaBuy lookups
     # ------------------------------------------------------------------
 
-    def get_by_id(self, media_buy_id: str) -> MediaBuy | None:
-        """Get a media buy by its ID within the tenant."""
-        return self._session.scalars(
-            select(MediaBuy).where(
-                MediaBuy.tenant_id == self._tenant_id,
-                MediaBuy.media_buy_id == media_buy_id,
-            )
-        ).first()
+    def get_by_id(
+        self,
+        media_buy_id: str,
+        *,
+        for_update: bool = False,
+        populate_existing: bool = False,
+        lock_timeout_seconds: int | None = None,
+        idle_in_transaction_timeout_seconds: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy | None:
+        """Get a media buy by its ID within the tenant.
+
+        ``for_update=True`` acquires a row lock (``SELECT ... FOR UPDATE``) so
+        concurrent writers to the same buy's mutable columns serialize under
+        READ COMMITTED. Pass ``populate_existing=True`` when the caller needs
+        the locked row to refresh an instance already present in the identity
+        map; this is required for authoritative revision/status checks.
+
+        ``lock_timeout_seconds`` (e.g. ``5``) arms a transaction-scoped ``SET LOCAL
+        lock_timeout`` before the locked read, so a second request contending for
+        the SAME row's lock fails fast (PostgreSQL SQLSTATE ``55P03``) instead of
+        blocking to the global ``statement_timeout``. That EXPECTED contention is
+        translated to a typed transient :class:`AdCPConflictError`
+        (``recovery="transient"``) — it is NOT a DB outage and must not trip the
+        DB circuit breaker. Keeping the timeout + SQLSTATE handling here (not in
+        the ``_impl``) keeps transport-agnostic business logic free of raw ``SET
+        LOCAL`` / driver error codes — the lock policy is a data-access concern.
+
+        ``lock_timeout`` bounds only the WAITER; ``idle_in_transaction_timeout_seconds``
+        bounds the HOLDER. ``context`` is echoed into the CONFLICT envelope.
+        """
+        stmt = select(MediaBuy).where(
+            MediaBuy.tenant_id == self._tenant_id,
+            MediaBuy.media_buy_id == media_buy_id,
+        )
+        if for_update:
+            stmt = stmt.with_for_update()
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
+        if lock_timeout_seconds is None and idle_in_transaction_timeout_seconds is None:
+            return self._session.scalars(stmt).first()
+
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from src.core.database.database_session import LOCK_NOT_AVAILABLE
+
+        try:
+            # SET can't bind parameters; the int() coercion makes the
+            # never-user-input invariant structural rather than a comment.
+            if idle_in_transaction_timeout_seconds is not None:
+                self._session.execute(
+                    text(
+                        f"SET LOCAL idle_in_transaction_session_timeout = '{int(idle_in_transaction_timeout_seconds)}s'"
+                    )
+                )
+            if lock_timeout_seconds is not None:
+                self._session.execute(text(f"SET LOCAL lock_timeout = '{int(lock_timeout_seconds)}s'"))
+            return self._session.scalars(stmt).first()
+        except OperationalError as exc:
+            if getattr(getattr(exc, "orig", None), "pgcode", None) != LOCK_NOT_AVAILABLE:
+                raise
+            from src.core.exceptions import AdCPConflictError
+
+            raise AdCPConflictError(
+                f"Media buy '{media_buy_id}' is being modified by another request; retry shortly.",
+                field="media_buy_id",
+                suggestion="Another update holds the row lock. Re-read the media buy and retry.",
+                # Spec CONFLICT details shape (conflict.json): resource_id only —
+                # expected/current versions are genuinely unknown here (the lock
+                # timed out before the row could be read).
+                details={"resource_id": media_buy_id},
+                recovery="transient",
+                context=context,
+            ) from exc
 
     def get_by_id_or_raise(
         self, media_buy_id: str, *, context: ContextObject | dict[str, Any] | None = None
@@ -410,7 +483,9 @@ class MediaBuyRepository:
 
         media_buy = MediaBuy(**kwargs)
         self._session.add(media_buy)
-        self._session.flush()
+        self._session.flush()  # materialize server-default created_at before stamping
+        if self._stamp_confirmation_if_needed(media_buy):
+            self._session.flush()
         return media_buy
 
     def create(self, media_buy: MediaBuy) -> MediaBuy:
@@ -430,6 +505,130 @@ class MediaBuyRepository:
         self._session.flush()
         return media_buy
 
+    @staticmethod
+    def _bump_revision(media_buy: MediaBuy) -> None:
+        """Increment the persisted monotonic revision counter by 1.
+
+        Single shared bump used by every mutation path (update_status,
+        update_fields, bump_revision, apply_status_transition). The counter is
+        the AdCP 3.1.1 ``revision`` optimistic-concurrency token: it
+        starts at 1 on create and MUST strictly increase on every successful
+        mutation — never derived from timestamps.
+
+        The increment is a **server-side** SQL expression, not a Python
+        read-modify-write: assigning ``revision + 1`` to the mapped attribute
+        defers the compute to flush time, so the database emits
+        ``UPDATE ... SET revision = coalesce(revision, 0) + 1`` and serializes
+        two concurrent bumps at the row write-lock. A stale identity-mapped read
+        therefore cannot collapse two bumps onto the same value — the guarantee
+        holds even on paths that loaded the row without ``FOR UPDATE`` (the
+        cross-tenant scheduler sweep and creative-sync via
+        ``apply_status_transition``). SQLAlchemy expires the attribute after
+        flush, so the next read re-selects the committed value automatically.
+        """
+        media_buy.revision = func.coalesce(MediaBuy.revision, 0) + 1
+
+    @staticmethod
+    def _stamp_confirmation_if_needed(media_buy: MediaBuy) -> bool:
+        """Write-once seller-confirmation stamp, shared by every mutation seam.
+
+        The AdCP 3.1.1 ``confirmed_at`` field records the instant the
+        seller committed to running the buy: it is set exactly once — the first
+        time the buy enters a seller-confirmed status
+        (:func:`is_media_buy_seller_confirmed`) — and stays stable across later
+        creative/status transitions. Keyed on the buy's status at the call, so
+        every seam that lands a seller-confirmed status stamps identically: the
+        create path, :meth:`update_status`, :meth:`update_fields` (staged
+        ``status``), and :meth:`apply_status_transition` (scheduler sweep,
+        creative-sync). Keeping it in one place is what stops the create and get
+        paths from drifting — a buy that reached a committed state on any seam
+        carries ``confirmed_at`` on the wire.
+
+        Returns True when the buy first entered a seller-confirmed status here,
+        so a caller that must persist the stamp immediately (the create path,
+        before the row leaves the repository) knows to flush; the mutation seams
+        ignore it because they flush the whole mutation afterwards regardless.
+        """
+        if media_buy.confirmed_at is None and is_media_buy_seller_confirmed(media_buy.status):
+            # The in-memory ``confirmed_at`` guard is only trustworthy when the row
+            # was loaded under a row lock (or is freshly created). The single-row
+            # mutators load ``FOR UPDATE`` + ``populate_existing`` and the create
+            # path just inserted the row, so ``confirmed_at is None`` here reflects
+            # the committed state. The one seam that loads WITHOUT a lock —
+            # :meth:`apply_status_transition` (scheduler sweep / creative-sync) —
+            # locks and refreshes ``confirmed_at`` itself before calling this, so a
+            # stale ``None`` cannot slip through and clobber a concurrently
+            # committed stamp. Value: the approval instant, else the create instant.
+            media_buy.confirmed_at = media_buy.approved_at or media_buy.created_at
+            return True
+        return False
+
+    def _locked_mutate_and_bump(
+        self,
+        media_buy_id: str,
+        mutate: Callable[[MediaBuy], None],
+        *,
+        expected_revision: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy | None:
+        """Shared single-row mutation skeleton: load-under-lock → mutate → bump → flush.
+
+        Loads the buy with a row write-lock, applies ``mutate`` in place, stamps
+        the write-once ``confirmed_at`` if the new status warrants it, bumps the
+        persisted revision counter, and flushes. Returns the mutated row, or
+        None if the buy is not found in this tenant (no bump/flush). Every
+        single-row mutator (``bump_revision``, ``update_status``,
+        ``update_fields``) routes through here so the load-guard, the confirm
+        stamp, the bump, and the flush live in exactly one place.
+
+        ``expected_revision`` is the buyer's optimistic-concurrency token
+        (AdCP 3.1.1 update-media-buy-request ``revision``): when
+        provided, the check happens HERE, under the held row lock. The update
+        tool also gates on the token before dispatching to the adapter, but that
+        gate and this mutation run in the same UoW under the same lock; this
+        check is the authoritative backstop for callers that reach the
+        repository directly (admin routes, ``bump_revision`` callers, tests).
+        Raises the shared CONFLICT on mismatch, before any mutation.
+        """
+        media_buy = self.get_by_id(media_buy_id, for_update=True, populate_existing=True)
+        if media_buy is None:
+            return None
+        if expected_revision is not None:
+            from src.core.exceptions import media_buy_revision_conflict
+
+            # populate_existing=True on the locked SELECT above already overwrote
+            # the identity-mapped revision with the committed value, so compare
+            # directly — no second SELECT needed.
+            if media_buy.revision != expected_revision:
+                raise media_buy_revision_conflict(
+                    media_buy_id, expected=expected_revision, current=media_buy.revision, context=context
+                )
+        mutate(media_buy)
+        self._stamp_confirmation_if_needed(media_buy)
+        self._bump_revision(media_buy)
+        self._session.flush()
+        return media_buy
+
+    def bump_revision(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy | None:
+        """Bump the revision of a media buy that was mutated outside this repository.
+
+        For tool paths that persist changes to a buy's packages/assignments
+        directly on the session (e.g. package targeting_overlay writes) and
+        therefore never pass through ``update_status``/``update_fields``.
+        Returns the updated MediaBuy, or None if not found in this tenant.
+        ``expected_revision`` is checked under the row lock (CONFLICT on mismatch).
+        """
+        # No column change of its own — the shared skeleton does the bump/flush.
+        return self._locked_mutate_and_bump(
+            media_buy_id, lambda _media_buy: None, expected_revision=expected_revision, context=context
+        )
+
     def update_status(
         self,
         media_buy_id: str,
@@ -440,40 +639,109 @@ class MediaBuyRepository:
     ) -> MediaBuy | None:
         """Update the status of a media buy within this tenant.
 
+        Bumps the persisted revision counter (successful mutation).
         Returns the updated MediaBuy, or None if not found in this tenant.
         """
-        media_buy = self.get_by_id(media_buy_id)
+
+        def _apply(media_buy: MediaBuy) -> None:
+            media_buy.status = status
+            if approved_at is not None:
+                media_buy.approved_at = approved_at
+            if approved_by is not None:
+                media_buy.approved_by = approved_by
+
+        return self._locked_mutate_and_bump(media_buy_id, _apply)
+
+    def _require_mutated(self, media_buy: MediaBuy | None, media_buy_id: str, action: str) -> MediaBuy:
+        """Shared vanished-row invariant behind the ``*_or_raise`` mutation variants.
+
+        The base mutators return ``None`` for a buy not found in this tenant.
+        Callers that verified the buy exists before mutating (admin routes, the
+        update tool past ``get_by_id_or_raise``) must not tolerate that —
+        proceeding would report success for a write that never happened
+        (No Quiet Failures). Callers that deliberately tolerate a missing buy
+        keep using the base mutators and check the return themselves.
+        """
         if media_buy is None:
-            return None
-        media_buy.status = status
-        if approved_at is not None:
-            media_buy.approved_at = approved_at
-        if approved_by is not None:
-            media_buy.approved_by = approved_by
-        self._session.flush()
+            raise RuntimeError(
+                f"media buy {media_buy_id!r} disappeared during {action} — it existed when the request began"
+            )
         return media_buy
 
-    def update_fields(self, media_buy_id: str, **kwargs: Any) -> MediaBuy | None:
+    def update_status_or_raise(
+        self,
+        media_buy_id: str,
+        status: str,
+        *,
+        approved_at: datetime.datetime | None = None,
+        approved_by: str | None = None,
+    ) -> MediaBuy:
+        """``update_status``, raising if the buy vanished mid-request (No Quiet Failures)."""
+        return self._require_mutated(
+            self.update_status(media_buy_id, status, approved_at=approved_at, approved_by=approved_by),
+            media_buy_id,
+            f"status transition to {status!r}",
+        )
+
+    def bump_revision_or_raise(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy:
+        """``bump_revision``, raising if the buy vanished mid-request (No Quiet Failures)."""
+        return self._require_mutated(
+            self.bump_revision(media_buy_id, expected_revision=expected_revision, context=context),
+            media_buy_id,
+            "revision bump",
+        )
+
+    def update_fields(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> MediaBuy | None:
         """Update arbitrary fields on a media buy within this tenant.
 
         Only updates fields that are valid MediaBuy column attributes.
+        Bumps the persisted revision counter (successful mutation).
         Returns the updated MediaBuy, or None if not found in this tenant.
-        Raises ValueError if any kwarg is not a valid MediaBuy attribute or
-        if the caller attempts to update an immutable field (tenant_id,
-        media_buy_id, created_at).
+        ``expected_revision`` is checked under the row lock (CONFLICT on
+        mismatch, before any mutation). Raises ValueError if any kwarg is not
+        a valid MediaBuy attribute or if the caller attempts to update an
+        immutable/repository-managed field (tenant_id, media_buy_id,
+        created_at, revision).
         """
         blocked = self._MEDIA_BUY_IMMUTABLE_FIELDS & kwargs.keys()
         if blocked:
             raise ValueError(f"Cannot update immutable field(s): {', '.join(sorted(blocked))}")
-        media_buy = self.get_by_id(media_buy_id)
-        if media_buy is None:
-            return None
-        for key, value in kwargs.items():
-            if not hasattr(media_buy, key):
-                raise ValueError(f"MediaBuy has no attribute {key!r}")
-            setattr(media_buy, key, value)
-        self._session.flush()
-        return media_buy
+
+        def _apply(media_buy: MediaBuy) -> None:
+            for key, value in kwargs.items():
+                if not hasattr(media_buy, key):
+                    raise ValueError(f"MediaBuy has no attribute {key!r}")
+                setattr(media_buy, key, value)
+
+        return self._locked_mutate_and_bump(media_buy_id, _apply, expected_revision=expected_revision, context=context)
+
+    def update_fields_or_raise(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int | None = None,
+        context: ContextObject | dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> MediaBuy:
+        """``update_fields``, raising if the buy vanished mid-request (No Quiet Failures)."""
+        return self._require_mutated(
+            self.update_fields(media_buy_id, expected_revision=expected_revision, context=context, **kwargs),
+            media_buy_id,
+            "field update",
+        )
 
     # ------------------------------------------------------------------
     # MediaPackage writes
@@ -593,3 +861,167 @@ class MediaBuyRepository:
         media buys regardless of tenant. Not tenant-scoped.
         """
         return list(session.scalars(select(MediaBuy).where(MediaBuy.status.in_(statuses))).all())
+
+    # Lifecycle inputs refreshed under the row lock before a target status is
+    # (re)computed: the flight window AND the current status/confirmation. A
+    # target derived from any of these on a STALE unlocked read can lose a race
+    # (e.g. a concurrent end_time extension), so the compute must see the
+    # committed values. See :meth:`apply_computed_status_transition`.
+    #
+    # GUARD: ``revision`` is deliberately EXCLUDED. The counter is bumped by a
+    # server-side ``coalesce(revision, 0) + 1`` expression (see :meth:`_bump_revision`);
+    # if it were refreshed here, the locked re-read would reload the committed value
+    # into the identity map and a Python read-modify-write bump would silently become
+    # collision-free too — masking a regression. Keeping revision OUT of this set is
+    # exactly what makes the server-side increment the SOLE protection on this seam,
+    # which ``test_two_concurrent_apply_status_transition_yield_distinct_revisions``
+    # relies on (adding "revision" here flips that test green even under a Python RMW).
+    _LIFECYCLE_REFRESH_FIELDS: tuple[str, ...] = (
+        "status",
+        "confirmed_at",
+        "start_time",
+        "end_time",
+        "start_date",
+        "end_date",
+    )
+
+    @staticmethod
+    def apply_computed_status_transition(
+        media_buy: MediaBuy,
+        compute_target: Callable[[MediaBuy], str | None],
+    ) -> MediaBuy:
+        """Lock the row, refresh EVERY lifecycle input, THEN compute the target.
+
+        The seam for lifecycle transitions whose target depends on the buy's own
+        state — the flight window (``start``/``end``) and current ``status`` — on
+        paths that loaded the row WITHOUT a lock (the cross-tenant scheduler sweep
+        via :meth:`get_all_by_statuses`, the admin approve/creative-unblock routes
+        that resolve a window→status decision). Computing the target from the
+        unlocked identity-mapped row is a lost-update race: the scheduler can read
+        ``end_time`` in the past, decide ``completed``, and then a concurrent
+        transaction extends ``end_time`` (leaving ``status`` ``active``) and
+        commits — the stale ``completed`` would overwrite the live ``active`` buy.
+
+        So the caller supplies ``compute_target`` as a CALLBACK, evaluated only
+        AFTER the ``FOR UPDATE`` refresh of every lifecycle input, never a
+        precomputed string. ``compute_target`` returning ``None`` is the sole
+        no-op signal — no status write, no ``confirmed_at`` stamp, no revision
+        bump — so a caller that decides "nothing to do" against the committed row
+        returns ``None`` explicitly (the scheduler does). A returned status is
+        applied even when it equals the current one: re-asserting a status IS a
+        mutation for revision purposes (the unlocked seam relies on that — see
+        ``test_two_concurrent_apply_status_transition_yield_distinct_revisions``),
+        and every real caller that would otherwise pass the same value returns
+        ``None`` instead. The transition applies and stamps/bumps via the shared
+        seams, so no committed buy is left without a confirmation instant. The
+        lock is held until the caller commits, serializing concurrent transitions
+        of the same buy. ``revision`` needs no refresh — it bumps via a
+        server-side expression that serializes at the write-lock. Returns the same
+        (mutated) row.
+        """
+        session = object_session(media_buy)
+        if session is not None:
+            session.refresh(
+                media_buy,
+                list(MediaBuyRepository._LIFECYCLE_REFRESH_FIELDS),
+                with_for_update=True,
+            )
+        target = compute_target(media_buy)
+        if target is None:
+            return media_buy
+        media_buy.status = target
+        MediaBuyRepository._stamp_confirmation_if_needed(media_buy)
+        MediaBuyRepository._bump_revision(media_buy)
+        return media_buy
+
+    @staticmethod
+    def apply_status_transition(media_buy: MediaBuy, new_status: str) -> MediaBuy:
+        """Transition an already-loaded MediaBuy to ``new_status`` and bump revision.
+
+        The seam for paths that already hold a ``MediaBuy`` row on their own
+        session and therefore cannot use tenant-scoped, single-row
+        :meth:`update_status`: the cross-tenant scheduler sweep (rows from
+        :meth:`get_all_by_statuses`) and the creative-sync assignment pass
+        (rows loaded inside ``CreativeUoW``). The caller owns the
+        session/transaction and commits. Bumps the AdCP 3.1.1
+        ``revision`` counter so seller-initiated lifecycle transitions
+        (``pending_start`` → ``active``, ``active`` → ``completed``,
+        ``draft`` → ``pending_creatives``) advance the optimistic-concurrency
+        token like any other state change, and stamps the write-once
+        ``confirmed_at`` when the transition enters a seller-confirmed status —
+        via the same :meth:`_stamp_confirmation_if_needed` seam the tenant-scoped
+        mutators use, so no path can leave a committed buy without a confirmation
+        instant. Returns the same (mutated) row so the seam matches the
+        ``MediaBuy | None`` shape of every sibling mutator — the return is never
+        None here because the caller supplies a loaded row.
+
+        Unlike the tenant-scoped mutators, callers here loaded the row WITHOUT a
+        row lock (the scheduler sweep via :meth:`get_all_by_statuses`, creative-
+        sync inside ``CreativeUoW``), so BOTH the identity-mapped ``status`` and
+        ``confirmed_at`` may be stale while a concurrent transaction has committed
+        a newer decision. Lock and refresh ``status`` + ``confirmed_at`` before
+        applying the transition:
+
+        * If ``status`` changed under the stale read — e.g. an admin committed
+          ``rejected`` while the scheduler still held ``active`` — the caller's
+          target was computed from the stale value, so applying it would overwrite
+          the newer decision (``rejected`` → ``completed``). No-op instead: leave
+          the committed state and skip the bump. The scheduler re-evaluates next
+          cycle; creative-sync's stamp is best-effort.
+        * Otherwise the refreshed ``confirmed_at`` feeds the write-once check in
+          :meth:`_stamp_confirmation_if_needed`, so a stale ``None`` cannot clobber
+          a concurrently committed stamp.
+
+        The ``FOR UPDATE`` lock is held until the caller commits, serializing
+        concurrent transitions of the same buy. ``revision`` needs no refresh — it
+        bumps via a server-side expression that serializes at the write-lock.
+
+        This is the STATIC-target variant of :meth:`apply_computed_status_transition`:
+        the caller already knows the destination status (it does not depend on the
+        refreshed window), so the only race to guard is a concurrent status change.
+        Expressed as the compute callback below — return the fixed ``new_status``
+        only while the committed status still matches what the caller based it on;
+        otherwise no-op — it reuses the one lock→refresh→stamp→bump tail.
+        """
+        # The source status the caller based ``new_status`` on, captured before the
+        # locked refresh (inside the computed seam) overwrites it with the committed
+        # value.
+        expected_from_status = media_buy.status
+
+        def _compute(refreshed: MediaBuy) -> str | None:
+            if refreshed.status != expected_from_status:
+                logger.info(
+                    "apply_status_transition: skipping %s -> %s for media buy %s; "
+                    "committed status changed to %s under a stale unlocked read",
+                    expected_from_status,
+                    new_status,
+                    refreshed.media_buy_id,
+                    refreshed.status,
+                )
+                return None
+            return new_status
+
+        return MediaBuyRepository.apply_computed_status_transition(media_buy, _compute)
+
+    @staticmethod
+    def apply_revision_bump(media_buy: MediaBuy) -> MediaBuy:
+        """Advance the revision of an already-loaded buy WITHOUT a status change.
+
+        The seam for a non-status mutation that still materially changes the buy —
+        a creative assignment created, or an assignment weight actually changed, on
+        the creative-sync pass (rows loaded inside ``CreativeUoW``). Bumps the AdCP
+        3.1.1 ``revision`` optimistic-concurrency token so a buyer's next
+        update observes a fresh token, WITHOUT writing ``status`` or stamping
+        ``confirmed_at`` (the buy's lifecycle state is unchanged). Uses the same
+        server-side ``coalesce(revision, 0) + 1`` expression as every other seam,
+        so it is concurrency-safe on the unlocked ``CreativeUoW`` row and never
+        collapses two bumps onto one value.
+
+        The CALLER filters idempotent no-op assignments (existing assignment, weight
+        already at target) — this method ALWAYS bumps, and must not be called for a
+        buy that also transitions status this pass (``apply_status_transition``
+        already bumps once; calling both would double-count). Returns the same
+        (mutated) row.
+        """
+        MediaBuyRepository._bump_revision(media_buy)
+        return media_buy

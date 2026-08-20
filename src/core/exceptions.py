@@ -668,6 +668,45 @@ class AdCPServiceUnavailableError(AdCPError):
 # translator runs build_two_layer_error_envelope() on the raised exception.
 
 
+def media_buy_revision_conflict(
+    media_buy_id: str,
+    *,
+    expected: int,
+    current: int,
+    context: ContextObject | dict[str, Any] | None = None,
+) -> AdCPConflictError:
+    """CONFLICT for an optimistic-concurrency revision mismatch.
+
+    AdCP 3.1.1 update-media-buy-request.json ``properties.revision``:
+    "When provided, sellers MUST reject the update with CONFLICT if the media
+    buy's current revision does not match." One definition of the error shape,
+    shared by the fast pre-adapter gate in ``_update_media_buy_impl`` and the
+    authoritative under-row-lock check in ``MediaBuyRepository``.
+    """
+    # Details use the spec's recommended CONFLICT shape
+    # (dist/schemas/3.1.1/error-details/conflict.json:
+    # resource_id / expected_version / current_version) so optimistic-
+    # concurrency clients can re-read and retry generically.
+    #
+    # recovery=transient per the pinned AdCP 3.1.1 error-code.json
+    # enumMetadata for CONFLICT ("re-read the resource and retry with current
+    # state"). Equals AdCPConflictError's default; passed explicitly so the
+    # wire value is pinned at the raise site. The suggestion carries the
+    # re-read-then-retry guidance the transient classification implies.
+    return AdCPConflictError(
+        f"Revision mismatch for media buy '{media_buy_id}': request expected "
+        f"revision {expected}, current revision is {current}",
+        field="revision",
+        suggestion=(
+            f"Re-read the media buy via get_media_buys and retry the update with "
+            f"revision {current} and a fresh idempotency_key."
+        ),
+        details={"resource_id": media_buy_id, "expected_version": expected, "current_version": current},
+        recovery="transient",
+        context=context,
+    )
+
+
 class AdCPMediaBuyNotFoundError(AdCPNotFoundError):
     """Media buy lookup failed (404, MEDIA_BUY_NOT_FOUND).
 
