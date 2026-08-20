@@ -33,7 +33,17 @@ _UPDATE_PATCHES = {
 
 def _is_update_request(kwargs: dict[str, Any]) -> bool:
     req = kwargs.get("req")
-    return isinstance(req, UpdateMediaBuyRequest)
+    if isinstance(req, UpdateMediaBuyRequest):
+        return True
+    if req is not None:
+        return False  # an explicit non-update req (e.g. a CreateMediaBuyRequest)
+    # No req object — a raw payload (e.g. an update whose invalid revision failed
+    # UpdateMediaBuyRequest construction, so the caller sends the raw fields). It
+    # MUST still route to update, not create: ``revision`` is an update-only
+    # optimistic-concurrency token and ``media_buy_id`` targets an existing buy,
+    # so either identifies a raw update payload. Routing it to create would fail
+    # on missing brand/packages/start_time instead of validating the revision.
+    return "revision" in kwargs or "media_buy_id" in kwargs
 
 
 class MediaBuyDualEnv(MediaBuyCreateEnv):

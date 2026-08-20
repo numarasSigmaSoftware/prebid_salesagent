@@ -349,6 +349,45 @@ class MediaBuyCreateEnv(IntegrationEnv):
         identity = enrich_identity_with_account(identity, req.account)
         return asyncio.run(_create_media_buy_impl(req=req, identity=identity))
 
+    def default_create_kwargs(self, product: Any, *, brand_domain: str = "harness-default.example") -> dict[str, Any]:
+        """The canonical default create request: 30-day flight starting tomorrow, one CPM package at 5000.0.
+
+        Single source of truth for the request shape, so tests that just need a
+        persisted buy do not each hand-roll one.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from tests.helpers.adcp_factories import create_test_package_request_dict
+
+        start = datetime.now(UTC) + timedelta(days=1)
+        end = start + timedelta(days=30)
+        return {
+            "brand": {"domain": brand_domain},
+            "packages": [
+                create_test_package_request_dict(
+                    product_id=product.product_id,
+                    pricing_option_id="cpm_usd_fixed",
+                    budget=5000.0,
+                )
+            ],
+            "start_time": start.isoformat(),
+            "end_time": end.isoformat(),
+        }
+
+    def create_default_buy(
+        self, product: Any, *, brand_domain: str = "harness-default.example"
+    ) -> CreateMediaBuySuccess:
+        """Drive a one-package create through ``call_impl``; assert and return success.
+
+        Shared by tests that just need a persisted buy (the
+        ``default_create_kwargs`` shape) without caring about the request
+        shape. Tests exercising create parameters call ``call_impl`` directly.
+        """
+        result = self.call_impl(**self.default_create_kwargs(product, brand_domain=brand_domain))
+        created = result.response
+        assert isinstance(created, CreateMediaBuySuccess), f"create must succeed, got {type(created).__name__}"
+        return created
+
     def _flatten_request(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Convert a ``req=`` kwarg into the flat parameter dict the wrappers take.
 
