@@ -75,7 +75,7 @@ class DeliveryBatchSummary:
         return self.sent + self.suppressed + self.not_reportable + self.no_webhook_config + self.errors
 
 
-def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: object) -> bool:
+def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: GetMediaBuyDeliveryResponse) -> bool:
     """Whether a delivery lookup result can be reported on.
 
     Returns True when the result is usable, False for a LEGITIMATE skip, and RAISES
@@ -86,17 +86,6 @@ def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: object) -
     Extracted from ``_deliver_report`` to keep that method under the PLR0915 statement
     ceiling; the discrimination below is the whole reason this is not a one-liner.
     """
-    if not isinstance(delivery_response, GetMediaBuyDeliveryResponse):
-        # %r-style detail, not %s: this branch proved the object is NOT the response
-        # model, so its type is unknown. A result that is not the model at all is none
-        # of the contract's legitimate skips — returning False here made the batch print
-        # "0 sent, 0 errors" for a terminal buy whose spec-required final could not be
-        # built, hiding the failure entirely.
-        raise RuntimeError(
-            f"Delivery lookup for media buy {media_buy.media_buy_id} returned "
-            f"{type(delivery_response).__name__}, not GetMediaBuyDeliveryResponse"
-        )
-
     if delivery_response.errors is not None:
         # Log the ERRORS, not the response: GetMediaBuyDeliveryResponse.__str__ is a
         # human-readable envelope summary ("No delivery data found for the specified

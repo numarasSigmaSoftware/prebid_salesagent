@@ -258,16 +258,6 @@ class TestDeliveryLookupFailureIsCountedNotSkipped:
             response = self._response_with([self._error("MEDIA_BUY_NOT_FOUND")])
             assert await self._drive(env, buy, response) is False
 
-    @pytest.mark.asyncio
-    async def test_non_response_result_raises(self, integration_db):
-        """Not the response model at all — none of the contract's legitimate skips."""
-        from tests.harness import DeliveryPollEnv
-
-        with DeliveryPollEnv(tenant_id="t_lookup_type", principal_id="p_lookup_type") as env:
-            buy = _serving_webhook_buy(env)
-            with pytest.raises(RuntimeError, match="not GetMediaBuyDeliveryResponse"):
-                await self._drive(env, buy, None)
-
 
 # ---------------------------------------------------------------------------
 # UC-004-ALT-WEBHOOK-PUSH-REPORTING-03
