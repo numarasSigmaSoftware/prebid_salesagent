@@ -8,8 +8,10 @@ Handles media buy updates including:
 - Currency limit validation
 """
 
+import contextlib
 import logging
 import os
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -136,6 +138,50 @@ def _persist_expired_update_lease_reconciliation(tenant_id: str, media_buy_id: s
     with MediaBuyUoW(tenant_id) as recovery_uow:
         assert recovery_uow.media_buys is not None
         recovery_uow.media_buys.persist_expired_update_lease_reconciliation(media_buy_id, lease_id)
+
+
+@contextlib.contextmanager
+def _resolve_update_lease_on_exit(get_release: "Callable[[], Callable[[], None] | None]") -> Iterator[None]:
+    """Resolve ``_update_media_buy_impl``'s durable update lease on EVERY exit path.
+
+    The lease is claimed lazily before the first adapter call and immediately marked
+    ``update_adapter_invoked_at``. Fourteen ``raise`` statements sit between that claim
+    and the end of the body, and a raise on ANY of them — including a plain buyer-input
+    rejection such as PACKAGE_NOT_FOUND on a later package — used to leak the claim.
+    Once the lease TTL passes, ``claim_update_lease`` sees ``update_adapter_invoked_at``
+    still set and refuses to claim, so the buy is fenced from updates PERMANENTLY: there
+    is no reconciler and no operator surface to clear it.
+
+    ``get_release`` is a getter, not the closure itself, because the release closure is
+    defined deep inside the body (it needs the UoW and the lease id) while this guard has
+    to be entered before any of it runs — the same "hoist and read it late" shape the
+    sibling ``step`` fence uses at ``audit_workflow_step_failure_ctx(lambda: step)``. It
+    returns ``None`` for any exit that happened before the closure existed, which is also
+    every exit before a lease could have been claimed.
+
+    On the SUCCESS path a failed release propagates: ``complete_update_lease`` refusing is
+    the "ownership lost before completion" signal the buyer must see. On the ERROR path it
+    is logged and swallowed — the error already travelling to the buyer is the true cause,
+    and replacing it with a lease CONFLICT would hide it.
+
+    Modelled on the sibling ``finalize_lease_heartbeat``
+    (src/services/media_buy_completion.py) — same claim-then-``finally`` shape, kept
+    deliberately separate rather than generalised into one lease family.
+    """
+    try:
+        yield
+    except BaseException:
+        release = get_release()
+        if release is not None:
+            try:
+                release()
+            except Exception:
+                logger.exception("[UPDATE] failed to resolve the update lease while unwinding")
+        raise
+    else:
+        release = get_release()
+        if release is not None:
+            release()
 
 
 def _adcp_status_and_actions(
@@ -417,10 +463,18 @@ def _update_media_buy_impl(
     # Mirrors ``media_buy_create.py:3688-3697`` exactly.
     ctx_manager = get_context_manager()
     step = None
+    # ── Update-lease fence ───────────────────────────────────────────────
+    # Hoisted for the same reason as ``step`` above: the release closure is
+    # defined deep in the body (it needs the UoW and the claimed lease id), but
+    # ``_resolve_update_lease_on_exit`` has to be entered before any of that runs
+    # so no ``raise`` between the claim and the end of the body can leak the lease.
+    lease_release: Callable[[], None] | None = None
 
     with ctx_manager.audit_workflow_step_failure_ctx(lambda: step):
         # Single UoW for the update operation; lease durability uses short commits.
-        with MediaBuyUoW(tenant["tenant_id"]) as uow:
+        # The lease guard is the INNER manager so it still has a live UoW to commit
+        # the completion through.
+        with MediaBuyUoW(tenant["tenant_id"]) as uow, _resolve_update_lease_on_exit(lambda: lease_release):
             assert uow.media_buys is not None
             # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
             assert uow.session is not None
@@ -730,15 +784,22 @@ def _update_media_buy_impl(
                 uow.commit()
 
             def release_update_lease() -> None:
+                nonlocal update_lease_id
                 if update_lease_id is None:
                     return
-                if not media_buy_repo.complete_update_lease(req.media_buy_id, update_lease_id):
+                # Resolve EXACTLY ONCE. Clearing the id before acting is what makes a
+                # second call a no-op instead of an error: the guard below releases on
+                # every exit, so an already-completed path must not attempt a second
+                # completion (which would fail the ownership check and re-fence the buy
+                # for manual reconciliation).
+                lease_id, update_lease_id = update_lease_id, None
+                if not media_buy_repo.complete_update_lease(req.media_buy_id, lease_id):
                     # Completion may fail after an adapter-backed call exceeded its
                     # lease.  The repository has staged a manual fence in this
                     # UoW, but this update also has local writes pending; roll those
                     # back before using a fresh UoW to persist only the fence.
                     uow.rollback()
-                    _persist_expired_update_lease_reconciliation(tenant["tenant_id"], req.media_buy_id, update_lease_id)
+                    _persist_expired_update_lease_reconciliation(tenant["tenant_id"], req.media_buy_id, lease_id)
                     raise AdCPConflictError(
                         "Update ownership was lost before completion.",
                         field="media_buy_id",
@@ -748,6 +809,10 @@ def _update_media_buy_impl(
                         context=req.context,
                     )
                 uow.commit()
+
+            # Hand the closure to the guard entered above; every exit from here on —
+            # return, raise, or fall-through — now resolves the lease.
+            lease_release = release_update_lease
 
             # Validate currency limits if flight dates or budget changes
             # This prevents workarounds where buyers extend flight to bypass daily max
@@ -852,7 +917,6 @@ def _update_media_buy_impl(
                         status="failed",
                         error_message=result.errors[0].message if result.errors else "Pause/resume failed",
                     )
-                    release_update_lease()
                     return UpdateMediaBuyResult(response=error_response, status=AdcpTaskStatus.failed.value)
                 else:
                     # UpdateMediaBuySuccess extends adcp v1.2.1 with internal fields
@@ -901,7 +965,6 @@ def _update_media_buy_impl(
                         },
                     )
                     ctx_manager.audit_workflow_step_result(step.step_id, success_response)
-                    release_update_lease()
                     return UpdateMediaBuyResult(response=success_response, status=AdcpTaskStatus.completed.value)
 
             # Every column mutation from this update is staged here and applied
@@ -942,7 +1005,6 @@ def _update_media_buy_impl(
                                 status="failed",
                                 error_message=error_message,
                             )
-                            release_update_lease()
                             return UpdateMediaBuyResult(response=response_data, status=AdcpTaskStatus.failed.value)
 
                     # Handle budget updates
@@ -1012,7 +1074,6 @@ def _update_media_buy_impl(
                                 status="failed",
                                 error_message=error_message,
                             )
-                            release_update_lease()
                             return UpdateMediaBuyResult(response=response_data, status=AdcpTaskStatus.failed.value)
 
                         # Track budget update in affected_packages
@@ -1594,7 +1655,6 @@ def _update_media_buy_impl(
             # Persist success with response data, then return
             # Use mode="json" to ensure enums are serialized as strings for JSONB storage
             ctx_manager.audit_workflow_step_result(step.step_id, final_response)
-            release_update_lease()
 
         return UpdateMediaBuyResult(response=final_response, status=AdcpTaskStatus.completed.value)
 
