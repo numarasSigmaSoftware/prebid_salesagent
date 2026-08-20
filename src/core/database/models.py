@@ -894,6 +894,31 @@ class AgentAccountAccess(Base):
     )
 
 
+# Statuses in which the seller has NOT yet committed to running the buy. The
+# AdCP 3.1.1 `confirmed_at` field ("when the seller committed to this
+# media buy") MUST be absent for these. This is the SINGLE source of truth for
+# "seller committed", consulted by both create_media_buy (which omits
+# confirmed_at on its not-yet-committed arms) and the repository's write-once
+# confirmation stamp (MediaBuyRepository._stamp_confirmation_if_needed, applied
+# on every status-mutation seam) — so the create path and the persisted column
+# get_media_buys reads back cannot drift: adding a new not-yet-committed status
+# here fixes both at once.
+MEDIA_BUY_UNCONFIRMED_STATUSES: frozenset[str] = frozenset(
+    {"draft", "pending", "pending_approval", "rejected", "failed"}
+)
+
+
+def is_media_buy_seller_confirmed(status: str | None) -> bool:
+    """True once the seller has committed to running the buy (confirmed_at is set).
+
+    The inverse of :data:`MEDIA_BUY_UNCONFIRMED_STATUSES`. Case-insensitive; a
+    missing/empty status reads as not-confirmed (we never emit confirmed_at when
+    the state is unknown).
+    """
+    normalized = (status or "").lower()
+    return bool(normalized) and normalized not in MEDIA_BUY_UNCONFIRMED_STATUSES
+
+
 class MediaBuy(Base):
     __tablename__ = "media_buys"
 
@@ -913,12 +938,20 @@ class MediaBuy(Base):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    # Monotonic optimistic-concurrency counter (AdCP 3.1.1 `revision`).
+    # Starts at 1 on create; bumped by MediaBuyRepository on every successful
+    # mutation. Never derived from timestamps — two updates within one second
+    # must still yield strictly increasing revisions.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Write-once seller confirmation instant. Unlike approved_at, this remains
+    # stable across later creative/status transitions.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_request: Mapped[dict] = mapped_column(JSONType, nullable=False)
     strategy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")

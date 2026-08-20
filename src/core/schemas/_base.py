@@ -1,4 +1,4 @@
-# SDK 5.7 type:ignore tracking (adcontextprotocol/adcp-client-python#913):
+# SDK 6.6 type:ignore tracking:
 # - [misc] on lines ~339, ~415: UpdateMediaBuySuccess/Error class defs.
 #   Pydantic metaclass interaction in SDK hierarchy; permanent.
 # - [assignment] on lines ~1449, ~1450, ~1637, ~1638: account/idempotency_key
@@ -6,13 +6,13 @@
 
 import re
 import warnings
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 # --- V2.3 Pydantic Models (Bearer Auth, Restored & Complete) ---
 # --- MCP Status System (AdCP PR #77) ---
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, TypeAlias
 
 from src.core.enum_helpers import enum_value
 
@@ -118,8 +118,30 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    SkipValidation,
+    StrictFloat,
+    StrictInt,
+    TypeAdapter,
     model_serializer,
     model_validator,
+)
+from pydantic import ValidationError as PydanticValidationError
+
+# Transport wrappers must preserve malformed JSON values until the common
+# request boundary can emit the same AdCP error envelope on A2A, MCP, and REST.
+# ``SkipValidation`` does that without erasing the public JSON Schema: clients
+# still see the concrete AdCP types and constraints rather than ``Any``.
+RawRevision: TypeAlias = SkipValidation[Annotated[int, Field(ge=1)]]  # noqa: UP040 - Pydantic runtime alias
+# Runtime restatement of ``RawRevision``'s constraint, kept beside the alias so the
+# rule has one home. ``update-media-buy-request.json`` types ``revision`` as draft-07
+# ``{"type": "integer", "minimum": 1}``, and draft-07 ``integer`` matches any number
+# with a zero fractional part — so ``7.0`` (the shape A2A's protobuf doubles deliver an
+# integer in) is schema-VALID and must be accepted, then normalised to ``int``.
+# Strict members keep ``"7"`` and ``bool`` out; ``multiple_of=1`` keeps ``7.5`` out;
+# ``allow_inf_nan=False`` keeps ``inf``/``nan`` out (``int(inf)`` would raise a raw
+# OverflowError out of the validator instead of a buyer-facing envelope).
+RevisionValidator = TypeAdapter[int | float](
+    Annotated[StrictInt, Field(ge=1)] | Annotated[StrictFloat, Field(ge=1, multiple_of=1, allow_inf_nan=False)]
 )
 
 # Type alias for the union of all AdCP pricing option types (V3 consolidated)
@@ -322,11 +344,11 @@ def _mirror_media_buy_status(model: Any) -> Any:
     ``TaskResultEnvelope._serialize`` OVERWRITES the top-level ``status`` with the
     PROTOCOL ``TaskStatus`` (``submitted`` / ``completed``), so on the wire the
     top-level ``status`` and ``media_buy_status`` are DIFFERENT namespaces and are
-    NOT identical. This is the GA model graded by the published 3.1.0 storyboard
-    ``pending_creatives_to_start.yaml`` (status=field_value 'completed'), which
-    diverges from the pinned SDK's beta.3 storyboard (status=field_value_or_absent,
-    MUST-equal media_buy_status; #4908). See docs/adcp-spec-version.md
-    "Behavior target vs SDK pin".
+    NOT identical. This is the GA model graded by the pinned 3.1.1 storyboard
+    ``pending_creatives_to_start.yaml`` (status=field_value 'completed'); the
+    earlier beta.3 storyboard's status=field_value_or_absent / MUST-equal
+    media_buy_status shape was superseded on the 3.1.0 GA → 3.1.1 line.
+    See docs/adcp-spec-version.md "Behavior target vs SDK pin".
 
     Shared by ``CreateMediaBuySuccess`` and ``UpdateMediaBuySuccess`` (DRY).
     """
@@ -356,29 +378,62 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     ``SyncAccountsResponse``.
     """
 
-    # adcp 6.6 (spec 3.1.1) made these required on the success envelope. They are
-    # invariant for a synchronous committed success, so declare spec-correct defaults
-    # here rather than threading identical literals through every constructor:
-    #   status      — protocol-envelope TaskStatus; a sync create_media_buy that
-    #                 returns this type has, by definition, completed.
-    #   confirmed_at — seller commitment timestamp (stable after set).
-    #   revision     — initial revision number (schema minimum: 1).
-    # NOTE (SDK divergence): spec allows confirmed_at=null for provisional/manual-approval
-    # buys, but adcp 6.6 types it non-nullable AwareDatetime; that branch can't be modeled.
+    # adcp 6.6 (spec 3.1.1) made status/confirmed_at/revision REQUIRED on the success
+    # envelope. ``status`` is invariant for a synchronous committed success, so its
+    # spec-correct default lives here rather than being threaded through every constructor.
+    #
+    # ``confirmed_at`` is overridden back to NULLABLE (adcp 6.6 types it a non-null
+    # AwareDatetime). This is a MODEL TYPE capability grounded in the spec: 3.1.1
+    # create-media-buy-response oneOf[0] types confirmed_at as ["string","null"]
+    # ("May be null in deferred or manual-approval flows until seller commitment occurs"),
+    # so the required field must be able to serialize as present-with-null to represent a
+    # not-yet-seller-confirmed buy. adcp 6.6's non-nullable type cannot express that state,
+    # hence the widening. There IS a live wire arm that legitimately serializes confirmed_at
+    # present-as-null: the DRY-RUN / sandbox success arm (media_buy_create._dry_run branch),
+    # where a simulation commits nothing, so confirmed_at is honestly null while the required
+    # key stays present (the serializer below re-emits it as null so exclude_none does not
+    # drop it). The non-sandbox committed paths are the opposite: the approval finalizer
+    # publishes a confirmed serving status BEFORE building the success body, and the approve /
+    # immediate-activation paths set confirmed_at EXPLICITLY from the persisted MediaBuy (see
+    # media_buy_completion.finalize_media_buy / the sync-success tool path), so a real
+    # COMMITTED CreateMediaBuySuccess on the wire always carries a non-null confirmed_at.
+    # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
+    #
+    # ``revision`` is NON-nullable: 3.1.1 requires it present as a non-null int >= 1 and —
+    # unlike confirmed_at — it has NO spec-sanctioned null arm (a would-be-fresh buy is
+    # revision 1; a committed/updated buy carries its persisted counter). A nullable revision
+    # left None would serialize OMITTED (exclude_none), leaving the body missing a REQUIRED
+    # key — non-conformant, and it cannot be null-injected like confirmed_at. So it defaults
+    # to the spec-minimum initial revision 1; every wire-emitting tool path (sync-success /
+    # dry-run / finalizer / auto-approve) passes the real persisted revision explicitly,
+    # overriding the default. Adapter-layer builders (_build_create_success) leave the
+    # default 1 — their revision is discarded, the tool rebuilds the wire success with the
+    # persisted revision. This matches the serializer note below ("revision already
+    # serializes as a non-null int (>=1)").
+    #   status      — protocol TaskStatus; a create_media_buy returning this type has, by
+    #                 definition, completed.
+    #   confirmed_at — persisted, write-once seller-confirmation instant (None until
+    #                 confirmed; present-as-null in the dry-run/sandbox simulation arm).
+    #   revision     — persisted monotonic revision counter (default 1 = initial).
     status: Literal["completed"] = "completed"
-    confirmed_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
-    revision: int = 1
+    # confirmed_at is WIDENED from the 6.6 non-null parent to nullable (pydantic permits this
+    # at runtime; mypy flags the override as incompatible) — the dry-run/sandbox and
+    # not-yet-committed arms require present-as-null. revision stays a non-null int (default
+    # 1); it is never None, so it can never serialize OMITTED.
+    confirmed_at: AwareDatetime | None = None  # type: ignore[assignment]
+    revision: int = Field(default=1, ge=1)
 
     @classmethod
     def sync_success(cls, **kwargs: Any) -> "CreateMediaBuySuccess":
-        """Construct a synchronous create_media_buy success.
+        """Construct a create_media_buy success without tripping mypy's pydantic plugin.
 
-        The spec-3.1.1 envelope invariants (status/confirmed_at/revision) come from the
-        subclass field defaults above — that is the single source of truth. This factory
-        exists ONLY because mypy's pydantic plugin does not treat those subclass defaults
-        as satisfying the required parent fields (spurious ``call-arg``); callers route the
-        untyped ``**kwargs`` through here to dodge that. Do NOT re-default the fields here —
-        that would let the factory drift from the class defaults.
+        adcp 6.6 types confirmed_at/revision as required on the parent. This subclass makes
+        confirmed_at nullable with a None default and keeps revision non-null with the
+        spec-minimum default 1, but mypy's pydantic plugin still emits a spurious ``call-arg``
+        at direct construction sites. Callers route the untyped ``**kwargs`` through here to
+        dodge that. Committed-success callers pass both fields explicitly from the persisted
+        MediaBuy; a provisional caller may omit them and receives confirmed_at=None and
+        revision=1. Do NOT re-default the fields here.
         """
         return cls(**kwargs)
 
@@ -391,6 +446,12 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # buyer_ref: the SDK-5.7 parent wrongly declared it (removed from AdCP 3.1
     # create-media-buy-response; SDK bug adcontextprotocol/adcp-client-python#950,
     # excluded here by #1417); adcp 6.6 no longer declares it, so no override needed.
+    # Seller rejection is NOT modeled here: 3.1.1 create-media-buy-response oneOf covers
+    # Success / Error / Submitted only — no rejection arm — so a rejected buy is emitted as
+    # CreateMediaBuyError (errors[].code POLICY_VIOLATION via the AdCPMediaBuyRejectedError
+    # cascade), not a success body with a rejection_reason. Authority: dist/compliance/3.1.1/
+    # domains/media-buy/scenarios/governance_denied.yaml (create_media_buy_denied, Case-2).
+    # The rejection_reason field previously carried here was dropped in this merge.
 
     # Internal fields (excluded from AdCP responses)
     workflow_step_id: str | None = None
@@ -445,6 +506,24 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
                         data[field_name] = [item.model_dump(mode=info.mode) for item in field_value]
             elif isinstance(field_value, BaseModel):
                 data[field_name] = field_value.model_dump(mode=info.mode)
+
+        # 3.1.1 create-media-buy-response.json oneOf[0] (CreateMediaBuySuccess)
+        # required = [media_buy_id, confirmed_at, revision, packages]; confirmed_at
+        # is typed ["string", "null"] ("May be null in deferred or manual-approval
+        # flows until seller commitment occurs"). ANY CreateMediaBuySuccess must
+        # therefore carry confirmed_at on the wire — present-with-null when the buy is
+        # not yet seller-confirmed (e.g. the simulated/sandbox dry-run arm, which
+        # confirms nothing). The inherited exclude_none=True would DROP a null
+        # confirmed_at, leaving the body missing a REQUIRED key, so re-emit it
+        # explicitly as null whenever it is absent from ``data``. This is a success-arm
+        # invariant, not a sandbox special case: it also guards adapter-layer successes
+        # (adapters/base.py, mock_ad_server.py) that are one refactor away from omitting
+        # the key. The ``"confirmed_at" not in data`` guard means a real committed
+        # instant (a non-null datetime already in ``data``) is never clobbered. revision
+        # already serializes as a non-null int (>=1) and is not re-injected here.
+        #
+        if "confirmed_at" not in data:
+            data["confirmed_at"] = None
 
         return data
 
@@ -600,12 +679,19 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     """
 
     # adcp 6.6 (spec 3.1.1) made status/revision required on the update success envelope.
-    # Invariant for a synchronous applied update, so declare spec-correct defaults here
-    # rather than threading identical literals through every constructor (see the twin
-    # note on CreateMediaBuySuccess). revision defaults to 1; real per-buy revision
-    # tracking is separate media-buy lifecycle work.
+    # ``status`` is invariant for a synchronously applied update, so its spec-correct default
+    # lives here. ``revision`` is NON-nullable, mirroring CreateMediaBuySuccess: 3.1.1
+    # update-media-buy-response oneOf[0] requires it present as a non-null int >= 1 (verified:
+    # the pinned adcp 6.6 UpdateMediaBuySuccessResponse types revision as a required, non-null
+    # int), and — unlike confirmed_at on the create arm — it has NO spec-sanctioned null arm.
+    # A nullable revision left None would serialize OMITTED (exclude_none), leaving the body
+    # missing a REQUIRED key — non-conformant. So it defaults to the spec-minimum revision 1;
+    # every wire-emitting update path (dry-run / pause-resume / finalizer) passes the real
+    # persisted revision explicitly, overriding the default (adapter-layer builders leave the
+    # default; the tool rebuilds the wire success with the persisted counter).
+    # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
     status: Literal["completed"] = "completed"
-    revision: int = 1
+    revision: int = Field(default=1, ge=1)
 
     # Override affected_packages to use our extended AffectedPackage type
     # This allows us to include internal tracking fields (changes_applied, buyer_package_ref)
@@ -2083,6 +2169,18 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
 
         values = copy_before_mutating(values)
 
+        # Optimistic-concurrency ``revision`` gate. JSON Schema ``type: integer``
+        # enforced before Pydantic's default coercion. This bites at the raw-dict (A2A)
+        # boundary, where the payload reaches this model before any typed coercion.
+        # Transport wrappers preserve raw values with ``SkipValidation`` so this
+        # shared gate rejects numeric strings and booleans uniformly, and accepts the
+        # whole-number float (7.0) draft-07 ``integer`` admits — see ``RevisionValidator``.
+        if "revision" in values and values["revision"] is not None:
+            try:
+                values["revision"] = int(RevisionValidator.validate_python(values["revision"]))
+            except PydanticValidationError as exc:
+                raise ValueError("revision must be an integer greater than or equal to 1") from exc
+
         # Normalize package instances to dicts so the list[AdCPPackageUpdate] field
         # validates them. FastMCP coerces the incoming param to its annotated type
         # before the wrapper runs: on older adcp that was a PackageUpdate RootModel,
@@ -2786,19 +2884,42 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     packages: list[GetMediaBuysPackage] = Field(..., description="Packages within this media buy")
     created_at: datetime | None = Field(default=None, description="When this media buy was created")
     updated_at: datetime | None = Field(default=None, description="When this media buy was last updated")
+    # adcp 6.6 (spec 3.1.1) requires confirmed_at (nullable) and revision on each
+    # returned buy of get-media-buys-response. revision is the persisted monotonic
+    # counter (always >= 1, so it survives serialization). confirmed_at is the
+    # persisted, write-once seller confirmation instant and is nullable — None until
+    # the seller has committed to the buy. Because the inherited exclude_none=True
+    # would DROP a null confirmed_at, leaving the body missing a REQUIRED key, the
+    # serializer below re-injects it as null whenever it is absent (mirroring the
+    # CreateMediaBuySuccess.model_dump success-arm invariant).
+    confirmed_at: datetime | None = Field(
+        default=None, description="When this media buy was committed by the seller (stable after set)"
+    )
+    # Non-null and REQUIRED: 3.1.1 requires revision present as a non-null int >= 1
+    # on every returned buy, and the sole populating site (media_buy_list) always
+    # passes the persisted counter. Making it required (no default) means a
+    # constructor that forgets it fails loudly at validation instead of silently
+    # emitting revision=1.
+    revision: int = Field(..., ge=1, description="Current revision number for optimistic-concurrency updates")
 
     def model_dump(self, **kwargs):
         result = super().model_dump(**kwargs)
         if "packages" in result and self.packages:
             result["packages"] = [pkg.model_dump(**kwargs) for pkg in self.packages]
+        # confirmed_at is a REQUIRED (nullable) 3.1.1 field; exclude_none=True would
+        # drop it for an unconfirmed buy, so re-emit it as null when absent. The
+        # setdefault never clobbers a real committed instant already in ``result``.
+        # revision is a non-null int (persisted >= 1) so it always survives.
+        result.setdefault("confirmed_at", None)
         return result
 
 
 class GetMediaBuysRequest(SalesAgentBaseModel):
     """Request to retrieve media buys.
 
-    Matches the adcp 3.6.0 GetMediaBuysRequest spec.
-    Defined locally because adcp 3.6.0 is not yet required.
+    Mirrors the pinned get-media-buys request shape (spec 3.1.1 / adcp 6.6.0),
+    defined locally as a SalesAgentBaseModel so it carries the repo's strict
+    (extra=forbid in dev/CI) validation and serialization behavior.
     """
 
     media_buy_ids: list[str] | None = Field(default=None, description="Specific media buy IDs to retrieve")
@@ -2811,7 +2932,9 @@ class GetMediaBuysRequest(SalesAgentBaseModel):
 class GetMediaBuysResponse(NestedModelSerializerMixin, SalesAgentBaseModel):
     """Response from get_media_buys.
 
-    Matches the adcp 3.6.0 GetMediaBuysResponse spec.
+    Mirrors the pinned get-media-buys response shape (spec 3.1.1 / adcp 6.6.0);
+    see :class:`GetMediaBuysMediaBuy` for the per-buy ``revision`` / ``confirmed_at``
+    3.1.1 fields.
     """
 
     media_buys: list[GetMediaBuysMediaBuy] = Field(..., description="List of matching media buys")
