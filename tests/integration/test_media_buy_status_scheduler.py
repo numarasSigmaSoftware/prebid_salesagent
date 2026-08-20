@@ -795,11 +795,12 @@ async def test_status_sweep_summary_accounts_for_every_selected_buy(integration_
     Asserts the identity (buckets sum to selection) rather than each bucket's
     value, so it keeps holding as outcomes are added.
 
-    ``no_flight_window`` is NOT seeded here, and cannot be: MediaBuy.start_date and
-    end_date are both NOT NULL, so ``_compute_new_status`` always resolves a window
-    and that bucket is unreachable against the current schema (see
-    ``_NoFlightWindow``). Seeding it fails at INSERT, which is the honest reason
-    this asserts over the reachable buckets only.
+    The three buckets are the whole partition: every selected row is a transition,
+    a no-op, or an error. A row with no resolvable flight window would be a fourth,
+    but MediaBuy.start_date and end_date are both NOT NULL, so ``_compute_new_status``
+    always resolves a window — seeding such a row fails at INSERT. This seeds the
+    two outcomes it can produce on demand (errors need a fault injected, which is a
+    different test) and asserts the identity over all of them.
     """
     from tests.factories import MediaBuyFactory
     from tests.harness._base import IntegrationEnv
@@ -833,8 +834,8 @@ async def test_status_sweep_summary_accounts_for_every_selected_buy(integration_
         assert summary.accounted_for == summary.selected, (
             f"buckets do not partition the selection: selected={summary.selected} "
             f"accounted_for={summary.accounted_for} (updated={summary.updated} "
-            f"unchanged={summary.unchanged} no_flight_window={summary.no_flight_window} "
-            f"errors={summary.errors}) — some path left the loop without counting"
+            f"unchanged={summary.unchanged} errors={summary.errors}) — "
+            "some path left the loop without counting"
         )
 
 

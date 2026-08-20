@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
@@ -54,11 +55,6 @@ class StatusSweepSummary:
     that selected a thousand rows and changed none emitted no line, which is
     indistinguishable from a sweep that selected nothing.
 
-    ``no_flight_window`` is currently UNREACHABLE and is expected to stay 0: see
-    ``_NoFlightWindow``. It is a named bucket rather than a silent path so that if
-    the schema ever loosens, the rows land somewhere countable instead of
-    reopening the hole.
-
     Returned rather than only logged so the partition invariant can be asserted
     against a real sweep instead of scraped from a log line.
     """
@@ -66,40 +62,12 @@ class StatusSweepSummary:
     selected: int = 0
     updated: int = 0
     unchanged: int = 0
-    no_flight_window: int = 0
     errors: int = 0
 
     @property
     def accounted_for(self) -> int:
-        return self.updated + self.unchanged + self.no_flight_window + self.errors
+        return self.updated + self.unchanged + self.errors
 
-
-class _NoFlightWindow:
-    """Sentinel for "this row has no resolvable flight window".
-
-    ``_compute_new_status`` returned a bare ``None`` for that AND for "no change
-    needed", so the caller could not tell them apart. They are different facts:
-    "no change" is the healthy steady state, while a row with no resolvable start
-    or end can NEVER transition and would be re-selected on every sweep forever.
-
-    UNREACHABLE TODAY, and deliberately kept anyway. ``MediaBuy.start_date`` and
-    ``MediaBuy.end_date`` are both ``nullable=False`` (models.py:911-912), and
-    ``_compute_new_status`` falls back to them whenever ``start_time``/``end_time``
-    are unset, so neither branch can fire against the current schema — the two
-    ``return None``s this replaces were not silently dropping rows, contrary to how
-    a reading of the loop alone suggests. No test seeds this bucket, because no
-    test CAN: the NOT NULL constraint rejects the row. Kept because the cost is a
-    named bucket, and the alternative is that a future nullable-ing of either
-    column reopens the hole silently.
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "NO_FLIGHT_WINDOW"
-
-
-NO_FLIGHT_WINDOW = _NoFlightWindow()
 
 # PENDING_PERSISTED_STATUSES / LEGACY_SERVING_ALIASES (imported): the pre-serving
 # states this scheduler promotes, and the legacy serving aliases it migrates to the
@@ -200,17 +168,9 @@ class MediaBuyStatusScheduler:
                         summary.errors += 1
                         continue
 
-                    if new_status is NO_FLIGHT_WINDOW:
-                        # Counted, not a bare `continue`: this row can never
-                        # transition, so it is re-selected on every sweep forever.
-                        # Silently skipping it made an unbounded population of stuck
-                        # rows indistinguishable from an idle scheduler.
-                        summary.no_flight_window += 1
-                        continue
-
                     if new_status and new_status != media_buy.status:
                         old_status = media_buy.status
-                        media_buy.status = str(new_status)
+                        media_buy.status = new_status
                         summary.updated += 1
                         logger.info(f"Updated media buy {media_buy.media_buy_id} status: {old_status} -> {new_status}")
                     else:
@@ -225,10 +185,9 @@ class MediaBuyStatusScheduler:
                 # scheduler" misreading the delivery batch summary was widened to
                 # prevent, in the sibling this PR also touches.
                 logger.info(
-                    "Status sweep: %d updated, %d unchanged, %d without a flight window, %d errors (of %d selected)",
+                    "Status sweep: %d updated, %d unchanged, %d errors (of %d selected)",
                     summary.updated,
                     summary.unchanged,
-                    summary.no_flight_window,
                     summary.errors,
                     summary.selected,
                 )
@@ -238,14 +197,21 @@ class MediaBuyStatusScheduler:
 
         return summary
 
-    def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> "str | None | _NoFlightWindow":
+    def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session: Session) -> str | None:
         """Compute the new status for a media buy based on flight dates.
 
         Returns:
-            New status string if a change is needed; ``None`` if the row is
-            already correct; ``NO_FLIGHT_WINDOW`` if no start or end could be
-            resolved, which is a STUCK row rather than a settled one and is
-            counted separately by the caller.
+            New status string if a change is needed; ``None`` if the row needs no
+            change.
+
+        A row with no resolvable flight window would be neither, but it cannot
+        occur: ``MediaBuy.start_date`` and ``MediaBuy.end_date`` are both
+        ``nullable=False`` (see the model), and the resolution below falls back to
+        them whenever ``start_time``/``end_time`` are unset. If either column is
+        ever made nullable, that becomes a real third case — a row that can never
+        transition and is therefore re-selected on every sweep — and needs its own
+        return value and its own bucket in ``StatusSweepSummary``, not the
+        ``None`` it would otherwise be quietly filed under.
         """
         # Get start and end times (prefer start_time/end_time over start_date/end_date)
         start_time: datetime | None = None
@@ -259,7 +225,7 @@ class MediaBuyStatusScheduler:
             start_time = utc_flight_start(media_buy.start_date)  # type: ignore[arg-type]
 
         if start_time is None:
-            return NO_FLIGHT_WINDOW  # No start time defined -> cannot ever transition
+            return None  # Schema-impossible (start_date is NOT NULL); see the docstring.
 
         end_time: datetime | None = None
         if media_buy.end_time:
@@ -272,7 +238,7 @@ class MediaBuyStatusScheduler:
             end_time = utc_flight_end(media_buy.end_date)  # type: ignore[arg-type]
 
         if end_time is None:
-            return NO_FLIGHT_WINDOW  # No end time defined -> cannot ever transition
+            return None  # Schema-impossible (end_date is NOT NULL); see the docstring.
 
         current_status = media_buy.status
 
