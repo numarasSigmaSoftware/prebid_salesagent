@@ -280,7 +280,7 @@ class TestUpdateReportingWebhookFrequencyWire:
         transport: Transport,
     ) -> None:
         from src.core.database.repositories.media_buy import MediaBuyRepository
-        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler, TriggerReportOutcome
 
         env, media_buy, _product = env_with_media_buy
         media_buy_id = media_buy.media_buy_id
@@ -320,7 +320,7 @@ class TestUpdateReportingWebhookFrequencyWire:
                 )
             )
 
-        assert triggered is True
+        assert triggered is TriggerReportOutcome.SENT
         mock_send.assert_awaited_once_with(
             MediaBuyIdMatcher(media_buy_id),
             replacement,

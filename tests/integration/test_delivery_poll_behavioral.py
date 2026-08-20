@@ -508,7 +508,7 @@ class TestForceDoesNotDuplicateDeliveredFinal:
 
     @pytest.mark.asyncio
     async def test_manual_force_trigger_skips_when_final_already_delivered(self, integration_db):
-        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler, TriggerReportOutcome
         from tests.harness import DeliveryPollEnv
 
         with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
@@ -521,10 +521,49 @@ class TestForceDoesNotDuplicateDeliveredFinal:
             # Manual trigger uses force=True; the final-ever gate must still fire.
             scheduler = DeliveryWebhookScheduler()
             with mock_send_notification(scheduler, delivered=True) as mock_send:
-                delivered = await scheduler.trigger_report_for_media_buy_by_id(buy.media_buy_id, "t1")
+                outcome = await scheduler.trigger_report_for_media_buy_by_id(buy.media_buy_id, "t1")
 
-            assert delivered is False, "a manual force trigger must not re-send an already-delivered final"
+            # SUPPRESSED, not merely "not SENT": the gate firing is a legitimate
+            # nothing-to-send, and the outcome has to say which one it was.
+            assert outcome is TriggerReportOutcome.SUPPRESSED, (
+                "a manual force trigger must not re-send an already-delivered final"
+            )
             mock_send.assert_not_awaited()
+
+    @pytest.mark.admin
+    def test_admin_banner_calls_the_delivered_final_a_skip_not_a_failure(
+        self, integration_db, authenticated_admin_session
+    ):
+        """The operator-facing banner must not report a failure that did not happen.
+
+        Same event as the test above, read at the surface an operator actually
+        sees. The route rendered every non-send as "Failed to trigger delivery
+        webhook. Check logs or configuration." at warning severity — the same
+        banner the adapter genuinely breaking produces — because the single bool
+        it read could not say which non-send outcome had occurred. Here the gate
+        is WORKING, so the banner has to be neutral.
+
+        Driven through the real HTTP route: the misreport lived in the rendering,
+        so a test stopping at the service call would not have seen it.
+        """
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight="completed")
+            _seed_delivery_log(env, buy, log_id="prior-final-success", status="success", notification_type="final")
+
+            client = authenticated_admin_session
+            response = client.post(f"/tenant/t1/media-buy/{buy.media_buy_id}/trigger-delivery-webhook")
+
+        assert response.status_code == 302
+
+        with client.session_transaction() as flask_session:
+            flashes = flask_session.get("_flashes", [])
+
+        assert len(flashes) == 1, f"expected exactly one banner, got {flashes}"
+        category, message = flashes[0]
+        assert category == "info", f"an already-delivered final is neutral news, not {category}: {message}"
+        assert "Nothing to send" in message
 
 
 class TestBatchSendsEverySelectedBuy:

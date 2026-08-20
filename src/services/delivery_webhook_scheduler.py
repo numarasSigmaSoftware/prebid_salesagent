@@ -10,6 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 from adcp import create_mcp_webhook_payload
@@ -73,6 +74,34 @@ class DeliveryBatchSummary:
     @property
     def accounted_for(self) -> int:
         return self.sent + self.suppressed + self.not_reportable + self.no_webhook_config + self.errors
+
+
+class TriggerReportOutcome(StrEnum):
+    """What a manual (admin-initiated) trigger did with ONE media buy.
+
+    The member names deliberately reuse ``DeliveryBatchSummary``'s bucket
+    vocabulary wherever the two paths mean the same thing, so "suppressed" reads
+    identically in the batch log and in the admin banner instead of one event
+    wearing two names.
+
+    It is NOT a one-to-one map, and forcing one would be a lie: this path is
+    handed an id by a caller, so it has a case the batch cannot have — the id
+    does not resolve. That is neither a delivery skip nor a delivery failure, so
+    it gets its own member rather than being folded into a skip reason, and the
+    type is a SUPERSET of the batch's skip buckets. In the other direction the
+    batch's ``not_reportable`` has no member here: this path has no
+    canonical-status pre-filter (``force`` sends the buy to the delivery impl,
+    whose not-reportable advisory lands in ``suppressed``), so a member for it
+    would never be produced.
+
+    Real failures are not members. They raise — see
+    ``trigger_report_for_media_buy_by_id``.
+    """
+
+    SENT = "sent"
+    SUPPRESSED = "suppressed"
+    NO_WEBHOOK_CONFIG = "no_webhook_config"
+    NOT_FOUND = "not_found"
 
 
 def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: GetMediaBuyDeliveryResponse) -> bool:
@@ -306,7 +335,7 @@ class DeliveryWebhookScheduler:
         # all-zero summary means. The error itself is logged above.
         return DeliveryBatchSummary()
 
-    async def trigger_report_for_media_buy_by_id(self, media_buy_id: str, tenant_id: str) -> bool:
+    async def trigger_report_for_media_buy_by_id(self, media_buy_id: str, tenant_id: str) -> TriggerReportOutcome:
         """Manually trigger a delivery report for a single media buy by ID.
 
         This method manages its own database session to avoid detached instance errors.
@@ -316,18 +345,25 @@ class DeliveryWebhookScheduler:
             tenant_id: The tenant ID
 
         Returns:
-            bool: True when a webhook was actually sent; False when the buy was
-            LEGITIMATELY skipped (no reporting webhook configured, dedup, no data).
+            TriggerReportOutcome: which of the non-failure outcomes occurred —
+            ``SENT``, or one of the three reasons nothing went out. A bare bool
+            could not carry that: its False meant "no webhook configured", "the
+            id does not resolve" and "there was legitimately nothing to send" at
+            once, so the caller had to render one message for all three.
 
         Raises:
             Exception: propagated from the send path. A real failure must NOT be
-                flattened into False here — the admin route already distinguishes
-                three outcomes (sent / skipped / errored) and swallowing the
-                exception collapsed the last two into one "Failed to trigger …
-                check logs" banner, telling an operator the same thing whether
+                flattened into an outcome member — a caller can distinguish a
+                skip from a break only if the break is not dressed as a skip, and
+                swallowing the exception told an operator the same thing whether
                 nothing needed sending or the adapter actually broke. This mirrors
                 _send_report_for_media_buy's contract rather than re-flattening it
                 one layer up.
+
+                Note that a buy the caller named but that does not resolve is NOT
+                such a failure: it returns ``NOT_FOUND``. The admin passes an id
+                from its own listing, so a 500-shaped error is the wrong
+                affordance for a stale link.
         """
         try:
             with get_db_session() as session:
@@ -336,22 +372,24 @@ class DeliveryWebhookScheduler:
 
                 if not media_buy:
                     logger.warning(f"Cannot trigger report: Media buy {media_buy_id} not found")
-                    return False
+                    return TriggerReportOutcome.NOT_FOUND
 
                 raw_request = media_buy.raw_request or {}
                 reporting_webhook = raw_request.get("reporting_webhook")
 
                 if not reporting_webhook:
                     logger.warning(f"Cannot trigger report: No reporting_webhook configured for {media_buy_id}")
-                    return False
+                    return TriggerReportOutcome.NO_WEBHOOK_CONFIG
 
                 # force bypasses the frequency + 24h "scheduled" dedup so an
                 # operator can re-send a fresh periodic report. It does NOT bypass
                 # the final gate: a completed buy whose final was already delivered
                 # is still skipped, so a manual trigger won't duplicate the final on
                 # the read-check path (best-effort; true exactly-once needs a durable
-                # reserve-before-send).
-                return await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
+                # reserve-before-send). That skip is a legitimate "nothing to send",
+                # which is why it maps to SUPPRESSED and not to a failure.
+                sent = await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
+                return TriggerReportOutcome.SENT if sent else TriggerReportOutcome.SUPPRESSED
         except Exception as e:
             # Log here (this frame knows the media_buy_id) then RE-RAISE, so the caller
             # can tell a genuine failure from a legitimate skip.

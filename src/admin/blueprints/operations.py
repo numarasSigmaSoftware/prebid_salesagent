@@ -661,17 +661,37 @@ def trigger_delivery_webhook(tenant_id, media_buy_id, **kwargs):
     """Trigger a delivery report webhook for a media buy manually."""
     from flask import flash, redirect, url_for
 
-    from src.services.delivery_webhook_scheduler import get_delivery_webhook_scheduler
+    from src.services.delivery_webhook_scheduler import TriggerReportOutcome, get_delivery_webhook_scheduler
+
+    # One banner per outcome. A single "Failed to trigger delivery webhook" for
+    # everything that was not a send reported a failure that did not happen: the
+    # commonest case here is a completed buy whose final already went out, which
+    # is the gate working, not breaking. Neutral outcomes are "info"; only the
+    # two that need an operator to change something are "warning". A genuine
+    # failure raises and is handled below, so it never reaches this table.
+    outcome_banner = {
+        TriggerReportOutcome.SENT: ("Delivery webhook triggered successfully", "success"),
+        TriggerReportOutcome.SUPPRESSED: (
+            "Nothing to send for this media buy — its delivery report was already delivered or is not due yet.",
+            "info",
+        ),
+        TriggerReportOutcome.NO_WEBHOOK_CONFIG: (
+            "No reporting webhook is configured for this media buy.",
+            "warning",
+        ),
+        TriggerReportOutcome.NOT_FOUND: (
+            "Media buy not found.",
+            "warning",
+        ),
+    }
 
     try:
         # Trigger webhook using scheduler - pass IDs to avoid detached instance errors
         scheduler = get_delivery_webhook_scheduler()
-        success = asyncio.run(scheduler.trigger_report_for_media_buy_by_id(media_buy_id, tenant_id))
+        outcome = asyncio.run(scheduler.trigger_report_for_media_buy_by_id(media_buy_id, tenant_id))
 
-        if success:
-            flash("Delivery webhook triggered successfully", "success")
-        else:
-            flash("Failed to trigger delivery webhook. Check logs or configuration.", "warning")
+        message, category = outcome_banner[outcome]
+        flash(message, category)
 
         return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))
 

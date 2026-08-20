@@ -9,7 +9,7 @@ from sqlalchemy import select
 from src.core.database.database_session import get_db_session
 from src.core.database.models import WebhookDeliveryLog
 from src.core.schemas import GetMediaBuyDeliveryResponse
-from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler, TriggerReportOutcome
 from tests.harness.delivery_poll import mock_send_notification
 from tests.helpers.delivery_assertions import MediaBuyIdMatcher, SessionMatcher
 from tests.integration.test_delivery_webhooks_integration import (
@@ -150,7 +150,7 @@ async def test_trigger_report_for_media_buy_public_method(integration_db):
             result = await scheduler.trigger_report_for_media_buy_by_id(media_buy_id, tenant_id)
 
             # 3. Verify result and call
-            assert result is True
+            assert result is TriggerReportOutcome.SENT
             mock_send_internal.assert_awaited_once_with(
                 MediaBuyIdMatcher(media_buy_id),
                 media_buy.raw_request["reporting_webhook"],
@@ -192,4 +192,6 @@ async def test_trigger_report_fails_gracefully_no_webhook(integration_db):
         # Call public method
         result = await scheduler.trigger_report_for_media_buy_by_id(media_buy.media_buy_id, tenant_id)
 
-        assert result is False
+        # The reason is the point: "no webhook configured" is an operator-fixable
+        # configuration gap, not the same event as "there was nothing to send".
+        assert result is TriggerReportOutcome.NO_WEBHOOK_CONFIG
