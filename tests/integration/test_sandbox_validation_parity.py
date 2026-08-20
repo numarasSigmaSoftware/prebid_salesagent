@@ -21,11 +21,12 @@ at ``media_buy_create.py`` and the ``pricing_options[].supported`` annotation in
 ``products.py`` — ask the adapter instance ``get_adapter`` returned, so both are graded
 here through that one seam.
 
-Kevel is the declared adapter for the live-vs-sandbox parity comparison because
+Kevel is the declared adapter for the adapter-level live-vs-sandbox comparison because
 ``get_adapter`` can build a real ``Kevel`` in dry-run mode without credentials, which lets
 the sandbox error list be compared against the LIVE adapter's own error list rather than
-against a string this test made up. GAM is used where only the declaration matters, since
-building one requires a network code.
+against a string this test made up. GAM is the declared adapter everywhere else, including
+the end-to-end class, which seeds the ``AdapterConfig`` row a live GAM tenant needs so the
+same comparison can be made on the outcome of a real ``create_media_buy`` request.
 """
 
 from __future__ import annotations
@@ -48,12 +49,15 @@ from src.core.schemas import (
 )
 from tests.factories import (
     AccountFactory,
+    AdapterConfigFactory,
     AgentAccountAccessFactory,
     PricingOptionFactory,
     ProductFactory,
 )
+from tests.harness.assertions import assert_rejected
+from tests.harness.media_buy_create import MediaBuyCreateEnv
 from tests.harness.product import ProductEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import Transport, TransportResult
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -125,7 +129,12 @@ def _packages() -> list[MediaPackage]:
 
 
 def _validate(adapter, pricing_model: str) -> list[str]:
-    """Run the exact pre-create validation ``_create_media_buy_impl`` runs.
+    """Call the adapter's pre-create validation directly and return its error list.
+
+    This is the same adapter method ``_create_media_buy_impl`` calls, invoked here
+    WITHOUT driving the create path — so it grades the constraint profile the adapter
+    answers with, not the outcome of a request. The request outcome is graded by
+    ``TestSandboxCreateRefusesTheRequest`` below, which drives the real create path.
 
     ``start_time``/``end_time`` are passed as resolved datetimes, not read back off the
     request: ``req.start_time`` is a ``StartTiming`` union, and ``_create_media_buy_impl``
@@ -230,6 +239,141 @@ class TestSandboxRejectsWhatTheDeclaredAdapterCannotExecute:
         """Negative control: the constraint profile rejects by CONTENT, not always."""
         assert _validate(_adapter_for("kevel", sandbox=True), "cpm") == []
         assert _validate(_adapter_for("google_ad_manager", sandbox=True), "vcpm") == []
+
+
+class TestSandboxCreateRefusesTheRequest:
+    """End-to-end: ``create_media_buy`` REFUSES a model the declared adapter can't execute.
+
+    The two classes above call ``validate_media_buy_request`` on an adapter directly.
+    That grades the constraint DECLARATION and the adapter's own error list, but never
+    drives ``_create_media_buy_impl`` — so on its own it cannot say whether a sandbox
+    ``cpcv`` buy on a GAM tenant is actually refused. The obligation is about the
+    request: sandbox.mdx:231 "MUST validate inputs the same way as production (reject
+    invalid budgets, bad dates, etc.)". This class grades the request outcome, over a
+    real transport, and is the arm that reddens if the constraint profile stops
+    reaching production's create path.
+
+    ``MediaBuyCreateEnv`` patches ``media_buy_create.get_adapter`` with a stand-in whose
+    ``validate_media_buy_request`` returns ``None``, so the real resolver is restored
+    onto that patch below — left mocked, these arms would accept everything and grade
+    nothing. The env's other patches (audit, slack, context manager, setup checklist,
+    format spec) stay in place; none of them touch adapter selection or validation.
+    """
+
+    _GAM_MODELS_SENTENCE = "Supported pricing models: " + ", ".join(
+        sorted(model.upper() for model in GoogleAdManager.supported_pricing_models)
+    )
+
+    @staticmethod
+    def _create_cpcv(*, sandbox: bool) -> tuple[TransportResult, list[Any]]:
+        """Send a ``cpcv`` create_media_buy from a tenant that declares GAM.
+
+        Returns the transport result and every adapter production built while serving
+        it, so a caller can assert WHICH adapter answered — a live arm that silently ran
+        on the simulator would compare the simulator against itself.
+
+        ``dry_run`` is on for BOTH modes so the two arms differ in exactly one bit — the
+        account's sandbox flag. It is required by the live mode: a live GAM tenant builds
+        a real ``GoogleAdManager``, whose ``__init__`` opens a GAM client (fetching OAuth
+        credentials) unless dry_run is set. It changes nothing about what is graded here,
+        because the pre-create adapter validation runs "regardless of dry_run" — and it
+        is not what keeps the SANDBOX arm off the network: that arm returns the simulator
+        from the short-circuit before any adapter config or credential is read.
+        """
+        built: list[Any] = []
+
+        def _recording_get_adapter(*args: Any, **kwargs: Any) -> Any:
+            adapter = get_adapter(*args, **kwargs)
+            built.append(adapter)
+            return adapter
+
+        with MediaBuyCreateEnv(ad_server="google_ad_manager", dry_run=True) as env:
+            env.mock["adapter"].side_effect = _recording_get_adapter
+
+            tenant, principal, product, _cpm_option = env.setup_media_buy_data()
+            # ad_server is declared in BOTH places for the same reason as the catalog
+            # class below: the DB row is what a real deployment reads, while it is
+            # identity.tenant — built from this env's tenant overrides — that reaches
+            # get_adapter.
+            env.setup_default_data(ad_server="google_ad_manager")
+            PricingOptionFactory(product=product, pricing_model="cpcv")
+            if not sandbox:
+                # Only the live path reads this row, and without it get_adapter cannot
+                # build GAM at all ("network_code is required"). Seeding it for the
+                # sandbox arm too would prove nothing: that arm short-circuits first.
+                AdapterConfigFactory(tenant=tenant, adapter_type="google_ad_manager", gam_network_code="99999")
+
+            account_id = "acc_sbx_create"
+            AccountFactory(tenant=tenant, account_id=account_id, sandbox=sandbox)
+            # Resolution enforces agent access; without the grant the request is
+            # rejected before any adapter is constructed.
+            AgentAccountAccessFactory(
+                tenant_id=tenant.tenant_id,
+                principal_id=principal.principal_id,
+                account_id=account_id,
+            )
+
+            start = datetime.now(UTC) + timedelta(days=30)
+            result = env.call_via(
+                Transport.REST,
+                account={"account_id": account_id},
+                brand={"domain": "sandbox-parity.example.com"},
+                packages=[
+                    {
+                        "product_id": product.product_id,
+                        "budget": 5000.0,
+                        # cpcv_usd_fixed is the id product_conversion derives for the
+                        # PricingOption seeded above.
+                        "pricing_option_id": "cpcv_usd_fixed",
+                    }
+                ],
+                start_time=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end_time=(start + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                po_number="SANDBOX-CREATE-PARITY-1",
+            )
+        return result, built
+
+    @staticmethod
+    def _wire_message(result: TransportResult) -> str:
+        """The rejection message as the buyer receives it, off the real wire body."""
+        envelope = result.wire_error_envelope
+        assert envelope is not None, f"REST must capture a real wire error envelope: {result.error!r}"
+        return envelope["errors"][0]["message"]
+
+    def test_sandbox_create_of_an_unexecutable_model_is_refused(self, integration_db):
+        """The end-to-end bite: the REQUEST is rejected, not merely annotated.
+
+        Before the constraint profile reached the simulator, this create SUCCEEDED — the
+        sandbox adapter answered with its own seven models and accepted cpcv on a tenant
+        whose declared ad server cannot execute it.
+        """
+        result, built = self._create_cpcv(sandbox=True)
+
+        assert built and isinstance(built[0], MockAdServer), (
+            f"the sandbox account must still execute on the simulator, got {built!r}"
+        )
+        assert_rejected(result, code="VALIDATION_ERROR", message_contains="cpcv")
+        assert self._GAM_MODELS_SENTENCE in self._wire_message(result), (
+            "the rejection must carry the DECLARED adapter's models — a message listing "
+            f"the simulator's seven means the profile never arrived: {self._wire_message(result)}"
+        )
+
+    def test_live_create_of_the_same_model_is_refused_identically(self, integration_db):
+        """The "same way as production" half, graded end-to-end rather than per-adapter.
+
+        The same request on the same tenant with a LIVE account builds a real
+        ``GoogleAdManager``; the buyer must receive the same rejection. A fix that
+        rejected sandbox cpcv with its own wording — or with a different supported-models
+        list — passes the test above and fails this one.
+        """
+        live, built = self._create_cpcv(sandbox=False)
+        sandboxed, _ = self._create_cpcv(sandbox=True)
+
+        assert built and isinstance(built[0], GoogleAdManager), (
+            f"this test is only meaningful against a real live adapter, got {built!r}"
+        )
+        assert_rejected(live, code="VALIDATION_ERROR", message_contains="cpcv")
+        assert self._wire_message(sandboxed) == self._wire_message(live)
 
 
 class TestSandboxCatalogAnnotatesTheDeclaredAdaptersSupport:
