@@ -30,7 +30,7 @@ from src.core.schema_helpers import (
     to_push_notification_config,
     to_reporting_webhook,
 )
-from src.core.schemas import SalesAgentBaseModel
+from src.core.schemas import RawRevision, SalesAgentBaseModel
 from src.core.tools import accounts as accounts_module
 from src.core.tools import capabilities as capabilities_module
 from src.core.tools import creative_formats as creative_formats_module
@@ -101,6 +101,10 @@ class UpdateMediaBuyBody(SalesAgentBaseModel):
     currency: str | None = None
     start_time: str | None = None
     end_time: str | None = None
+    # Preserve the raw wire value until the shared UpdateMediaBuyRequest
+    # validation boundary. Otherwise FastAPI classifies/coerces this field before
+    # A2A/MCP reach the common contract.
+    revision: RawRevision | None = None
     # Fields update_media_buy_raw plumbs through to UpdateMediaBuyRequest. Raw dicts
     # are coerced downstream (Pattern #7 extra policy inherited from SalesAgentBaseModel).
     # NOTE: top-level targeting_overlay/creatives are intentionally omitted — the raw
@@ -359,6 +363,7 @@ async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity
         currency=body.currency,
         start_time=body.start_time,
         end_time=body.end_time,
+        revision=body.revision,
         pacing=body.pacing,
         daily_budget=body.daily_budget,
         # packages stay wire dicts: UpdateMediaBuyRequest validates them as the

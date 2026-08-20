@@ -1977,7 +1977,10 @@ class AdCPRequestHandler(RequestHandler):
             )
 
         # Validate top-level fields via typed model (packages validated by _raw
-        # which handles legacy formats with extra fields like 'status')
+        # which handles legacy formats with extra fields like 'status').
+        # ``revision`` stays raw through every transport and is validated by the
+        # shared request builder below, so a schema-invalid value produces the same
+        # response regardless of how it reached A2A.
         with adcp_validation_boundary():
             req = UpdateMediaBuyRequest(
                 media_buy_id=params.get("media_buy_id"),
@@ -1997,6 +2000,7 @@ class AdCPRequestHandler(RequestHandler):
             packages=params.get("packages"),
             push_notification_config=params.get("push_notification_config"),
             context=params.get("context"),
+            revision=params.get("revision"),
             identity=identity,
         )
 

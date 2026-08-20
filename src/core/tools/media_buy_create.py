@@ -3560,6 +3560,20 @@ async def _create_media_buy_impl(
                 valid_actions=valid_actions_for_status(simulated_lifecycle),
                 context=req.context,
                 errors=property_list_unsupported_advisories(req.packages, adapter),
+                # 3.1.1 create-media-buy-response.json oneOf[0] (CreateMediaBuySuccess)
+                # required = [media_buy_id, confirmed_at, revision, packages], so the
+                # simulated success arm must be CONFORMANT, not thin:
+                #   revision=1        — the correct initial value of a would-be-fresh buy
+                #                       (schema: integer, minimum=1).
+                #   confirmed_at=None — honest (a simulation commits nothing) AND
+                #                       schema-valid: confirmed_at is typed
+                #                       ["string","null"] and "May be null in deferred or
+                #                       manual-approval flows until seller commitment
+                #                       occurs". The CreateMediaBuySuccess serializer
+                #                       (_base.py) re-emits it as null so exclude_none does
+                #                       not drop the required key.
+                confirmed_at=None,
+                revision=1,
             )
             return CreateMediaBuyResult(response=simulated_response, status=AdcpTaskStatus.completed.value)
 
@@ -3634,7 +3648,7 @@ async def _create_media_buy_impl(
         try:
             with MediaBuyUoW(tenant["tenant_id"]) as create_uow:
                 assert create_uow.media_buys is not None
-                create_uow.media_buys.create_from_request(
+                created_mb = create_uow.media_buys.create_from_request(
                     media_buy_id=response.media_buy_id,
                     req=req,
                     principal_id=principal_id,
@@ -3649,6 +3663,10 @@ async def _create_media_buy_impl(
                     account_id=identity.account_id if identity else None,
                     payload_hash=request_hash,
                 )
+                # Capture persisted values while the session is open (the
+                # instance is expired after UoW commit).
+                persisted_confirmed_at = created_mb.confirmed_at
+                persisted_revision = created_mb.revision
                 # UoW auto-commits on clean exit
         except IntegrityError as exc:
             return _resolve_idempotency_race_or_raise(
@@ -4101,6 +4119,9 @@ async def _create_media_buy_impl(
             creative_deadline=getattr(response, "creative_deadline", None),
             context=req.context,
             errors=property_list_unsupported_advisories(req.packages, adapter),
+            # The response echoes the write-once persisted confirmation instant.
+            confirmed_at=persisted_confirmed_at,
+            revision=persisted_revision,
         )
 
         # Log activity
