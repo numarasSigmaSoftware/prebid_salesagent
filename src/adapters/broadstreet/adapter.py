@@ -76,7 +76,6 @@ class BroadstreetAdapter(AdServerAdapter):
         supports_custom_targeting=False,
         supports_geo_targeting=True,
         supports_dynamic_products=False,
-        supported_pricing_models=["cpm", "flat_rate"],
         supports_webhooks=False,
         supports_realtime_reporting=True,
     )

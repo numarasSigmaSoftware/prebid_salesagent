@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
@@ -141,7 +141,11 @@ class AdapterCapabilities:
     # Product configuration
     supports_dynamic_products: bool = False  # Supports AI-driven product configuration
 
-    # Pricing (None means all pricing models supported)
+    # Pricing. DERIVED — an adapter must NOT declare this here. For every AdServerAdapter
+    # subclass it is rebound from that class's ``supported_pricing_models`` frozenset by
+    # ``AdServerAdapter.__init_subclass__``, so the set the admin UI reports and the set
+    # validation enforces cannot drift apart. Stays None only on a bare AdapterCapabilities
+    # that belongs to no adapter.
     supported_pricing_models: list[str] | None = None
 
     # Reporting and webhooks
@@ -342,6 +346,19 @@ class AdServerAdapter(ABC):
     # default is CPM only.
     supported_pricing_models: frozenset[str] = frozenset({"cpm"})
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Derive the reported capability from the executed one.
+
+        ``AdapterCapabilities.supported_pricing_models`` is what the admin UI reads over
+        HTTP; ``cls.supported_pricing_models`` is what ``validate_media_buy_request``
+        enforces. Rebinding the first from the second at class-creation time leaves ONE
+        declaration per adapter, so the two cannot disagree. ``replace`` rather than
+        mutation: adapters that declare no ``capabilities`` of their own inherit the base
+        instance, and mutating it in place would rewrite every other adapter's answer.
+        """
+        super().__init_subclass__(**kwargs)
+        cls.capabilities = replace(cls.capabilities, supported_pricing_models=sorted(cls.supported_pricing_models))
+
     def get_supported_pricing_models(self) -> set[str]:
         """Return set of pricing models this adapter supports (AdCP PR #88).
 
@@ -349,6 +366,8 @@ class AdServerAdapter(ABC):
         declaration but may be shadowed per-instance when an adapter is executing on
         another adapter's behalf (see ``MockAdServer.__init__``). This is the single
         reader of that declaration — callers ask the adapter, never a parallel table.
+        The adapter's ``capabilities`` are no exception: their pricing field is derived
+        from this same declaration by ``__init_subclass__``, not restated beside it.
 
         Returns:
             Set of pricing model strings: {"cpm", "cpcv", "cpp", "cpc", "cpv", "flat_rate"}

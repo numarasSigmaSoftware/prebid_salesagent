@@ -119,7 +119,6 @@ class MockAdServer(AdServerAdapter):
         supports_custom_targeting=False,
         supports_geo_targeting=True,
         supports_dynamic_products=False,
-        supported_pricing_models=["cpm", "vcpm", "cpcv", "cpp", "cpc", "cpv", "flat_rate"],
         supports_webhooks=False,
         supports_realtime_reporting=True,
     )
