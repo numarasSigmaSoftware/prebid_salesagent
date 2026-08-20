@@ -1052,6 +1052,23 @@ _SUPPLEMENTAL_ALIGNMENTS: list[ResponseAlignment] = [
 RESPONSE_ALIGNMENTS = _build_alignments_from_pinned(_RESPONSE_MODEL_REGISTRY) + _SUPPLEMENTAL_ALIGNMENTS
 
 
+def _schema_allows_null(field_schema: dict[str, Any]) -> bool:
+    """Return True when the pinned schema types this field as nullable.
+
+    Covers both spellings the AdCP schemas use: a ``type`` list carrying
+    ``"null"`` (e.g. 3.1.1 ``confirmed_at``: ``["string", "null"]``) and an
+    ``anyOf``/``oneOf`` branch of ``{"type": "null"}``.
+    """
+    declared = field_schema.get("type")
+    if declared == "null" or (isinstance(declared, list) and "null" in declared):
+        return True
+    for key in ("anyOf", "oneOf"):
+        for branch in field_schema.get(key, []):
+            if isinstance(branch, dict) and branch.get("type") == "null":
+                return True
+    return False
+
+
 def _resolve_response_item_schema(alignment: ResponseAlignment) -> dict[str, Any]:
     """Resolve the pinned (sub-)schema a response model maps to.
 
@@ -1148,18 +1165,23 @@ class TestResponseModelAlignment:
     def test_required_fields_enforced(self, alignment: ResponseAlignment):
         """The model enforces every field the pinned schema marks required.
 
-        A schema-required field is "enforced" one of two ways, both valid:
+        A schema-required field is "enforced" one of three ways, all valid:
         - the model has no default -> omitting it MUST raise ValidationError
           (the model rejects an incomplete construction), or
         - the model declares a spec-correct literal default (e.g.
-          CreateMediaBuySuccess.status/confirmed_at/revision — see that
-          class's docstring: these are invariant for a synchronous success,
-          so the model guarantees the value itself rather than threading an
-          identical literal through every call site) -> omitting it must NOT
-          raise, and the constructed model must still carry a non-None value
-          for it. Either way the schema's requiredness invariant holds; only
-          silently accepting an omitted field with no value at all would be
-          a real gap.
+          CreateMediaBuySuccess.status/revision — see that class's docstring:
+          these are invariant for a synchronous success, so the model
+          guarantees the value itself rather than threading an identical
+          literal through every call site) -> omitting it must NOT raise, and
+          the constructed model must still carry a non-None value for it, or
+        - the pinned schema types the field NULLABLE-but-required (e.g. 3.1.1
+          ``confirmed_at``: ``["string", "null"]``, "May be null in deferred or
+          manual-approval flows until seller commitment occurs") -> the schema
+          demands the KEY on the wire, not a non-null value, so enforcement is
+          that the key SURVIVES serialization rather than being dropped by
+          exclude_none.
+        Either way the schema's requiredness invariant holds; only silently
+        dropping the field from the buyer's payload would be a real gap.
         """
         item = _resolve_response_item_schema(alignment)
         required = set(item.get("required", [])) - _VERSION_FIELDS
@@ -1187,12 +1209,25 @@ class TestResponseModelAlignment:
             partial = {k: v for k, v in alignment.sample.items() if k != fname}
             if fname in model_defaulted:
                 # Model-defaulted: omission must NOT raise, and the default must
-                # still satisfy the schema's requiredness (a real, non-None value).
+                # still satisfy the schema's requiredness.
                 instance = alignment.model(**partial)
-                assert getattr(instance, fname) is not None, (
-                    f"{alignment.model.__name__}.{fname} is schema-required but the model's "
-                    f"own default left it None when omitted from the constructor call"
-                )
+                if _schema_allows_null(item.get("properties", {}).get(fname, {})):
+                    # Nullable-required: requiredness is about the KEY reaching the
+                    # buyer, so grade serialization, not the in-memory value. This
+                    # pins the null re-injection that keeps exclude_none from
+                    # dropping a legitimately-null required field.
+                    dumped = instance.model_dump(mode="json", exclude_none=True)
+                    assert fname in dumped, (
+                        f"{alignment.model.__name__}.{fname} is schema-required and "
+                        f"nullable, but omitting it from the constructor dropped the key "
+                        f"from model_dump() — the buyer receives a payload missing a "
+                        f"required field"
+                    )
+                else:
+                    assert getattr(instance, fname) is not None, (
+                        f"{alignment.model.__name__}.{fname} is schema-required but the model's "
+                        f"own default left it None when omitted from the constructor call"
+                    )
             else:
                 # No model default: the model itself must reject an incomplete construction.
                 with pytest.raises(ValidationError):

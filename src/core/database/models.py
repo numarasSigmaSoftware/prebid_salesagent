@@ -1,7 +1,7 @@
 """SQLAlchemy models for database schema."""
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -933,8 +933,12 @@ class MediaBuy(Base):
     kpi_goal: Mapped[str | None] = mapped_column(String(255), nullable=True)
     budget: Mapped[Decimal | None] = mapped_column(DECIMAL(15, 2))
     currency: Mapped[str] = mapped_column(String(3), nullable=True, default="USD")
-    start_date: Mapped[Date] = mapped_column(Date, nullable=False)
-    end_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    # ``Mapped[date]`` (the Python type), not ``Mapped[Date]`` (the SQLAlchemy
+    # column type): the latter made every consumer of these attributes read as
+    # ``Date`` and forced ``# type: ignore[arg-type]`` at each date-arithmetic
+    # call site.
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")

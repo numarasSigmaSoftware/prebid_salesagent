@@ -120,7 +120,7 @@ class MediaBuyStatusScheduler:
             else:
                 start_time = raw_start
         elif media_buy.start_date:
-            start_time = utc_flight_start(media_buy.start_date)  # type: ignore[arg-type]
+            start_time = utc_flight_start(media_buy.start_date)
 
         if start_time is None:
             return None  # No start time defined
@@ -133,7 +133,7 @@ class MediaBuyStatusScheduler:
             else:
                 end_time = raw_end
         elif media_buy.end_date:
-            end_time = utc_flight_end(media_buy.end_date)  # type: ignore[arg-type]
+            end_time = utc_flight_end(media_buy.end_date)
 
         if end_time is None:
             return None  # No end time defined

@@ -2117,6 +2117,24 @@ def validate_idempotency_key_shape(key: str | None) -> None:
         )
 
 
+def _normalize_revision_in_place(values: dict[str, Any]) -> None:
+    """Apply the optimistic-concurrency ``revision`` gate to a raw request dict.
+
+    JSON Schema ``type: integer`` enforced before Pydantic's default coercion. This
+    bites at the raw-dict (A2A) boundary, where the payload reaches the request model
+    before any typed coercion. Transport wrappers preserve raw values with
+    ``SkipValidation`` so this shared gate rejects numeric strings and booleans
+    uniformly, and accepts the whole-number float (7.0) draft-07 ``integer`` admits —
+    see ``RevisionValidator``. Normalises the accepted value to ``int`` in place.
+    """
+    if "revision" not in values or values["revision"] is None:
+        return
+    try:
+        values["revision"] = int(RevisionValidator.validate_python(values["revision"]))
+    except PydanticValidationError as exc:
+        raise ValueError("revision must be an integer greater than or equal to 1") from exc
+
+
 class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
     """Update media buy request extending library type.
 
@@ -2169,17 +2187,7 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
 
         values = copy_before_mutating(values)
 
-        # Optimistic-concurrency ``revision`` gate. JSON Schema ``type: integer``
-        # enforced before Pydantic's default coercion. This bites at the raw-dict (A2A)
-        # boundary, where the payload reaches this model before any typed coercion.
-        # Transport wrappers preserve raw values with ``SkipValidation`` so this
-        # shared gate rejects numeric strings and booleans uniformly, and accepts the
-        # whole-number float (7.0) draft-07 ``integer`` admits — see ``RevisionValidator``.
-        if "revision" in values and values["revision"] is not None:
-            try:
-                values["revision"] = int(RevisionValidator.validate_python(values["revision"]))
-            except PydanticValidationError as exc:
-                raise ValueError("revision must be an integer greater than or equal to 1") from exc
+        _normalize_revision_in_place(values)
 
         # Normalize package instances to dicts so the list[AdCPPackageUpdate] field
         # validates them. FastMCP coerces the incoming param to its annotated type
