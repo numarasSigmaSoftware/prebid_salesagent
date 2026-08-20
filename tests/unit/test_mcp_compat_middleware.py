@@ -236,9 +236,14 @@ class TestMiddlewareReadIdempotencyEnvelope:
 
         assert captured_ctx is not None
         assert captured_ctx.message.arguments == {}
-        replay_service.assert_awaited_once()
-        assert replay_service.await_args.kwargs["tool_name"] == tool_name
-        assert replay_service.await_args.kwargs["idempotency_key"] == "valid-read-key-0001"
+        replay_service.assert_awaited_once_with(
+            tool_name=tool_name,
+            idempotency_key="valid-read-key-0001",
+            identity=ANY,
+            raw_wire_payload=ANY,
+            response_type=ANY,
+            work=ANY,
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tool_name", sorted(STANDARD_ADCP_READ_TOOLS))

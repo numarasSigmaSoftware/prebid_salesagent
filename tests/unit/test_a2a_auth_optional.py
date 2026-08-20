@@ -10,7 +10,7 @@ a pre-resolved identity parameter rather than resolving auth internally.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -77,9 +77,14 @@ class TestAuthOptionalSkills:
         assert result == {"ok": True}
         handler_stub.assert_awaited_once_with({}, self.mock_identity)
         if parameters:
-            replay_service.assert_awaited_once()
-            assert replay_service.await_args.kwargs["tool_name"] == skill_name
-            assert replay_service.await_args.kwargs["idempotency_key"] == parameters["idempotency_key"]
+            replay_service.assert_awaited_once_with(
+                tool_name=skill_name,
+                idempotency_key=parameters["idempotency_key"],
+                identity=ANY,
+                raw_wire_payload=ANY,
+                response_type=ANY,
+                work=ANY,
+            )
         else:
             replay_service.assert_not_awaited()
 

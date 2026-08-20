@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from src.admin.utils.media_buy_approval import build_approved_media_buy_result
 from src.core.context_manager import publish_workflow_notifications
@@ -18,6 +19,13 @@ logger = logging.getLogger(__name__)
 CREATIVE_UNBLOCK_LEASE_SECONDS = 300
 _PROVIDER_APPLIED_STATUSES = frozenset({"active", "completed"})
 _RETRYABLE_LOCAL_STATUSES = frozenset({"pending_creatives", "draft"})
+
+
+class CreativeUnblockRecoveryResult(NamedTuple):
+    """Outcome of one recovery pass, so a transient-and-deferred lease is never silently invisible."""
+
+    recovered: int
+    deferred: int
 
 
 def compute_unblocked_media_buy_status(media_buy) -> str:
@@ -101,13 +109,14 @@ def finalize_creative_unblock_workflow(
     return transitioned
 
 
-def recover_stale_creative_unblock_workflows() -> int:
+def recover_stale_creative_unblock_workflows() -> CreativeUnblockRecoveryResult:
     """Reclaim expired leases and safely resume or terminalize each workflow."""
     cutoff = datetime.now(UTC) - timedelta(seconds=CREATIVE_UNBLOCK_LEASE_SECONDS)
     with get_db_session() as session:
         leases = WorkflowRepository.list_stale_creative_unblock_leases(session, before=cutoff)
 
     recovered = 0
+    deferred = 0
     for lease in leases:
         with AdminCreativeUoW(lease.tenant_id) as uow:
             assert uow.media_buys is not None
@@ -136,6 +145,7 @@ def recover_stale_creative_unblock_workflows() -> int:
                     lease.media_buy_id,
                     exc_info=True,
                 )
+                deferred += 1
                 continue
         else:
             success = False
@@ -150,4 +160,4 @@ def recover_stale_creative_unblock_workflows() -> int:
             error_message=error_message,
         ):
             recovered += 1
-    return recovered
+    return CreativeUnblockRecoveryResult(recovered=recovered, deferred=deferred)

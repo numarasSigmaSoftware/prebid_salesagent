@@ -107,9 +107,14 @@ class MediaBuyStatusScheduler:
 
         from src.services.creative_unblock_recovery import recover_stale_creative_unblock_workflows
 
-        recovered_count = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
-        if recovered_count:
-            logger.info("Recovered %d stale creative-unblock workflow(s)", recovered_count)
+        unblock_result = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
+        if unblock_result.recovered:
+            logger.info("Recovered %d stale creative-unblock workflow(s)", unblock_result.recovered)
+        if unblock_result.deferred:
+            logger.warning(
+                "Deferred %d stale creative-unblock workflow(s) pending an ambiguous provider outcome",
+                unblock_result.deferred,
+            )
 
         from src.core.context_manager import publish_pending_workflow_notifications
 

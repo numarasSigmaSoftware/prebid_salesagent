@@ -48,7 +48,9 @@ def test_autonomous_recovery_terminalizes_provider_applied_buy_without_reinvocat
             return_value=True,
         ) as finalize,
     ):
-        assert recover_stale_creative_unblock_workflows() == 1
+        result = recover_stale_creative_unblock_workflows()
+        assert result.recovered == 1
+        assert result.deferred == 0
 
     execute.assert_not_called()
     finalize.assert_called_once_with(
@@ -81,7 +83,9 @@ def test_ambiguous_provider_recovery_renews_lease_without_terminal_failure() -> 
         ),
         patch("src.services.creative_unblock_recovery.finalize_creative_unblock_workflow") as finalize,
     ):
-        assert recover_stale_creative_unblock_workflows() == 0
+        result = recover_stale_creative_unblock_workflows()
+        assert result.recovered == 0
+        assert result.deferred == 1
 
     finalize.assert_not_called()
 
@@ -102,7 +106,9 @@ def test_negative_media_buy_state_never_replays_as_success() -> None:
             return_value=True,
         ) as finalize,
     ):
-        assert recover_stale_creative_unblock_workflows() == 1
+        result = recover_stale_creative_unblock_workflows()
+        assert result.recovered == 1
+        assert result.deferred == 0
 
     assert finalize.call_args.kwargs["success"] is False
     assert "rejected" in finalize.call_args.kwargs["error_message"]

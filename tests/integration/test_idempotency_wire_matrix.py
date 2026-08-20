@@ -20,6 +20,7 @@ turning an intended replay into a conflict.
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -193,6 +194,60 @@ class TestIdempotencyWireMatrix:
         assert "natural-key" in envelope["adcp_error"]["suggestion"], (
             f"EXPIRED suggestion must point the buyer at a natural-key check on {transport.value}: "
             f"{envelope['adcp_error']['suggestion']}"
+        )
+
+
+@pytest.mark.parametrize("transport", [Transport.REST, Transport.MCP, Transport.A2A], ids=lambda t: t.value)
+class TestInFlightWireMatrix:
+    """IDEMPOTENCY_IN_FLIGHT on the real wire (IMPL excluded — see below)."""
+
+    def test_live_in_flight_reservation_rejects(self, integration_db, transport):
+        """A second request while the first is still processing rejects with
+        IDEMPOTENCY_IN_FLIGHT (409) on the real wire.
+
+        Drives a genuinely live (non-expired) in_flight row: the first call is
+        patched so it reserves the key and returns normally WITHOUT ever marking
+        the reservation completed — modeling "the first request has not yet
+        produced a cached response", not a crash or an expiry. The retry then
+        observes the same live row `reserve()` itself would have left behind
+        mid-flight.
+
+        IMPL is excluded (unlike the sibling replay/conflict/expired legs above):
+        ``MediaBuyCreateEnv.call_impl`` calls ``_create_media_buy_impl`` directly
+        with no ``raw_wire_payload``, so a retry falls through to the older
+        model-dump-hash cache-lookup path (``_lookup_cached_replay`` /
+        `Idempotency replay: returning cached success`) instead of re-entering
+        ``reserve_idempotent`` — the patched ``complete_idempotent`` is never on
+        that path, so IMPL cannot observe a live in_flight row this way. Every
+        REAL wire transport (REST/MCP/A2A) goes through the reservation flow and
+        is graded here.
+
+        recovery="transient" pins CURRENT production behavior (the class's
+        `_default_recovery`) — it does not take a position on the open
+        terminal-vs-transient adcp-req reconciliation (round-1 review E3).
+        """
+        key = f"wire-inflight-{uuid.uuid4().hex}"
+
+        with MediaBuyCreateEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            kwargs = _create_kwargs(product, idempotency_key=key)
+
+            with patch("src.core.tools.media_buy_create.complete_idempotent"):
+                first = env.call_via(transport, **dict(kwargs))
+            assert first.is_success, f"fresh create failed on {transport.value}: {first.error}"
+
+            second = env.call_via(transport, **dict(kwargs))
+
+        assert second.is_error, f"a live in-flight reservation must reject on {transport.value}"
+        envelope = second.wire_error_envelope
+        assert envelope is not None, f"IN_FLIGHT must carry the two-layer envelope on {transport.value}"
+        assert_envelope_shape(envelope, "IDEMPOTENCY_IN_FLIGHT", recovery="transient")
+        # The retry_after wait hint rides the wire on both layers, not just the raise site.
+        assert envelope["adcp_error"].get("retry_after"), (
+            f"IN_FLIGHT must carry retry_after in adcp_error on {transport.value}: {envelope}"
+        )
+        assert envelope["errors"][0].get("retry_after"), (
+            f"IN_FLIGHT must carry retry_after in errors[0] on {transport.value}: {envelope}"
         )
 
 
