@@ -1739,7 +1739,7 @@ def then_sequence_ascending(ctx: dict) -> None:
     """Assert sequence numbers are strictly increasing across consecutive POST calls."""
     calls = ctx["env"].mock["post"].call_args_list
     assert len(calls) >= 2, f"Expected at least 2 webhook POSTs for sequence check, got {len(calls)}"
-    seq_nums = [call[1].get("json", {}).get("sequence_number") for call in calls]
+    seq_nums = [webhook_body(call).get("sequence_number") for call in calls]
     for i in range(1, len(seq_nums)):
         assert seq_nums[i] is not None, f"POST call {i} payload missing sequence_number"
         assert seq_nums[i] > seq_nums[i - 1], (
@@ -1752,7 +1752,7 @@ def then_first_sequence(ctx: dict) -> None:
     """Assert first webhook POST has sequence_number >= 1."""
     calls = ctx["env"].mock["post"].call_args_list
     assert calls, "No webhook POSTs were made"
-    first_payload = calls[0][1].get("json", {})
+    first_payload = webhook_body(calls[0])
     seq = first_payload.get("sequence_number")
     assert seq is not None, f"First webhook POST payload missing sequence_number: {list(first_payload.keys())}"
     assert seq >= 1, f"Expected sequence_number >= 1, got {seq}"
@@ -2395,10 +2395,13 @@ def then_skip_no_webhook(ctx: dict, mb_id: str) -> None:
     env = ctx["env"]
     real_id = _resolve_media_buy_id(ctx, mb_id)
     post_mock = env.mock["post"]
-    # Collect all media_buy_ids that received webhook POSTs
-    posted_mb_ids = [
-        call[1].get("json", {}).get("media_buy_id") for call in post_mock.call_args_list if call[1].get("json")
-    ]
+    # Collect all media_buy_ids that received webhook POSTs. Filtering on a
+    # non-empty BODY, not on the presence of a ``json=`` kwarg: an HMAC-signed
+    # send carries its body as ``data=<bytes>``, so the old key test dropped
+    # every signed POST from this list and let the "was it skipped?" assertion
+    # pass precisely when the send it looks for was signed.
+    posted_bodies = [webhook_body(call) for call in post_mock.call_args_list]
+    posted_mb_ids = [body.get("media_buy_id") for body in posted_bodies if body]
     assert real_id not in posted_mb_ids, (
         f"Webhook POST was made for '{real_id}' but it should have been skipped "
         f"(no webhook configured). All posted IDs: {posted_mb_ids}"

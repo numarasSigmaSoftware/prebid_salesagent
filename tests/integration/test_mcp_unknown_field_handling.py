@@ -13,7 +13,6 @@ import pytest
 
 from tests.factories import PricingOptionFactory, ProductFactory, TenantFactory
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -49,13 +48,15 @@ class TestMcpDevMode:
             result = env.call_via(Transport.MCP, brief="test ads", nonsense_field="bar")
 
             assert result.is_error
-            assert_envelope_shape(
-                result.wire_error_envelope,
+            # field= goes through the harness rather than a hand-rolled
+            # errors[0]["field"] read, so the blame is pinned on BOTH layers of
+            # the envelope (adcp_error and errors[]) instead of only the latter.
+            result.assert_wire_error(
                 "VALIDATION_ERROR",
                 recovery="correctable",
                 message_substr="Unexpected keyword argument",
+                field="nonsense_field",
             )
-            assert result.wire_error_envelope["errors"][0]["field"] == "nonsense_field"
 
     def test_deprecated_field_translated_even_in_dev(self, integration_db):
         """Deprecated field translation works in dev mode (always active)."""

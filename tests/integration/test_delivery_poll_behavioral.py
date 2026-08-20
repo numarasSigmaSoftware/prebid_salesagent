@@ -768,7 +768,7 @@ class TestWebhookSequenceNumber:
 
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
         from tests.harness import DeliveryPollEnv
-        from tests.harness.delivery_poll import mock_webhook_post
+        from tests.harness.delivery_poll import mock_webhook_post, webhook_body
 
         succeeded = requests.Response()
         succeeded.status_code = 200
@@ -799,7 +799,7 @@ class TestWebhookSequenceNumber:
                 await scheduler._send_report_for_media_buy(*send_args, force=True)
                 await scheduler._send_report_for_media_buy(*send_args, force=True)
 
-        payloads = [call.kwargs["json"] for call in mock_post.call_args_list]
+        payloads = [webhook_body(call) for call in mock_post.call_args_list]
         first_key = payloads[0]["idempotency_key"]
         assert [payload["result"]["sequence_number"] for payload in payloads] == [1, 1, 1, 1, 2]
         assert {payload["idempotency_key"] for payload in payloads[:4]} == {first_key}
