@@ -19,11 +19,7 @@ delivery-only terminal ``failed``::
     pending_creatives, pending_start, active, paused, completed,
     rejected, canceled, failed
 
-(``get-media-buy-delivery-response.json`` status enum; AdCP spec 3.1.1. The
-pinned schema copy is tagged ``v3.1-04f59d2d5``; the delivery-response contract
-this module grounds — the status enum plus the webhook-only fields — is
-byte-identical in AdCP 3.1.1, so every ``@ v3.1-04f59d2d5`` reference below cites
-the pinned commit whose shape 3.1.1 preserves, not an older spec version.)
+(``get-media-buy-delivery-response.json`` status enum; AdCP spec 3.1.1.)
 The two callers adapt this single result to their own surface:
 
 - ``get_media_buy_delivery`` uses the canonical string directly and overlays
@@ -236,8 +232,9 @@ WEBHOOK_REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
 WEBHOOK_TERMINAL_PERSISTED_STATUSES: frozenset[str] = WEBHOOK_REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
 
 # The FIVE webhook-only response fields — every field whose schema description
-# says "only present in webhook deliveries" (get-media-buy-delivery-response.json
-# @ v3.1-04f59d2d5): notification_type, sequence_number, next_expected_at,
+# says "only present in webhook deliveries"
+# (adcp/_schemas/3.1/media-buy/get-media-buy-delivery-response.json, AdCP 3.1.1
+# via adcp==6.6.0): notification_type, sequence_number, next_expected_at,
 # partial_data, and unavailable_count (the latter further scoped to
 # "when partial_data is true"). The polling _get_media_buy_delivery_impl must
 # omit all of them; on the polling-response path the delivery webhook scheduler
@@ -264,7 +261,9 @@ def derive_notification_type(statuses: Iterable[str]) -> str | None:
     from NO_MORE_DATA_STATUSES instead of a hardcoded "completed" keeps a
     rejected/canceled/failed buy from being promised a next report that will
     never come (next_expected_at is "only present ... when notification_type
-    is not 'final'" per get-media-buy-delivery-response.json @ v3.1-04f59d2d5).
+    is not 'final'" per
+    adcp/_schemas/3.1/media-buy/get-media-buy-delivery-response.json, AdCP 3.1.1
+    via adcp==6.6.0).
 
     Webhook-path only: the spec scopes notification_type to webhook
     deliveries ("only present in webhook deliveries"), so the polling

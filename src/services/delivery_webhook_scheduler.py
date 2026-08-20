@@ -531,7 +531,8 @@ class DeliveryWebhookScheduler:
 
         # Set webhook-specific metadata directly on the response model.
         # These fields are webhook-only ("only present in webhook deliveries" —
-        # get-media-buy-delivery-response.json @ v3.1-04f59d2d5), so the polling
+        # adcp/_schemas/3.1/media-buy/get-media-buy-delivery-response.json, AdCP
+        # 3.1.1 via adcp==6.6.0), so the polling
         # impl never sets them. On the polling-response path this is the only
         # place they are attached to the wire — NOT a repo-wide sole emitter:
         # webhook_delivery_service.send_delivery_webhook (GAM reporting, delivery

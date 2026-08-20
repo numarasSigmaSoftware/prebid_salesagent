@@ -332,7 +332,8 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
     # explicit null) when unset — the base model's exclude-None handles it. The
     # spec pins the field as a non-nullable date-time "only present in webhook
     # deliveries when notification_type is not 'final'"
-    # (get-media-buy-delivery-response.json @ v3.1-04f59d2d5), so a final
+    # (adcp/_schemas/3.1/media-buy/get-media-buy-delivery-response.json, AdCP
+    # 3.1.1 via adcp==6.6.0), so a final
     # webhook carrying "next_expected_at": null would fail a strict buyer's
     # schema validation. A prior model_dump override here injected that null,
     # citing a spec requirement the spec does not contain.
