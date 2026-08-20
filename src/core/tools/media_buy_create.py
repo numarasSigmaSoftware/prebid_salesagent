@@ -58,6 +58,10 @@ from src.core.exceptions import (
 )
 from src.core.helpers import enum_value
 from src.core.idempotency_canonical import canonical_payload_hash, canonical_request_hash
+from src.core.tools._reporting_webhook import (
+    validate_reporting_webhook_frequency,
+    validate_reporting_webhook_product_support,
+)
 
 
 class PackageAssignmentDict(TypedDict):
@@ -2090,6 +2094,8 @@ async def _create_media_buy_impl(
         # Miss or unusable cached envelope — proceed as a fresh execution; the
         # MediaBuy backstop resolves any resulting duplicate to the degraded path.
 
+    validate_reporting_webhook_frequency(req.reporting_webhook)
+
     # Context management and workflow step creation - create workflow step FIRST
     # Skip for dry_run mode (no side effects, no database writes)
     ctx_manager = get_context_manager()
@@ -2301,6 +2307,8 @@ async def _create_media_buy_impl(
                     suggestion="Check available products with get_products.",
                     field=package_field_path("product_id"),
                 )
+
+            validate_reporting_webhook_product_support(req.reporting_webhook, products)
 
             # AdCP spec (core/targeting.json): "Sellers SHOULD return a validation
             # error if the product has property_targeting_allowed: false."
