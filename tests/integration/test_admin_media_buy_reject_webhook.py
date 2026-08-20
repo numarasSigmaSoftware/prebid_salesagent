@@ -299,8 +299,9 @@ class TestAdminMediaBuyRejectWebhook:
 
         Pin for PR #1567 round-2 cleanup (approve site routed through the sync_success()
         factory): the buy IS committed at approval time, so the embedded result
-        must keep asserting completion — status="completed", confirmed_at and
-        revision from the subclass defaults, the media_buy_id, and NO leaked
+        must keep asserting completion — status="completed", the PERSISTED confirmed_at
+        and revision (echoed from the approved MediaBuy row, not the class defaults),
+        the media_buy_id, and NO leaked
         internal fields. Guards the factory switch against any wire drift and
         pins that approve stays a Success (never the Submitted variant the
         pending-approval CREATE path now emits — PR #1567 round-2 item 2).
@@ -318,7 +319,15 @@ class TestAdminMediaBuyRejectWebhook:
             f"approved webhook must embed a completed Success, got status={embedded.get('status')!r}"
         )
         assert embedded.get("confirmed_at"), "approved (committed) buy must carry confirmed_at"
-        assert embedded.get("revision") == 1, "approved buy must carry the initial revision"
+        from src.core.database.repositories import MediaBuyUoW
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            persisted_buy = uow.media_buys.get_by_id(media_buy_id)
+            assert persisted_buy is not None, "approved media buy vanished"
+            assert embedded.get("revision") == persisted_buy.revision, (
+                "webhook must carry the persisted optimistic-concurrency revision"
+            )
         assert "workflow_step_id" not in embedded, "internal workflow_step_id must not leak onto the wire"
         # Absent-context branch pin (PR #1567 round-3): with no "context" key in
         # the workflow step's request_data, the echo path stays dormant and the
