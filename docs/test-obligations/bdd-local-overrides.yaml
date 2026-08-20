@@ -93,7 +93,7 @@ overrides:
           | keyword_targets with duplicate (keyword, match_type) | {"keyword_targets": [{"keyword": "shoes", "match_type": "broad"}, {"keyword": "shoes", "match_type": "broad"}]}                        | error "INVALID_REQUEST" with suggestion  |
   - feature: BR-UC-003-update-media-buy.feature
     scenario_id: T-UC-003-partition-revision
-    authority: "AdCP 3.1.1 dist/schemas/3.1.1/media-buy/update-media-buy-request.json: revision is an integer with minimum 1; revision_optimistic_concurrency storyboard: a mismatch is CONFLICT."
+    authority: "AdCP 3.1.1 dist/schemas/3.1.1/media-buy/update-media-buy-request.json: revision is an integer with minimum 1, and properties.revision says sellers MUST reject a mismatch with CONFLICT. Schema MUST; ungraded by any 3.1.1 conformance storyboard."
     reason: "Protocol wrappers preserve raw values until the shared request boundary, so numeric strings are rejected identically instead of being transport-coerced."
     gherkin: |
       @T-UC-003-partition-revision @partition @revision @schema-v3.1
@@ -107,7 +107,8 @@ overrides:
         When the Buyer Agent sends the update_media_buy request
         Then the result should be <outcome>
         # AdCP 3.1.1: revision is optional, but when supplied it is an integer >= 1;
-        # optimistic-concurrency mismatch is CONFLICT. Storyboard: revision_optimistic_concurrency.yaml.
+        # optimistic-concurrency mismatch is CONFLICT. Schema MUST; ungraded by any
+        # 3.1.1 conformance storyboard.
 
         Examples: Valid partitions
           | partition       | value          | outcome |

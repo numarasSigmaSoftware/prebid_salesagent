@@ -698,9 +698,11 @@ def media_buy_revision_conflict(
     authoritative under-row-lock check in ``MediaBuyRepository``.
     """
     # Details use the spec's recommended CONFLICT shape
-    # (static/schemas/source/error-details/conflict.json:
+    # (dist/schemas/3.1.1/error-details/conflict.json:
     # resource_id / expected_version / current_version) so optimistic-
-    # concurrency clients can re-read and retry generically.
+    # concurrency clients can re-read and retry generically. Cited in the
+    # PINNED tree: static/schemas/source/ is the authoring path that moves with
+    # main, dist/schemas/<version>/ is the immutable per-version snapshot.
     #
     # recovery=transient per the pinned AdCP 3.1.1 error-code.json
     # enumMetadata for CONFLICT ("re-read the resource and retry with current

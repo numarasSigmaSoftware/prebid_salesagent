@@ -2119,7 +2119,8 @@ Feature: BR-UC-003 Update Media Buy
     When the Buyer Agent sends the update_media_buy request
     Then the result should be <outcome>
     # AdCP 3.1.1: revision is optional, but when supplied it is an integer >= 1;
-    # optimistic-concurrency mismatch is CONFLICT. Storyboard: revision_optimistic_concurrency.yaml.
+    # optimistic-concurrency mismatch is CONFLICT. Schema MUST; ungraded by any
+    # 3.1.1 conformance storyboard.
 
     Examples: Valid partitions
       | partition       | value          | outcome |
