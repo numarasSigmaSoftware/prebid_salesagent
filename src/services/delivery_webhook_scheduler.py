@@ -465,10 +465,10 @@ class DeliveryWebhookScheduler:
                 resolve_canonical_status(media_buy, datetime.now(UTC).date()) in WEBHOOK_TERMINAL_CANONICAL_STATUSES
             )
 
-            # Same set the create/update capability validator rejects against. If
-            # these drift, an unsupported cadence is accepted at booking and then
-            # silently never sent — the acknowledged-but-never-fires state
-            # validate_reporting_webhook_frequency exists to prevent.
+            # This gate is the only cadence enforcement: booking accepts any
+            # schema-valid reporting_frequency, so a cadence this seller does not
+            # support is acknowledged there and then skipped here — periodic sends
+            # never fire for it.
             #
             # `not is_final` is load-bearing, not defensive. This gate reads
             # reporting_frequency, and until that key was corrected it read a key

@@ -20,10 +20,6 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
 from pydantic import Field
 
-from src.core.tools._reporting_webhook import (
-    validate_reporting_webhook_frequency,
-    validate_reporting_webhook_product_support,
-)
 from src.core.tools.media_buy_list import _compute_status, normalize_persisted_media_buy_status
 from src.core.webhook_validator import reject_unsafe_registration_source_url
 
@@ -461,21 +457,6 @@ def _update_media_buy_impl(
             reject_unsafe_registration_source_url(
                 req.push_notification_config, field="push_notification_config.url", context=req.context
             )
-
-            if req.reporting_webhook is not None:
-                validate_reporting_webhook_frequency(req.reporting_webhook)
-                assert uow.products is not None, "MediaBuyUoW.products required for reporting capability validation"
-                product_ids = {
-                    str(package.package_config["product_id"])
-                    for package in uow.media_buys.get_packages(media_buy_id_to_use)
-                    if (package.package_config or {}).get("product_id")
-                }
-                products = uow.products.list_by_ids(sorted(product_ids))
-                validate_reporting_webhook_product_support(
-                    req.reporting_webhook,
-                    products,
-                    required_product_ids=product_ids,
-                )
 
             _requested = _requested_actions(req)
             _allowed = set(valid_actions_for_status(_current_status))

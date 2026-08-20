@@ -391,6 +391,11 @@ SCHEMA_LAYER_UNCOVERED_ALLOWLIST: frozenset[str] = frozenset(
         "CONSTR-PROPERTY-TYPE-01",
         "CONSTR-PROTOCOLS-01",
         "CONSTR-PUBLISHER-DOMAINS-FILTER-01",
+        # Carve-out restoration, NOT allowlist growth: this entry is back at its
+        # merge-base state (delta vs upstream/main is zero). It left only because the
+        # reporting-cadence wire test covered it; that coverage is being carved out to
+        # its own PR, which removes this line again when the coverage returns.
+        "CONSTR-REPORTING-FREQUENCY-01",
         "CONSTR-SAMPLING-METHOD-01",
         "CONSTR-SI-TERMINATION-REASON-01",
         "CONSTR-SI-TRANSACTION-ACTION-01",
