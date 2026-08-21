@@ -333,6 +333,46 @@ class TestRevisionBumpsOnStatusTransition:
             assert persisted.status == "active"
             assert persisted.revision == 2
 
+    def test_scheduler_sweep_transition_bumps_revision_and_stamps_confirmed_at(self, tenant_a, principal_a):
+        """The flight-date scheduler sweep goes through the repository seam.
+
+        The sweep loads rows cross-tenant and used to assign ``.status``
+        directly, so a seller-side ``scheduled`` → ``active`` transition advanced
+        neither the AdCP ``revision`` token nor the write-once ``confirmed_at``.
+        Drives the real ``_update_statuses()`` pass and asserts the persisted row.
+        """
+        import asyncio
+
+        from src.services.media_buy_status_scheduler import MediaBuyStatusScheduler
+
+        now = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(
+                make_media_buy(
+                    tenant_a,
+                    principal_a,
+                    "mb_scheduler_sweep",
+                    status="scheduled",
+                    start_time=now - timedelta(hours=1),
+                    end_time=now + timedelta(days=7),
+                )
+            )
+
+        with MediaBuyUoW(tenant_a) as uow:
+            created = uow.media_buys.get_by_id("mb_scheduler_sweep")
+            assert created is not None
+            assert created.revision == 1
+            assert created.confirmed_at is None
+
+        asyncio.run(MediaBuyStatusScheduler()._update_statuses())
+
+        with MediaBuyUoW(tenant_a) as uow:
+            swept = uow.media_buys.get_by_id("mb_scheduler_sweep")
+            assert swept is not None
+            assert swept.status == "active"
+            assert swept.revision == 2
+            assert swept.confirmed_at is not None
+
     def test_manual_approval_stamps_confirmed_at_and_bumps_revision(self, tenant_a, principal_a):
         """create (pending_approval) → approve → get: confirmed_at is the approval
         instant (not created_at) and revision advanced past the create value."""

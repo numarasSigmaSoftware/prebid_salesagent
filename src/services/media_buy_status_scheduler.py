@@ -90,11 +90,10 @@ class MediaBuyStatusScheduler:
                 )
 
                 for media_buy in media_buys:
-                    new_status = self._compute_new_status(media_buy, now, session)
+                    transition = self._apply_transition(media_buy, now, session)
 
-                    if new_status and new_status != media_buy.status:
-                        old_status = media_buy.status
-                        media_buy.status = new_status
+                    if transition is not None:
+                        old_status, new_status = transition
                         updated_count += 1
                         logger.info(f"Updated media buy {media_buy.media_buy_id} status: {old_status} -> {new_status}")
 
@@ -104,6 +103,32 @@ class MediaBuyStatusScheduler:
 
         except Exception as e:
             logger.error(f"Failed to update media buy statuses: {e}", exc_info=True)
+
+    def _apply_transition(self, media_buy: MediaBuy, now: datetime, session) -> tuple[str, str] | None:
+        """Apply this buy's lifecycle transition through the repository seam.
+
+        The sweep loads rows cross-tenant WITHOUT a lock, so the target status
+        must be computed against the committed row, not the stale identity-mapped
+        one: ``apply_computed_status_transition`` locks and refreshes every
+        lifecycle input first, then evaluates the callback, and stamps
+        ``confirmed_at`` / bumps ``revision`` for the transitions it applies.
+
+        Returns ``(old_status, new_status)`` when the seam applied a transition,
+        or ``None`` when it declined — either because the refreshed row needs no
+        change, or because a concurrent transaction already moved it, in which
+        case this sweep must not report or count an update it did not make.
+        """
+        applied: list[tuple[str, str]] = []
+
+        def compute_target(refreshed: MediaBuy) -> str | None:
+            target = self._compute_new_status(refreshed, now, session)
+            if target is None or target == refreshed.status:
+                return None
+            applied.append((refreshed.status, target))
+            return target
+
+        MediaBuyRepository.apply_computed_status_transition(media_buy, compute_target)
+        return applied[0] if applied else None
 
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
         """Compute the new status for a media buy based on flight dates.
