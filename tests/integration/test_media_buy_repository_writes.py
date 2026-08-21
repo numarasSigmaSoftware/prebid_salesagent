@@ -467,6 +467,76 @@ class TestRevisionBumpsOnStatusTransition:
             assert unblocked.revision == 2
             assert unblocked.confirmed_at is not None
 
+    def test_workflow_approval_pending_creatives_return_still_stamps_confirmed_at(
+        self, authenticated_admin_session, tenant_a, principal_a, bound_factories
+    ):
+        """The pending_creatives early-return commits a SELLER-COMMITTED buy.
+
+        Approving the workflow step while creatives are still outstanding moves
+        the buy to ``pending_creatives`` — a seller-confirmed status — then
+        commits and RETURNS, never reaching ``execute_approved_media_buy``. With
+        a raw ``.status =`` write nothing on that path stamped the buy, so
+        ``confirmed_at`` stayed NULL on a committed buy and ``get_media_buys``
+        emitted the NULL verbatim. Drives the real admin approve route.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import select as sa_select
+
+        from src.core.context_manager import ContextManager
+        from src.core.database.models import MediaBuy as MediaBuyModel
+        from src.core.database.models import Principal as PrincipalModel
+        from src.core.database.models import Tenant as TenantModel
+        from tests.factories import CreativeAssignmentFactory, CreativeFactory
+
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(
+                make_media_buy(tenant_a, principal_a, "mb_workflow_pending", status="pending_approval")
+            )
+
+        tenant_row = bound_factories.scalars(sa_select(TenantModel).filter_by(tenant_id=tenant_a)).first()
+        principal_row = bound_factories.scalars(
+            sa_select(PrincipalModel).filter_by(tenant_id=tenant_a, principal_id=principal_a)
+        ).first()
+        buy_row = bound_factories.scalars(
+            sa_select(MediaBuyModel).filter_by(tenant_id=tenant_a, media_buy_id="mb_workflow_pending")
+        ).first()
+        # An UNAPPROVED creative is what routes the handler down the early return.
+        creative = CreativeFactory(tenant=tenant_row, principal=principal_row, status="pending_review")
+        CreativeAssignmentFactory(creative=creative, media_buy=buy_row, package_id="pkg_workflow_pending")
+
+        cm = ContextManager()
+        context = cm.create_context(tenant_id=tenant_a, principal_id=principal_a)
+        step = cm.create_workflow_step(
+            context_id=context.context_id,
+            step_type="approval",
+            owner="publisher",
+            status="requires_approval",
+            tool_name="create_media_buy",
+            request_data={},
+            object_mappings=[
+                {"object_type": "media_buy", "object_id": "mb_workflow_pending", "action": "approve"},
+            ],
+        )
+
+        # The adapter must never run on this path — patched so a regression that
+        # falls through to it is loud rather than silently doing the stamping.
+        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as never_executed:
+            response = authenticated_admin_session.post(
+                f"/tenant/{tenant_a}/workflows/wf_pending/steps/{step.step_id}/approve",
+            )
+        assert response.status_code == 200, response.get_data(as_text=True)
+        never_executed.assert_not_called()
+
+        with MediaBuyUoW(tenant_a) as uow:
+            blocked = uow.media_buys.get_by_id("mb_workflow_pending")
+            assert blocked is not None
+            assert blocked.status == "pending_creatives"
+            assert blocked.confirmed_at is not None, (
+                "a seller-committed buy must carry a confirmation instant; the early return commits it"
+            )
+            assert blocked.revision == 2
+
     def test_manual_approval_stamps_confirmed_at_and_bumps_revision(self, tenant_a, principal_a):
         """create (pending_approval) → approve → get: confirmed_at is the approval
         instant (not created_at) and revision advanced past the create value."""

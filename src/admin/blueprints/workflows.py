@@ -222,7 +222,14 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                                 f"Media buy approved! Waiting for {len(unapproved_creatives)} creative(s) to be approved before creating in GAM.",
                                 "info",
                             )
-                            media_buy.status = "pending_creatives"
+                            # pending_creatives IS a seller-confirmed status, and this
+                            # branch commits and RETURNS — it never reaches
+                            # execute_approved_media_buy, so no later path can stamp
+                            # the buy. A raw `.status =` here left confirmed_at NULL
+                            # on a committed buy, which get_media_buys emits verbatim.
+                            # The seam stamps the write-once instant and bumps the
+                            # AdCP revision counter under the row lock.
+                            media_buy_repo.apply_status_transition(media_buy, "pending_creatives")
                             db.commit()
                             return jsonify({"success": True}), 200
 
@@ -237,8 +244,10 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                         flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
                         return jsonify({"success": False, "error": error_msg}), 500
 
-                    # Update media buy status
-                    media_buy.status = "scheduled"
+                    # Update media buy status through the repository seam, so the
+                    # adapter-success arm stamps confirmed_at and bumps revision
+                    # exactly like the early-return arm above.
+                    media_buy_repo.apply_status_transition(media_buy, "scheduled")
                     media_buy.approved_at = datetime.now(UTC)
                     media_buy.approved_by = user_email
                     db.commit()
