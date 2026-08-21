@@ -42,7 +42,14 @@ from sqlalchemy.exc import IntegrityError
 
 from src.core.application_context_values import serialize_application_context
 from src.core.database.repositories.idempotency_attempt import COMPLETED, EXPIRED, IN_FLIGHT, RESERVED
+from src.core.exceptions import (
+    AdCPIdempotencyConflictError,
+    AdCPIdempotencyExpiredError,
+    AdCPIdempotencyInFlightError,
+    AdCPServiceUnavailableError,
+)
 from src.core.idempotency_logging import redact_idempotency_key
+from src.core.logging_config import scrub_control_chars
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -84,8 +91,6 @@ def raise_on_payload_conflict(
     unset, preserving the original create-path behaviour.
     """
     if stored_hash is not None and stored_hash != request_hash:
-        from src.core.exceptions import AdCPIdempotencyConflictError
-
         raise AdCPIdempotencyConflictError(
             "idempotency_key was reused with a different request payload",
             details=details,
@@ -95,8 +100,6 @@ def raise_on_payload_conflict(
 def raise_on_tool_conflict(stored_tool_name: str | None, tool_name: str) -> None:
     """Reject cross-tool key reuse even when both request payloads are empty."""
     if stored_tool_name is not None and stored_tool_name != tool_name:
-        from src.core.exceptions import AdCPIdempotencyConflictError
-
         raise AdCPIdempotencyConflictError(
             "idempotency_key was reused for a different tool",
             details={"original_tool": stored_tool_name, "requested_tool": tool_name},
@@ -144,8 +147,6 @@ def lookup_cached_replay[T](
             )
             previous_expires_at = getattr(previous, "expires_at", None)
             if isinstance(previous_expires_at, datetime) and previous_expires_at <= datetime.now(UTC):
-                from src.core.exceptions import AdCPIdempotencyExpiredError
-
                 raise AdCPIdempotencyExpiredError(
                     "idempotency_key was seen before, but its replay window has expired",
                     suggestion=(
@@ -212,14 +213,14 @@ def record_replayable_success(
     except IntegrityError:
         logger.info(
             "Idempotency cache race for key %s (tenant %s, principal %s) — winner already stored",
-            redact_idempotency_key(idempotency_key),
+            scrub_control_chars(redact_idempotency_key(idempotency_key)),
             tenant_id,
             principal_id,
         )
     except Exception:
         logger.warning(
             "Best-effort idempotency cache write failed for key %s (tenant %s, principal %s)",
-            redact_idempotency_key(idempotency_key),
+            scrub_control_chars(redact_idempotency_key(idempotency_key)),
             tenant_id,
             principal_id,
             exc_info=True,
@@ -295,8 +296,6 @@ def _decode_reserved_replay[T](
     """
     decoded = decode(response_envelope) if response_envelope is not None else None
     if decoded is None:
-        from src.core.exceptions import AdCPServiceUnavailableError
-
         raise AdCPServiceUnavailableError(
             "The prior idempotent response could not be replayed safely",
             retry_after=1,
@@ -382,8 +381,6 @@ def reserve_idempotent[T](
             operation_class=operation_class,
         )
         if outcome.kind == EXPIRED:
-            from src.core.exceptions import AdCPIdempotencyExpiredError
-
             raise AdCPIdempotencyExpiredError(
                 "idempotency_key was seen before, but its replay window has expired",
                 suggestion=(
@@ -397,8 +394,6 @@ def reserve_idempotent[T](
         raise_on_tool_conflict(outcome.stored_tool_name, tool_name)
         raise_on_payload_conflict(outcome.stored_hash, request_hash, details=conflict_details)
         if outcome.kind == IN_FLIGHT:
-            from src.core.exceptions import AdCPIdempotencyInFlightError
-
             raise AdCPIdempotencyInFlightError(
                 "A prior request with the same idempotency_key is still being processed",
                 retry_after=outcome.retry_after or 1,
@@ -440,8 +435,6 @@ def complete_idempotent(
         protocol_status=protocol_status,
     )
     if not completed:
-        from src.core.exceptions import AdCPServiceUnavailableError
-
         raise AdCPServiceUnavailableError(
             "The idempotency reservation expired before completion; the result was not cached safely",
             retry_after=1,
@@ -546,8 +539,6 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
         tenant_id = identity.tenant.get("tenant_id")
     if not tenant_id:
-        from src.core.exceptions import AdCPServiceUnavailableError
-
         raise AdCPServiceUnavailableError(
             "A tenant scope is required to honor the supplied idempotency_key",
             retry_after=1,

@@ -80,19 +80,26 @@ def test_generated_replay_scenario_is_live_and_boundary_fixture_durable():
 def test_no_source_docstring_claims_the_opposite_of_the_shipped_discriminant():
     """Prose that contradicts the wire is a defect, not a typo.
 
-    Seven places described this seller as advertising idempotency SUPPORT while
-    `capabilities.py` ships `IdempotencyUnsupported(supported=False)`. Six were
-    parameter docstrings a buyer-facing schema renders; the seventh was the
-    Spec-Grounding-Gate note, which described this very guard as asserting
-    `supported: true`. The wire was always right — but the artifact a reviewer
-    reads to check the claim against the spec said the opposite, which is
-    exactly the kind of drift the gate exists to prevent.
+    Historical: at authoring time, seven places described this seller as
+    advertising idempotency SUPPORT while the capability wire shipped
+    `supported=False`. Six were parameter docstrings a buyer-facing schema
+    renders; the seventh was the Spec-Grounding-Gate note, which described
+    this very guard as asserting `supported: true`. The wire was always
+    right — but the artifact a reviewer reads to check the claim against the
+    spec said the opposite, which is exactly the kind of drift the gate
+    exists to prevent.
 
     Text-matching is the right shape here precisely because the defect IS the
     text: there is no behavior to exercise, and the wire side is already pinned
-    by `test_advertised_idempotency_is_the_narrower_defect_not_a_resolved_claim`
+    by `test_advertised_idempotency_matches_mutation_wide_replay_support`
     above. Keyed on the shipped discriminant, so if this seller ever advertises
     support for real, the guard inverts with it instead of going stale.
+
+    Current state: production now ships `supported=True` (the intended
+    end-state — see the module docstring), so the early return below fires
+    unconditionally and this guard is dormant. Retained rather than deleted:
+    if idempotency support is ever withdrawn again, the guard reawakens
+    exactly where it left off, instead of needing to be re-authored.
     """
     from pathlib import Path
 

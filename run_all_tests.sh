@@ -128,6 +128,14 @@ record_gate_failure() {
 }
 
 cleanup() {
+    # Capture server logs BEFORE tearing anything down: `dc down -v` below
+    # removes the containers, so a caller inspecting them after this script
+    # returns (e.g. a CI "dump logs on failure" step) would find nothing —
+    # this is the one place logs can still be read. $RESULTS_DIR is a host
+    # directory (bind-mounted), so it survives the teardown.
+    if [ "${RC:-1}" -ne 0 ]; then
+        dc logs --no-color --timestamps adcp-server postgres >"$RESULTS_DIR/docker-logs-on-failure.txt" 2>&1 || true
+    fi
     # Per-worker e2e servers are `docker compose run` containers (not `up`), so
     # `dc down` won't remove them — do it explicitly.
     docker ps -aq --filter "name=${COMPOSE_PROJECT_NAME}-server-gw" | xargs -r docker rm -f >/dev/null 2>&1 || true

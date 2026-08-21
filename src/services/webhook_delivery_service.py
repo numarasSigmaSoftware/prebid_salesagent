@@ -564,7 +564,7 @@ class WebhookDeliveryService:
                     body=payload_bytes,
                 )
             )
-        # 1546's warn-and-send-UNAUTHENTICATED branch for a configured but
+        # An earlier warn-and-send-UNAUTHENTICATED branch for a configured but
         # unusable scheme is not carried over: validate_webhook_auth_selector
         # above already REFUSES both causes it separated — an unsupported
         # scheme, and a recognised scheme whose credentials are missing or
