@@ -343,6 +343,47 @@ class TestAdminMediaBuyRejectWebhook:
             "media_buy_id": media_buy_id,
         }
 
+    def test_approve_webhook_never_emits_a_defaulted_revision(
+        self, authenticated_admin_session, pending_reject_media_buy, webhook_capture
+    ):
+        """A vanished buy aborts the approve webhook; it never defaults revision to 1.
+
+        confirmed_at/revision on the approve webhook are read back from the
+        persisted row. Defaulting them when that read finds nothing
+        (``approved_buy.revision if approved_buy else 1``) puts a token on the
+        wire BELOW the one the buyer already holds, which reads as a revision
+        REGRESSION. Simulates the vanished row by deleting the buy inside the
+        adapter-execution step — between the approval commit and the webhook
+        construction, the only window where the two shapes differ.
+        """
+        from sqlalchemy import delete
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import MediaBuy, MediaPackage
+
+        media_buy_id = pending_reject_media_buy["media_buy_id"]
+
+        def _execute_then_delete(buy_id, tenant_id):
+            with get_db_session() as session:
+                session.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == buy_id))
+                session.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == buy_id))
+                session.commit()
+            return True, None
+
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            side_effect=_execute_then_delete,
+        ):
+            _post_approval_action(authenticated_admin_session, pending_reject_media_buy, {"action": "approve"})
+
+        with get_db_session() as session:
+            assert session.get(MediaBuy, media_buy_id) is None, "test setup: the buy should have been deleted"
+
+        assert "payload" not in webhook_capture, (
+            "approve must not build a webhook from a vanished buy — a defaulted "
+            f"revision reports a regression to the buyer; got {webhook_capture.get('payload')!r}"
+        )
+
     def test_a2a_reject_webhook_carries_policy_violation_task(
         self, authenticated_admin_session, make_pending_media_buy, webhook_capture
     ):

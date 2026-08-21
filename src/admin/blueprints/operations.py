@@ -323,7 +323,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
     from src.core.database.database_session import get_db_session
     from src.core.database.models import Context as DBContext
-    from src.core.database.models import ObjectWorkflowMapping, WorkflowStep
+    from src.core.database.models import MediaBuy, ObjectWorkflowMapping, WorkflowStep
 
     try:
         action = request.form.get("action")  # "approve" or "reject"
@@ -418,38 +418,43 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # No creatives assigned yet
                         all_creatives_approved = False
 
-                    # Update status based on creative approval state
-                    if all_creatives_approved:
-                        if media_buy.start_time and media_buy.end_time:
-                            # Compute flight window
-                            if media_buy.start_time:
-                                start_time = (
-                                    media_buy.start_time.astimezone(UTC)
-                                    if media_buy.start_time.tzinfo
-                                    else media_buy.start_time.replace(tzinfo=UTC)
-                                )
+                    # Update status based on creative approval state. The target
+                    # depends on the buy's own flight window, so it is resolved
+                    # inside the repository seam: the row is locked and every
+                    # lifecycle input refreshed BEFORE this callback runs, and the
+                    # transition it applies stamps the write-once confirmed_at and
+                    # bumps the AdCP revision counter (a raw `.status =` here did
+                    # neither, so approval left both untouched).
+                    def _approved_status(refreshed: MediaBuy) -> str:
+                        if not all_creatives_approved:
+                            # Keep it in a state that shows it needs creative approval
+                            # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
+                            return "draft"
 
-                            if media_buy.end_time:
-                                end_time = (
-                                    media_buy.end_time.astimezone(UTC)
-                                    if media_buy.end_time.tzinfo
-                                    else media_buy.end_time.replace(tzinfo=UTC)
-                                )
-
-                            now = datetime.now(UTC)
-                            if now < start_time:
-                                media_buy.status = "scheduled"
-                            elif now > end_time:
-                                media_buy.status = "completed"
-                            else:
-                                media_buy.status = "active"
-                        else:
+                        if not (refreshed.start_time and refreshed.end_time):
                             # No start or end time - set to active
-                            media_buy.status = "active"
-                    else:
-                        # Keep it in a state that shows it needs creative approval
-                        # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
-                        media_buy.status = "draft"
+                            return "active"
+
+                        # Compute flight window
+                        start_time = (
+                            refreshed.start_time.astimezone(UTC)
+                            if refreshed.start_time.tzinfo
+                            else refreshed.start_time.replace(tzinfo=UTC)
+                        )
+                        end_time = (
+                            refreshed.end_time.astimezone(UTC)
+                            if refreshed.end_time.tzinfo
+                            else refreshed.end_time.replace(tzinfo=UTC)
+                        )
+
+                        now = datetime.now(UTC)
+                        if now < start_time:
+                            return "scheduled"
+                        if now > end_time:
+                            return "completed"
+                        return "active"
+
+                    MediaBuyRepository.apply_computed_status_transition(media_buy, _approved_status)
 
                     media_buy.approved_at = datetime.now(UTC)
                     media_buy.approved_by = user_email
@@ -505,15 +510,21 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # semantically correct here — route through the sync_success()
                         # factory like every sibling construction site. confirmed_at and
                         # revision are read back from the persisted row (the approval
-                        # transition above stamped and bumped them); the class defaults
-                        # would advertise an unconfirmed buy at revision 1.
-                        approved_buy = approve_repo.get_by_id(media_buy_id)
+                        # transition above stamped and bumped them through the
+                        # repository seam); the class defaults would advertise an
+                        # unconfirmed buy at revision 1.
+                        #
+                        # or_raise, never a default: the buy demonstrably existed
+                        # moments ago, so a vanished row here is an invariant breach.
+                        # Defaulting revision to 1 would emit a token BELOW the one
+                        # already on the wire, which the buyer reads as a regression.
+                        approved_buy = approve_repo.get_by_id_or_raise(media_buy_id)
                         create_media_buy_approved_result = CreateMediaBuySuccess.sync_success(
                             media_buy_id=media_buy_id,
                             packages=[Package(package_id=x.package_id) for x in all_packages],
                             context=approve_context,
-                            confirmed_at=approved_buy.confirmed_at if approved_buy else None,
-                            revision=approved_buy.revision if approved_buy else 1,
+                            confirmed_at=approved_buy.confirmed_at,
+                            revision=approved_buy.revision,
                         )
                         metadata = _media_buy_webhook_metadata(step_data, tenant_id, media_buy_id, media_buy_data)
 
