@@ -650,8 +650,15 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     assert uow2.media_buys is not None
                     mb = uow2.media_buys.get_by_id(action["media_buy_id"])
                     if mb:
-                        new_status = _compute_media_buy_status_from_flight_dates(mb)
-                        mb.status = new_status
+                        # The flight-window target is resolved INSIDE the seam:
+                        # it locks the row and refreshes every lifecycle input
+                        # before running the compute callback, then stamps the
+                        # write-once confirmed_at and bumps the AdCP revision
+                        # counter. A raw `.status =` here did neither, so a
+                        # creative-driven activation left both untouched.
+                        uow2.media_buys.apply_computed_status_transition(
+                            mb, _compute_media_buy_status_from_flight_dates
+                        )
                         mb.approved_at = datetime.now(UTC)
                         mb.approved_by = "system"
                     # auto-commits

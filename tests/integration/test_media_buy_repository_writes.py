@@ -113,6 +113,40 @@ def principal_a(tenant_a):
 
 
 @pytest.fixture
+def bound_factories(tenant_a):
+    """Bind factory-boy factories to a live session for this test.
+
+    Mirrors ``tests/admin/conftest.py::factory_session`` — the admin-route test
+    below builds creatives/assignments through factories rather than raw
+    ``session.add()``. Unbound on teardown so the binding never leaks.
+
+    Depends on ``tenant_a`` so this fixture tears down FIRST: creative rows
+    FK-reference ``media_buys``, so they must be gone before ``cleanup_tenant``
+    deletes the tenant's buys. Assignments before creatives (FK order).
+    """
+    from sqlalchemy import delete
+    from sqlalchemy.orm import Session as SASession
+
+    from src.core.database.database_session import get_engine
+    from src.core.database.models import Creative, CreativeAssignment
+    from tests.factories import ALL_FACTORIES
+
+    session = SASession(bind=get_engine())
+    for f in ALL_FACTORIES:
+        f._meta.sqlalchemy_session = session
+    try:
+        yield session
+    finally:
+        for f in ALL_FACTORIES:
+            f._meta.sqlalchemy_session = None
+        session.close()
+        with get_db_session() as cleanup:
+            cleanup.execute(delete(CreativeAssignment).where(CreativeAssignment.tenant_id == tenant_a))
+            cleanup.execute(delete(Creative).where(Creative.tenant_id == tenant_a))
+            cleanup.commit()
+
+
+@pytest.fixture
 def principal_b(tenant_b):
     """Create a principal in tenant B."""
     principal_id = "write_principal_b"
@@ -372,6 +406,66 @@ class TestRevisionBumpsOnStatusTransition:
             assert swept.status == "active"
             assert swept.revision == 2
             assert swept.confirmed_at is not None
+
+    def test_creative_unblock_transition_bumps_revision_and_stamps_confirmed_at(
+        self, authenticated_admin_session, tenant_a, principal_a, bound_factories
+    ):
+        """Creative-driven activation goes through the repository seam.
+
+        Approving the last outstanding creative unblocks the buy and moves it out
+        of ``pending_creatives``. That admin path assigned ``.status`` directly,
+        so the seller-side activation advanced neither the AdCP ``revision`` token
+        nor the write-once ``confirmed_at``. Drives the real admin approve route.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import select as sa_select
+
+        from src.core.database.models import MediaBuy as MediaBuyModel
+        from src.core.database.models import Principal as PrincipalModel
+        from src.core.database.models import Tenant as TenantModel
+        from tests.factories import CreativeAssignmentFactory, CreativeFactory
+
+        now = datetime.now(UTC)
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(
+                make_media_buy(
+                    tenant_a,
+                    principal_a,
+                    "mb_creative_unblock",
+                    status="pending_creatives",
+                    start_time=now - timedelta(hours=1),
+                    end_time=now + timedelta(days=7),
+                )
+            )
+
+        tenant_row = bound_factories.scalars(sa_select(TenantModel).filter_by(tenant_id=tenant_a)).first()
+        principal_row = bound_factories.scalars(
+            sa_select(PrincipalModel).filter_by(tenant_id=tenant_a, principal_id=principal_a)
+        ).first()
+        buy_row = bound_factories.scalars(
+            sa_select(MediaBuyModel).filter_by(tenant_id=tenant_a, media_buy_id="mb_creative_unblock")
+        ).first()
+        creative = CreativeFactory(tenant=tenant_row, principal=principal_row, status="pending_review")
+        CreativeAssignmentFactory(creative=creative, media_buy=buy_row, package_id="pkg_creative_unblock")
+
+        with (
+            patch("src.admin.blueprints.creatives._send_post_commit_side_effects"),
+            patch("src.admin.blueprints.creatives.execute_approved_media_buy", return_value=(True, None)),
+        ):
+            response = authenticated_admin_session.post(
+                f"/tenant/{tenant_a}/creatives/review/{creative.creative_id}/approve",
+                content_type="application/json",
+                json={"approved_by": "admin@example.com"},
+            )
+        assert response.status_code == 200, response.get_data(as_text=True)
+
+        with MediaBuyUoW(tenant_a) as uow:
+            unblocked = uow.media_buys.get_by_id("mb_creative_unblock")
+            assert unblocked is not None
+            assert unblocked.status == "active"
+            assert unblocked.revision == 2
+            assert unblocked.confirmed_at is not None
 
     def test_manual_approval_stamps_confirmed_at_and_bumps_revision(self, tenant_a, principal_a):
         """create (pending_approval) → approve → get: confirmed_at is the approval
