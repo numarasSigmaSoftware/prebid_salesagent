@@ -80,6 +80,32 @@ class TestUpdateRevisionValidationWire:
         assert result.is_success, f"expected revision=1.0 to be accepted, got error: {result.error!r}"
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
+    def test_stale_revision_on_a_terminal_buy_emits_conflict_on_every_transport(self, env_with_media_buy, transport):
+        """A stale token against a since-terminal buy must reach the buyer as CONFLICT.
+
+        The optimistic-concurrency gate runs BEFORE the terminal-state gate, so the
+        buyer is told to refetch-and-retry rather than that the buy is gone. Graded on
+        the real wire envelope per transport: the precedence is a buyer-visible contract,
+        and a grader that asserts on a raised exception from an in-process call proves
+        nothing about what any transport actually emitted — swapping the two gates would
+        leave such a test green on every wire.
+        """
+        from src.core.database.repositories import MediaBuyUoW
+
+        env, media_buy = env_with_media_buy
+
+        # Drive the buy terminal out-of-band; this bumps the persisted revision 1 -> 2,
+        # so the token below is stale AND the buy is terminal — both gates are eligible.
+        with MediaBuyUoW(env.identity.tenant_id) as uow:
+            uow.media_buys.update_status(media_buy.media_buy_id, "completed")
+
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=1)
+
+        assert result.is_error, "expected a CONFLICT for a stale token on a terminal buy"
+        assert result.wire_error_envelope is not None, "wire envelope not captured"
+        assert_envelope_shape(result.wire_error_envelope, "CONFLICT", recovery="transient")
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_non_integral_float_revision_emits_invalid_request_on_every_transport(self, env_with_media_buy, transport):
         """``7.5`` has a non-zero fractional part, so draft-07 ``integer`` rejects it —
         accepting whole-number floats must not widen the gate to every float."""
