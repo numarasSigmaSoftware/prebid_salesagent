@@ -234,6 +234,47 @@ class TestAdminMediaBuyRejectWebhook:
             },
         )
 
+    def test_reject_bumps_revision_without_stamping_confirmed_at(
+        self, authenticated_admin_session, pending_reject_media_buy, webhook_capture
+    ):
+        """Admin rejection advances the persisted revision and leaves confirmed_at NULL.
+
+        The reject branch used to write ``media_buy.status = "rejected"`` raw, so a
+        buyer holding revision N watched the rejection land with the optimistic-
+        concurrency token unchanged — the buy changed state and the token did not.
+        Routing through ``MediaBuyRepository.apply_status_transition`` bumps the
+        counter. "rejected" is in MEDIA_BUY_UNCONFIRMED_STATUSES, so the same seam
+        must NOT stamp ``confirmed_at``: the seller declined, it never committed.
+        """
+        from src.core.database.repositories import MediaBuyUoW
+
+        tenant_id = pending_reject_media_buy["tenant_id"]
+        media_buy_id = pending_reject_media_buy["media_buy_id"]
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            before = uow.media_buys.get_by_id(media_buy_id)
+            assert before is not None, "test setup: pending media buy missing"
+            revision_before = before.revision
+            assert before.confirmed_at is None, "test setup: pending_approval buy must not be confirmed yet"
+
+        _post_approval_action(
+            authenticated_admin_session, pending_reject_media_buy, {"action": "reject", "reason": "test"}
+        )
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            after = uow.media_buys.get_by_id(media_buy_id)
+            assert after is not None, "rejected media buy vanished"
+            assert after.status == "rejected", f"reject route left status={after.status!r}"
+            assert after.revision == revision_before + 1, (
+                f"rejection must advance the buyer's revision token: {revision_before} -> "
+                f"{after.revision} (expected {revision_before + 1})"
+            )
+            assert after.confirmed_at is None, (
+                f"a rejected buy was never seller-confirmed, but confirmed_at={after.confirmed_at!r} was stamped"
+            )
+
     def test_reject_webhook_does_not_embed_completed_success(
         self, authenticated_admin_session, pending_reject_media_buy, webhook_capture
     ):

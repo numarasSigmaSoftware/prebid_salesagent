@@ -587,7 +587,13 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 attributes.flag_modified(step, "comments")
 
                 if media_buy and media_buy.status == "pending_approval":
-                    media_buy.status = "rejected"
+                    # Route through the repository seam rather than a raw ``.status =``
+                    # write: a rejection IS a successful mutation, so it must advance the
+                    # AdCP ``revision`` token the buyer holds. "rejected" is in
+                    # MEDIA_BUY_UNCONFIRMED_STATUSES, so the shared seam bumps ``revision``
+                    # without stamping ``confirmed_at``. Same session/transaction as the
+                    # commit below, so the bump lands atomically with the step update.
+                    MediaBuyRepository.apply_status_transition(media_buy, "rejected")
 
                 db_session.commit()
 
