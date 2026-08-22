@@ -139,11 +139,12 @@ def bound_factories(tenant_a):
     finally:
         for f in ALL_FACTORIES:
             f._meta.sqlalchemy_session = None
+        # Clean up on the fixture's OWN session — no second session needed, and
+        # test bodies/fixtures here must not open get_db_session().
+        session.execute(delete(CreativeAssignment).where(CreativeAssignment.tenant_id == tenant_a))
+        session.execute(delete(Creative).where(Creative.tenant_id == tenant_a))
+        session.commit()
         session.close()
-        with get_db_session() as cleanup:
-            cleanup.execute(delete(CreativeAssignment).where(CreativeAssignment.tenant_id == tenant_a))
-            cleanup.execute(delete(Creative).where(Creative.tenant_id == tenant_a))
-            cleanup.commit()
 
 
 @pytest.fixture
