@@ -197,6 +197,53 @@ class TestRevisionOptimisticConcurrency:
             # Rejected update wrote nothing: revision unchanged on a fresh read.
             assert read_back_media_buy(env.identity, created.media_buy_id).revision == 1
 
+    def test_vanished_buy_with_a_revision_token_fails_before_any_side_effect(self, integration_db):
+        """A row that vanishes before the locked read must not skip the CONFLICT gate.
+
+        The gate used to be guarded by ``and _current_mb is not None``, so a buy
+        deleted between ``_verify_principal`` and the locked re-read skipped the
+        spec-MUST compare-and-set entirely — and skipped the terminal gate too,
+        since ``is_terminal_status("")`` is False. The request then went on to
+        resolve the ad-server adapter and open a workflow step, and only failed
+        later, mid-mutation. Graded on those side effects, not on the raised
+        message alone: with the guard restored ``get_adapter`` is resolved once
+        and a workflow step IS created before the failure.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import delete
+
+        import src.core.tools.media_buy_update as media_buy_update_module
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import MediaBuy, MediaPackage
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+        with MediaBuyDualEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            created = _create_buy(env, product)
+
+            real_verify = media_buy_update_module._verify_principal
+
+            def _verify_then_delete(*args, **kwargs):
+                """Real ownership check, then delete the row — the exact race window."""
+                outcome = real_verify(*args, **kwargs)
+                with get_db_session() as session:
+                    session.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == created.media_buy_id))
+                    session.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == created.media_buy_id))
+                    session.commit()
+                return outcome
+
+            with patch.object(media_buy_update_module, "_verify_principal", side_effect=_verify_then_delete):
+                with pytest.raises(RuntimeError, match="update flow continued with no media buy"):
+                    env.call_impl(
+                        req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=1)
+                    )
+
+            # Rejected at the gate: no adapter was even resolved, and no workflow
+            # step was opened. Both flip the moment the guard comes back.
+            env.mock["update_adapter"].assert_not_called()
+            env.mock["update_context_mgr"].return_value.create_workflow_step.assert_not_called()
+
     def test_terminal_and_stale_revision_prefers_conflict_over_gone(self, integration_db):
         """CONFLICT precedence: a stale token against a buy that has since reached a
         terminal state MUST reject with CONFLICT (refetch-and-retry), not GONE.

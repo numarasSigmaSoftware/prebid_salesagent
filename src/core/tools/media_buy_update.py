@@ -110,19 +110,19 @@ from src.services.targeting_capabilities import (
 
 
 def _require_current_buy(mb: "MediaBuy | None") -> "MediaBuy":
-    """The post-mutation buy re-read from the DB, guaranteed present.
+    """A buy re-read from the DB inside the update flow, guaranteed present.
 
-    Every update response site runs after ``_verify_principal`` has already
-    raised MEDIA_BUY_NOT_FOUND for a missing buy, so a ``None`` here is an
-    internal invariant violation — we raise rather than fabricate a fallback.
-    Callers read ``revision`` and ``status`` off the returned (non-optional)
-    row: a defaulted revision could report a token *regression* (a later read
-    returning a lower value than an earlier one), which an optimistic-concurrency
-    counter must never do, and a defaulted ``""`` status would advertise a
-    graceful path that does not exist.
+    Both the pre-adapter revision gate and every update response site run after
+    ``_verify_principal`` has already raised MEDIA_BUY_NOT_FOUND for a missing
+    buy, so a ``None`` here is an internal invariant violation — we raise rather
+    than fabricate a fallback. Callers read ``revision`` and ``status`` off the
+    returned (non-optional) row: a defaulted revision could report a token
+    *regression* (a later read returning a lower value than an earlier one),
+    which an optimistic-concurrency counter must never do, and a defaulted ``""``
+    status would advertise a graceful path that does not exist.
     """
     if mb is None:
-        raise RuntimeError("update response built with no media buy — the buy must exist post-mutation")
+        raise RuntimeError("update flow continued with no media buy — the buy existed when the request began")
     return mb
 
 
@@ -457,8 +457,14 @@ def _update_media_buy_impl(
             #     the buyer already implements — it then sees the terminal state and
             #     stops for the right reason. Running the terminal gate first would
             #     mask the stale write as INVALID_STATE and drop the version detail.
-            if req.revision is not None and _current_mb is not None:
-                _persisted_revision = _current_mb.revision
+            # No ``and _current_mb is not None`` guard: a row that vanished between
+            # _verify_principal and this locked read would silently SKIP the
+            # spec-MUST compare-and-set (and skip the terminal gate too, since
+            # is_terminal_status("") is False), so the buyer's optimistic-concurrency
+            # request would run to the adapter and only fail afterwards. Surface it
+            # here instead, before any adapter side effect.
+            if req.revision is not None:
+                _persisted_revision = _require_current_buy(_current_mb).revision
                 if req.revision != _persisted_revision:
                     raise media_buy_revision_conflict(
                         req.media_buy_id, expected=req.revision, current=_persisted_revision, context=req.context
