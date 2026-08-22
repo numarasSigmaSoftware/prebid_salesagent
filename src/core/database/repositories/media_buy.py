@@ -541,9 +541,15 @@ class MediaBuyRepository:
         every seam that lands a seller-confirmed status stamps identically: the
         create path, :meth:`update_status`, :meth:`update_fields` (staged
         ``status``), and :meth:`apply_status_transition` (scheduler sweep,
-        creative-sync). Keeping it in one place is what stops the create and get
-        paths from drifting — a buy that reached a committed state on any seam
-        carries ``confirmed_at`` on the wire.
+        creative-sync, admin approve/reject). Keeping it in one place is what
+        stops the create and get paths from drifting — a buy that reached a
+        committed state on any seam carries ``confirmed_at`` on the wire.
+
+        The claim holds only while every status write goes through a seam, which
+        is not something a docstring can promise. ``tests/unit/
+        test_architecture_media_buy_status_writes.py`` is the mechanism: it fails
+        on any raw ``media_buy.status = ...`` assignment in production code
+        outside this module.
 
         Returns True when the buy first entered a seller-confirmed status here,
         so a caller that must persist the stamp immediately (the create path,
@@ -968,12 +974,14 @@ class MediaBuyRepository:
         The seam for paths that already hold a ``MediaBuy`` row on their own
         session and therefore cannot use tenant-scoped, single-row
         :meth:`update_status`: the cross-tenant scheduler sweep (rows from
-        :meth:`get_all_by_statuses`) and the creative-sync assignment pass
-        (rows loaded inside ``CreativeUoW``). The caller owns the
-        session/transaction and commits. Bumps the AdCP 3.1.1
+        :meth:`get_all_by_statuses`), the creative-sync assignment pass
+        (rows loaded inside ``CreativeUoW``), and the admin approve/reject and
+        workflow-approval routes (rows loaded on the request session). The caller
+        owns the session/transaction and commits. Bumps the AdCP 3.1.1
         ``revision`` counter so seller-initiated lifecycle transitions
         (``pending_start`` → ``active``, ``active`` → ``completed``,
-        ``draft`` → ``pending_creatives``) advance the optimistic-concurrency
+        ``draft`` → ``pending_creatives``, ``pending_approval`` → ``rejected``)
+        advance the optimistic-concurrency
         token like any other state change, and stamps the write-once
         ``confirmed_at`` when the transition enters a seller-confirmed status —
         via the same :meth:`_stamp_confirmation_if_needed` seam the tenant-scoped
