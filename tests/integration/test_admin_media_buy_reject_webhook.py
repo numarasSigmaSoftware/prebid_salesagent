@@ -357,27 +357,33 @@ class TestAdminMediaBuyRejectWebhook:
         construction, the only window where the two shapes differ.
         """
         from sqlalchemy import delete
+        from sqlalchemy.orm import Session as SASession
 
-        from src.core.database.database_session import get_db_session
+        from src.core.database.database_session import get_engine
         from src.core.database.models import MediaBuy, MediaPackage
 
         media_buy_id = pending_reject_media_buy["media_buy_id"]
 
+        # An independent session, as this suite's other out-of-band DB work does —
+        # test bodies here must not open get_db_session().
+        probe = SASession(bind=get_engine())
+
         def _execute_then_delete(buy_id, tenant_id):
-            with get_db_session() as session:
-                session.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == buy_id))
-                session.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == buy_id))
-                session.commit()
+            probe.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == buy_id))
+            probe.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == buy_id))
+            probe.commit()
             return True, None
 
-        with patch(
-            "src.core.tools.media_buy_create.execute_approved_media_buy",
-            side_effect=_execute_then_delete,
-        ):
-            _post_approval_action(authenticated_admin_session, pending_reject_media_buy, {"action": "approve"})
+        try:
+            with patch(
+                "src.core.tools.media_buy_create.execute_approved_media_buy",
+                side_effect=_execute_then_delete,
+            ):
+                _post_approval_action(authenticated_admin_session, pending_reject_media_buy, {"action": "approve"})
 
-        with get_db_session() as session:
-            assert session.get(MediaBuy, media_buy_id) is None, "test setup: the buy should have been deleted"
+            assert probe.get(MediaBuy, media_buy_id) is None, "test setup: the buy should have been deleted"
+        finally:
+            probe.close()
 
         assert "payload" not in webhook_capture, (
             "approve must not build a webhook from a vanished buy — a defaulted "
