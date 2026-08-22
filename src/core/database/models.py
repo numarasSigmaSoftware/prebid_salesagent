@@ -897,12 +897,19 @@ class AgentAccountAccess(Base):
 # Statuses in which the seller has NOT yet committed to running the buy. The
 # AdCP 3.1.1 `confirmed_at` field ("when the seller committed to this
 # media buy") MUST be absent for these. This is the SINGLE source of truth for
-# "seller committed", consulted by both create_media_buy (which omits
-# confirmed_at on its not-yet-committed arms) and the repository's write-once
-# confirmation stamp (MediaBuyRepository._stamp_confirmation_if_needed, applied
-# on every status-mutation seam) — so the create path and the persisted column
-# get_media_buys reads back cannot drift: adding a new not-yet-committed status
-# here fixes both at once.
+# "seller committed", consulted by all three writers of the column:
+# create_media_buy (which omits confirmed_at on its not-yet-committed arms), the
+# repository's write-once confirmation stamp
+# (MediaBuyRepository._stamp_confirmation_if_needed, applied on every
+# status-mutation seam), and the historical backfill
+# (scripts/ops/backfill_media_buy_confirmed_at.py, whose eligibility predicate
+# derives from this set and nothing else) — so the create path, the runtime
+# stamp, and the persisted column get_media_buys reads back cannot drift:
+# adding a new not-yet-committed status here fixes all three at once.
+# NOTE on `draft`: it is listed here deliberately even though the admin approve
+# path pairs it with an `approved_at` — an approval that is still blocked on
+# creatives is not a commitment to run, so neither the runtime stamp nor the
+# backfill may treat `draft` + `approved_at` as confirmed.
 MEDIA_BUY_UNCONFIRMED_STATUSES: frozenset[str] = frozenset(
     {"draft", "pending", "pending_approval", "rejected", "failed"}
 )

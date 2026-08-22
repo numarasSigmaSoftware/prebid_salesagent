@@ -27,7 +27,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 _APPROVED = datetime(2026, 1, 5, tzinfo=UTC)
 _CREATED = datetime(2026, 1, 1, tzinfo=UTC)
-_TEST_TENANT_IDS = ("t_conf_schema", "t_conf_backfill")
+_TEST_TENANT_IDS = ("t_conf_schema", "t_conf_backfill", "t_conf_agree")
 
 
 def _clear_seed_rows(engine) -> None:
@@ -114,7 +114,10 @@ def _seed_pre_migration_media_buys(engine, tenant_id: str) -> None:
         approved_at=None,
         created_at=_CREATED,
     )
-    # Historical draft+approved_at hold for a creative-blocked buy.
+    # Historical draft+approved_at hold for a creative-blocked buy. `draft` is in
+    # MEDIA_BUY_UNCONFIRMED_STATUSES, so an approval still blocked on creatives is
+    # NOT a commitment to run: this row must stay NULL, exactly as the runtime
+    # stamp leaves an identical NEW row unstamped.
     _insert_media_buy(
         engine,
         f"{tenant_id}_draft_approved",
@@ -175,17 +178,20 @@ def test_operational_backfill_uses_multiple_committed_batches(migration_db):
     _seed_pre_migration_media_buys(engine, tenant_id)
     run_alembic_upgrade(db_url, CONFIRMED_AT_REV)
 
-    # Four eligible rows (of the five seeded) prove the loop advances past a
+    # Three eligible rows (of the five seeded) prove the loop advances past a
     # single-row batch and confirm eligibility is case-insensitive like the
-    # model's canonical rule (MEDIA_BUY_UNCONFIRMED_STATUSES).
+    # model's canonical rule (MEDIA_BUY_UNCONFIRMED_STATUSES). The two ineligible
+    # rows are the pending_approval one and the draft+approved_at one — `draft`
+    # is in that frozenset, so an approval blocked on creatives is not a
+    # commitment.
     commits: list[object] = []
     on_commit = commits.append
     event.listen(engine, "commit", on_commit)
     try:
-        assert backfill_confirmed_at(engine, batch_rows=1) == 4
+        assert backfill_confirmed_at(engine, batch_rows=1) == 3
     finally:
         event.remove(engine, "commit", on_commit)
-    assert len(commits) == 5, "each one-row batch must commit independently, plus the final empty probe"
+    assert len(commits) == 4, "each one-row batch must commit independently, plus the final empty probe"
     assert backfill_confirmed_at(engine, batch_rows=1) == 0, "the job must be idempotent"
 
     with engine.connect() as conn:
@@ -199,7 +205,83 @@ def test_operational_backfill_uses_multiple_committed_batches(migration_db):
     assert rows[f"{tenant_id}_unconfirmed"] is None
     assert rows[f"{tenant_id}_confirmed_approved"] == _APPROVED
     assert rows[f"{tenant_id}_confirmed_sync"] == _CREATED
-    assert rows[f"{tenant_id}_draft_approved"] == _APPROVED
+    assert rows[f"{tenant_id}_draft_approved"] is None
     assert rows[f"{tenant_id}_confirmed_no_instants"] is not None
+
+    run_alembic_downgrade(db_url, PRE_REV)
+
+
+def test_backfill_eligibility_agrees_with_the_runtime_rule_for_every_status(migration_db):
+    """The script's SQL predicate and ``is_media_buy_seller_confirmed`` must agree.
+
+    Two writers decide the same fact — "has the seller committed?" — one in
+    Python at runtime, one in SQL for historical rows. When they disagree, a
+    historical row carries a ``confirmed_at`` that an identical NEW row would
+    never get (or vice versa), and ``get_media_buys`` emits the difference to
+    buyers. This pins agreement for EVERY status either source of truth knows,
+    with ``approved_at`` set on all of them — the shape where the two used to
+    diverge on ``draft``.
+    """
+    from scripts.ops.backfill_media_buy_confirmed_at import backfill_confirmed_at
+    from src.core.database.models import MEDIA_BUY_UNCONFIRMED_STATUSES, is_media_buy_seller_confirmed
+    from src.core.schemas import MediaBuyStatus
+
+    engine, db_url = migration_db
+    tenant_id = "t_conf_agree"
+    # Derived from the sources of truth, never hand-listed: the AdCP wire enum
+    # plus every internal not-yet-committed status the column can hold.
+    statuses = sorted({status.value for status in MediaBuyStatus} | set(MEDIA_BUY_UNCONFIRMED_STATUSES))
+    assert "draft" in statuses, "the divergent status must be in scope"
+
+    run_alembic_upgrade(db_url, PRE_REV)
+    _clear_seed_rows(engine)
+    seed_tenant(engine, tenant_id, subdomain=f"{tenant_id}-migration-test")
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO principals (tenant_id, principal_id, name, platform_mappings, access_token) "
+                "VALUES (:tenant_id, :principal_id, 'Agreement Principal', '{}', :access_token)"
+            ),
+            {
+                "tenant_id": tenant_id,
+                "principal_id": f"p_{tenant_id}",
+                "access_token": f"tok_{tenant_id}",
+            },
+        )
+        conn.commit()
+
+    row_ids = {}
+    for index, status in enumerate(statuses):
+        row_id = f"{tenant_id}_{index}"
+        row_ids[status] = row_id
+        _insert_media_buy(
+            engine,
+            row_id,
+            tenant_id=tenant_id,
+            status=status,
+            approved_at=_APPROVED,
+            created_at=_CREATED,
+        )
+
+    run_alembic_upgrade(db_url, CONFIRMED_AT_REV)
+    backfill_confirmed_at(engine, batch_rows=len(statuses))
+
+    with engine.connect() as conn:
+        stamped = dict(
+            conn.execute(
+                text("SELECT media_buy_id, confirmed_at FROM media_buys WHERE tenant_id = :tenant_id"),
+                {"tenant_id": tenant_id},
+            ).all()
+        )
+
+    disagreements = {
+        status: (stamped[row_ids[status]] is not None, is_media_buy_seller_confirmed(status))
+        for status in statuses
+        if (stamped[row_ids[status]] is not None) != is_media_buy_seller_confirmed(status)
+    }
+    assert not disagreements, (
+        "backfill eligibility must equal is_media_buy_seller_confirmed for every status; "
+        f"(backfilled, runtime_says_confirmed) mismatches: {disagreements}"
+    )
 
     run_alembic_downgrade(db_url, PRE_REV)

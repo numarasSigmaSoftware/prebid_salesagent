@@ -17,16 +17,25 @@ from src.core.database.models import MEDIA_BUY_UNCONFIRMED_STATUSES
 
 DEFAULT_BATCH_ROWS = 1000
 
+# Eligibility derives SOLELY from MEDIA_BUY_UNCONFIRMED_STATUSES — the single
+# source of truth for "the seller has committed" (src/core/database/models.py) —
+# so a historical row receives exactly the confirmed_at the runtime stamp
+# (MediaBuyRepository._stamp_confirmation_if_needed) would give an identical NEW
+# row. This query previously carried an extra
+# ``OR (lower(status) = 'draft' AND approved_at IS NOT NULL)`` arm that
+# CONTRADICTED that set: ``draft`` is listed there as not-yet-committed, and the
+# admin approve path still writes status=draft WITH approved_at while creatives
+# are outstanding — so the runtime leaves such a row unstamped while the backfill
+# stamped it, and history disagreed with every new row of the same shape.
+# lower() keeps the comparison case-insensitive, matching
+# is_media_buy_seller_confirmed.
 _BACKFILL_BATCH = text(
     """
     WITH batch AS (
         SELECT media_buy_id
         FROM media_buys
         WHERE confirmed_at IS NULL
-          AND (
-            lower(status) NOT IN :unconfirmed_statuses
-            OR (lower(status) = 'draft' AND approved_at IS NOT NULL)
-          )
+          AND lower(status) NOT IN :unconfirmed_statuses
         ORDER BY media_buy_id
         FOR UPDATE
         LIMIT :batch_rows
