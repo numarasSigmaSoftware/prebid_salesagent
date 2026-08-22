@@ -20,6 +20,7 @@ import pytest
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal, Tenant
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.exceptions import AdCPGoneError
 from tests.helpers.media_buy import read_back_media_buy
 from tests.integration.conftest import cleanup_tenant, make_media_buy, make_package
 
@@ -328,6 +329,13 @@ class TestRevisionBumpsOnStatusTransition:
         The admin approve/reject routes verify the buy exists, then transition it;
         a ``None`` from ``update_status`` at that point means the row disappeared
         mid-request — No-Quiet-Failures requires a raise, not a skipped write.
+
+        The raise is the TYPED ``AdCPGoneError``, pinned here by its wire contract
+        (410 / INVALID_STATE / correctable), not merely by its class. A bare
+        ``RuntimeError`` escapes the transport boundaries as
+        SERVICE_UNAVAILABLE/transient — inviting a buyer agent to retry a request
+        whose row no longer exists. The operator-facing invariant sentence must
+        stay in the log and out of the buyer-facing message.
         """
         with MediaBuyUoW(tenant_a) as uow:
             uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_rev_or_raise", status="pending_approval"))
@@ -337,12 +345,25 @@ class TestRevisionBumpsOnStatusTransition:
             assert result.status == "active"
 
         with MediaBuyUoW(tenant_a) as uow:
-            with pytest.raises(RuntimeError, match="mb_never_existed"):
-                uow.media_buys.update_status_or_raise("mb_never_existed", "active")
-            with pytest.raises(RuntimeError, match="mb_never_existed"):
-                uow.media_buys.update_fields_or_raise("mb_never_existed", budget=Decimal("1.00"))
-            with pytest.raises(RuntimeError, match="mb_never_existed"):
-                uow.media_buys.bump_revision_or_raise("mb_never_existed")
+            vanished_mutations = (
+                lambda: uow.media_buys.update_status_or_raise("mb_never_existed", "active"),
+                lambda: uow.media_buys.update_fields_or_raise("mb_never_existed", budget=Decimal("1.00")),
+                lambda: uow.media_buys.bump_revision_or_raise("mb_never_existed"),
+            )
+            for mutate in vanished_mutations:
+                with pytest.raises(AdCPGoneError, match="mb_never_existed") as exc_info:
+                    mutate()
+                gone = exc_info.value
+                assert gone.wire_error_code == "INVALID_STATE", (
+                    f"a vanished buy must reach the buyer as INVALID_STATE, got {gone.wire_error_code!r}"
+                )
+                assert gone.recovery == "correctable", (
+                    f"a vanished buy is not retryable, it is correctable; got recovery={gone.recovery!r}"
+                )
+                assert gone.status_code == 410, f"a vanished buy is 410 Gone, got {gone.status_code}"
+                assert "existed when the request began" not in gone.message, (
+                    f"the internal invariant sentence leaked into the buyer-facing message: {gone.message!r}"
+                )
 
     def test_apply_status_transition_bumps_revision(self, tenant_a, principal_a):
         """The cross-tenant seam (scheduler / creative-sync) bumps revision too."""

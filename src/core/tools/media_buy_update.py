@@ -120,9 +120,18 @@ def _require_current_buy(mb: "MediaBuy | None") -> "MediaBuy":
     *regression* (a later read returning a lower value than an earlier one),
     which an optimistic-concurrency counter must never do, and a defaulted ``""``
     status would advertise a graceful path that does not exist.
+
+    Raises the typed :class:`AdCPGoneError` (410 / ``INVALID_STATE`` /
+    ``correctable``) rather than a bare ``RuntimeError``: this escapes to the
+    buyer, and an untyped exception renders as ``SERVICE_UNAVAILABLE`` /
+    ``transient`` on A2A and MCP — telling a buyer agent to retry a request whose
+    target row no longer exists — and as a bare 500 with no envelope on REST. The
+    internal invariant sentence is operator-facing and belongs in the log; the
+    raised message is a buyer contract.
     """
     if mb is None:
-        raise RuntimeError("update flow continued with no media buy — the buy existed when the request began")
+        logger.error("update flow continued with no media buy — the buy existed when the request began")
+        raise AdCPGoneError("Media buy is no longer available")
     return mb
 
 

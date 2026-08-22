@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, object_session
 
 from src.core.database.models import MediaBuy, MediaPackage, is_media_buy_seller_confirmed
+from src.core.exceptions import AdCPGoneError
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
@@ -661,11 +662,25 @@ class MediaBuyRepository:
         proceeding would report success for a write that never happened
         (No Quiet Failures). Callers that deliberately tolerate a missing buy
         keep using the base mutators and check the return themselves.
+
+        Raises the typed :class:`AdCPGoneError` (410 / ``INVALID_STATE`` /
+        ``correctable``), not a bare ``RuntimeError``: this reaches the buyer
+        through the transport boundaries, and an untyped exception renders as
+        ``SERVICE_UNAVAILABLE``/``transient`` on A2A and MCP — telling a buyer
+        agent to retry a request whose target row no longer exists — while REST
+        emits a bare 500 with no envelope at all. The buy really is gone, and the
+        buyer recovers by referencing a different one, which is exactly GONE.
+        The *invariant* sentence ("it existed when the request began") is
+        operator-facing and stays in the log; the raised message is a buyer
+        contract and only names the resource.
         """
         if media_buy is None:
-            raise RuntimeError(
-                f"media buy {media_buy_id!r} disappeared during {action} — it existed when the request began"
+            logger.error(
+                "media buy %r disappeared during %s — it existed when the request began",
+                media_buy_id,
+                action,
             )
+            raise AdCPGoneError(f"Media buy {media_buy_id!r} is no longer available")
         return media_buy
 
     def update_status_or_raise(

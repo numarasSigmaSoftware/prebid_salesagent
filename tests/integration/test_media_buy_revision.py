@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.core.exceptions import AdCPGoneError
 from src.core.schemas import UpdateMediaBuyRequest
 from src.core.schemas._base import (
     CreateMediaBuySuccess,
@@ -238,10 +239,14 @@ class TestRevisionOptimisticConcurrency:
 
             try:
                 with patch.object(media_buy_update_module, "_verify_principal", side_effect=_verify_then_delete):
-                    with pytest.raises(RuntimeError, match="update flow continued with no media buy"):
+                    with pytest.raises(AdCPGoneError) as exc_info:
                         env.call_impl(
                             req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=1)
                         )
+                # The vanished row is GONE, not a retryable server fault, and the
+                # operator-facing invariant sentence stays out of the buyer's message.
+                assert exc_info.value.wire_error_code == "INVALID_STATE"
+                assert "update flow continued" not in exc_info.value.message
             finally:
                 racer.close()
 
@@ -249,6 +254,59 @@ class TestRevisionOptimisticConcurrency:
             # step was opened. Both flip the moment the guard comes back.
             env.mock["update_adapter"].assert_not_called()
             env.mock["update_context_mgr"].return_value.create_workflow_step.assert_not_called()
+
+    def test_vanished_buy_reaches_the_buyer_as_a_gone_envelope(self, integration_db):
+        """The vanished-row invariant reaches the buyer as a two-layer GONE envelope.
+
+        The guard used to raise a bare ``RuntimeError``. Untyped exceptions have no
+        place in the typed cascade: A2A and MCP render them as
+        ``SERVICE_UNAVAILABLE``/``transient`` — instructing a buyer agent to RETRY a
+        request whose target row no longer exists — and REST emitted a bare 500 with
+        no envelope at all. Drives a REAL REST request (FastAPI TestClient over
+        ``src.app.app``) through the same delete-mid-flight race and asserts on the
+        HTTP body, not on a reconstructed exception.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import delete
+        from sqlalchemy.orm import Session as SASession
+
+        import src.core.tools.media_buy_update as media_buy_update_module
+        from src.core.database.database_session import get_engine
+        from src.core.database.models import MediaBuy, MediaPackage
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+        from tests.harness.transport import Transport
+        from tests.helpers import assert_envelope_shape
+
+        with MediaBuyDualEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            created = _create_buy(env, product)
+
+            real_verify = media_buy_update_module._verify_principal
+            racer = SASession(bind=get_engine())
+
+            def _verify_then_delete(*args, **kwargs):
+                outcome = real_verify(*args, **kwargs)
+                racer.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == created.media_buy_id))
+                racer.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == created.media_buy_id))
+                racer.commit()
+                return outcome
+
+            try:
+                with patch.object(media_buy_update_module, "_verify_principal", side_effect=_verify_then_delete):
+                    result = env.call_via(
+                        Transport.REST,
+                        req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=1),
+                    )
+            finally:
+                racer.close()
+
+        assert result.is_error, f"a vanished media buy must reject, got {result!r}"
+        assert_envelope_shape(
+            result.wire_error_envelope,
+            "INVALID_STATE",
+            recovery="correctable",
+        )
 
     def test_terminal_and_stale_revision_prefers_conflict_over_gone(self, integration_db):
         """CONFLICT precedence: a stale token against a buy that has since reached a
