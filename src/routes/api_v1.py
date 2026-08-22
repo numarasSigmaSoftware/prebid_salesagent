@@ -30,7 +30,7 @@ from src.core.schema_helpers import (
     to_push_notification_config,
     to_reporting_webhook,
 )
-from src.core.schemas import RawRevision, SalesAgentBaseModel
+from src.core.schemas import RawRevision, SalesAgentBaseModel, raise_if_revision_present_but_unusable
 from src.core.tools import accounts as accounts_module
 from src.core.tools import capabilities as capabilities_module
 from src.core.tools import creative_formats as creative_formats_module
@@ -348,6 +348,11 @@ async def create_media_buy(
 @router.put("/media-buys/{media_buy_id}")
 async def update_media_buy(media_buy_id: str, body: UpdateMediaBuyBody, identity: ResolvedIdentity = require_auth):
     """Update an existing media buy (auth required)."""
+    # A present-but-unusable ``revision`` is indistinguishable from an omitted
+    # field once the model is built — both leave ``body.revision`` as None — so
+    # decide it here, where ``model_fields_set`` still records that the key was
+    # sent. Same rule, same envelope as the MCP boundary.
+    raise_if_revision_present_but_unusable("revision" in body.model_fields_set, body.revision)
     # Same context string as _build_update_request's boundary, so a malformed
     # object rejects with an identical message prefix wherever it validates.
     with adcp_validation_boundary(context="update_media_buy request"):

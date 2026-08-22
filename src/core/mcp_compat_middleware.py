@@ -9,15 +9,16 @@ Runs after MCPAuthMiddleware.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
-from src.core.exceptions import normalize_to_adcp_error
+from src.core.exceptions import AdCPValidationError, normalize_to_adcp_error
 from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params
+from src.core.schemas._base import raise_if_revision_present_but_unusable
 from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,17 @@ class RequestCompatMiddleware(Middleware):
             return await call_next(context)
 
         tool_name = context.message.name
+
+        # Step 0: reject a present-but-unusable ``revision`` token. This is the
+        # last seam that still knows the difference between "the key was sent"
+        # and "the key was omitted" — everything downstream sees only ``None``
+        # for both, and would treat the token as absent (silent last-write-wins
+        # plus a revision bump). REST rejects the same shape in api_v1.
+        try:
+            raise_if_revision_present_but_unusable("revision" in arguments, arguments.get("revision"))
+        except AdCPValidationError as exc:
+            await self._reject_at_boundary(context, tool_name, exc)
+
         normalized = dict(arguments)
         modified = False
 
@@ -118,28 +130,39 @@ class RequestCompatMiddleware(Middleware):
                                 raise
                             exc = retry_exc
 
-            # Normalize once for the audit record, then pass the raw exception to
-            # _translate_to_tool_error so the emitted AdCPToolError keeps it as
-            # __cause__. The translator intentionally normalizes it a second time.
-            typed = normalize_to_adcp_error(exc)
-            tenant_id = None
-            principal_id = None
-            if context.fastmcp_context is not None:
-                try:
-                    identity = await context.fastmcp_context.get_state("identity")
-                    if identity is not None:
-                        tenant_id = identity.tenant_id
-                        principal_id = identity.principal_id
-                except Exception:
-                    logger.debug("Could not read MCP identity for validation error logging", exc_info=True)
-            record_boundary_error(
-                "mcp",
-                tool_name,
-                typed,
-                tenant_id=tenant_id,
-                principal_id=principal_id,
-            )
-            _translate_to_tool_error(exc)
+            await self._reject_at_boundary(context, tool_name, exc)
+
+    async def _reject_at_boundary(self, context: MiddlewareContext, tool_name: str, exc: Exception) -> NoReturn:
+        """Record a boundary rejection and emit it as the MCP error envelope.
+
+        Shared by the pre-dispatch ``revision`` gate and the post-dispatch
+        TypeAdapter fallback so both leave the same audit/activity-feed record
+        and produce the same wire envelope. Never returns —
+        ``_translate_to_tool_error`` always raises.
+
+        Normalizes once for the audit record, then passes the RAW exception to
+        ``_translate_to_tool_error`` so the emitted AdCPToolError keeps it as
+        ``__cause__``. The translator intentionally normalizes it a second time.
+        """
+        typed = normalize_to_adcp_error(exc)
+        tenant_id = None
+        principal_id = None
+        if context.fastmcp_context is not None:
+            try:
+                identity = await context.fastmcp_context.get_state("identity")
+                if identity is not None:
+                    tenant_id = identity.tenant_id
+                    principal_id = identity.principal_id
+            except Exception:
+                logger.debug("Could not read MCP identity for validation error logging", exc_info=True)
+        record_boundary_error(
+            "mcp",
+            tool_name,
+            typed,
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+        )
+        _translate_to_tool_error(exc)
 
     @staticmethod
     def _should_retry(exc: Exception) -> bool:

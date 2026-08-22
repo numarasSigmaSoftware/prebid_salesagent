@@ -32,6 +32,11 @@ _WIRE_TRANSPORTS = [Transport.A2A, Transport.MCP, Transport.REST]
 # these tests stays "every transport agrees", not "this literal string".
 _SCHEMA_REJECTION_CODE = "VALIDATION_ERROR"
 
+# The boundaries that can still tell a PRESENT ``revision`` key from an omitted
+# one. A2A is excluded deliberately: its raw-payload path reaches the shared
+# request model with the distinction already collapsed.
+_PRESENT_NULL_TRANSPORTS = [Transport.MCP, Transport.REST]
+
 
 class TestUpdateRevisionValidationWire:
     """Schema-invalid ``revision`` values must emit the documented wire codes.
@@ -115,6 +120,38 @@ class TestUpdateRevisionValidationWire:
         assert result.is_error, "expected a validation error for revision=7.5"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+
+    @pytest.mark.parametrize("transport", _PRESENT_NULL_TRANSPORTS, ids=lambda t: t.value)
+    def test_present_but_null_revision_is_rejected_not_treated_as_absent(self, env_with_media_buy, transport):
+        """A ``revision`` key sent with no usable value must REJECT, not silently
+        fall back to last-write-wins.
+
+        Several distinct wire shapes reach our first seam identically — as
+        ``None`` with the KEY PRESENT — while an omitted field arrives with the
+        key ABSENT. Treating the present case as "no token supplied" degraded the
+        compare-and-set to last-write-wins AND still bumped the row, giving no
+        signal to a buyer who explicitly asked for optimistic concurrency. The
+        pinned ``update-media-buy-request.json`` types ``revision`` as
+        ``integer``, which admits no such value.
+
+        Pinned on the two boundaries that can still see the key-present/key-absent
+        distinction.
+        """
+        from tests.helpers.media_buy import read_back_media_buy
+
+        env, media_buy = env_with_media_buy
+        before = read_back_media_buy(env.identity, media_buy.media_buy_id).revision
+
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=None)
+
+        assert result.is_error, "a present-but-unusable revision must reject, not fall back to last-write-wins"
+        assert result.wire_error_envelope is not None, "wire envelope not captured"
+        assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+        assert result.wire_error_envelope["errors"][0].get("suggestion"), (
+            f"the rejection must carry a suggestion, got {result.wire_error_envelope['errors'][0]!r}"
+        )
+        # A rejected update writes nothing: the counter must not have advanced.
+        assert read_back_media_buy(env.identity, media_buy.media_buy_id).revision == before
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_stale_revision_conflict_recovery_is_transient_on_the_wire(self, env_with_media_buy, transport):

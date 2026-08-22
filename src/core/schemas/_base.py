@@ -2115,6 +2115,35 @@ def validate_idempotency_key_shape(key: str | None) -> None:
         )
 
 
+def raise_if_revision_present_but_unusable(present: bool, value: Any) -> None:
+    """Reject a ``revision`` key that arrived present but carries no usable value.
+
+    The single home for this rule; the MCP and REST boundaries each detect
+    presence in their own shape (a raw arguments dict / a Pydantic
+    ``model_fields_set``) and delegate the decision here.
+
+    A present key whose value is ``None`` is NOT the same as an omitted field.
+    Treating it as "no token supplied" silently degrades the compare-and-set to
+    last-write-wins AND still bumps the row — the buyer asked for optimistic
+    concurrency and got none, with no signal. The pinned
+    ``update-media-buy-request.json`` types ``revision`` as ``integer``, so a
+    present-but-unusable value is a schema violation and must be rejected.
+
+    This layer genuinely cannot tell WHICH unusable value the buyer sent, so the
+    message names none: several distinct wire shapes are delivered to us
+    identically as ``None`` with the key present.
+    """
+    if present and value is None:
+        raise AdCPValidationError(
+            "revision was supplied without a usable integer value.",
+            field="revision",
+            suggestion=(
+                "Send revision as a JSON integer >= 1, taken from get_media_buys or the most "
+                "recent update response, or omit the field entirely to accept last-write-wins."
+            ),
+        )
+
+
 def _normalize_revision_in_place(values: dict[str, Any]) -> None:
     """Apply the optimistic-concurrency ``revision`` gate to a raw request dict.
 
@@ -2125,6 +2154,11 @@ def _normalize_revision_in_place(values: dict[str, Any]) -> None:
     uniformly, and accepts the whole-number float (7.0) draft-07 ``integer`` admits —
     see ``RevisionValidator``. Normalises the accepted value to ``int`` in place.
     """
+    # Still correct to return early on ``None``: the MCP and REST boundaries now
+    # reject a PRESENT-but-``None`` ``revision`` via
+    # ``raise_if_revision_present_but_unusable`` before the request model is built,
+    # so a ``None`` reaching here means the buyer omitted the field — the
+    # last-write-wins path the gate is meant to leave alone.
     if "revision" not in values or values["revision"] is None:
         return
     try:
