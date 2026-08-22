@@ -669,6 +669,29 @@ class AdCPServiceUnavailableError(AdCPError):
 # translator runs build_two_layer_error_envelope() on the raised exception.
 
 
+def media_buy_conflict_details(
+    media_buy_id: str,
+    *,
+    expected: int | None = None,
+    current: int | None = None,
+) -> dict[str, Any]:
+    """The spec CONFLICT ``details`` shape — the SAME keys at every raise site.
+
+    ``dist/schemas/3.1.1/error-details/conflict.json`` models a conflict as
+    ``resource_id`` / ``expected_version`` / ``current_version``. A generic
+    optimistic-concurrency retry loop reads ``details["current_version"]``, so a
+    site that OMITS the key raises ``KeyError`` in the buyer's client instead of
+    reading "unknown". Every media-buy CONFLICT therefore carries all three keys.
+
+    A version that is genuinely unobserved is an EXPLICIT ``None``, never a
+    guessed integer: the lock-timeout site times out BEFORE the row can be read,
+    so neither version was ever seen, and taking another lock to learn them is
+    precisely what just failed. ``None`` says "unknown"; a fabricated number
+    would say something false about the buyer's own token.
+    """
+    return {"resource_id": media_buy_id, "expected_version": expected, "current_version": current}
+
+
 def media_buy_revision_conflict(
     media_buy_id: str,
     *,
@@ -684,10 +707,9 @@ def media_buy_revision_conflict(
     shared by the fast pre-adapter gate in ``_update_media_buy_impl`` and the
     authoritative under-row-lock check in ``MediaBuyRepository``.
     """
-    # Details use the spec's recommended CONFLICT shape
-    # (dist/schemas/3.1.1/error-details/conflict.json:
-    # resource_id / expected_version / current_version) so optimistic-
-    # concurrency clients can re-read and retry generically.
+    # Details come from the shared media_buy_conflict_details() shape, so this
+    # site and the lock-timeout site in MediaBuyRepository expose an identical
+    # key set to optimistic-concurrency clients.
     #
     # recovery=transient per the pinned AdCP 3.1.1 error-code.json
     # enumMetadata for CONFLICT ("re-read the resource and retry with current
@@ -702,7 +724,7 @@ def media_buy_revision_conflict(
             f"Re-read the media buy via get_media_buys and retry the update with "
             f"revision {current} and a fresh idempotency_key."
         ),
-        details={"resource_id": media_buy_id, "expected_version": expected, "current_version": current},
+        details=media_buy_conflict_details(media_buy_id, expected=expected, current=current),
         recovery="transient",
         context=context,
     )

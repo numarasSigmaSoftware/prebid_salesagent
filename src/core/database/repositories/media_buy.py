@@ -119,16 +119,19 @@ class MediaBuyRepository:
         except OperationalError as exc:
             if getattr(getattr(exc, "orig", None), "pgcode", None) != LOCK_NOT_AVAILABLE:
                 raise
-            from src.core.exceptions import AdCPConflictError
+            from src.core.exceptions import AdCPConflictError, media_buy_conflict_details
 
             raise AdCPConflictError(
                 f"Media buy '{media_buy_id}' is being modified by another request; retry shortly.",
                 field="media_buy_id",
                 suggestion="Another update holds the row lock. Re-read the media buy and retry.",
-                # Spec CONFLICT details shape (conflict.json): resource_id only —
-                # expected/current versions are genuinely unknown here (the lock
-                # timed out before the row could be read).
-                details={"resource_id": media_buy_id},
+                # Same details KEY SET as every other media-buy CONFLICT (shared
+                # shape), so a generic retry loop reading details["current_version"]
+                # gets an explicit "unknown" instead of a KeyError. The versions are
+                # genuinely unobserved here — the lock timed out BEFORE the row could
+                # be read — so they are explicit nulls, never guessed integers, and we
+                # do not take another lock or add a read to learn them.
+                details=media_buy_conflict_details(media_buy_id),
                 recovery="transient",
                 context=context,
             ) from exc

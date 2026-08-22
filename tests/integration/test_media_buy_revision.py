@@ -348,3 +348,60 @@ class TestRevisionOptimisticConcurrency:
 
             result = _update_budget(env, created.media_buy_id, 9000.0)
             assert result.revision == 2
+
+
+@pytest.mark.requires_db
+class TestConflictDetailsShapeParity:
+    """Every media-buy CONFLICT exposes the SAME ``details`` key set.
+
+    A generic optimistic-concurrency retry loop reads
+    ``details["current_version"]``. One raise site used to emit ``resource_id``
+    alone, so that loop raised ``KeyError`` instead of reading "unknown". The
+    keys are now uniform; a version that was never observed is an explicit
+    ``None``, never a fabricated integer.
+    """
+
+    def test_revision_mismatch_and_lock_timeout_conflicts_share_a_details_key_set(self, integration_db):
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session as SASession
+
+        from src.core.database.database_session import get_engine, reset_health_state
+        from src.core.database.models import MediaBuy
+        from src.core.database.repositories import MediaBuyUoW
+        from src.core.exceptions import AdCPConflictError
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+        with MediaBuyDualEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            created = _create_buy(env, product)
+            tenant_id = env.identity.tenant_id
+
+            # Shape A — the factory-built revision mismatch (both versions known).
+            with pytest.raises(AdCPConflictError) as mismatch:
+                env.call_impl(req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=5))
+
+            # Shape B — the lock-timeout CONFLICT (neither version observable).
+            holder = SASession(get_engine())
+            try:
+                holder.execute(select(MediaBuy).filter_by(media_buy_id=created.media_buy_id).with_for_update()).first()
+                with pytest.raises(AdCPConflictError) as timeout:
+                    with MediaBuyUoW(tenant_id) as waiter:
+                        waiter.media_buys.get_by_id(created.media_buy_id, for_update=True, lock_timeout_seconds=1)
+            finally:
+                holder.rollback()
+                holder.close()
+                reset_health_state()
+
+        mismatch_details = mismatch.value.details
+        timeout_details = timeout.value.details
+        assert mismatch_details is not None and timeout_details is not None
+        assert mismatch_details.keys() == timeout_details.keys(), (
+            "both CONFLICT shapes must expose the same details keys; "
+            f"mismatch={sorted(mismatch_details)} lock_timeout={sorted(timeout_details)}"
+        )
+        # The unknown side says so explicitly rather than guessing a number.
+        assert timeout_details["expected_version"] is None
+        assert timeout_details["current_version"] is None
+        # ...and the known side still carries the real values.
+        assert mismatch_details["expected_version"] == 5
+        assert mismatch_details["current_version"] == 1
