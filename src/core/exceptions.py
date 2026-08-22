@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from adcp.server.helpers import STANDARD_ERROR_CODES, adcp_error
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -1116,8 +1117,9 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
     boundaries (MCP, A2A, REST). Already-typed ``AdCPError`` passes through
     unchanged. Pydantic ``ValidationError`` maps to a structured, sanitized
     ``AdCPValidationError``; other ``ValueError`` instances map to the plain
-    validation error, ``PermissionError`` to ``AdCPAuthorizationError``, and
-    anything else wraps in base ``AdCPError`` (INTERNAL_ERROR).
+    validation error, ``PermissionError`` to ``AdCPAuthorizationError``,
+    ``SQLAlchemyError`` to a driver-text-free ``AdCPServiceUnavailableError``,
+    and anything else wraps in base ``AdCPError`` (INTERNAL_ERROR).
     """
     if isinstance(exc, AdCPError):
         return exc
@@ -1133,4 +1135,19 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
         return AdCPValidationError(str(exc))
     if isinstance(exc, PermissionError):
         return AdCPAuthorizationError(str(exc))
+    if isinstance(exc, SQLAlchemyError):
+        # Placed AFTER the AdCPError / ValidationError / ValueError /
+        # PermissionError arms so it shadows none of them, and BEFORE the
+        # generic fallback because that fallback is the leak path: ``str()`` on
+        # a DBAPI-wrapping SQLAlchemy error renders the failing statement AND
+        # its bound parameter values (credentials, tokens, PII have been
+        # observed). None of that is a buyer contract, so the driver payload
+        # goes to the log and the buyer gets a fixed, information-free message.
+        logger.error("Database error at the transport boundary: %s", type(exc).__name__, exc_info=True)
+        return AdCPServiceUnavailableError(
+            "A database error prevented this request from completing.",
+            suggestion="Retry shortly. If the failure persists, contact the sales agent operator.",
+        )
+    # Reaches here only for non-SQLAlchemy exceptions: the DB family is
+    # intercepted above precisely because its ``str()`` carries driver text.
     return AdCPError(str(exc) or type(exc).__name__)

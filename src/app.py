@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.lifespan import combine_lifespans
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.routing import Route
 
 from src.a2a_server.adcp_a2a_server import (
@@ -267,6 +268,21 @@ async def permission_error_handler(request: Request, exc: PermissionError) -> JS
     raw ``PermissionError`` on the REST path would render as a 500 server
     error instead of the 403 authorization envelope every transport should
     emit for the same condition.
+    """
+    return _envelope_response(request, normalize_to_adcp_error(exc))
+
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    """Database failures reach the buyer as an envelope, never as driver text.
+
+    Scoped to the SQLAlchemy family only — NOT a blanket ``Exception`` handler.
+    Without it a raw ``OperationalError``/``DataError`` renders as FastAPI's
+    plaintext 500 with no two-layer envelope at all, while ``str(exc)`` on those
+    exceptions carries the failing SQL statement and its BOUND PARAMETER VALUES.
+    ``normalize_to_adcp_error`` owns the sanitization (one arm, shared with the
+    MCP and A2A boundaries) so all three transports emit the same wire shape for
+    the same condition; the driver payload is logged there, not returned.
     """
     return _envelope_response(request, normalize_to_adcp_error(exc))
 

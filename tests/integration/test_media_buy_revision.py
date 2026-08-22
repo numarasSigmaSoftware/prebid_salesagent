@@ -241,6 +241,56 @@ class TestRevisionOptimisticConcurrency:
             assert isinstance(result.response, UpdateMediaBuySuccess), f"matching revision must succeed, got {result!r}"
             assert result.response.revision == 2
 
+    def test_database_failure_reaches_the_buyer_without_sql_or_bound_parameters(self, integration_db):
+        """A raw SQLAlchemy error must never render its statement or bound values.
+
+        ``str()`` on a DBAPI-wrapping SQLAlchemy exception renders the failing
+        statement AND its bound parameter values. REST also had no handler for
+        the family at all, so the buyer got a plaintext 500 carrying that text
+        instead of the two-layer envelope. Drives a REAL REST request (FastAPI
+        TestClient over ``src.app.app``) and asserts on the HTTP body.
+        """
+        import json
+
+        from sqlalchemy.exc import OperationalError
+
+        from src.core.database.database_session import reset_health_state
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+        from tests.harness.transport import Transport
+        from tests.helpers import assert_envelope_shape
+
+        secret = "pw-do-not-leak-9f3c"
+        try:
+            with MediaBuyDualEnv() as env:
+                _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+                created = _create_buy(env, product)
+
+                env.mock["update_adapter"].side_effect = OperationalError(
+                    "SELECT * FROM media_buys WHERE token = %(token)s",
+                    {"token": secret},
+                    Exception("server closed the connection unexpectedly"),
+                )
+                result = env.call_via(
+                    Transport.REST,
+                    req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0),
+                )
+        finally:
+            # An OperationalError escaping a UoW is a genuine DB-outage signal, so
+            # get_db_session opens the process-wide circuit breaker. Reset it or
+            # every later test in this process fails fast on an injected fault.
+            reset_health_state()
+
+        assert result.is_error, f"a database failure must reject, got {result!r}"
+        assert_envelope_shape(
+            result.wire_error_envelope,
+            "SERVICE_UNAVAILABLE",
+            recovery="transient",
+        )
+        body = json.dumps(result.wire_error_envelope)
+        assert "SQL:" not in body, f"the failing statement leaked to the buyer: {body}"
+        assert secret not in body, f"a bound parameter value leaked to the buyer: {body}"
+        assert "media_buys" not in body, f"SQL statement text leaked to the buyer: {body}"
+
     def test_absent_revision_keeps_last_write_wins(self, integration_db):
         """Omitting the token preserves LWW semantics — the gate only fires when provided."""
         from tests.harness.media_buy_dual import MediaBuyDualEnv
