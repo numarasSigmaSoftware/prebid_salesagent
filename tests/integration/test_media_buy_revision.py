@@ -212,9 +212,10 @@ class TestRevisionOptimisticConcurrency:
         from unittest.mock import patch
 
         from sqlalchemy import delete
+        from sqlalchemy.orm import Session as SASession
 
         import src.core.tools.media_buy_update as media_buy_update_module
-        from src.core.database.database_session import get_db_session
+        from src.core.database.database_session import get_engine
         from src.core.database.models import MediaBuy, MediaPackage
         from tests.harness.media_buy_dual import MediaBuyDualEnv
 
@@ -223,21 +224,26 @@ class TestRevisionOptimisticConcurrency:
             created = _create_buy(env, product)
 
             real_verify = media_buy_update_module._verify_principal
+            # An independent session, like the other out-of-band DB work in these
+            # suites — test bodies must not open get_db_session().
+            racer = SASession(bind=get_engine())
 
             def _verify_then_delete(*args, **kwargs):
                 """Real ownership check, then delete the row — the exact race window."""
                 outcome = real_verify(*args, **kwargs)
-                with get_db_session() as session:
-                    session.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == created.media_buy_id))
-                    session.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == created.media_buy_id))
-                    session.commit()
+                racer.execute(delete(MediaPackage).where(MediaPackage.media_buy_id == created.media_buy_id))
+                racer.execute(delete(MediaBuy).where(MediaBuy.media_buy_id == created.media_buy_id))
+                racer.commit()
                 return outcome
 
-            with patch.object(media_buy_update_module, "_verify_principal", side_effect=_verify_then_delete):
-                with pytest.raises(RuntimeError, match="update flow continued with no media buy"):
-                    env.call_impl(
-                        req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=1)
-                    )
+            try:
+                with patch.object(media_buy_update_module, "_verify_principal", side_effect=_verify_then_delete):
+                    with pytest.raises(RuntimeError, match="update flow continued with no media buy"):
+                        env.call_impl(
+                            req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=1)
+                        )
+            finally:
+                racer.close()
 
             # Rejected at the gate: no adapter was even resolved, and no workflow
             # step was opened. Both flip the moment the guard comes back.
