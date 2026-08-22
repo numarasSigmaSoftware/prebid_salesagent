@@ -374,7 +374,7 @@ class TestRevisionBumpsOnStatusTransition:
         with MediaBuyUoW(tenant_a) as uow:
             buy = uow.media_buys.get_by_id("mb_rev_transition")
             assert buy is not None
-            returned = MediaBuyRepository.apply_status_transition(buy, "active")
+            returned = uow.media_buys.apply_status_transition(buy, "active")
             # CON-03: the seam returns the same (mutated) row, matching sibling mutators.
             assert returned is buy
             assert buy.status == "active"
@@ -388,6 +388,41 @@ class TestRevisionBumpsOnStatusTransition:
             assert persisted is not None
             assert persisted.status == "active"
             assert persisted.revision == 2
+
+    def test_transition_seams_refuse_a_row_from_another_tenant(self, tenant_a, tenant_b, principal_a, principal_b):
+        """Both transition seams resolve the row against the REPOSITORY's tenant.
+
+        These two seams write buyer-visible lifecycle state (``status``,
+        ``confirmed_at``, ``revision``) and take an ALREADY-LOADED row, so while
+        they were ``@staticmethod`` they had no tenant to check against: any caller
+        could hand them a buy from any tenant and the write went through. That is a
+        hole in the repository's core invariant, precisely on a write path. Bound to
+        an instance, the row must belong to this repository's tenant — the check
+        compares two independent sources (the row and the binding), not the row
+        against itself.
+        """
+        with MediaBuyUoW(tenant_b) as uow:
+            uow.media_buys.create(make_media_buy(tenant_b, principal_b, "mb_foreign_transition", status="draft"))
+
+        with MediaBuyUoW(tenant_b) as uow_b, MediaBuyUoW(tenant_a) as uow_a:
+            foreign = uow_b.media_buys.get_by_id("mb_foreign_transition")
+            assert foreign is not None, "test setup: tenant B's buy must exist"
+
+            with pytest.raises(ValueError, match="Tenant mismatch"):
+                uow_a.media_buys.apply_status_transition(foreign, "active")
+            with pytest.raises(ValueError, match="Tenant mismatch"):
+                uow_a.media_buys.apply_computed_status_transition(foreign, lambda _row: "active")
+
+        # Nothing was written: tenant B's buy is untouched on a fresh read.
+        with MediaBuyUoW(tenant_b) as uow:
+            assert uow.media_buys is not None
+            persisted = uow.media_buys.get_by_id("mb_foreign_transition")
+            assert persisted is not None
+            assert persisted.status == "draft", (
+                f"tenant A's repository mutated tenant B's buy: status={persisted.status!r}"
+            )
+            assert persisted.revision == 1, f"tenant A's repository bumped tenant B's revision to {persisted.revision}"
+            assert persisted.confirmed_at is None, "tenant A's repository stamped tenant B's confirmed_at"
 
     def test_scheduler_sweep_transition_bumps_revision_and_stamps_confirmed_at(self, tenant_a, principal_a):
         """The flight-date scheduler sweep goes through the repository seam.
@@ -606,7 +641,7 @@ class TestRevisionBumpsOnStatusTransition:
         with MediaBuyUoW(tenant_a) as uow:
             buy = uow.media_buys.get_by_id("mb_transition_confirm")
             assert buy is not None
-            MediaBuyRepository.apply_status_transition(buy, "pending_creatives")
+            uow.media_buys.apply_status_transition(buy, "pending_creatives")
 
         identity = PrincipalFactory.make_identity(
             tenant_id=tenant_a, principal_id=principal_a, tenant={"tenant_id": tenant_a}
@@ -646,7 +681,8 @@ class TestRevisionBumpsOnStatusTransition:
         approve_session = SASession(engine)
         try:
             # Sweep-style unlocked load: in-memory status is 'draft', confirmed_at None.
-            stale = MediaBuyRepository(stale_session, tenant_a).get_by_id("mb_confirm_race")
+            stale_repo = MediaBuyRepository(stale_session, tenant_a)
+            stale = stale_repo.get_by_id("mb_confirm_race")
             assert stale is not None
             assert stale.confirmed_at is None
 
@@ -658,7 +694,7 @@ class TestRevisionBumpsOnStatusTransition:
 
             # The stale session applies its own transition on the row it loaded
             # BEFORE the approval — its status is still 'draft' in memory.
-            MediaBuyRepository.apply_status_transition(stale, "active")
+            stale_repo.apply_status_transition(stale, "active")
             stale_session.commit()
         finally:
             stale_session.close()
@@ -697,7 +733,8 @@ class TestRevisionBumpsOnStatusTransition:
         admin_session = SASession(engine)
         try:
             # Sweep-style unlocked load: in-memory status is the soon-to-be-stale 'active'.
-            stale = MediaBuyRepository(stale_session, tenant_a).get_by_id("mb_status_race")
+            stale_repo = MediaBuyRepository(stale_session, tenant_a)
+            stale = stale_repo.get_by_id("mb_status_race")
             assert stale is not None
             assert stale.status == "active"
 
@@ -706,7 +743,7 @@ class TestRevisionBumpsOnStatusTransition:
             admin_session.commit()
 
             # The scheduler's stale active→completed transition must no-op under lock.
-            MediaBuyRepository.apply_status_transition(stale, "completed")
+            stale_repo.apply_status_transition(stale, "completed")
             stale_session.commit()
         finally:
             stale_session.close()
@@ -1284,7 +1321,7 @@ class TestConcurrentRevisionBump:
                 mb = uow.media_buys.get_by_id("mb_ast_concurrent")
                 assert mb is not None
                 barrier.wait()
-                MediaBuyRepository.apply_status_transition(mb, "active")
+                uow.media_buys.apply_status_transition(mb, "active")
                 # UoW commit happens on clean exit.
 
         _run_concurrently([transition_once, transition_once], thread_name_prefix="apply-status-transition")
@@ -1338,7 +1375,7 @@ class TestConcurrentRevisionBump:
                 assert mb is not None
                 assert mb.end_date == past, "precondition: the scheduler starts from the ENDED window"
                 barrier.wait()
-                MediaBuyRepository.apply_computed_status_transition(
+                uow.media_buys.apply_computed_status_transition(
                     mb,
                     lambda locked: "completed" if locked.end_date < date.today() else None,
                 )

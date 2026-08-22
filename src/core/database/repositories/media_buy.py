@@ -900,8 +900,8 @@ class MediaBuyRepository:
         "end_date",
     )
 
-    @staticmethod
     def apply_computed_status_transition(
+        self,
         media_buy: MediaBuy,
         compute_target: Callable[[MediaBuy], str | None],
     ) -> MediaBuy:
@@ -933,7 +933,20 @@ class MediaBuyRepository:
         of the same buy. ``revision`` needs no refresh — it bumps via a
         server-side expression that serializes at the write-lock. Returns the same
         (mutated) row.
+
+        The row is resolved against THIS repository's tenant binding, not against
+        its own ``tenant_id``: an instance method cannot be handed a buy from
+        another tenant and quietly mutate it. That is why this is not a
+        ``@staticmethod`` — a free function has no tenant to check against, so the
+        core repository invariant ("every access is tenant-scoped") had a hole
+        exactly on the seam that writes buyer-visible lifecycle state. Mirrors the
+        guard on :meth:`create`.
         """
+        if media_buy.tenant_id != self._tenant_id:
+            raise ValueError(
+                f"Tenant mismatch: media_buy.tenant_id={media_buy.tenant_id!r} "
+                f"!= repository tenant_id={self._tenant_id!r}"
+            )
         session = object_session(media_buy)
         if session is not None:
             session.refresh(
@@ -949,8 +962,7 @@ class MediaBuyRepository:
         MediaBuyRepository._bump_revision(media_buy)
         return media_buy
 
-    @staticmethod
-    def apply_status_transition(media_buy: MediaBuy, new_status: str) -> MediaBuy:
+    def apply_status_transition(self, media_buy: MediaBuy, new_status: str) -> MediaBuy:
         """Transition an already-loaded MediaBuy to ``new_status`` and bump revision.
 
         The seam for paths that already hold a ``MediaBuy`` row on their own
@@ -991,12 +1003,14 @@ class MediaBuyRepository:
         concurrent transitions of the same buy. ``revision`` needs no refresh — it
         bumps via a server-side expression that serializes at the write-lock.
 
-        This is the STATIC-target variant of :meth:`apply_computed_status_transition`:
+        This is the FIXED-target variant of :meth:`apply_computed_status_transition`:
         the caller already knows the destination status (it does not depend on the
         refreshed window), so the only race to guard is a concurrent status change.
         Expressed as the compute callback below — return the fixed ``new_status``
         only while the committed status still matches what the caller based it on;
-        otherwise no-op — it reuses the one lock→refresh→stamp→bump tail.
+        otherwise no-op — it reuses the one lock→refresh→stamp→bump tail, and with
+        it the tenant-binding check: the row must belong to THIS repository's
+        tenant, resolved against the binding rather than against the row itself.
         """
         # The source status the caller based ``new_status`` on, captured before the
         # locked refresh (inside the computed seam) overwrites it with the committed
@@ -1016,7 +1030,7 @@ class MediaBuyRepository:
                 return None
             return new_status
 
-        return MediaBuyRepository.apply_computed_status_transition(media_buy, _compute)
+        return self.apply_computed_status_transition(media_buy, _compute)
 
     @staticmethod
     def apply_revision_bump(media_buy: MediaBuy) -> MediaBuy:

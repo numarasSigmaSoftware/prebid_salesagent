@@ -454,7 +454,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                             return "completed"
                         return "active"
 
-                    MediaBuyRepository.apply_computed_status_transition(media_buy, _approved_status)
+                    approve_repo.apply_computed_status_transition(media_buy, _approved_status)
 
                     media_buy.approved_at = datetime.now(UTC)
                     media_buy.approved_by = user_email
@@ -593,7 +593,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # MEDIA_BUY_UNCONFIRMED_STATUSES, so the shared seam bumps ``revision``
                     # without stamping ``confirmed_at``. Same session/transaction as the
                     # commit below, so the bump lands atomically with the step update.
-                    MediaBuyRepository.apply_status_transition(media_buy, "rejected")
+                    approve_repo.apply_status_transition(media_buy, "rejected")
 
                 db_session.commit()
 

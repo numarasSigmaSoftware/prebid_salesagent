@@ -117,6 +117,11 @@ class MediaBuyStatusScheduler:
         or ``None`` when it declined — either because the refreshed row needs no
         change, or because a concurrent transaction already moved it, in which
         case this sweep must not report or count an update it did not make.
+
+        The seam is an INSTANCE method, so it needs a tenant-bound repository. The
+        sweep is cross-tenant by design (:meth:`get_all_by_statuses`), so it binds
+        one per row, to that row's own tenant: a system sweep legitimately spans
+        tenants, and binding per row keeps every write scoped to exactly one.
         """
         applied: list[tuple[str, str]] = []
 
@@ -127,7 +132,7 @@ class MediaBuyStatusScheduler:
             applied.append((refreshed.status, target))
             return target
 
-        MediaBuyRepository.apply_computed_status_transition(media_buy, compute_target)
+        MediaBuyRepository(session, media_buy.tenant_id).apply_computed_status_transition(media_buy, compute_target)
         return applied[0] if applied else None
 
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
