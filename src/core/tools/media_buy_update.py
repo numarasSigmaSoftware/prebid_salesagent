@@ -432,10 +432,18 @@ def _update_media_buy_impl(
             # media buy's current revision does not match." (Schema-optional
             # field; no conformance storyboard step — ungraded.)
             # Acquire the authoritative row lock before any workflow or adapter
-            # side effect. The lock is held by this UoW until commit, so two
-            # same-token requests cannot both reach the adapter. lock_timeout
-            # bounds the WAITER so a second contending request fails fast with a
-            # transient CONFLICT instead of blocking to statement_timeout.
+            # side effect. lock_timeout bounds the WAITER so a second contending
+            # request fails fast with a transient CONFLICT instead of blocking to
+            # statement_timeout.
+            #
+            # What this lock does and does NOT guarantee: it does NOT hold across
+            # the adapter call — ``get_adapter`` opens a nested session whose
+            # ``close()`` ends the transaction, so the adapter runs unlocked and
+            # two same-token requests CAN both reach it. The guarantee that
+            # survives is on the persisted counter: ``_locked_mutate_and_bump``
+            # re-reads the row FOR UPDATE and re-checks ``expected_revision``
+            # before mutating, so the counter cannot be double-bumped for one
+            # token.
             _current_mb = uow.media_buys.get_by_id(
                 media_buy_id_to_use,
                 for_update=True,

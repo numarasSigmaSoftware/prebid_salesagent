@@ -67,7 +67,6 @@ class MediaBuyRepository:
         for_update: bool = False,
         populate_existing: bool = False,
         lock_timeout_seconds: int | None = None,
-        idle_in_transaction_timeout_seconds: int | None = None,
         context: ContextObject | dict[str, Any] | None = None,
     ) -> MediaBuy | None:
         """Get a media buy by its ID within the tenant.
@@ -78,18 +77,23 @@ class MediaBuyRepository:
         the locked row to refresh an instance already present in the identity
         map; this is required for authoritative revision/status checks.
 
-        ``lock_timeout_seconds`` (e.g. ``5``) arms a transaction-scoped ``SET LOCAL
-        lock_timeout`` before the locked read, so a second request contending for
-        the SAME row's lock fails fast (PostgreSQL SQLSTATE ``55P03``) instead of
-        blocking to the global ``statement_timeout``. That EXPECTED contention is
-        translated to a typed transient :class:`AdCPConflictError`
-        (``recovery="transient"``) — it is NOT a DB outage and must not trip the
-        DB circuit breaker. Keeping the timeout + SQLSTATE handling here (not in
-        the ``_impl``) keeps transport-agnostic business logic free of raw ``SET
-        LOCAL`` / driver error codes — the lock policy is a data-access concern.
+        ``lock_timeout_seconds`` (e.g. ``5``) arms ``SET LOCAL lock_timeout``
+        before the locked read, so a request contending for the SAME row's lock
+        fails fast (PostgreSQL SQLSTATE ``55P03``) instead of blocking to the
+        global ``statement_timeout``. That EXPECTED contention is translated to a
+        typed transient :class:`AdCPConflictError` (``recovery="transient"``) —
+        it is NOT a DB outage and must not trip the DB circuit breaker. Keeping
+        the timeout + SQLSTATE handling here (not in the ``_impl``) keeps
+        transport-agnostic business logic free of raw ``SET LOCAL`` / driver
+        error codes — the lock policy is a data-access concern.
 
-        ``lock_timeout`` bounds only the WAITER; ``idle_in_transaction_timeout_seconds``
-        bounds the HOLDER. ``context`` is echoed into the CONFLICT envelope.
+        Scope, precisely: ``SET LOCAL`` is TRANSACTION-scoped, not
+        statement-scoped, so the setting stays armed for every later statement in
+        the caller's transaction, not just the read below. Only that read is
+        wrapped by the 55P03 translation, so a later statement in the same
+        transaction that hits the timeout raises the raw ``OperationalError``.
+        ``lock_timeout`` bounds only the WAITER — nothing here bounds the lock
+        HOLDER. ``context`` is echoed into the CONFLICT envelope.
         """
         stmt = select(MediaBuy).where(
             MediaBuy.tenant_id == self._tenant_id,
@@ -99,7 +103,7 @@ class MediaBuyRepository:
             stmt = stmt.with_for_update()
         if populate_existing:
             stmt = stmt.execution_options(populate_existing=True)
-        if lock_timeout_seconds is None and idle_in_transaction_timeout_seconds is None:
+        if lock_timeout_seconds is None:
             return self._session.scalars(stmt).first()
 
         from sqlalchemy import text
@@ -110,14 +114,7 @@ class MediaBuyRepository:
         try:
             # SET can't bind parameters; the int() coercion makes the
             # never-user-input invariant structural rather than a comment.
-            if idle_in_transaction_timeout_seconds is not None:
-                self._session.execute(
-                    text(
-                        f"SET LOCAL idle_in_transaction_session_timeout = '{int(idle_in_transaction_timeout_seconds)}s'"
-                    )
-                )
-            if lock_timeout_seconds is not None:
-                self._session.execute(text(f"SET LOCAL lock_timeout = '{int(lock_timeout_seconds)}s'"))
+            self._session.execute(text(f"SET LOCAL lock_timeout = '{int(lock_timeout_seconds)}s'"))
             return self._session.scalars(stmt).first()
         except OperationalError as exc:
             if getattr(getattr(exc, "orig", None), "pgcode", None) != LOCK_NOT_AVAILABLE:
