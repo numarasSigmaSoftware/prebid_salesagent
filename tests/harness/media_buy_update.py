@@ -46,6 +46,14 @@ _DB_MODULE = "src.core.database.database_session"
 # update_media_buy MCP) do not accept as parameters. MediaBuyDualEnv pops these from
 # the model_dump before calling a wrapper so the flat-kwargs call doesn't fail on
 # unexpected keyword arguments. Kept in sync with update_media_buy_raw's signature.
+#
+# Every entry here SILENCES a field on a2a/mcp, so an entry a wrapper actually
+# accepts turns a spec obligation into a harness-manufactured pass. ``revision``
+# was listed and is declared on BOTH wrappers (media_buy_update.py:
+# ``update_media_buy``'s Annotated param and ``update_media_buy_raw``'s), so a
+# stale-token update dispatched as ``req=UpdateMediaBuyRequest(..., revision=N)``
+# lost its token in flattening and SUCCEEDED under last-write-wins on both wire
+# transports. Before adding a field here, check the wrapper signature.
 _WRAPPER_UNSUPPORTED_FIELDS = (
     "account",
     "adcp_major_version",
@@ -54,7 +62,6 @@ _WRAPPER_UNSUPPORTED_FIELDS = (
     "invoice_recipient",
     "new_packages",
     "proposal_id",
-    "revision",
     "today",
     "total_budget",
 )

@@ -20,6 +20,7 @@ from src.core.schemas._base import (
     CreateMediaBuySuccess,
     UpdateMediaBuySuccess,
 )
+from tests.harness.transport import Transport
 from tests.helpers.media_buy import read_back_media_buy
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -198,6 +199,40 @@ class TestRevisionOptimisticConcurrency:
             # Rejected update wrote nothing: revision unchanged on a fresh read.
             assert read_back_media_buy(env.identity, created.media_buy_id).revision == 1
 
+    @pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP], ids=lambda t: t.value)
+    def test_stale_revision_in_a_request_model_still_conflicts_on_a2a_and_mcp(self, integration_db, transport):
+        """A stale token carried by the REQUEST MODEL must reach the gate on a2a/mcp.
+
+        The other a2a/mcp CONFLICT pins pass ``revision=`` as an explicit kwarg, and
+        the harness's flatten step overlays explicit kwargs AFTER dropping its
+        wrapper-unsupported list — so those dispatches never exercised the drop. A
+        ``req=UpdateMediaBuyRequest(..., revision=N)`` dispatch is the only shape
+        that does: the token lives inside the model, gets stripped in flattening,
+        and the update then silently proceeds under last-write-wins. That is a
+        harness-manufactured pass — the spec MUST ("sellers MUST reject the update
+        with CONFLICT if the media buy's current revision does not match") would go
+        ungraded on both wire transports.
+        """
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+        from tests.helpers import assert_envelope_shape
+
+        with MediaBuyDualEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            created = _create_buy(env, product)  # persisted revision 1
+
+            result = env.call_via(
+                transport,
+                req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, budget=9000.0, revision=999),
+            )
+
+            assert result.is_error, (
+                f"a stale revision inside the request model must reject on {transport.value}, got {result!r}"
+            )
+            assert_envelope_shape(result.wire_error_envelope, "CONFLICT", recovery="transient")
+
+            # Rejected update wrote nothing: the strip let the budget through.
+            assert read_back_media_buy(env.identity, created.media_buy_id).revision == 1
+
     def test_vanished_buy_with_a_revision_token_fails_before_any_side_effect(self, integration_db):
         """A row that vanishes before the locked read must not skip the CONFLICT gate.
 
@@ -275,7 +310,6 @@ class TestRevisionOptimisticConcurrency:
         from src.core.database.database_session import get_engine
         from src.core.database.models import MediaBuy, MediaPackage
         from tests.harness.media_buy_dual import MediaBuyDualEnv
-        from tests.harness.transport import Transport
         from tests.helpers import assert_envelope_shape
 
         with MediaBuyDualEnv() as env:
@@ -367,7 +401,6 @@ class TestRevisionOptimisticConcurrency:
 
         from src.core.database.database_session import reset_health_state
         from tests.harness.media_buy_dual import MediaBuyDualEnv
-        from tests.harness.transport import Transport
         from tests.helpers import assert_envelope_shape
 
         secret = "pw-do-not-leak-9f3c"
