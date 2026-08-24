@@ -382,6 +382,31 @@ def _mirror_media_buy_status(model: Any) -> Any:
     return model
 
 
+def _reemit_always_included(model: BaseModel, data: dict[str, Any], *fields: str) -> dict[str, Any]:
+    """Put back REQUIRED-but-nullable spec fields that ``exclude_none=True`` dropped.
+
+    The inherited ``AdCPBaseModel.model_dump`` defaults ``exclude_none=True``, which
+    drops a ``None`` value. That is right for an optional field and wrong for one the
+    pinned schema lists as REQUIRED with a ``"null"`` arm: the body then omits a key
+    the buyer's validator demands.
+
+    Re-emits the model's OWN value (``getattr``), never a hardcoded ``None`` — the
+    same semantics as ``Account.model_dump``. A field dropped for any reason other
+    than being null (an explicit ``exclude=``) is therefore restored as it stands, so
+    this can never replace a real value with a fabricated null.
+
+    Call this from a ``@model_serializer(mode="wrap")``, never from a plain
+    ``model_dump`` override: pydantic-core serialization (``to_jsonable_python``, and
+    any parent that serializes this model as a nested value) bypasses Python-level
+    ``model_dump`` entirely, so an override there leaves the REQUIRED key missing on
+    exactly those wires.
+    """
+    for field in fields:
+        if field not in data:
+            data[field] = getattr(model, field, None)
+    return data
+
+
 class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     """Successful create_media_buy response extending adcp v1.2.1 type.
 
@@ -549,18 +574,15 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
         # therefore carry confirmed_at on the wire — present-with-null when the buy is
         # not yet seller-confirmed (e.g. the simulated/sandbox dry-run arm, which
         # confirms nothing). The inherited exclude_none=True would DROP a null
-        # confirmed_at, leaving the body missing a REQUIRED key, so re-emit it
-        # explicitly as null whenever it is absent from ``data``. This is a success-arm
-        # invariant, not a sandbox special case: it also guards adapter-layer successes
-        # (adapters/base.py, mock_ad_server.py) that are one refactor away from omitting
-        # the key. The ``"confirmed_at" not in data`` guard means a real committed
-        # instant (a non-null datetime already in ``data``) is never clobbered. revision
-        # already serializes as a non-null int (>=1) and is not re-injected here.
-        #
-        if "confirmed_at" not in data:
-            data["confirmed_at"] = None
-
-        return data
+        # confirmed_at, leaving the body missing a REQUIRED key, so it is re-emitted
+        # below. This is a success-arm invariant, not a sandbox special case: it also
+        # guards adapter-layer successes (adapters/base.py, mock_ad_server.py) that are
+        # one refactor away from omitting the key. revision already serializes as a
+        # non-null int (>=1) and is not re-emitted here.
+        # ``_reemit_always_included`` is the single mechanism shared with
+        # ``GetMediaBuysMediaBuy`` — it restores this model's own value, so a real
+        # committed instant is never replaced by a fabricated null.
+        return _reemit_always_included(self, data, "confirmed_at")
 
     def model_dump_internal(self, **kwargs):
         """Dump including internal fields for database storage and internal processing."""
@@ -3003,8 +3025,8 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # persisted, write-once seller confirmation instant and is nullable — None until
     # the seller has committed to the buy. Because the inherited exclude_none=True
     # would DROP a null confirmed_at, leaving the body missing a REQUIRED key, the
-    # serializer below re-injects it as null whenever it is absent (mirroring the
-    # CreateMediaBuySuccess.model_dump success-arm invariant).
+    # serializer below re-emits it through the same ``_reemit_always_included``
+    # mechanism ``CreateMediaBuySuccess`` uses.
     confirmed_at: datetime | None = Field(
         default=None, description="When this media buy was committed by the seller (stable after set)"
     )
@@ -3020,15 +3042,22 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # such arm.
     revision: Revision = Field(..., description="Current revision number for optimistic-concurrency updates")
 
+    @model_serializer(mode="wrap")
+    def _serialize_model(self, serializer, info):
+        """Re-emit the REQUIRED-but-nullable ``confirmed_at`` on EVERY serialization path.
+
+        A ``model_dump`` override would not run under pydantic-core — ``to_jsonable_python``
+        and any parent that serializes this buy as a nested value go straight to the core
+        serializer — so the guard lives here, in the same mechanism
+        ``CreateMediaBuySuccess`` uses. revision is a non-null int (persisted >= 1) and
+        always survives exclude_none on its own.
+        """
+        return _reemit_always_included(self, serializer(self), "confirmed_at")
+
     def model_dump(self, **kwargs):
         result = super().model_dump(**kwargs)
         if "packages" in result and self.packages:
             result["packages"] = [pkg.model_dump(**kwargs) for pkg in self.packages]
-        # confirmed_at is a REQUIRED (nullable) 3.1.1 field; exclude_none=True would
-        # drop it for an unconfirmed buy, so re-emit it as null when absent. The
-        # setdefault never clobbers a real committed instant already in ``result``.
-        # revision is a non-null int (persisted >= 1) so it always survives.
-        result.setdefault("confirmed_at", None)
         return result
 
 

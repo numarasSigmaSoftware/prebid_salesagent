@@ -734,6 +734,56 @@ class TestGetMediaBuysResponseStructure:
         assert mb["confirmed_at"] is None
         assert mb["revision"] == 1
 
+    def test_buy_alone_carries_required_confirmed_at_under_pydantic_core(self):
+        """The re-emit must survive pydantic-core, not only the Python model_dump path.
+
+        Both sibling tests above serialize the PARENT, whose mixin re-dumps each child
+        through ``GetMediaBuysMediaBuy.model_dump`` — so they stay green even when the
+        child's own guard sits in a plain ``model_dump`` override, which pydantic-core
+        never calls. This one hands the child straight to ``to_jsonable_python``, the
+        exact path such an override misses, so it reddens if the re-emit moves back out
+        of the child's ``@model_serializer``.
+        """
+        from pydantic_core import to_jsonable_python
+
+        buy = GetMediaBuysMediaBuy(
+            media_buy_id="mb_unconfirmed_core",
+            status=MediaBuyStatus.pending_start,
+            currency="USD",
+            total_budget=1000.0,
+            packages=[],
+            confirmed_at=None,
+            revision=1,
+        )
+
+        wire = to_jsonable_python(buy, exclude_none=True)
+
+        assert "confirmed_at" in wire, "confirmed_at REQUIRED when pydantic-core serializes the buy directly"
+        assert wire["confirmed_at"] is None
+        assert wire["revision"] == 1
+
+    def test_reemit_restores_the_buys_own_confirmed_at_not_a_hardcoded_null(self):
+        """The re-emit puts back the model's OWN value, matching ``Account.model_dump``.
+
+        Only observable when the key is dropped for some reason other than being null:
+        under an explicit ``exclude``, a hardcoded ``None`` would report a committed buy
+        as unconfirmed — a false statement about seller commitment. Both always-include
+        sites share one helper so this cannot differ between them.
+        """
+        committed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        buy = GetMediaBuysMediaBuy(
+            media_buy_id="mb_committed",
+            status=MediaBuyStatus.active,
+            currency="USD",
+            total_budget=1000.0,
+            packages=[],
+            confirmed_at=committed,
+            revision=2,
+        )
+
+        assert buy.model_dump(exclude={"confirmed_at"})["confirmed_at"] == committed
+        assert buy.model_dump()["confirmed_at"] == committed
+
     def test_nested_serialization_roundtrip(self):
         """model_dump() recursively serializes all nested models to plain dicts.
 

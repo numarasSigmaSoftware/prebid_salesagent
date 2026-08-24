@@ -1791,6 +1791,32 @@ class TestAdCPContract:
             f"CreateMediaBuySuccess should have at least 3 required fields, got {len(adcp_response)}"
         )
 
+    def test_create_media_buy_success_carries_required_confirmed_at_under_pydantic_core(self):
+        """3.1.1 create-media-buy-response oneOf[0] lists confirmed_at REQUIRED (nullable).
+
+        The inherited exclude_none=True drops a null confirmed_at, so the success arm
+        re-emits it. Serialized here through ``to_jsonable_python``, which bypasses any
+        Python ``model_dump`` override — the same mechanism ``GetMediaBuysMediaBuy``
+        uses, graded on the same path, so the two cannot drift apart.
+        """
+        from pydantic_core import to_jsonable_python
+
+        from src.core.schemas import CreateMediaBuySuccess
+
+        unconfirmed = CreateMediaBuySuccess(media_buy_id="mb_unconfirmed_core", packages=[])
+
+        wire = to_jsonable_python(unconfirmed, exclude_none=True)
+
+        assert "confirmed_at" in wire, "confirmed_at REQUIRED on the success arm even when null"
+        assert wire["confirmed_at"] is None
+
+        # The re-emit restores the model's OWN value, never a hardcoded null: under an
+        # explicit exclude a hardcoded None would report a committed buy as unconfirmed.
+        committed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        confirmed = CreateMediaBuySuccess(media_buy_id="mb_committed", packages=[], confirmed_at=committed)
+        assert confirmed.model_dump(exclude={"confirmed_at"})["confirmed_at"] == committed
+        assert confirmed.model_dump()["confirmed_at"] == committed
+
     def test_get_products_response_adcp_compliance(self):
         """Test that GetProductsResponse complies with AdCP get-products-response schema."""
         # Create Product using the actual Product model (not ProductSchema)
