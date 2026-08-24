@@ -184,13 +184,22 @@ class DeliveryWebhookScheduler:
         while self.is_running:
             try:
                 await self._send_reports()
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"Error in delivery webhook scheduler: {e}", exc_info=True)
-            finally:
-                # Wait before next batch
-                await asyncio.sleep(SLEEP_INTERVAL_SECONDS)
+
+            # Cancellable sleep in the loop body, and no `except asyncio.CancelledError`
+            # above — the identical fix applied to media_buy_status_scheduler, for the
+            # identical defect. Catching CancelledError to `break` consumed it, and the
+            # old `finally` then started a fresh sleep the cancellation no longer
+            # applied to, so `stop()` blocked for up to a full hour on shutdown. Here
+            # the try body has always suspended (`_send_reports` awaits), so unlike the
+            # sibling this was reachable all along.
+            #
+            # CancelledError is a BaseException and so is not caught above: a failing
+            # batch is still absorbed and the loop survives it, while a cancel ends the
+            # task at once. `stop()` already wraps `await self._task` in
+            # `except CancelledError`.
+            await asyncio.sleep(SLEEP_INTERVAL_SECONDS)
 
     async def _send_reports(self) -> DeliveryBatchSummary:
         """Send reports for all active media buys with configured webhooks.

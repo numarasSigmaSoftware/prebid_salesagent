@@ -123,13 +123,25 @@ class MediaBuyStatusScheduler:
                 # delivery_webhook_scheduler.py, which cannot be offloaded for exactly
                 # the opposite reason.
                 await asyncio.to_thread(self._update_statuses)
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"Error in media buy status scheduler: {e}", exc_info=True)
-            finally:
-                # Wait before next check
-                await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
+
+            # Cancellation must reach here as a live exception, so this sleep is an
+            # ordinary cancellable await in the loop body — NOT a `finally`, and there
+            # is deliberately no `except asyncio.CancelledError` above.
+            #
+            # The old shape caught CancelledError to `break`, which CONSUMED it, and
+            # the `finally` then started a FRESH sleep that the cancellation no longer
+            # applied to — so `stop()` (which awaits this task) blocked for a whole
+            # interval. That was latent while the try body never suspended; offloading
+            # the sweep to a thread made `await` a real suspension point and the
+            # cancellation started landing inside the try, which made it reachable.
+            #
+            # CancelledError is a BaseException, so the `except Exception` above cannot
+            # swallow it: an ordinary sweep failure is still absorbed and the loop
+            # survives it, while a cancel propagates and ends the task at once.
+            # `stop()` already wraps `await self._task` in `except CancelledError`.
+            await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
 
     def _update_statuses(self) -> StatusSweepSummary:
         """Check and update media buy statuses based on flight dates.
