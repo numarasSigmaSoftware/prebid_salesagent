@@ -689,21 +689,6 @@ class MediaBuyRepository:
             raise AdCPGoneError(f"Media buy {media_buy_id!r} is no longer available")
         return media_buy
 
-    def update_status_or_raise(
-        self,
-        media_buy_id: str,
-        status: str,
-        *,
-        approved_at: datetime.datetime | None = None,
-        approved_by: str | None = None,
-    ) -> MediaBuy:
-        """``update_status``, raising if the buy vanished mid-request (No Quiet Failures)."""
-        return self._require_mutated(
-            self.update_status(media_buy_id, status, approved_at=approved_at, approved_by=approved_by),
-            media_buy_id,
-            f"status transition to {status!r}",
-        )
-
     def bump_revision_or_raise(
         self,
         media_buy_id: str,
@@ -1039,26 +1024,3 @@ class MediaBuyRepository:
             return new_status
 
         return self.apply_computed_status_transition(media_buy, _compute)
-
-    @staticmethod
-    def apply_revision_bump(media_buy: MediaBuy) -> MediaBuy:
-        """Advance the revision of an already-loaded buy WITHOUT a status change.
-
-        The seam for a non-status mutation that still materially changes the buy —
-        a creative assignment created, or an assignment weight actually changed, on
-        the creative-sync pass (rows loaded inside ``CreativeUoW``). Bumps the AdCP
-        3.1.1 ``revision`` optimistic-concurrency token so a buyer's next
-        update observes a fresh token, WITHOUT writing ``status`` or stamping
-        ``confirmed_at`` (the buy's lifecycle state is unchanged). Uses the same
-        server-side ``coalesce(revision, 0) + 1`` expression as every other seam,
-        so it is concurrency-safe on the unlocked ``CreativeUoW`` row and never
-        collapses two bumps onto one value.
-
-        The CALLER filters idempotent no-op assignments (existing assignment, weight
-        already at target) — this method ALWAYS bumps, and must not be called for a
-        buy that also transitions status this pass (``apply_status_transition``
-        already bumps once; calling both would double-count). Returns the same
-        (mutated) row.
-        """
-        MediaBuyRepository._bump_revision(media_buy)
-        return media_buy

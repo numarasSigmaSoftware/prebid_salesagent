@@ -323,12 +323,13 @@ class TestRevisionBumpsOnStatusTransition:
             assert result is not None
             assert result.revision == 2
 
-    def test_update_status_or_raise_returns_row_and_raises_when_missing(self, tenant_a, principal_a):
-        """The or-raise variant surfaces a vanished buy instead of reporting silent success.
+    def test_or_raise_variants_raise_when_the_buy_vanished(self, tenant_a, principal_a):
+        """The or-raise variants surface a vanished buy instead of reporting silent success.
 
-        The admin approve/reject routes verify the buy exists, then transition it;
-        a ``None`` from ``update_status`` at that point means the row disappeared
-        mid-request — No-Quiet-Failures requires a raise, not a skipped write.
+        A caller that verified the buy exists, then mutates it (the update tool
+        past ``get_by_id_or_raise``), gets ``None`` back only when the row
+        disappeared mid-request — No-Quiet-Failures requires a raise, not a
+        skipped write.
 
         The raise is the TYPED ``AdCPGoneError``, pinned here by its wire contract
         (410 / INVALID_STATE / correctable), not merely by its class. A bare
@@ -341,12 +342,11 @@ class TestRevisionBumpsOnStatusTransition:
             uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_rev_or_raise", status="pending_approval"))
 
         with MediaBuyUoW(tenant_a) as uow:
-            result = uow.media_buys.update_status_or_raise("mb_rev_or_raise", "active")
+            result = uow.media_buys.update_fields_or_raise("mb_rev_or_raise", status="active")
             assert result.status == "active"
 
         with MediaBuyUoW(tenant_a) as uow:
             vanished_mutations = (
-                lambda: uow.media_buys.update_status_or_raise("mb_never_existed", "active"),
                 lambda: uow.media_buys.update_fields_or_raise("mb_never_existed", budget=Decimal("1.00")),
                 lambda: uow.media_buys.bump_revision_or_raise("mb_never_existed"),
             )
