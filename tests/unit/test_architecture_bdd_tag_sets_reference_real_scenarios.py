@@ -8,9 +8,9 @@ the scenario is simply gone, so no test fails and no count changes.
 This is the THIRD deadness mechanism found in these sets, and the first two were each
 fixed one instance at a time before the class was closed:
 
-1. Overlap with ``_TRANSPORT_INDEPENDENT_SCENARIO_TAGS`` — the transport-independent
-   check returns before any e2e_rest gate is consulted, so the entry excludes nothing.
-   (Hollowed out ``_NO_E2E_REST_TAGS``, then all eleven
+1. Overlap with a transport-independent exemption registry (since deleted) — its
+   check returned before any e2e_rest gate was consulted, so the entry excluded
+   nothing. (Hollowed out ``_NO_E2E_REST_TAGS``, then all eleven
    ``_UC004_E2E_WEBHOOK_INTERNAL_TAGS`` entries.)
 2. Unreachable gate — ``_NO_REST_UC_TAG_PREFIXES`` strips E2E_REST from the transport
    list for a whole UC, so every ``is_e2e_rest``-gated block for it is dead regardless

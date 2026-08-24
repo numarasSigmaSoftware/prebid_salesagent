@@ -29,7 +29,7 @@ from tests.helpers.delivery_assertions import (
     assert_next_expected_at_shape,
     assert_omits_webhook_only_fields,
 )
-from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK, flight_window
+from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK
 
 if TYPE_CHECKING:
     from src.core.database.models import MediaBuy
@@ -360,24 +360,19 @@ def _setup_scheduler_buy(
     mb_id: str,
     *,
     reporting_webhook: dict[str, Any] | None = None,
-    flight: str | None = None,
 ) -> MediaBuy:
-    """Create and register the media buy used by scheduler-originated scenarios."""
-    owner = ctx.get("principal_id", "buyer-001")
-    start_date: str | None = None
-    end_date: str | None = None
-    if flight is not None:
-        flight_start, flight_end = flight_window(flight)
-        start_date = flight_start.isoformat()
-        end_date = flight_end.isoformat()
+    """Create and register the media buy used by scheduler-originated scenarios.
 
+    Uses the factory's default mid-flight window: the remaining scheduler scenario
+    does not select a flight phase. A phase-selecting variant belongs with the
+    integration graders, which take their window from ``flight_window``.
+    """
+    owner = ctx.get("principal_id", "buyer-001")
     buy = _ensure_media_buy_in_db(
         ctx,
         mb_id,
         owner,
         status="active",
-        start_date=start_date,
-        end_date=end_date,
         raw_request={"reporting_webhook": dict(reporting_webhook or DAILY_REPORTING_WEBHOOK)},
     )
     assert buy is not None, "Scheduler scenarios require a database-backed delivery polling environment"
