@@ -172,6 +172,15 @@ def _persist_reporting_webhook_update(
 ) -> None:
     """Persist an acknowledged reporting-webhook replacement exactly once.
 
+    ``reporting_webhook`` "Updates the reporting configuration for this media
+    buy" (adcp/_schemas/3.1/media-buy/update-media-buy-request.json, AdCP 3.1.1
+    via adcp==6.6.0), so acknowledging one without persisting it is a silent
+    no-op: the delivery scheduler picks its POST target by reading
+    ``MediaBuy.raw_request["reporting_webhook"]``, which is exactly what this
+    write rewrites. Graded end to end — update on the wire, then the next
+    scheduler batch's target — in
+    tests/integration/test_delivery_webhooks_integration.py.
+
     Validation happens before dry-run/approval branching. Persistence belongs
     only on completed update paths: dry runs and submitted approval requests
     must leave the active channel unchanged until the update is actually

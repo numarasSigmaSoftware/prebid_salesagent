@@ -6,9 +6,11 @@ These tests:
 - Mock only the GAM reporting layer (get_media_buy_delivery + freshness) and outbound HTTP
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime, time, timedelta
 from unittest.mock import ANY, AsyncMock, patch
 
@@ -809,3 +811,174 @@ async def test_batch_summary_distinguishes_suppressed_from_idle(integration_db):
     # anyone reading only the buckets. Deleting the "(of N selected)" fragment from
     # the production line reddened nothing here before this.
     assert_summary_reports_against_its_selection(summaries, "batch complete", selected=1)
+
+
+# ---------------------------------------------------------------------------
+# update_media_buy rewrites the delivery-webhook TARGET (R17-1)
+#
+# `reporting_webhook` "Updates the reporting configuration for this media buy"
+# (adcp/_schemas/3.1/media-buy/update-media-buy-request.json, AdCP 3.1.1 via
+# adcp==6.6.0). The scheduler decides where to POST by reading
+# MediaBuy.raw_request["reporting_webhook"], so persisting an acknowledged
+# replacement is a buyer-VISIBLE routing change, not bookkeeping: before it the
+# field was accepted and silently ignored, and every subsequent delivery kept
+# going to the old endpoint.
+#
+# The three tests below grade the three outcomes that change:
+#   * the replacement takes effect on the next scheduler batch,
+#   * dry-run / submitted-approval leave the live channel alone,
+#   * a row that vanishes under the write is reported as MEDIA_BUY_NOT_FOUND.
+# ---------------------------------------------------------------------------
+
+# Distinct from DAILY_REPORTING_WEBHOOK in every graded field, so a test can only
+# pass by reading the REPLACEMENT rather than by matching the seeded config.
+REPLACEMENT_REPORTING_WEBHOOK = {
+    "url": "https://replacement.example.com/webhook",
+    "authentication": {
+        "schemes": ["Bearer"],
+        "credentials": "replacement-webhook-test-credential-01",
+    },
+    "reporting_frequency": "daily",
+}
+
+# example.com's own real address — the repo-wide idiom for stubbing
+# socket.gethostbyname (see tests/harness/delivery_poll.py). The registration
+# SSRF gate's IP-range check still runs on it for real and allows it.
+_PUBLIC_RESOLVED_IP = "93.184.216.34"
+
+
+@contextmanager
+def _dual_env_with_serving_buy():
+    """Yield ``(env, media_buy)``: a real-transport update env over a serving buy.
+
+    MediaBuyDualEnv is the only env that routes an UpdateMediaBuyRequest through
+    the real A2A/MCP/REST wrappers against a real database, which is what makes
+    the persisted rewrite observable to a subsequent scheduler batch (and what
+    makes ``result.assert_wire_error`` meaningful — the impl-only dispatch used
+    by MediaBuyUpdateEnv captures no wire envelope at all).
+
+    The buy is mid-flight and persisted-``active`` so the delivery batch selects
+    it, and it carries the SHARED daily webhook config, so the target the
+    scheduler resolves after the update is only ever the replacement.
+    """
+    from tests.factories import MediaBuyFactory
+    from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+    with MediaBuyDualEnv() as env:
+        tenant, principal, _product, _pricing = env.setup_media_buy_data()
+        buy = MediaBuyFactory(
+            tenant=tenant,
+            principal=principal,
+            status="active",
+            start_date=datetime.now(UTC).date() - timedelta(days=7),
+            end_date=datetime.now(UTC).date() + timedelta(days=7),
+            raw_request={"reporting_webhook": dict(DAILY_REPORTING_WEBHOOK)},
+        )
+        env._commit_factory_data()
+        env._seeded_media_buy_id = buy.media_buy_id
+        yield env, buy
+
+
+def _persisted_reporting_webhook(env, media_buy) -> dict:
+    """Read back the channel the scheduler will resolve, through the repository."""
+    from src.core.database.repositories.media_buy import MediaBuyRepository
+
+    env._session.expire_all()
+    repo = MediaBuyRepository(env._session, media_buy.tenant_id)
+    row = repo.get_by_id(media_buy.media_buy_id)
+    assert row is not None, "media buy disappeared"
+    return (row.raw_request or {}).get("reporting_webhook") or {}
+
+
+def _dispatch_reporting_webhook_update(env, media_buy, webhook: dict):
+    """Dispatch an update_media_buy carrying ``webhook`` over the A2A wire."""
+    from src.core.schemas import UpdateMediaBuyRequest
+    from tests.harness.transport import Transport
+
+    with patch("src.core.security.url_validator.socket.gethostbyname", return_value=_PUBLIC_RESOLVED_IP):
+        return env.call_via(
+            Transport.A2A,
+            req=UpdateMediaBuyRequest(media_buy_id=media_buy.media_buy_id, reporting_webhook=webhook),
+        )
+
+
+@pytest.mark.requires_db
+def test_update_media_buy_repoints_the_next_delivery_webhook_at_the_new_url(integration_db):
+    """An acknowledged reporting_webhook replacement redirects the next batch's POST.
+
+    This is the whole buyer-visible effect of persisting the update: the batch
+    that runs after it must build its sender carrier from the REPLACEMENT url and
+    credentials. Reverting the write in ``_persist_reporting_webhook_update``
+    leaves the scheduler pointed at the seeded config and reddens this test.
+    """
+    with _dual_env_with_serving_buy() as (env, buy):
+        result = _dispatch_reporting_webhook_update(env, buy, REPLACEMENT_REPORTING_WEBHOOK)
+        assert result.is_success, f"update failed: {result.error!r} / {result.payload!r}"
+
+        # Synchronous test on purpose: MediaBuyDualEnv's A2A dispatch calls
+        # asyncio.run() internally, which cannot run inside an already-running
+        # loop. The batch is driven with its own loop instead.
+        scheduler = DeliveryWebhookScheduler()
+        with mock_send_notification(scheduler) as mock_send:
+            asyncio.run(scheduler._send_reports())
+
+        assert mock_send.await_count == 1, (
+            f"expected exactly one delivery webhook for the serving buy, got {mock_send.await_count}"
+        )
+        assert_detached_push_config(
+            mock_send.await_args.kwargs["push_notification_config"],
+            tenant_id=buy.tenant_id,
+            principal_id=buy.principal_id,
+            url=REPLACEMENT_REPORTING_WEBHOOK["url"],
+            config_id=f"temp_{buy.media_buy_id}",
+            authentication_type="Bearer",
+            authentication_token="replacement-webhook-test-credential-01",
+            context="post-update delivery carrier",
+        )
+
+
+@pytest.mark.requires_db
+def test_submitted_for_approval_update_leaves_the_live_reporting_channel_unchanged(integration_db):
+    """An update parked for human approval must not reroute deliveries yet.
+
+    ``_persist_reporting_webhook_update`` documents that persistence belongs only
+    on completed update paths: a submitted approval request leaves the active
+    channel unchanged until the update is actually applied. Without that, merely
+    ASKING to change the endpoint would redirect live traffic before anyone
+    approved it.
+    """
+    from src.core.schemas._base import UpdateMediaBuySubmitted
+
+    with _dual_env_with_serving_buy() as (env, buy):
+        adapter = env.mock["update_adapter"].return_value
+        adapter.manual_approval_required = True
+        adapter.manual_approval_operations = ["update_media_buy"]
+
+        result = _dispatch_reporting_webhook_update(env, buy, REPLACEMENT_REPORTING_WEBHOOK)
+
+        assert isinstance(result.payload, UpdateMediaBuySubmitted), (
+            f"expected the approval-gated envelope, got {result.payload!r} / {result.error!r}"
+        )
+        assert _persisted_reporting_webhook(env, buy) == DAILY_REPORTING_WEBHOOK, (
+            "an update awaiting approval must leave the persisted reporting channel untouched"
+        )
+
+
+@pytest.mark.requires_db
+def test_reporting_webhook_write_against_a_vanished_row_is_media_buy_not_found(integration_db):
+    """The persist step's own not-found raise reaches the buyer as MEDIA_BUY_NOT_FOUND.
+
+    Ownership verification reads the row much earlier, so this branch only fires
+    when the row disappears UNDER the write (a concurrent delete). Returning None
+    from the repository write is the only way to reach it; the repository's own
+    behavior is untouched. Graded on the wire envelope rather than the raised
+    exception, since the reconstruction is lossy.
+    """
+    from src.core.database.repositories.media_buy import MediaBuyRepository
+
+    with _dual_env_with_serving_buy() as (env, buy):
+        with patch.object(MediaBuyRepository, "update_reporting_webhook", return_value=None):
+            result = _dispatch_reporting_webhook_update(env, buy, REPLACEMENT_REPORTING_WEBHOOK)
+
+        assert result.is_error, f"expected a not-found error, got {result.payload!r}"
+        result.assert_wire_error("MEDIA_BUY_NOT_FOUND", message_substr="reporting_webhook")
