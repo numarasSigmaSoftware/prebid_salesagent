@@ -735,9 +735,25 @@ class TestA2ASkillInvocation:
             # The wire carries the PERSISTED revision, not the subclass default: the buy
             # is seeded at revision 1 and this update bumps the optimistic-concurrency
             # counter once, so the response is revision 2 (pinned against a real database
-            # by tests/integration/test_media_buy_revision.py). Numbers are doubles on the
-            # A2A protobuf-Struct transport, so 2 arrives as 2.0 — assert on value.
+            # by tests/integration/test_media_buy_revision.py).
             assert payload["revision"] == 2, f"missing/incorrect revision on wire: {payload!r}"
+            # The JSON TYPE is pinned too, not just the value: ``== 2`` alone is green
+            # whether the wire carried the int 2 or the double 2.0, so it could not see
+            # this transport's representation at all. A2A carries the payload through a
+            # protobuf Struct, whose only numeric type is a double, so an integer arrives
+            # as 2.0. That is CONFORMANT — the pinned schema types revision as draft-07
+            # {"type": "integer", "minimum": 1} and draft-07 ``integer`` matches any
+            # number with a zero fractional part — and it is deliberate, so do not
+            # "normalise" it here. (Doubles represent integers exactly only up to 2**53;
+            # at one bump per accepted update that ceiling is unreachable in practice.)
+            # The cross-transport fork is graded in
+            # tests/integration/test_media_buy_revision.py::
+            # TestEmittedRevisionAndConfirmedAtPerTransport.
+            emitted_revision = payload["revision"]
+            assert isinstance(emitted_revision, float) and emitted_revision.is_integer(), (
+                "A2A emits protobuf-Struct doubles, so the revision is expected as a "
+                f"whole-number float here; got {type(emitted_revision).__name__} ({emitted_revision!r})"
+            )
 
     @pytest.mark.asyncio
     async def test_list_creative_formats_skill(

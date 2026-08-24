@@ -570,3 +570,96 @@ class TestRawPayloadRoutesToUpdate:
         from tests.harness.media_buy_dual import _is_update_request
 
         assert _is_update_request(kwargs) is expected, why
+
+
+@pytest.mark.requires_db
+class TestEmittedRevisionAndConfirmedAtPerTransport:
+    """The VALUES of ``revision`` and ``confirmed_at`` are graded on every wire.
+
+    Both fields were graded only through typed response objects or a comparison
+    that could not fail: ``payload["revision"] == 2`` is green whether the wire
+    carried the int ``2`` or the double ``2.0``, and ``confirmed_at``'s emitted
+    value was asserted on no transport at all. These tests read the real wire
+    body per transport and pin both the value and its JSON type.
+
+    THE PER-TRANSPORT JSON-TYPE FORK IS DELIBERATE AND CONFORMANT — do not
+    "fix" it. A2A carries the payload through a protobuf ``Struct``, whose only
+    numeric type is a double, so an integer arrives as ``2.0``; MCP and REST
+    serialize plain JSON and emit ``2``. The pinned schemas type ``revision`` as
+    draft-07 ``{"type": "integer", "minimum": 1}``, and draft-07 ``integer``
+    matches ANY number with a zero fractional part — so ``2.0`` satisfies it
+    exactly as ``2`` does. (This is the same draft-07 rule that makes an inbound
+    ``revision: 7.0`` acceptable on the request side.)
+
+    The double DOES impose a ceiling: an IEEE-754 double represents integers
+    exactly only up to 2**53, so a counter beyond that would lose precision on
+    A2A. At one bump per accepted update that bound is unreachable in practice,
+    and normalising the A2A representation is a separate decision — these tests
+    grade what is emitted, they do not change it.
+    """
+
+    #: Transports whose JSON numbers survive as Python ints, paired with the
+    #: type the wire must carry. ``bool`` is excluded implicitly: it would be a
+    #: different JSON type entirely.
+    _INT_TRANSPORTS = [Transport.MCP, Transport.REST]
+
+    @pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP, Transport.REST], ids=lambda t: t.value)
+    def test_emitted_revision_value_and_json_type(self, env_with_media_buy, transport):
+        env, media_buy = env_with_media_buy
+
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, budget=9000.0)
+
+        assert result.is_success, f"the update must succeed on {transport.value}, got {result!r}"
+        wire = result.wire_response
+        assert isinstance(wire, dict), f"no wire body captured on {transport.value}: {wire!r}"
+
+        # The seeded buy is at revision 1; one accepted update bumps it to 2.
+        assert wire["revision"] == 2, f"{transport.value} emitted revision={wire['revision']!r}, expected 2"
+
+        emitted = wire["revision"]
+        if transport in self._INT_TRANSPORTS:
+            assert isinstance(emitted, int) and not isinstance(emitted, bool), (
+                f"{transport.value} serializes plain JSON and must emit an integer, "
+                f"got {type(emitted).__name__} ({emitted!r})"
+            )
+        else:
+            # Pinned, not tolerated silently: if A2A ever starts emitting an int
+            # this reddens, and whoever changed it reads the docstring above
+            # before deciding whether the change was intended.
+            assert isinstance(emitted, float), (
+                "A2A carries the payload through a protobuf Struct (doubles only), so the "
+                f"counter is expected as a float here; got {type(emitted).__name__} ({emitted!r})"
+            )
+            assert emitted.is_integer(), f"a revision must have no fractional part, got {emitted!r}"
+
+    @pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP, Transport.REST], ids=lambda t: t.value)
+    def test_emitted_confirmed_at_matches_the_persisted_instant(self, integration_db, transport):
+        """The create response's ``confirmed_at`` must be the PERSISTED instant.
+
+        A buy created straight into a seller-confirmed status is stamped with its
+        create instant, and the create response carries that stamp. Nothing
+        asserted the emitted VALUE on any transport, so a response that echoed
+        "now", or a null, or the class default would have passed everywhere.
+        """
+        from datetime import datetime
+
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+        with MediaBuyDualEnv() as env:
+            _tenant, _principal, product, _pricing = env.setup_media_buy_data()
+
+            result = env.call_via(transport, **env.default_create_kwargs(product, brand_domain="i2.example"))
+
+            assert result.is_success, f"the create must succeed on {transport.value}, got {result!r}"
+            wire = result.wire_response
+            assert isinstance(wire, dict), f"no wire body captured on {transport.value}: {wire!r}"
+
+            assert "confirmed_at" in wire, f"{transport.value} dropped the required confirmed_at key"
+            emitted = wire["confirmed_at"]
+            assert emitted is not None, f"{transport.value} emitted a null confirmed_at for a committed buy"
+
+            persisted = read_back_media_buy(env.identity, wire["media_buy_id"]).confirmed_at
+            assert persisted is not None, "the created buy was not stamped in the database"
+            assert datetime.fromisoformat(str(emitted).replace("Z", "+00:00")) == persisted, (
+                f"{transport.value} emitted confirmed_at={emitted!r} but the row holds {persisted!r}"
+            )
