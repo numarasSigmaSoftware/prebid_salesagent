@@ -419,6 +419,22 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # not-yet-committed arms require present-as-null. revision stays a non-null int (default
     # 1); it is never None, so it can never serialize OMITTED.
     confirmed_at: AwareDatetime | None = None  # type: ignore[assignment]
+    # The default FABRICATES an optimistic-concurrency token, and that is a
+    # deliberate, bounded compromise rather than an oversight:
+    #   * the adapter layer constructs this wire model with no persisted row in hand
+    #     (it has not written one), so it cannot supply the real counter — a required
+    #     field would make every adapter-side builder fail;
+    #   * ``_impl`` rebuilds the success from the persisted row before the response
+    #     reaches a buyer, so the value a buyer actually receives is the real counter;
+    #   * the residual hazard is therefore precise: a caller that returns an
+    #     ADAPTER-BUILT response DIRECTLY, skipping that rebuild, emits revision=1 for
+    #     a buy whose real revision is anything. Nothing in the type system stops that.
+    # ``GetMediaBuysResponse`` declares the SAME field as ``Field(..., ge=1)``. The two
+    # answers are deliberate: that model's only populating site always holds the
+    # persisted row, so it has no adapter-built arm to accommodate and can afford the
+    # loud-failure spelling; this one cannot.
+    # Removable when the adapter layer returns an internal result type rather than a
+    # wire response.
     revision: int = Field(default=1, ge=1)
 
     @classmethod
@@ -688,6 +704,23 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     # persisted revision explicitly, overriding the default (adapter-layer builders leave the
     # default; the tool rebuilds the wire success with the persisted counter).
     # (The prose/schema divergence is re-grounded to 3.1.1 and tracked in #1564.)
+    #
+    # The default FABRICATES an optimistic-concurrency token, and that is a
+    # deliberate, bounded compromise rather than an oversight:
+    #   * the adapter layer constructs this wire model with no persisted row in hand,
+    #     so it cannot supply the real counter — a required field would make every
+    #     adapter-side builder fail;
+    #   * ``_impl`` rebuilds the success from the persisted row before the response
+    #     reaches a buyer, so the value a buyer actually receives is the real counter;
+    #   * the residual hazard is therefore precise: a caller that returns an
+    #     ADAPTER-BUILT response DIRECTLY, skipping that rebuild, emits revision=1 for
+    #     a buy whose real revision is anything. Nothing in the type system stops that.
+    # ``GetMediaBuysResponse`` declares the SAME field as ``Field(..., ge=1)``. The two
+    # answers are deliberate: that model's only populating site always holds the
+    # persisted row, so it has no adapter-built arm to accommodate and can afford the
+    # loud-failure spelling; this one cannot.
+    # Removable when the adapter layer returns an internal result type rather than a
+    # wire response.
     status: Literal["completed"] = "completed"
     revision: int = Field(default=1, ge=1)
 
@@ -2940,6 +2973,10 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # passes the persisted counter. Making it required (no default) means a
     # constructor that forgets it fails loudly at validation instead of silently
     # emitting revision=1.
+    # The create/update success models spell the SAME field ``Field(default=1, ge=1)``.
+    # The divergence is deliberate and follows from who constructs the model: those two
+    # are also built by the adapter layer, which holds no persisted row, so a required
+    # field there would break every adapter-side builder. This model has no such arm.
     revision: int = Field(..., ge=1, description="Current revision number for optimistic-concurrency updates")
 
     def model_dump(self, **kwargs):
