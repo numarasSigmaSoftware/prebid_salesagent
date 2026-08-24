@@ -493,23 +493,20 @@ class TestProductionSignalConverged:
 # reads.
 
 
-class TestBddTransportTagSetsDoNotOverlap:
-    """A tag in both routing sets makes its e2e_rest entry dead.
+class TestBddE2eGatedSetsAreEnumerated:
+    """Every set whose only use is gated on ``is_e2e_rest`` is named in E2E_GATED_SETS.
 
-    pytest_generate_tests returns early for transport-independent scenarios, well
-    before any e2e_rest exclusion or xfail is consulted. So an entry appearing in
-    both sets excludes nothing — it reads as protection while being unreachable,
-    which is how _NO_E2E_REST_TAGS' sole entry rotted after its scenario was
-    routed, and how all eleven _UC004_E2E_WEBHOOK_INTERNAL_TAGS entries rotted
-    after the UC-004 webhook scenarios were. That rot lasted exactly as long as
-    _TRANSPORT_INDEPENDENT_SCENARIO_TAGS did: with the registry emptied those
-    scenarios parametrize again, so all twelve entries are restored and both gates
-    are live. Keeping the two sets from overlapping a second time is this guard's
-    whole job — the sets being populated is the expected state, not a relapse.
+    A set that is checked in conftest.py but absent from the table is the escape
+    hatch this guard exists to close, so the table's own membership is derived from
+    the source and pinned below, and the parser that reads each set is shown to
+    match rather than silently returning nothing.
 
-    Every set whose only use is gated on e2e_rest belongs in E2E_GATED_SETS. A
-    set that is checked but absent from the table is the escape hatch this guard
-    exists to close, so the table's own membership is pinned below.
+    Reachability of the entries themselves — whether the gate they sit behind can
+    ever be consulted — is NOT checked here. The only mechanism this file ever had
+    for that was an overlap test against a transport-independent exemption registry
+    that has since been deleted, and an intersection with a set asserted elsewhere
+    to be empty proves nothing. An AST-derived replacement covering both deadness
+    mechanisms is tracked separately.
     """
 
     # name -> anchor member proving the parser matched (None for a set that is
@@ -562,13 +559,12 @@ class TestBddTransportTagSetsDoNotOverlap:
         """Guards that scan by regex must be shown to match, or an empty result is
         indistinguishable from a broken parser.
 
-        Anchored on a POPULATED set rather than on
-        _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, which is now legitimately empty. The
-        parser is shared (``_tags``), so proving it against any populated set proves
-        it for all of them — and anchoring the liveness check on a set that is
-        supposed to stay empty would mean re-pointing this test every time an
-        exemption set is correctly drained, which is the "guard fails for the wrong
-        reason" shape its predecessor's docstring already warned about.
+        Anchored on a POPULATED set. The parser is shared (``_tags``), so proving it
+        against any populated set proves it for all of them — and anchoring the
+        liveness check on a set that is supposed to stay empty would mean re-pointing
+        this test every time an exemption set is correctly drained, which is the
+        "guard fails for the wrong reason" shape its predecessor's docstring already
+        warned about.
         """
         populated = self._tags("_UC026_XFAIL_TAGS")
         assert populated, "parser found no tags in _UC026_XFAIL_TAGS — regex is stale"
@@ -576,29 +572,9 @@ class TestBddTransportTagSetsDoNotOverlap:
             "parser did not find a known _UC026_XFAIL_TAGS member — regex is stale"
         )
 
-    def test_the_transport_independent_set_is_empty(self):
-        """It is a cross-transport coverage exemption, so empty is the only correct size.
-
-        It held 18 UC-004 tags on this branch: scenarios that already existed on main
-        and already ran a2a/mcp/rest there, reduced to one collection each. Measured
-        over the whole UC-004 module, emptying it took 420 passed to 476 with zero
-        failures — it suppressed 56 passing variants and protected nothing.
-
-        Asserted as a hard empty rather than a shrink-only ceiling: a ceiling above
-        zero is permission to re-add, and the exemption has no legitimate size other
-        than none. A scenario with genuinely no request surface belongs in an
-        integration test, not in a four-way scenario claiming parametrization.
-        """
-        tags = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS")
-        assert tags == set(), (
-            f"_TRANSPORT_INDEPENDENT_SCENARIO_TAGS is populated again with {sorted(tags)}. Each "
-            "entry removes a2a/mcp/rest coverage from a scenario that otherwise runs on all "
-            "three; if the scenario truly has no request surface, move it to an integration test."
-        )
-
     def test_the_parser_finds_each_e2e_gated_set(self):
         """A named anchor proves the balanced-delimiter parse works on the
-        indented, function-local form the reachability check reads."""
+        indented, function-local form these sets are declared in."""
         src = self._source()
         for name, anchor in self.E2E_GATED_SETS.items():
             tags = self._tags(name, src)  # raises if unparseable
@@ -617,20 +593,9 @@ class TestBddTransportTagSetsDoNotOverlap:
         checked.add("_NO_E2E_REST_TAGS")  # consulted as an exclusion, not an xfail
         missing = sorted(checked - set(self.E2E_GATED_SETS))
         assert not missing, (
-            f"e2e_rest-gated sets {missing} are not in E2E_GATED_SETS, so their entries are "
-            "never checked for reachability — add them to the table"
+            f"e2e_rest-gated sets {missing} are not in E2E_GATED_SETS, so nothing enumerates "
+            "them — add them to the table"
         )
-
-    def test_e2e_gated_tags_are_reachable(self):
-        src = self._source()
-        transport_independent = self._tags("_TRANSPORT_INDEPENDENT_SCENARIO_TAGS", src)
-        for name in self.E2E_GATED_SETS:
-            dead = sorted(self._tags(name, src) & transport_independent)
-            assert not dead, (
-                f"{name} entries {dead} are also transport-independent, so the e2e_rest "
-                "check never runs for them — remove the entry, or un-route the scenario if it "
-                "must still parametrize across transports"
-            )
 
 
 class TestBddDispatchersShareOneResultRecorder:

@@ -606,17 +606,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # so they still reach for in-process state. Wire it and the set can shrink.
         #
         # These eleven entries were briefly emptied on this branch on the premise
-        # that they were unreachable: all eleven were also in
-        # _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, which returns early in
-        # pytest_generate_tests, so no e2e_rest param was ever emitted for them and
-        # `is_e2e_rest` below could not be True. That premise died with the
-        # registry — _TRANSPORT_INDEPENDENT_SCENARIO_TAGS is now empty and hard-
-        # asserted empty, so these scenarios parametrize again and this gate is the
-        # only thing keeping them off e2e_rest. Restored to the set they hold on
-        # main: measured against main the delta is zero, so the shrink-only rule is
-        # not in play — leaving them out would have replaced eleven documented
-        # exclusions with implicit StepDefinitionNotFound auto-xfail.
-        # TestBddTransportTagSetsDoNotOverlap keeps the reachability true.
+        # that they were unreachable: all eleven were also in a transport-independent
+        # exemption registry that returned early in pytest_generate_tests, so no
+        # e2e_rest param was ever emitted for them and `is_e2e_rest` below could not
+        # be True. That premise died with the registry, which has since been deleted:
+        # these scenarios parametrize again and this gate is the only thing keeping
+        # them off e2e_rest. Restored to the set they hold on main: measured against
+        # main the delta is zero, so the shrink-only rule is not in play — leaving
+        # them out would have replaced eleven documented exclusions with implicit
+        # StepDefinitionNotFound auto-xfail.
         _UC004_E2E_WEBHOOK_INTERNAL_TAGS: set[str] = {
             "T-UC-004-webhook-bearer",
             "T-UC-004-webhook-hmac",
@@ -2269,11 +2267,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # _UC004_E2E_WEBHOOK_INTERNAL_TAGS (both since restored, once the routing
         # that made them unreachable was itself removed): a set stays populated and
         # reads as live coverage after the routing that fed it was removed one layer
-        # up. The reachability guard does not catch this variant — it models deadness only
-        # as overlap with _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, not as "the gate is
-        # unreachable because parametrization never produces the param". Deriving
-        # gated sets from the AST and modelling both mechanisms is tracked
-        # separately; deleting the dead block is not blocked on that.
+        # up. The reachability guard that existed then did not catch this variant — it
+        # modelled deadness only as overlap with a transport-independent exemption
+        # registry (since deleted), not as "the gate is unreachable because
+        # parametrization never produces the param". Deriving gated sets from the AST
+        # and modelling both mechanisms is tracked separately; deleting the dead block
+        # is not blocked on that.
         #
         # If UC-019 ever gains a REST route and leaves _NO_REST_UC_TAG_PREFIXES,
         # the xfail knowledge is in this file's history at the commit that removed
@@ -2754,53 +2753,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 # These scenarios must NOT be multiplied — they have explicit When steps.
 _TRANSPORT_SPECIFIC_TAGS = {"rest", "mcp", "a2a"}
 
-# Scheduler-originated events do not enter through an AdCP request transport.
-# Keep these scenarios single-run instead of producing misleading A2A/MCP/REST
-# variants that all exercise the same outbound scheduler path.
-# Membership is derived from the STEP, not the scenario's subject matter: a
-# scenario belongs here when its When step EXISTS and never consults
-# ctx["transport"], so the a2a/mcp/rest copies execute byte-identical code.
-#
-# "Exists" is load-bearing. A scenario whose steps are unbound auto-xfails on
-# StepDefinitionNotFound, and to a scan that looks for a transport reference it is
-# indistinguishable from a bound step that simply has none — absence of a
-# reference reads the same as absence of a step. Routing those is wrong twice: the
-# derivation has nothing to derive from, and de-parametrizing shrinks the dormancy
-# signal from three xfails to one, making an unwired scenario look like a
-# deliberate single-run. Eight such tags were removed from this set for that reason
-# — the whole partial-data/window family: the delayed-* trio,
-# webhook-adjusted-resend, webhook-partial-data, webhook-window-update,
-# window-first-report and status-reporting-delayed. They stay parametrized until
-# their steps are wired.
-#
-# Two webhook scenarios are deliberately ABSENT for the opposite reason —
-# webhook-creds-short/valid dispatch a real create_media_buy carrying the config,
-# so their copies grade each transport's Pydantic boundary and must keep
-# multiplying.
-# EMPTY, and it must stay that way — this set is a cross-transport coverage
-# exemption, which the shrink-only rule and the single-transport standard both
-# forbid growing.
-#
-# It briefly held 18 UC-004 tags, added by this branch. That was a coverage
-# REGRESSION, not new work at a chosen breadth: every one of those scenarios
-# already existed on main, UC-004 was already wired there (DeliveryPollEnv /
-# WebhookEnv / CircuitBreakerEnv), and on main they were excluded from e2e_rest
-# ONLY — they still ran a2a/mcp/rest. The early return below reduced them to one
-# collection each.
-#
-# Measured before removing, over the whole UC-004 module: 420 passed with the set
-# populated, 476 passed with it emptied, zero failures either way. So it was
-# suppressing 56 passing variants and protecting nothing. The rationale offered
-# for it — that these scenarios assert in-process mock / circuit-breaker state the
-# Docker path cannot see — is true of e2e_rest, which _UC004_E2E_WEBHOOK_INTERNAL_TAGS
-# (carrying eleven of them), _NO_E2E_REST_TAGS and _NO_REST_UC_TAG_PREFIXES already
-# handle; a2a/mcp/rest are all in-process, so the mock state is visible and the
-# assertions hold.
-#
 # A scenario with genuinely no request surface (a pure background emission) is an
-# integration test, not a four-way scenario claiming parametrization — move it,
-# rather than adding it here.
-_TRANSPORT_INDEPENDENT_SCENARIO_TAGS: set[str] = set()
+# integration test, not a four-way scenario claiming parametrization — move it.
+# There is deliberately no exemption set here to route one into: a cross-transport
+# coverage exemption has no correct non-empty size, and one that existed briefly
+# suppressed 56 passing UC-004 variants while protecting nothing.
 
 # UC + tag combinations that should run IMPL-only (no 4-way parametrization).
 # (UC-002 @account used to live here when it ran resolve_account() via IMPL on
@@ -2847,14 +2804,13 @@ _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 # Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
 #
 # Its sole entry (T-UC-004-webhook-ssrf-blocked) was briefly removed on this branch
-# on the premise that it was unreachable: the scenario was also in
-# _TRANSPORT_INDEPENDENT_SCENARIO_TAGS, whose check returns before this one is
+# on the premise that it was unreachable: the scenario was also in a
+# transport-independent exemption registry whose check returned before this one was
 # consulted, so the scenario was excluded from e2e_rest by never being parametrized
-# at all. That premise died with the registry — _TRANSPORT_INDEPENDENT_SCENARIO_TAGS
-# is now empty and hard-asserted empty, so the scenario parametrizes again and this
-# exclusion is the only thing keeping it off e2e_rest. Restored to main's content;
-# measured against main the delta is zero, so this is not exemption growth.
-# test_e2e_gated_tags_are_reachable keeps the reachability true.
+# at all. That premise died with the registry, which has since been deleted: the
+# scenario parametrizes again and this exclusion is the only thing keeping it off
+# e2e_rest. Restored to main's content; measured against main the delta is zero, so
+# this is not exemption growth.
 _NO_E2E_REST_TAGS: frozenset[str] = frozenset(
     {
         "T-UC-004-webhook-ssrf-blocked",
@@ -2885,8 +2841,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     marker_names = {m.name for m in metafunc.definition.iter_markers()}
     if marker_names & _TRANSPORT_SPECIFIC_TAGS:
         # Transport-specific scenario — don't multiply
-        return
-    if marker_names & _TRANSPORT_INDEPENDENT_SCENARIO_TAGS:
         return
 
     # Admin scenarios use Flask test_client, not API transports
