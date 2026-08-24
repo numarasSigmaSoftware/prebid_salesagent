@@ -1024,3 +1024,38 @@ class MediaBuyRepository:
             return new_status
 
         return self.apply_computed_status_transition(media_buy, _compute)
+
+    def stamp_approval(
+        self,
+        media_buy: MediaBuy,
+        *,
+        approved_by: str,
+        approved_at: datetime.datetime | None = None,
+    ) -> MediaBuy:
+        """Record WHO approved an already-loaded buy and WHEN, inside the repository.
+
+        The approval stamp is buyer-visible seller-side state and it is what
+        :meth:`_stamp_confirmation_if_needed` prefers when back-filling
+        ``confirmed_at``, so it belongs on the same side of the boundary as the
+        status write it accompanies. The admin approve/reject and creative-unblock
+        routes previously assigned ``approved_at``/``approved_by`` raw on the row
+        right after calling a transition seam; ``tests/unit/
+        test_architecture_media_buy_status_writes.py`` now reddens on that shape.
+
+        Deliberately does NOT bump ``revision``: every caller stamps in the same
+        transaction as a transition seam that already bumped exactly once, and a
+        second bump here would double-count one approval. Callers that need the
+        counter advanced without a status change use :meth:`bump_revision`.
+
+        The row is resolved against THIS repository's tenant binding, like the
+        transition seams — an instance method cannot be handed a buy from another
+        tenant and quietly stamp it. Returns the same (mutated) row.
+        """
+        if media_buy.tenant_id != self._tenant_id:
+            raise ValueError(
+                f"Tenant mismatch: media_buy.tenant_id={media_buy.tenant_id!r} "
+                f"!= repository tenant_id={self._tenant_id!r}"
+            )
+        media_buy.approved_at = approved_at if approved_at is not None else datetime.datetime.now(datetime.UTC)
+        media_buy.approved_by = approved_by
+        return media_buy

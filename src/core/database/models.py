@@ -953,9 +953,10 @@ class MediaBuy(Base):
     # Starts at 1 on create; bumped by MediaBuyRepository's mutation seams, which
     # every status transition is required to go through — enforced by
     # tests/unit/test_architecture_media_buy_status_writes.py, which fails on a raw
-    # `media_buy.status = ...` assignment anywhere in production code outside the
-    # repository. Never derived from timestamps — two updates within one second
-    # must still yield strictly increasing revisions.
+    # assignment to `status`, `approved_at` or `confirmed_at` on a media-buy row
+    # anywhere in production code outside the repository. Never derived from
+    # timestamps — two updates within one second must still yield strictly
+    # increasing revisions.
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

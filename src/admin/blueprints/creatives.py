@@ -659,8 +659,10 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                         uow2.media_buys.apply_computed_status_transition(
                             mb, _compute_media_buy_status_from_flight_dates
                         )
-                        mb.approved_at = datetime.now(UTC)
-                        mb.approved_by = "system"
+                        # The approval stamp goes through the repository too: it is
+                        # seller-side state the confirmation back-fill reads, so it
+                        # belongs on the same side of the boundary as the status write.
+                        uow2.media_buys.stamp_approval(mb, approved_by="system")
                     # auto-commits
 
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")

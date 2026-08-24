@@ -1,4 +1,6 @@
-"""Guard: a media buy's ``status`` is only ever written inside MediaBuyRepository.
+"""Guard: a media buy's lifecycle stamps are only written inside MediaBuyRepository.
+
+Three fields are covered: ``status``, ``approved_at`` and ``confirmed_at``.
 
 The AdCP ``revision`` counter and the write-once ``confirmed_at`` stamp are both
 produced by the repository's transition seams (``apply_status_transition``,
@@ -6,6 +8,13 @@ produced by the repository's transition seams (``apply_status_transition``,
 ``media_buy.status = ...`` assignment anywhere else changes buyer-visible state
 while leaving the buyer's optimistic-concurrency token frozen and, on a
 seller-confirmed status, leaves a committed buy with no confirmation instant.
+
+``approved_at`` is covered for the same reason one level down: it is the instant
+:meth:`MediaBuyRepository._stamp_confirmation_if_needed` prefers when back-filling
+``confirmed_at``, so a raw approval stamp writes an input to the confirmation
+contract from outside the seam that owns it. ``confirmed_at`` itself is covered so
+the write-once rule cannot be re-implemented (and mis-implemented) at a call site;
+``MediaBuyRepository.stamp_approval`` is the sanctioned approval seam.
 
 That is exactly what happened at every wired site before it was routed through a
 seam, so the invariant the counter's docstrings state ("bumped on every
@@ -28,6 +37,9 @@ SCOPE (this is a shape check on the assignment, not a type check on the object):
   past, so this guard cannot prove the absence of every raw write — which is why
   it also asserts that it actually reached each of the four modules that hold and
   transition a media buy, so the scan cannot silently shrink to nothing.
+* The same name rule is what keeps ``creative.approved_at`` (a Creative row, a
+  different entity with its own approval semantics) out of scope: it is bound to
+  ``creative``, which is not a media-buy row name.
 """
 
 from __future__ import annotations
@@ -40,8 +52,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 
-# The one module allowed to assign a media buy's status: every seam lives here.
+# The one module allowed to assign these fields on a media buy: every seam lives here.
 REPOSITORY_FILE = "src/core/database/repositories/media_buy.py"
+
+# The lifecycle fields the repository owns. ``status`` drives the revision bump and
+# the confirmation stamp; ``approved_at`` is the instant that stamp back-fills from;
+# ``confirmed_at`` is the stamp itself.
+GUARDED_FIELDS = ("status", "approved_at", "confirmed_at")
 
 # The production modules that load a MediaBuy row and transition it — six wired
 # writes across four modules (operations.py carries approve AND reject; workflows.py
@@ -76,10 +93,10 @@ def _production_modules() -> list[Path]:
     return [path for path in sorted(SRC.rglob("*.py")) if "tests" not in path.relative_to(ROOT).parts]
 
 
-def _find_raw_status_writes() -> list[tuple[str, int, str]]:
-    """Find ``<media buy>.status = ...`` assignments outside the repository.
+def _find_raw_lifecycle_writes() -> list[tuple[str, int, str]]:
+    """Find ``<media buy>.<guarded field> = ...`` assignments outside the repository.
 
-    Returns ``(relative_path, line_number, target_name)``.
+    Returns ``(relative_path, line_number, target_expression)``.
     """
     violations: list[tuple[str, int, str]] = []
     for path in _production_modules():
@@ -95,27 +112,32 @@ def _find_raw_status_writes() -> list[tuple[str, int, str]]:
             else:
                 continue
             for target in targets:
-                if isinstance(target, ast.Attribute) and target.attr == "status" and _is_media_buy_row(target.value):
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr in GUARDED_FIELDS
+                    and _is_media_buy_row(target.value)
+                ):
                     violations.append((rel_path, target.lineno, ast.unparse(target)))
     return violations
 
 
 class TestMediaBuyStatusWritesGoThroughTheRepository:
-    """Only MediaBuyRepository may write a media buy's status."""
+    """Only MediaBuyRepository may write a media buy's lifecycle stamps."""
 
     @pytest.mark.arch_guard
-    def test_no_raw_media_buy_status_assignment_in_production(self):
-        """A raw ``.status =`` write bypasses the revision bump and confirmation stamp."""
-        violations = _find_raw_status_writes()
+    def test_no_raw_media_buy_lifecycle_assignment_in_production(self):
+        """A raw write bypasses the revision bump and the confirmation stamp."""
+        violations = _find_raw_lifecycle_writes()
 
         assert not violations, (
-            "Media buy status written outside MediaBuyRepository — the write skips the "
-            "AdCP revision bump and the write-once confirmed_at stamp, so the buyer sees "
-            "the new state carrying a stale concurrency token:\n"
+            "Media buy lifecycle state written outside MediaBuyRepository — the write "
+            "skips the AdCP revision bump and the write-once confirmed_at stamp, so the "
+            "buyer sees the new state carrying a stale concurrency token:\n"
             + "\n".join(f"  {path}:{line}  {expr} = ..." for path, line, expr in violations)
-            + "\n\nRoute the transition through MediaBuyRepository.apply_status_transition "
+            + "\n\nRoute a status change through MediaBuyRepository.apply_status_transition "
             "(fixed target) or .apply_computed_status_transition (target derived from the "
-            "refreshed row). Do not add an allowlist entry."
+            "refreshed row), and an approval stamp through .stamp_approval. Do not add an "
+            "allowlist entry."
         )
 
     @pytest.mark.arch_guard
@@ -123,9 +145,16 @@ class TestMediaBuyStatusWritesGoThroughTheRepository:
         """The guard is only meaningful if it actually reads the wired modules.
 
         A file-set that silently stops matching (a rename, a move, a changed
-        ``rglob``) would make the test above pass by scanning nothing.
+        ``rglob``) would make the test above pass by scanning nothing. The same
+        applies to the field set: a guard narrowed back to ``status`` alone would
+        stop seeing the approval stamps, so the covered fields are pinned here too.
         """
         scanned = {path.relative_to(ROOT).as_posix() for path in _production_modules()}
+
+        assert set(GUARDED_FIELDS) == {"status", "approved_at", "confirmed_at"}, (
+            "the guarded field set changed — a media buy's status, its approval instant "
+            f"and its confirmation stamp all belong to the repository; got {GUARDED_FIELDS}"
+        )
 
         missing = [module for module in WIRED_TRANSITION_MODULES if module not in scanned]
         assert not missing, (

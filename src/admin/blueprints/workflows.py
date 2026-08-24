@@ -2,7 +2,6 @@
 
 import json
 import logging
-from datetime import UTC, datetime
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import select
@@ -248,8 +247,10 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     # adapter-success arm stamps confirmed_at and bumps revision
                     # exactly like the early-return arm above.
                     media_buy_repo.apply_status_transition(media_buy, "scheduled")
-                    media_buy.approved_at = datetime.now(UTC)
-                    media_buy.approved_by = user_email
+                    # The approval stamp goes through the repository too: it is
+                    # seller-side state the confirmation back-fill reads, so it
+                    # belongs on the same side of the boundary as the status write.
+                    media_buy_repo.stamp_approval(media_buy, approved_by=user_email)
                     db.commit()
 
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")
