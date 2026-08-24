@@ -1,8 +1,21 @@
-# SDK 6.6 type:ignore tracking:
-# - [misc] on lines ~339, ~415: UpdateMediaBuySuccess/Error class defs.
-#   Pydantic metaclass interaction in SDK hierarchy; permanent.
-# - [assignment] on lines ~1449, ~1450, ~1637, ~1638: account/idempotency_key
-#   overrides (required -> optional). Architectural; permanent.
+# SDK 6.6 type-suppression ledger for this module. Line numbers drift with every
+# edit, so this ledger names the SITES, not coordinates — re-derive the current
+# lines with ``grep -n "type: ignore" src/core/schemas/_base.py``. The module-wide
+# count is ratcheted by .pre-commit-hooks/check_type_ignore_count.py against
+# .type-ignore-baseline; it may shrink, never grow.
+# - [misc] on the UpdateMediaBuySuccess / UpdateMediaBuyError /
+#   UpdateMediaBuySubmitted class definitions: Pydantic metaclass interaction in
+#   the SDK hierarchy; permanent.
+# - [assignment] on the account / idempotency_key overrides (SDK-required ->
+#   optional here, because identity is resolved at the transport boundary) and on
+#   the start_time widening to accept Literal["asap"]. Architectural; permanent.
+# - [assignment] on CreateMediaBuySuccess.confirmed_at: WIDENS the SDK 6.6
+#   non-null parent to nullable, which pydantic permits at runtime and mypy flags
+#   as an incompatible override. Required by the dry-run/sandbox and
+#   not-yet-committed arms, which must serialize confirmed_at present-as-null.
+# - [assignment] on the geo_*_exclude lists, Product.creatives, and the Signal /
+#   GetSignalsResponse required-field restatements: nested-type narrowing of SDK
+#   parents; permanent while those parents stand.
 
 import re
 import warnings

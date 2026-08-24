@@ -12,11 +12,10 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import event, text
 
+from tests.helpers.migration_helpers import column_exists, seed_tenant
 from tests.integration.migration_helpers import (
-    column_exists,
     run_alembic_downgrade,
     run_alembic_upgrade,
-    seed_tenant,
 )
 
 # Migration under test and its parent

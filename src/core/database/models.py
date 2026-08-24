@@ -942,8 +942,10 @@ class MediaBuy(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=True, default="USD")
     # ``Mapped[date]`` (the Python type), not ``Mapped[Date]`` (the SQLAlchemy
     # column type): the latter made every consumer of these attributes read as
-    # ``Date`` and forced ``# type: ignore[arg-type]`` at each date-arithmetic
-    # call site.
+    # ``Date`` and forced an arg-type suppression at each date-arithmetic call
+    # site. (Spelled in prose, not as the literal directive token: the
+    # .type-ignore-baseline ratchet counts a regex match anywhere in src/, so a
+    # backticked example in a comment consumed a real slot.)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

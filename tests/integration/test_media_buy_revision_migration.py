@@ -15,16 +15,19 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from tests.helpers.migration_helpers import column_exists, seed_tenant
 from tests.integration.migration_helpers import (
-    column_exists,
     run_alembic_downgrade,
     run_alembic_upgrade,
-    seed_tenant,
 )
 
-# Migration under test and its parent
+# Migration under test and its TRUE parent: 1497aa06013c declares
+# ``down_revision = "823974a5553e"``. This previously named a164b85bab9e, the
+# GREAT-grandparent (a164b85bab9e -> 64f0fff7d954 -> 823974a5553e ->
+# 1497aa06013c), so the "pre-migration" schema the test seeded against was two
+# migrations older than the one under test.
 REVISION_REV = "1497aa06013c"
-PRE_REV = "a164b85bab9e"
+PRE_REV = "823974a5553e"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
