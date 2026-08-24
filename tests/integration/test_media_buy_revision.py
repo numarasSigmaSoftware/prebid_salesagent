@@ -533,3 +533,71 @@ class TestConflictDetailsShapeParity:
         # ...and the known side still carries the real values.
         assert mismatch_details["expected_version"] == 5
         assert mismatch_details["current_version"] == 1
+
+
+@pytest.mark.requires_db
+class TestConflictEnvelopeOnEveryTransport:
+    """The CONFLICT's buyer-actionable payload must survive to the WIRE.
+
+    ``details`` (both sides of the mismatch), ``field`` and ``suggestion`` were
+    graded only on the reconstructed ``_impl`` exception. A boundary that dropped
+    any of them — the A2A serializer has done exactly that to ``field`` and
+    ``suggestion`` before — would leave every one of those pins green while the
+    buyer received a bare code. Graded per transport on the real envelope.
+    """
+
+    @pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP, Transport.REST], ids=lambda t: t.value)
+    def test_conflict_carries_details_field_and_suggestion_on_the_wire(self, env_with_media_buy, transport):
+        env, media_buy = env_with_media_buy
+
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, budget=9000.0, revision=999)
+
+        assert result.is_error, f"a stale revision must reject on {transport.value}, got {result!r}"
+        assert result.wire_error_envelope is not None, "wire envelope not captured"
+        error = result.wire_error_envelope["errors"][0]
+
+        assert error["code"] == "CONFLICT"
+        assert error.get("field") == "revision", (
+            f"the CONFLICT must name the offending field on the wire, got field={error.get('field')!r}"
+        )
+        suggestion = error.get("suggestion") or ""
+        assert "get_media_buys" in suggestion, (
+            f"the buyer must be told how to obtain a fresh token, got suggestion={suggestion!r}"
+        )
+
+        details = error.get("details")
+        assert details is not None, "the CONFLICT dropped its details payload before the wire"
+        # A generic optimistic-concurrency retry loop reads these three keys.
+        # Numeric comparison, not identity: A2A delivers these as JSON doubles
+        # (999.0) where MCP and REST deliver ints — see
+        # TestEmittedRevisionAndConfirmedAtPerTransport for the grounding.
+        assert details["expected_version"] == 999
+        assert details["current_version"] == 1
+        assert details["resource_id"] == media_buy.media_buy_id
+
+
+class TestRawPayloadRoutesToUpdate:
+    """Each operand of the harness's raw-payload routing predicate is graded.
+
+    ``tests/harness/media_buy_dual._is_update_request`` falls back to
+    ``"revision" in kwargs or "media_buy_id" in kwargs`` when no typed ``req`` is
+    present — the shape a wire test sends when the revision is deliberately
+    invalid, so ``UpdateMediaBuyRequest`` could not be constructed. With both
+    operands ungraded, deleting either one left every caller green (they all send
+    BOTH keys) while a raw payload carrying only the other silently routed to
+    CREATE, which fails on missing brand/packages instead of grading the token.
+    """
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected", "why"),
+        [
+            ({"revision": 1}, True, "revision is an update-only optimistic-concurrency token"),
+            ({"media_buy_id": "mb_x"}, True, "media_buy_id targets an existing buy"),
+            ({"brand": "acme.example", "packages": [], "start_time": "asap"}, False, "a create-shaped payload"),
+        ],
+        ids=["revision_only", "media_buy_id_only", "create_shaped"],
+    )
+    def test_raw_payload_routing(self, kwargs, expected, why):
+        from tests.harness.media_buy_dual import _is_update_request
+
+        assert _is_update_request(kwargs) is expected, why

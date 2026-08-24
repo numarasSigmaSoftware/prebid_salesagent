@@ -869,6 +869,13 @@ class TestConfirmedAtStamping:
         # ``status not in MEDIA_BUY_UNCONFIRMED_STATUSES``) rather than a
         # hand-copied literal, so a future add/remove (e.g. ``finalizing``) is
         # covered automatically instead of silently dropped.
+        # Non-emptiness pin: every assertion below lives inside a loop over a
+        # DERIVED set, so emptying that set would leave this test green while
+        # grading nothing at all.
+        assert len(MEDIA_BUY_UNCONFIRMED_STATUSES) >= 5, (
+            f"the unconfirmed vocabulary collapsed to {sorted(MEDIA_BUY_UNCONFIRMED_STATUSES)} — "
+            "the loop below would grade nothing"
+        )
         for status in MEDIA_BUY_UNCONFIRMED_STATUSES:
             buy = MediaBuy(status=status, created_at=created, approved_at=None, confirmed_at=None)
             MediaBuyRepository._stamp_confirmation_if_needed(buy)
@@ -883,6 +890,11 @@ class TestConfirmedAtStamping:
         from src.core.database.repositories.media_buy import MediaBuyRepository
 
         created = datetime(2026, 1, 1, tzinfo=UTC)
+        # Non-emptiness pin (see test_unconfirmed_statuses_are_not_stamped): the
+        # derived set must still contain the statuses this test exists to grade.
+        assert set(_confirmed_statuses()) >= {"active", "completed", "paused"}, (
+            f"the confirmed vocabulary lost a graded status: {_confirmed_statuses()}"
+        )
         for status in _confirmed_statuses():
             buy = MediaBuy(status=status, created_at=created, approved_at=None, confirmed_at=None)
             MediaBuyRepository._stamp_confirmation_if_needed(buy)
@@ -898,6 +910,10 @@ class TestConfirmedAtStamping:
 
         created = datetime(2026, 1, 1, tzinfo=UTC)
         approved = datetime(2026, 1, 5, tzinfo=UTC)
+        # Non-emptiness pin (see test_unconfirmed_statuses_are_not_stamped).
+        assert set(_confirmed_statuses()) >= {"active", "completed", "paused"}, (
+            f"the confirmed vocabulary lost a graded status: {_confirmed_statuses()}"
+        )
         for status in _confirmed_statuses():
             buy = MediaBuy(status=status, created_at=created, approved_at=approved, confirmed_at=None)
             MediaBuyRepository._stamp_confirmation_if_needed(buy)

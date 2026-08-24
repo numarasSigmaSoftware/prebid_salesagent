@@ -1479,7 +1479,12 @@ class TestExpectedRevisionUnderLock:
         with MediaBuyUoW(tenant_a) as uow:
             # Load the row unlocked into THIS session's identity map at revision 1.
             stale = uow.media_buys.get_by_id("mb_lock_conflict")
-            assert stale is not None and (stale.revision or 1) == 1
+            # Split, and no coalesce: ``stale is not None and (stale.revision or 1) == 1``
+            # short-circuits on the None arm and, on a nullable=False column, the
+            # ``or 1`` fallback turns a missing counter into the value the test
+            # expects — so both a vanished row and an unpopulated revision passed.
+            assert stale is not None, "the freshly created buy must load in this session"
+            assert stale.revision == 1, f"a freshly created buy starts at revision 1, got {stale.revision!r}"
 
             # A concurrent writer bumps the committed row to 2.
             with MediaBuyUoW(tenant_a) as other:

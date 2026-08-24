@@ -359,16 +359,37 @@ class TestAdminMediaBuyRejectWebhook:
         assert embedded.get("status") == "completed", (
             f"approved webhook must embed a completed Success, got status={embedded.get('status')!r}"
         )
-        assert embedded.get("confirmed_at"), "approved (committed) buy must carry confirmed_at"
+        # Split so each failure names itself: a MISSING key, a null value and a
+        # non-matching instant are three different defects and one compound
+        # truthiness assert reports all of them as the same thing.
+        assert "confirmed_at" in embedded, "approved webhook dropped the required confirmed_at key entirely"
+        assert embedded["confirmed_at"] is not None, (
+            "approved (committed) buy must carry a non-null confirmed_at, got null"
+        )
         from src.core.database.repositories import MediaBuyUoW
 
         with MediaBuyUoW(tenant_id) as uow:
             assert uow.media_buys is not None
             persisted_buy = uow.media_buys.get_by_id(media_buy_id)
             assert persisted_buy is not None, "approved media buy vanished"
+            # A LITERAL on both sides, not row-vs-row: comparing the emitted value
+            # against the same row it was read from passes for ANY value the row
+            # happens to hold, so a counter that stopped advancing would stay green.
+            # The buy is seeded pending_approval at revision 1; approving it makes
+            # TWO seller-side mutations, each through a seam that bumps once — the
+            # approval status transition (operations.py) and the post-adapter
+            # activation to "active" (media_buy_create.execute_approved_media_buy).
+            # So the row and the wire value must BOTH be exactly 3.
+            assert persisted_buy.revision == 3, (
+                f"approving a freshly seeded buy must leave the row at revision 3, got {persisted_buy.revision}"
+            )
+            assert embedded.get("revision") == 3, (
+                f"webhook must carry the persisted revision 3, got {embedded.get('revision')!r}"
+            )
             assert embedded.get("revision") == persisted_buy.revision, (
                 "webhook must carry the persisted optimistic-concurrency revision"
             )
+            assert embedded["confirmed_at"] is not None and persisted_buy.confirmed_at is not None
         assert "workflow_step_id" not in embedded, "internal workflow_step_id must not leak onto the wire"
         # Absent-context branch pin (PR #1567 round-3): with no "context" key in
         # the workflow step's request_data, the echo path stays dormant and the

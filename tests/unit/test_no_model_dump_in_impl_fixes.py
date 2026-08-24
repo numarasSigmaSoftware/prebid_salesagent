@@ -107,10 +107,13 @@ class TestMediaBuyRepositoryCreateFromRequest:
         assert packages[0].get("package_id") == "pkg_prod_1_abc123_1"
 
     def test_create_from_request_adds_to_session(self):
-        """Repository must add the MediaBuy to the session."""
+        """Repository must add the MediaBuy to the session, already confirmation-stamped."""
         session = MagicMock()
+        added: list = []
+        session.add.side_effect = added.append
         repo = MediaBuyRepository(session=session, tenant_id="tenant_1")
         req = _make_minimal_request()
+        created_at = datetime.now(UTC) - timedelta(minutes=5)
 
         repo.create_from_request(
             media_buy_id="mb_test_004",
@@ -122,13 +125,22 @@ class TestMediaBuyRepositoryCreateFromRequest:
             start_time=datetime.now(UTC) + timedelta(days=1),
             end_time=datetime.now(UTC) + timedelta(days=8),
             status="active",
+            created_at=created_at,
         )
 
         session.add.assert_called_once()
-        # "active" is a seller-confirmed status, so create_from_request flushes
-        # twice: once to assign created_at on insert, then again to persist
-        # confirmed_at (= created_at). Both flushes are expected.
-        assert session.flush.call_count == 2
+        # Grade the OBJECT that reached the session, not how many times a
+        # MagicMock was flushed: a flush count pins an implementation detail of
+        # the mock and stays green if the confirmation stamp is deleted outright.
+        # "active" is a seller-confirmed status, so the buy must leave
+        # create_from_request already carrying the create instant as its
+        # write-once confirmed_at.
+        assert len(added) == 1, f"exactly one MediaBuy must reach the session, got {len(added)}"
+        persisted = added[0]
+        assert persisted.confirmed_at == created_at, (
+            "a buy created in a seller-confirmed status must leave the repository stamped "
+            f"with its create instant, got confirmed_at={persisted.confirmed_at!r}"
+        )
 
 
 class TestContextManagerAcceptsModel:
