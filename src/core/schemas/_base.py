@@ -133,6 +133,13 @@ from pydantic_core import ValidationError as CoreValidationError
 # ``SkipValidation`` does that without erasing the public JSON Schema: clients
 # still see the concrete AdCP types and constraints rather than ``Any``.
 RawRevision: TypeAlias = SkipValidation[Annotated[int, Field(ge=1)]]  # noqa: UP040 - Pydantic runtime alias
+# The RESPONSE-side spelling of the same bound, kept beside the request-side one so
+# ``revision >= 1`` has a single home instead of being restated at each response
+# model. No ``SkipValidation``: a response is built by this server from a persisted
+# row, so there is no raw wire value to preserve and the bound is enforced at
+# construction. Defaults stay at the field (they differ per model — see the
+# create/update success models and GetMediaBuysResponse).
+Revision: TypeAlias = Annotated[int, Field(ge=1)]  # noqa: UP040 - Pydantic runtime alias
 # Runtime restatement of ``RawRevision``'s constraint, kept beside the alias so the
 # rule has one home. ``update-media-buy-request.json`` types ``revision`` as draft-07
 # ``{"type": "integer", "minimum": 1}``, and draft-07 ``integer`` matches any number
@@ -430,13 +437,13 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     #   * the residual hazard is therefore precise: a caller that returns an
     #     ADAPTER-BUILT response DIRECTLY, skipping that rebuild, emits revision=1 for
     #     a buy whose real revision is anything. Nothing in the type system stops that.
-    # ``GetMediaBuysResponse`` declares the SAME field as ``Field(..., ge=1)``. The two
-    # answers are deliberate: that model's only populating site always holds the
-    # persisted row, so it has no adapter-built arm to accommodate and can afford the
-    # loud-failure spelling; this one cannot.
+    # ``GetMediaBuysResponse`` declares the SAME ``Revision`` field REQUIRED (no
+    # default). The two answers are deliberate: that model's only populating site
+    # always holds the persisted row, so it has no adapter-built arm to accommodate
+    # and can afford the loud-failure spelling; this one cannot.
     # Removable when the adapter layer returns an internal result type rather than a
     # wire response.
-    revision: int = Field(default=1, ge=1)
+    revision: Revision = 1
 
     @classmethod
     def sync_success(cls, **kwargs: Any) -> "CreateMediaBuySuccess":
@@ -716,14 +723,14 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):  # type: ignore[misc]
     #   * the residual hazard is therefore precise: a caller that returns an
     #     ADAPTER-BUILT response DIRECTLY, skipping that rebuild, emits revision=1 for
     #     a buy whose real revision is anything. Nothing in the type system stops that.
-    # ``GetMediaBuysResponse`` declares the SAME field as ``Field(..., ge=1)``. The two
-    # answers are deliberate: that model's only populating site always holds the
-    # persisted row, so it has no adapter-built arm to accommodate and can afford the
-    # loud-failure spelling; this one cannot.
+    # ``GetMediaBuysResponse`` declares the SAME ``Revision`` field REQUIRED (no
+    # default). The two answers are deliberate: that model's only populating site
+    # always holds the persisted row, so it has no adapter-built arm to accommodate
+    # and can afford the loud-failure spelling; this one cannot.
     # Removable when the adapter layer returns an internal result type rather than a
     # wire response.
     status: Literal["completed"] = "completed"
-    revision: int = Field(default=1, ge=1)
+    revision: Revision = 1
 
     # Override affected_packages to use our extended AffectedPackage type
     # This allows us to include internal tracking fields (changes_applied, buyer_package_ref)
@@ -2993,11 +3000,12 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     # passes the persisted counter. Making it required (no default) means a
     # constructor that forgets it fails loudly at validation instead of silently
     # emitting revision=1.
-    # The create/update success models spell the SAME field ``Field(default=1, ge=1)``.
-    # The divergence is deliberate and follows from who constructs the model: those two
-    # are also built by the adapter layer, which holds no persisted row, so a required
-    # field there would break every adapter-side builder. This model has no such arm.
-    revision: int = Field(..., ge=1, description="Current revision number for optimistic-concurrency updates")
+    # The create/update success models carry the SAME ``Revision`` type with a default
+    # of 1. The divergence is deliberate and follows from who constructs the model:
+    # those two are also built by the adapter layer, which holds no persisted row, so a
+    # required field there would break every adapter-side builder. This model has no
+    # such arm.
+    revision: Revision = Field(..., description="Current revision number for optimistic-concurrency updates")
 
     def model_dump(self, **kwargs):
         result = super().model_dump(**kwargs)

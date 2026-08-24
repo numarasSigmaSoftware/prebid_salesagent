@@ -1562,7 +1562,11 @@ def _build_update_request(
     reporting_webhook: Any = None,
     ext: Any = None,
     idempotency_key: Annotated[str | None, Field(description="Idempotency key for retry safety")] = None,
-    revision: Any = None,
+    # One spelling of the raw parameter at every entry point (MCP wrapper, A2A raw
+    # function, REST model, and here): the wire value is preserved unvalidated
+    # (SkipValidation) until UpdateMediaBuyRequest applies the shared gate below, so
+    # every transport emits the same envelope for the same bad value.
+    revision: RawRevision | None = None,
 ) -> UpdateMediaBuyRequest:
     """Build UpdateMediaBuyRequest from flat parameters.
 
@@ -1748,7 +1752,10 @@ def update_media_buy_raw(
     reporting_webhook: ReportingWebhook | None = None,  # AdCP ReportingWebhook
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
     idempotency_key: str | None = None,  # AdCP idempotency key for retry safety
-    revision: object = None,  # Validated once by UpdateMediaBuyRequest at the shared boundary.
+    # Same spelling as the MCP wrapper, the REST model and _build_update_request:
+    # the raw wire value is preserved and validated once by UpdateMediaBuyRequest at
+    # the shared boundary.
+    revision: RawRevision | None = None,
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
 ):
