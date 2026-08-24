@@ -875,6 +875,57 @@ class TestWebhookNextExpectedAt:
             assert response.next_expected_at is None
 
 
+class TestSchedulerDerivesNotificationTypeFromFlight:
+    """The scheduler's whole first-send wire contract, per flight phase, in one grade.
+
+    Relocated from the BDD scenario T-UC-004-webhook-scheduler-derivation: that
+    scenario collected six transport-labelled variants but dispatched through none
+    of them — the emission it graded (``derive_notification_type`` over the buy's
+    resolved delivery status, plus the success-only ``WebhookDeliveryLog`` counter)
+    has no request surface, so it belongs here. Same seam the BDD step drove
+    (``DeliveryPollEnv.send_delivery_webhook`` -> the real
+    ``DeliveryWebhookScheduler``, only the outbound POST mocked), same four
+    assertions, both Examples rows.
+
+    The sibling classes above each pin one field in isolation; this one pins the
+    conjunction, which is what a buyer actually receives — in particular
+    ``sequence_number == 1`` and the partial_data/unavailable_count pairing on the
+    FINAL row, which no single-field test covered.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("flight", "expected_type", "next_expected_present"),
+        [("live", "scheduled", True), ("completed", "final", False)],
+    )
+    async def test_first_send_wire_matches_the_flight_phase(
+        self, integration_db, flight, expected_type, next_expected_present
+    ):
+        """A live flight derives 'scheduled' + next_expected_at; a completed one 'final' without it.
+
+        Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-03/04/05/06
+        """
+        from tests.harness import DeliveryPollEnv
+
+        with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+            buy = _serving_webhook_buy(env, flight=flight)
+
+            wire = await env.send_delivery_webhook(buy)
+
+            result = wire["result"]
+            assert result["notification_type"] == expected_type, (
+                f"{flight!r} flight must derive notification_type={expected_type!r}, "
+                f"got {result.get('notification_type')!r}"
+            )
+            assert result["sequence_number"] == 1, (
+                f"first send on a {flight!r} flight must carry sequence_number 1, got {result.get('sequence_number')!r}"
+            )
+            assert_next_expected_at_shape(
+                result, present=next_expected_present, context=f"{flight} flight scheduler wire"
+            )
+            assert_partial_data_pairing(result, context=f"{flight} flight scheduler wire")
+
+
 # ---------------------------------------------------------------------------
 # Failed send accounting + broadened dedup
 # ---------------------------------------------------------------------------

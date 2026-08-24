@@ -53,7 +53,6 @@ def _hand_edited_tag_lines(text: str) -> list[str]:
 # Deliberately explicit: a self-consistency check cannot notice a marker that was
 # removed, because the raw and parsed counts fall together.
 _EXPECTED_HAND_EDITED: set[tuple[str, str]] = {
-    ("BR-UC-004-deliver-media-buy-metrics.feature", "T-UC-004-webhook-scheduler-derivation"),
     ("BR-UC-004-deliver-media-buy-metrics.feature", "T-UC-004-poll-omits-webhook-fields"),
 }
 

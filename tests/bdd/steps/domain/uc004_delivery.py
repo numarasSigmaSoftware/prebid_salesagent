@@ -19,7 +19,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 from src.core.database.models import DELIVERY_TASK_TYPE
-from tests.bdd.steps._outcome_helpers import _require, wire_dict
+from tests.bdd.steps._outcome_helpers import wire_dict
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
@@ -28,7 +28,6 @@ from tests.helpers.delivery_assertions import (
     WEBHOOK_ONLY_FIELDS,
     assert_next_expected_at_shape,
     assert_omits_webhook_only_fields,
-    assert_partial_data_pairing,
 )
 from tests.helpers.delivery_fixtures import DAILY_REPORTING_WEBHOOK, flight_window
 
@@ -1756,119 +1755,6 @@ def then_first_sequence(ctx: dict) -> None:
     seq = first_payload.get("sequence_number")
     assert seq is not None, f"First webhook POST payload missing sequence_number: {list(first_payload.keys())}"
     assert seq >= 1, f"Expected sequence_number >= 1, got {seq}"
-
-
-# ---------------------------------------------------------------------------
-# Real DeliveryWebhookScheduler path
-#
-# The @T-UC-004-webhook-* scenarios above dispatch through the harness
-# is_final/is_adjusted flags and WebhookDeliveryService's own counter — they do
-# not exercise the scheduler's derive_notification_type() /
-# get_max_sequence_number() production logic. The steps below drive the REAL
-# DeliveryWebhookScheduler via DeliveryPollEnv.send_delivery_webhook (only the
-# outbound HTTP POST is mocked), so the notification_type and sequence_number on
-# the wire are the ones production derives, not test-supplied flags.
-# ---------------------------------------------------------------------------
-
-
-@given(parsers.parse('a media buy "{mb_id}" with a reporting_webhook and a "{flight}" flight'))
-def given_media_buy_with_reporting_webhook(ctx: dict, mb_id: str, flight: str) -> None:
-    """Create a serving buy (status="active") with a daily reporting_webhook + adapter data.
-
-    ``flight`` selects the window so the real scheduler derives the right
-    notification_type from the buy's *resolved* delivery status:
-      - "live"      -> in-flight, resolves to "active"    -> notification_type "scheduled"
-      - "completed" -> flight ended, date-refines to "completed" -> notification_type "final"
-
-    Requires the polling harness (DeliveryPollEnv) — the scenario must NOT be
-    tagged @webhook (that routes to CircuitBreakerEnv, which has no
-    send_delivery_webhook / set_adapter_response).
-
-    The phase→window taxonomy and the webhook config are shared with the
-    integration fixture via ``tests/helpers/delivery_fixtures`` so the two layers
-    grade the same flight phase under the same phase name.
-    """
-    env = ctx["env"]
-    buy = _setup_scheduler_buy(ctx, mb_id, flight=flight)
-    env.set_adapter_response(buy.media_buy_id, impressions=5000)
-
-
-@when(parsers.parse('the delivery webhook scheduler sends a report for "{mb_id}"'))
-def when_scheduler_sends_report(ctx: dict, mb_id: str) -> None:
-    """Drive the real DeliveryWebhookScheduler send; capture the wire payload."""
-    import asyncio
-
-    env = ctx["env"]
-    try:
-        buy = _scheduler_buy_for(ctx, mb_id)
-        ctx["scheduler_wire"] = asyncio.run(env.send_delivery_webhook(buy))
-    except Exception as exc:
-        ctx["error"] = exc
-
-
-def _scheduler_result(ctx: dict) -> dict:
-    """The ``result`` block of the real scheduler's captured wire payload.
-
-    Raises a diagnostic (not a bare KeyError) if the scheduler send was skipped
-    or errored — those set ``ctx["error"]`` without ``ctx["scheduler_wire"]``.
-    Routes through the same task_type-gated unwrap as ``_get_last_webhook_payload``
-    — ``ctx["scheduler_wire"]`` is the same envelope shape, just captured via
-    ``env.send_delivery_webhook`` instead of the mock's call args directly.
-    """
-    payload = _require(ctx, "scheduler_wire", hint="The scheduler send may have been skipped or errored.")
-    return _delivery_webhook_body(payload)
-
-
-@then(parsers.parse('the scheduler webhook payload notification_type should be "{ntype}"'))
-def then_scheduler_notification_type(ctx: dict, ntype: str) -> None:
-    """Assert the scheduler-derived notification_type on the wire (under ``result``)."""
-    result = _scheduler_result(ctx)
-    assert result.get("notification_type") == ntype, (
-        f"Expected scheduler-derived notification_type={ntype!r}, got {result.get('notification_type')!r}"
-    )
-
-
-@then(parsers.parse("the scheduler webhook payload sequence_number should be {n:d}"))
-def then_scheduler_sequence_number(ctx: dict, n: int) -> None:
-    """Assert the scheduler-computed sequence_number on the wire (under ``result``)."""
-    result = _scheduler_result(ctx)
-    assert result.get("sequence_number") == n, (
-        f"Expected scheduler-computed sequence_number={n}, got {result.get('sequence_number')!r}"
-    )
-
-
-@then(parsers.re(r"the scheduler webhook payload (?P<next_expected>.+) include next_expected_at"))
-def then_scheduler_next_expected(ctx: dict, next_expected: str) -> None:
-    """Assert next_expected_at presence on the real scheduler wire (under ``result``).
-
-    Same presence/absence rule as ``then_next_expected`` via the shared
-    ``_assert_next_expected_presence`` helper; this step reads the real scheduler
-    wire ``result``, not ``env.mock["post"]``.
-    """
-    _assert_next_expected_presence(_scheduler_result(ctx), next_expected, context="scheduler wire result")
-
-
-@then("the scheduler webhook payload should omit unavailable_count while partial_data is false")
-def then_scheduler_omits_unavailable_count(ctx: dict) -> None:
-    """Assert the partial_data/unavailable_count pairing on the real scheduler wire.
-
-    Same rule as the integration and e2e graders via the shared
-    ``assert_partial_data_pairing`` helper; this step reads the real scheduler
-    wire ``result``. Runs on both Examples rows, so the pairing is graded on the
-    final path as well as the scheduled one.
-
-    The sentence deliberately names only the branch that is graded. The presence
-    rule itself comes from the polling-response schema
-    (get-media-buy-delivery-response.json @ v3.1-04f59d2d5): `unavailable_count` is
-    "only present in webhook deliveries when partial_data is true". The dedicated
-    webhook-payload schema words the same rule in prose only — no `if`/`then`, and
-    `additionalProperties: true` — so omitting the field is conformant under both,
-    which is why the helper can assert the stricter polling reading. Both schemas
-    permit `partial_data: true`; production hardcodes it false, so the helper pins
-    that. Wording the step as the general pairing rule would mis-attribute the
-    failure the day real partial-data reporting ships.
-    """
-    assert_partial_data_pairing(_scheduler_result(ctx), context="scheduler wire result")
 
 
 @then("the response omits the webhook-only fields")

@@ -303,34 +303,10 @@ Feature: BR-UC-004 Deliver Media Buy Metrics
   # HAND-EDITED: salesagent-local scenario (not in adcp-req). The @hand-edited
   # marker makes compile_bdd.py --merge classify this LEGACY-PRESERVE, and its
   # bdd-traceability.yaml entry survives the rederive prune (id kept in
-  # all_scenario_ids). Added for the #1570 review (grade the real scheduler path).
+  # all_scenario_ids). Added for the #1570 review (grade the poll's omission of
+  # the webhook-only fields).
   # NOTE: this comment MUST stay ABOVE the tag line — a comment between the tag
   # line and Scenario: makes the compiler parse tags=[]/id=None -> LEGACY-DELETE.
-  @T-UC-004-webhook-scheduler-derivation @alternative @polling @invariant @BR-RULE-029 @hand-edited
-  Scenario Outline: Delivery webhook scheduler derives <type> from the buy's real delivery status
-    # Drives the REAL DeliveryWebhookScheduler — not the WebhookDeliveryService
-    # is_final/is_adjusted flags: notification_type comes from
-    # derive_notification_type() over the buy's resolved delivery status, and
-    # sequence_number from the success-only WebhookDeliveryLog counter (#1570).
-    # NOT tagged @webhook so the polling harness (DeliveryPollEnv) is active — it
-    # exposes send_delivery_webhook / set_adapter_response.
-    Given a media buy "mb-100" with a reporting_webhook and a "<flight>" flight
-    When the delivery webhook scheduler sends a report for "mb-100"
-    Then the scheduler webhook payload notification_type should be "<type>"
-    And the scheduler webhook payload sequence_number should be 1
-    And the scheduler webhook payload <next_expected> include next_expected_at
-    And the scheduler webhook payload should omit unavailable_count while partial_data is false
-
-    # A completed (flight-ended) buy resolves to "completed" -> derive_notification_type
-    # returns "final", which must OMIT next_expected_at; an in-flight buy -> "scheduled".
-    Examples: notification_type derived from the buy's resolved delivery status
-      | flight    | type      | next_expected |
-      | live      | scheduled | should        |
-      | completed | final     | should not    |
-
-  # HAND-EDITED: salesagent-local scenario (not in adcp-req). See the
-  # @hand-edited note on the scheduler-derivation scenario above (comment stays
-  # ABOVE the tag line so the compiler classifies it LEGACY-PRESERVE).
   @T-UC-004-poll-omits-webhook-fields @main-flow @polling @v3-1 @invariant @BR-RULE-029 @hand-edited
   Scenario: Synchronous poll omits the webhook-only fields
     # #1570: the webhook-only fields (notification_type, sequence_number,
