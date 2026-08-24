@@ -17,6 +17,7 @@ from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.exceptions import AdCPMediaBuyRejectedError
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
+from src.core.tools._media_buy_status import REPORTABLE_PERSISTED_STATUSES
 from src.core.webhook_validator import validate_webhook_task_type
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
@@ -214,9 +215,14 @@ def media_buy_detail(tenant_id, media_buy_id):
                     "message": "This media buy is pending. It may be waiting for creatives or other requirements.",
                 }
 
-            # Fetch delivery metrics if media buy is active or completed
+            # Fetch delivery metrics for every persisted status the delivery tool
+            # reports on. Derived from the canonical status map rather than
+            # listed here: the literal this replaced omitted the legacy aliases
+            # ("ready", "scheduled"), so an operator looking at one of those rows
+            # saw an empty panel above a button that would happily send that same
+            # buy a delivery webhook.
             delivery_metrics = None
-            if media_buy.status in ["active", "approved", "completed"]:
+            if media_buy.status in REPORTABLE_PERSISTED_STATUSES:
                 try:
                     from datetime import UTC, datetime, timedelta
 

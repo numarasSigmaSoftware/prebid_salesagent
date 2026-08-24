@@ -30,6 +30,7 @@ from src.core.exceptions import (
     AdCPValidationError,
 )
 from src.core.schemas import GetMediaBuyDeliveryResponse
+from src.core.tools._media_buy_status import REPORTABLE_PERSISTED_STATUSES
 from tests.harness.delivery_poll import mock_send_notification
 from tests.helpers.delivery_assertions import (
     DetachedPushConfigMatcher,
@@ -4160,3 +4161,106 @@ class TestSchedulerWebhookBodyIsSchemaValid:
             wire = await env.send_delivery_webhook(buy)
 
             validate_against_pinned_schema(schema_file, wire["result"])
+
+
+class TestAdminDetailDeliveryMetricsGate:
+    """The admin media-buy detail panel must report on every reportable status.
+
+    ``media_buy_detail`` decides whether to fetch delivery metrics at all. A
+    hardcoded status list there strands exactly the rows #1556 exists to
+    un-strand: a legacy persisted ``ready``/``scheduled`` buy reports delivery
+    through ``get_media_buy_delivery`` and receives delivery webhooks, yet the
+    operator's panel for it rendered no metrics — and this same page's
+    trigger-delivery-webhook button would send a report for a buy the panel
+    above it showed nothing for.
+
+    The gate is graded against the derived ``REPORTABLE_PERSISTED_STATUSES`` so
+    the panel cannot drift from the polling tool's own vocabulary.
+    """
+
+    @staticmethod
+    def _render_kwargs(monkeypatch: pytest.MonkeyPatch, tenant_id: str, media_buy_id: str) -> dict[str, Any]:
+        """Drive the real view body and return what it handed the template.
+
+        ``__wrapped__`` skips only the auth decorator (the body reads no Flask
+        request/session state), so the status gate, the adapter fetch and the
+        metrics assembly all run for real. Only the template render is replaced,
+        and with a real recorder function rather than a mock object -- behavioral
+        files are capped on hand-rolled unittest.mock scaffolding, and there is no
+        harness env for an admin blueprint to route this through.
+        """
+        from src.admin.blueprints.operations import media_buy_detail
+
+        captured: dict[str, Any] = {}
+
+        def _record(_template_name: str, **kwargs: Any) -> str:
+            captured.update(kwargs)
+            return "rendered"
+
+        monkeypatch.setattr("flask.render_template", _record)
+        response = media_buy_detail.__wrapped__(tenant_id, media_buy_id)
+
+        assert response == "rendered", f"view did not render the detail template: {response!r}"
+        return captured
+
+    @pytest.mark.parametrize("persisted_status", sorted(REPORTABLE_PERSISTED_STATUSES))
+    def test_every_reportable_persisted_status_renders_delivery_metrics(
+        self, integration_db, monkeypatch, persisted_status
+    ):
+        """A legacy ``ready``/``scheduled`` buy renders metrics like a modern ``active`` one.
+
+        Fails before the fix for the two legacy aliases: the panel's literal
+        ["active", "approved", "completed"] left ``delivery_metrics`` None for
+        rows the rest of the system already reports on.
+        """
+        from tests.factories import MediaBuyFactory
+        from tests.harness._base import IntegrationEnv
+
+        with IntegrationEnv(tenant_id="t_admin_gate", principal_id="p_admin_gate") as env:
+            tenant, principal = env.setup_default_data()
+            buy = MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id=f"mb_admin_{persisted_status}",
+                status=persisted_status,
+                start_date=date.today() - timedelta(days=7),
+                end_date=date.today() + timedelta(days=7),
+            )
+            env._commit_factory_data()
+
+            metrics = self._render_kwargs(monkeypatch, tenant.tenant_id, buy.media_buy_id)["delivery_metrics"]
+
+        assert metrics is not None, (
+            f"persisted status {persisted_status!r} is reportable, but the admin detail panel "
+            f"rendered no delivery metrics for it"
+        )
+        assert "impressions" in metrics and "spend" in metrics, (
+            f"delivery metrics for {persisted_status!r} are missing the headline figures: {metrics!r}"
+        )
+
+    def test_a_pre_serving_status_still_renders_no_delivery_metrics(self, integration_db, monkeypatch):
+        """The gate still closes for a status the delivery tool cannot report on.
+
+        Without this, widening the gate to the derived set would pass just as
+        well if the gate were removed altogether.
+        """
+        from tests.factories import MediaBuyFactory
+        from tests.harness._base import IntegrationEnv
+
+        assert "pending_approval" not in REPORTABLE_PERSISTED_STATUSES
+
+        with IntegrationEnv(tenant_id="t_admin_gate2", principal_id="p_admin_gate2") as env:
+            tenant, principal = env.setup_default_data()
+            buy = MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb_admin_pending_approval",
+                status="pending_approval",
+                start_date=date.today() - timedelta(days=7),
+                end_date=date.today() + timedelta(days=7),
+            )
+            env._commit_factory_data()
+
+            metrics = self._render_kwargs(monkeypatch, tenant.tenant_id, buy.media_buy_id)["delivery_metrics"]
+
+        assert metrics is None, f"a pending-approval buy must render no delivery metrics, got {metrics!r}"
