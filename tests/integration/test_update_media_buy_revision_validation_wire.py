@@ -38,6 +38,25 @@ _SCHEMA_REJECTION_CODE = "VALIDATION_ERROR"
 _PRESENT_NULL_TRANSPORTS = [Transport.MCP, Transport.REST]
 
 
+def _assert_attributed_to_revision(envelope) -> None:
+    """The rejection must name ``revision``, not the request root.
+
+    The shared gate raised a bare ``ValueError`` inside a ``mode="before"`` model
+    validator, which Pydantic attributes to the MODEL ROOT — so every transport
+    emitted ``field: ""`` / ``loc: []`` and a request-level suggestion for a
+    rejection that knows exactly which field is wrong. Graded on the real wire
+    envelope, per transport, because the attribution is buyer-facing.
+    """
+    error = envelope["errors"][0]
+    assert error.get("field") == "revision", (
+        f"the rejection must be attributed to 'revision', got field={error.get('field')!r}"
+    )
+    suggestion = error.get("suggestion") or ""
+    assert "revision" in suggestion, (
+        f"the suggestion must name the offending field rather than the request root, got {suggestion!r}"
+    )
+
+
 class TestUpdateRevisionValidationWire:
     """Schema-invalid ``revision`` values must emit the documented wire codes.
 
@@ -55,6 +74,7 @@ class TestUpdateRevisionValidationWire:
         assert result.is_error, "expected a validation error for revision=0"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+        _assert_attributed_to_revision(result.wire_error_envelope)
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     @pytest.mark.parametrize("revision", ["not-an-int", "7"], ids=["non_numeric", "numeric_string"])
@@ -69,6 +89,7 @@ class TestUpdateRevisionValidationWire:
         assert result.is_error, "expected a validation error for a non-integer revision"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+        _assert_attributed_to_revision(result.wire_error_envelope)
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_whole_number_float_revision_is_accepted_on_every_transport(self, env_with_media_buy, transport):
@@ -120,6 +141,7 @@ class TestUpdateRevisionValidationWire:
         assert result.is_error, "expected a validation error for revision=7.5"
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+        _assert_attributed_to_revision(result.wire_error_envelope)
 
     @pytest.mark.parametrize("transport", _PRESENT_NULL_TRANSPORTS, ids=lambda t: t.value)
     def test_present_but_null_revision_is_rejected_not_treated_as_absent(self, env_with_media_buy, transport):

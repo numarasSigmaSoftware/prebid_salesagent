@@ -126,6 +126,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
+from pydantic_core import ValidationError as CoreValidationError
 
 # Transport wrappers must preserve malformed JSON values until the common
 # request boundary can emit the same AdCP error envelope on A2A, MCP, and REST.
@@ -2194,10 +2195,29 @@ def _normalize_revision_in_place(values: dict[str, Any]) -> None:
     # last-write-wins path the gate is meant to leave alone.
     if "revision" not in values or values["revision"] is None:
         return
+    raw = values["revision"]
     try:
-        values["revision"] = int(RevisionValidator.validate_python(values["revision"]))
+        values["revision"] = int(RevisionValidator.validate_python(raw))
     except PydanticValidationError as exc:
-        raise ValueError("revision must be an integer greater than or equal to 1") from exc
+        # A bare ``raise ValueError(...)`` inside a ``mode="before"`` model validator
+        # is attributed by Pydantic to the MODEL ROOT: the resulting error carries
+        # ``loc: []``, so ``first_validation_error_field`` reports no field and
+        # ``suggest_validation_fix`` falls back to a request-level hint. Every
+        # transport then emitted ``field: ""`` for a rejection that knows exactly
+        # which field is wrong. Re-raising a core ``ValidationError`` with an
+        # explicit ``loc`` puts ``revision`` back on the envelope, on all three
+        # transports at once, without changing which values are accepted.
+        raise CoreValidationError.from_exception_data(
+            "UpdateMediaBuyRequest",
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("revision",),
+                    "input": raw,
+                    "ctx": {"error": ValueError("revision must be an integer greater than or equal to 1")},
+                }
+            ],
+        ) from exc
 
 
 class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
