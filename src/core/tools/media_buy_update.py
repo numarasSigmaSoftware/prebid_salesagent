@@ -828,6 +828,7 @@ def _update_media_buy_impl(
                         media_buy_status=_post_action_mbs,  # AdCP 3.1: mirrors `status`
                         affected_packages=affected_pkgs,
                         valid_actions=_post_action_actions,
+                        context=req.context,
                         errors=property_list_unsupported_advisories(req.packages, adapter),
                     )
                     # Log successful update_media_buy (pause/resume)

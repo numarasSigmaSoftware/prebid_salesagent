@@ -165,6 +165,37 @@ class TestPersistedRevisionOnReadPath:
             assert result.response.revision == pre_pause + 1
             assert read_back_media_buy(env.identity, created.media_buy_id).revision == result.response.revision
 
+    def test_pause_success_echoes_the_buyer_context(self, integration_db):
+        """The pause arm must echo ``context`` like every other update success.
+
+        The pause/resume arm builds its own ``UpdateMediaBuySuccess`` rather than
+        falling through to the finalizer, and it omitted ``context=req.context`` —
+        so a buyer correlating responses by the context it sent got nothing back
+        on exactly this path, while the dry-run and finalizer arms echoed it.
+        """
+        from adcp.types import ContextObject
+
+        from src.core.database.repositories import MediaBuyUoW
+        from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+        with MediaBuyDualEnv() as env:
+            tenant, _principal, product, _pricing = env.setup_media_buy_data()
+            created = _create_buy(env, product)
+
+            with MediaBuyUoW(tenant.tenant_id) as uow:
+                uow.media_buys.update_status(created.media_buy_id, "active")
+
+            sent = ContextObject(campaign_id="ctx-echo-pause", session="sess-pause-1")
+            result = env.call_impl(
+                req=UpdateMediaBuyRequest(media_buy_id=created.media_buy_id, paused=True, context=sent)
+            )
+            assert isinstance(result.response, UpdateMediaBuySuccess), f"pause must succeed, got {result!r}"
+
+            echoed = result.response.context
+            assert echoed is not None, "the pause success dropped the buyer's context echo entirely"
+            assert echoed.campaign_id == "ctx-echo-pause"
+            assert echoed.session == "sess-pause-1"
+
 
 @pytest.mark.requires_db
 class TestRevisionOptimisticConcurrency:
