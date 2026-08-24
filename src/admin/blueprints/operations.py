@@ -511,9 +511,13 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # The buy IS committed at this point, so a confirmed Success is
                         # semantically correct here — route through the sync_success()
                         # factory like every sibling construction site. confirmed_at and
-                        # revision are read back from the persisted row (the approval
-                        # transition above stamped and bumped them through the
-                        # repository seam); the class defaults would advertise an
+                        # revision are read back from the persisted row FRESH, right
+                        # here: approving makes two seam mutations that each bump —
+                        # apply_computed_status_transition above (which also stamps the
+                        # write-once confirmed_at, while stamp_approval records who and
+                        # when) and the post-adapter activation to "active" inside
+                        # execute_approved_media_buy — so only a read at this point sees
+                        # the final counter. The class defaults would advertise an
                         # unconfirmed buy at revision 1.
                         #
                         # or_raise, never a default: the buy demonstrably existed

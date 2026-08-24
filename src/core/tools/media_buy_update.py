@@ -470,8 +470,14 @@ def _update_media_buy_impl(
             # Optimistic-concurrency gate — AdCP 3.1.1
             # update-media-buy-request.json properties.revision: "When
             # provided, sellers MUST reject the update with CONFLICT if the
-            # media buy's current revision does not match." (Schema-optional
-            # field; no conformance storyboard step — ungraded.)
+            # media buy's current revision does not match, and MUST enforce
+            # that comparison atomically with the write." The second clause is
+            # why the authoritative check is the one under the row lock below.
+            # The FIELD's presence on a response IS graded structurally by the
+            # storyboard's ``check: response_schema`` steps; what no storyboard
+            # step exercises is the BEHAVIOUR — none sends a stale token or
+            # asserts an increment — so the rejection itself is ungraded there
+            # and is graded here instead.
             # Acquire the authoritative row lock before any workflow or adapter
             # side effect. lock_timeout bounds the WAITER so a second contending
             # request fails fast with a transient CONFLICT instead of blocking to

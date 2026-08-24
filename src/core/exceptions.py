@@ -703,9 +703,12 @@ def media_buy_revision_conflict(
 
     AdCP 3.1.1 update-media-buy-request.json ``properties.revision``:
     "When provided, sellers MUST reject the update with CONFLICT if the media
-    buy's current revision does not match." One definition of the error shape,
-    shared by the fast pre-adapter gate in ``_update_media_buy_impl`` and the
-    authoritative under-row-lock check in ``MediaBuyRepository``.
+    buy's current revision does not match, and MUST enforce that comparison
+    atomically with the write." The second clause is the reason the authoritative
+    check lives under the row lock, so quoting the sentence one clause short
+    dropped the half that dictates WHERE the check goes. One definition of the
+    error shape, shared by the fast pre-adapter gate in ``_update_media_buy_impl``
+    and the authoritative under-row-lock check in ``MediaBuyRepository``.
     """
     # Details come from the shared media_buy_conflict_details() shape, so this
     # site and the lock-timeout site in MediaBuyRepository expose an identical

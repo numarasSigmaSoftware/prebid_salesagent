@@ -101,10 +101,15 @@ def _get_media_buys_impl(
         identity: ResolvedIdentity with principal/tenant info (transport-agnostic)
         include_snapshot: When True, include near-real-time delivery stats per package.
             ``include_snapshot`` IS a field of the pinned AdCP 3.1.1
-            get-media-buys-request schema, but the installed ``adcp`` library's
-            ``GetMediaBuysRequest`` type does not surface it. As an implementation
-            decision (not a spec fact), the transport wrappers thread it as a
-            separate parameter alongside ``req`` rather than as a ``req`` field.
+            get-media-buys-request schema, and the installed ``adcp`` library's
+            ``GetMediaBuysRequest`` DOES surface it — verify with
+            ``"include_snapshot" in adcp.types.GetMediaBuysRequest.model_fields``
+            (True). The type that lacks it is this repo's OWN
+            ``src.core.schemas._base.GetMediaBuysRequest``, which mirrors the
+            request shape locally instead of extending the library type. As an
+            implementation decision (not a spec fact), the transport wrappers
+            thread it as a separate parameter alongside ``req`` rather than as a
+            ``req`` field.
 
     Returns:
         GetMediaBuysResponse with matching media buys

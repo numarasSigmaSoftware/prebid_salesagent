@@ -200,8 +200,13 @@ class TestRevisionOptimisticConcurrency:
 
     AdCP 3.1.1 update-media-buy-request.json ``properties.revision``:
     "When provided, sellers MUST reject the update with CONFLICT if the media
-    buy's current revision does not match." (Schema MUST; no conformance
-    storyboard step grades it — ungraded.)
+    buy's current revision does not match, and MUST enforce that comparison
+    atomically with the write."
+
+    The FIELD's presence on a response IS graded structurally by the conformance
+    storyboard's ``check: response_schema`` steps. What is ungraded there is the
+    BEHAVIOUR: no storyboard step sends a stale token or asserts that an accepted
+    update incremented the counter. These tests are that grading.
     """
 
     def test_stale_revision_rejected_with_conflict_and_nothing_written(self, env_and_buy):
