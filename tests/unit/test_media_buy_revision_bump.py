@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from src.core.database.models import MediaBuy
 from src.core.database.repositories.media_buy import MediaBuyRepository
+from src.core.exceptions import AdCPInternalError
 from src.core.schemas._base import CreateMediaBuySuccess, UpdateMediaBuySuccess
 
 
@@ -63,11 +64,32 @@ class TestBumpRevisionShortCircuits:
 
         The guard raises BEFORE the row is even loaded, so no bump/flush occurs —
         this is asserted at unit level precisely because it is DB-independent.
+
+        Pinned by WIRE CONTRACT, not just by class. No buyer field maps onto
+        ``revision`` as a write target, so reaching this guard is a server-side
+        defect: the ``ValueError`` it used to raise normalizes to
+        ``VALIDATION_ERROR``/``correctable`` at the transport boundaries and
+        reports our bug as the buyer's malformed request. It must reach the
+        buyer as ``SERVICE_UNAVAILABLE``/``transient``, carrying neither the
+        blocked field name nor the buy id.
         """
         repo = _repo_with_media_buy(_transient_media_buy(revision=5))
 
-        with pytest.raises(ValueError, match="revision"):
+        with pytest.raises(AdCPInternalError) as exc_info:
             repo.update_fields("mb-rev-1", revision=99)
+
+        breach = exc_info.value
+        assert breach.wire_error_code == "SERVICE_UNAVAILABLE", (
+            f"a repository-managed write is a server fault, not a buyer one; got {breach.wire_error_code!r}"
+        )
+        assert breach.recovery == "transient", (
+            f"the buyer has no request defect to correct here; got recovery={breach.recovery!r}"
+        )
+        assert breach.status_code == 503, f"a server-side invariant breach is 503, got {breach.status_code}"
+        assert "revision" not in breach.message, (
+            f"the blocked field name leaked into the buyer-facing message: {breach.message!r}"
+        )
+        assert "mb-rev-1" not in breach.message, f"the row id leaked into the buyer-facing message: {breach.message!r}"
 
 
 class TestMutationLoadsAreRowLocked:

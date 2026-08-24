@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, object_session
 
 from src.core.database.models import MediaBuy, MediaPackage, is_media_buy_seller_confirmed
-from src.core.exceptions import AdCPGoneError
+from src.core.exceptions import AdCPInternalError
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
@@ -669,16 +669,18 @@ class MediaBuyRepository:
         (No Quiet Failures). Callers that deliberately tolerate a missing buy
         keep using the base mutators and check the return themselves.
 
-        Raises the typed :class:`AdCPGoneError` (410 / ``INVALID_STATE`` /
-        ``correctable``), not a bare ``RuntimeError``: this reaches the buyer
-        through the transport boundaries, and an untyped exception renders as
-        ``SERVICE_UNAVAILABLE``/``transient`` on A2A and MCP — telling a buyer
-        agent to retry a request whose target row no longer exists — while REST
-        emits a bare 500 with no envelope at all. The buy really is gone, and the
-        buyer recovers by referencing a different one, which is exactly GONE.
-        The *invariant* sentence ("it existed when the request began") is
-        operator-facing and stays in the log; the raised message is a buyer
-        contract and only names the resource.
+        Raises the typed :class:`AdCPInternalError` (503 /
+        ``SERVICE_UNAVAILABLE`` / ``transient``), not a bare ``RuntimeError``
+        and not a buyer-fault code: this reaches the buyer through the
+        transport boundaries, and an untyped exception renders as a bare 500
+        with no envelope at all on REST. The buyer's request named a buy that
+        this very request had already resolved, so there is nothing for them to
+        correct — a ``correctable`` classification would send them to fix a
+        request defect that does not exist. The row vanishing under a verified
+        read is our invariant, so ``transient`` (retry) is the only honest
+        advice. The invariant sentence, the buy id and the action are
+        operator-facing and stay in the log; the raised message carries none of
+        them.
         """
         if media_buy is None:
             logger.error(
@@ -686,7 +688,7 @@ class MediaBuyRepository:
                 media_buy_id,
                 action,
             )
-            raise AdCPGoneError(f"Media buy {media_buy_id!r} is no longer available")
+            raise AdCPInternalError()
         return media_buy
 
     def bump_revision_or_raise(
@@ -718,13 +720,25 @@ class MediaBuyRepository:
         Returns the updated MediaBuy, or None if not found in this tenant.
         ``expected_revision`` is checked under the row lock (CONFLICT on
         mismatch, before any mutation). Raises ValueError if any kwarg is not
-        a valid MediaBuy attribute or if the caller attempts to update an
-        immutable/repository-managed field (tenant_id, media_buy_id,
-        created_at, revision).
+        a valid MediaBuy attribute.
+
+        Naming an immutable/repository-managed field (tenant_id, media_buy_id,
+        created_at, revision) raises :class:`AdCPInternalError`, not
+        ``ValueError``: no buyer field maps onto any of the four, so reaching
+        this guard means server-side code passed a kwarg it manages itself. A
+        ``ValueError`` normalizes to ``VALIDATION_ERROR`` / ``correctable`` at
+        the transport boundaries, which would report our bug as the buyer's
+        malformed request. The blocked names are operator-facing and go to the
+        log, not to the buyer's message.
         """
         blocked = self._MEDIA_BUY_IMMUTABLE_FIELDS & kwargs.keys()
         if blocked:
-            raise ValueError(f"Cannot update immutable field(s): {', '.join(sorted(blocked))}")
+            logger.error(
+                "update_fields called with repository-managed field(s) %s on media buy %r",
+                ", ".join(sorted(blocked)),
+                media_buy_id,
+            )
+            raise AdCPInternalError()
 
         def _apply(media_buy: MediaBuy) -> None:
             for key, value in kwargs.items():

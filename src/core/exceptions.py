@@ -659,6 +659,37 @@ class AdCPServiceUnavailableError(AdCPError):
     _default_recovery: ClassVar[RecoveryHint] = "transient"
 
 
+class AdCPInternalError(AdCPServiceUnavailableError):
+    """A server-side invariant was breached — the buyer did nothing wrong (503).
+
+    Raised where the code reaches a state its own preconditions rule out: a row
+    verified present and then absent, a repository-managed column handed to a
+    caller-facing setter. Two consequences follow from "the buyer did nothing
+    wrong", and this class exists to make both structural rather than a habit
+    each raise site has to remember:
+
+    * **The wire contract must not blame the buyer.** ``INVALID_STATE`` /
+      ``correctable`` instructs a buyer agent to fix a request it did not get
+      wrong; ``SERVICE_UNAVAILABLE`` / ``transient`` instructs it to retry,
+      which is the only honest advice when the fault is ours. The code is
+      inherited rather than restated: it is exactly what the base
+      ``AdCPError``'s ``INTERNAL_ERROR`` already remaps to via
+      ``ERROR_CODE_MAPPING``, so the buyer sees no new code — only a recovery
+      class that stops sending them after a request defect that isn't there.
+    * **The message must carry no diagnostic.** The invariant sentence, the
+      tenant id and the row id are operator-facing. The constructor takes no
+      message at all, so no raise site can leak one; diagnostics belong in the
+      ``logger.error`` call beside the raise.
+    """
+
+    #: The whole buyer-facing message. Deliberately says nothing about which
+    #: invariant broke — that detail is in the log, keyed by the same request.
+    _BUYER_MESSAGE: ClassVar[str] = "The request could not be completed due to a server-side error."
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(self._BUYER_MESSAGE, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Typed subclasses for spec-compliant error codes.
 # ---------------------------------------------------------------------------

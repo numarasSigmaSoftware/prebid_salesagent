@@ -47,6 +47,7 @@ from src.core.exceptions import (
     AdCPContextNotFoundError,
     AdCPCreativeRejectedError,
     AdCPGoneError,
+    AdCPInternalError,
     AdCPInvalidRequestError,
     AdCPValidationError,
     media_buy_revision_conflict,
@@ -121,17 +122,19 @@ def _require_current_buy(mb: "MediaBuy | None") -> "MediaBuy":
     which an optimistic-concurrency counter must never do, and a defaulted ``""``
     status would advertise a graceful path that does not exist.
 
-    Raises the typed :class:`AdCPGoneError` (410 / ``INVALID_STATE`` /
-    ``correctable``) rather than a bare ``RuntimeError``: this escapes to the
-    buyer, and an untyped exception renders as ``SERVICE_UNAVAILABLE`` /
-    ``transient`` on A2A and MCP — telling a buyer agent to retry a request whose
-    target row no longer exists — and as a bare 500 with no envelope on REST. The
-    internal invariant sentence is operator-facing and belongs in the log; the
-    raised message is a buyer contract.
+    Raises the typed :class:`AdCPInternalError` (503 / ``SERVICE_UNAVAILABLE`` /
+    ``transient``) rather than a bare ``RuntimeError`` — which escapes to the
+    buyer as a bare 500 with no envelope on REST — and rather than a buyer-fault
+    code. ``_verify_principal`` already accepted this buy for this request, so
+    the buyer has nothing to correct; a ``correctable`` classification would send
+    them to fix a request defect that does not exist. The breach is ours, so
+    ``transient`` (retry) is the only honest advice. The internal invariant
+    sentence is operator-facing and belongs in the log; the raised message
+    carries no diagnostic at all.
     """
     if mb is None:
         logger.error("update flow continued with no media buy — the buy existed when the request began")
-        raise AdCPGoneError("Media buy is no longer available")
+        raise AdCPInternalError()
     return mb
 
 

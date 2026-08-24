@@ -20,7 +20,7 @@ import pytest
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal, Tenant
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
-from src.core.exceptions import AdCPGoneError
+from src.core.exceptions import AdCPInternalError
 from tests.helpers.media_buy import read_back_media_buy
 from tests.integration.conftest import cleanup_tenant, make_media_buy, make_package
 
@@ -331,12 +331,15 @@ class TestRevisionBumpsOnStatusTransition:
         disappeared mid-request — No-Quiet-Failures requires a raise, not a
         skipped write.
 
-        The raise is the TYPED ``AdCPGoneError``, pinned here by its wire contract
-        (410 / INVALID_STATE / correctable), not merely by its class. A bare
-        ``RuntimeError`` escapes the transport boundaries as
-        SERVICE_UNAVAILABLE/transient — inviting a buyer agent to retry a request
-        whose row no longer exists. The operator-facing invariant sentence must
-        stay in the log and out of the buyer-facing message.
+        The raise is the TYPED ``AdCPInternalError``, pinned here by its wire
+        contract (503 / SERVICE_UNAVAILABLE / transient), not merely by its
+        class. A bare ``RuntimeError`` escapes REST as a bare 500 with no
+        envelope; a ``correctable`` code (the earlier ``AdCPGoneError``, 410 /
+        INVALID_STATE) is worse than untyped — it instructs a buyer agent to fix
+        a request it did not get wrong, when the row disappearing under a read
+        this request had already verified is entirely our invariant. The
+        operator-facing invariant sentence AND the buy id must stay in the log
+        and out of the buyer-facing message.
         """
         with MediaBuyUoW(tenant_a) as uow:
             uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_rev_or_raise", status="pending_approval"))
@@ -351,18 +354,21 @@ class TestRevisionBumpsOnStatusTransition:
                 lambda: uow.media_buys.bump_revision_or_raise("mb_never_existed"),
             )
             for mutate in vanished_mutations:
-                with pytest.raises(AdCPGoneError, match="mb_never_existed") as exc_info:
+                with pytest.raises(AdCPInternalError) as exc_info:
                     mutate()
-                gone = exc_info.value
-                assert gone.wire_error_code == "INVALID_STATE", (
-                    f"a vanished buy must reach the buyer as INVALID_STATE, got {gone.wire_error_code!r}"
+                breach = exc_info.value
+                assert breach.wire_error_code == "SERVICE_UNAVAILABLE", (
+                    f"a vanished verified row is a server fault, not a buyer one; got {breach.wire_error_code!r}"
                 )
-                assert gone.recovery == "correctable", (
-                    f"a vanished buy is not retryable, it is correctable; got recovery={gone.recovery!r}"
+                assert breach.recovery == "transient", (
+                    f"the buyer has no request defect to correct here; got recovery={breach.recovery!r}"
                 )
-                assert gone.status_code == 410, f"a vanished buy is 410 Gone, got {gone.status_code}"
-                assert "existed when the request began" not in gone.message, (
-                    f"the internal invariant sentence leaked into the buyer-facing message: {gone.message!r}"
+                assert breach.status_code == 503, f"a server-side invariant breach is 503, got {breach.status_code}"
+                assert "existed when the request began" not in breach.message, (
+                    f"the internal invariant sentence leaked into the buyer-facing message: {breach.message!r}"
+                )
+                assert "mb_never_existed" not in breach.message, (
+                    f"the row id leaked into the buyer-facing message: {breach.message!r}"
                 )
 
     def test_apply_status_transition_bumps_revision(self, tenant_a, principal_a):
