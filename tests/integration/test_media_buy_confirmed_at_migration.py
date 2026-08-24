@@ -156,6 +156,15 @@ def test_upgrade_leaves_historical_rows_for_operational_backfill_and_downgrade_d
             ).all()
         )
 
+    # The all-NULL state is intentional (the migration must not hold a
+    # historical-row rewrite transaction) AND it is a live serving hazard, which
+    # is why the deploy ordering is migrate -> backfill -> serve: while these rows
+    # are NULL, every already-running buy serializes ``status: "active"`` with
+    # ``confirmed_at: null``, and the pinned
+    # dist/schemas/3.1.1/media-buy/get-media-buys-response.json
+    # ``properties.media_buys.items.allOf[0]`` forbids that pair (an item with a
+    # present-and-null confirmed_at must NOT carry status "active"). See the
+    # ordering note in alembic/versions/2c4e6a7b8d9e_add_media_buys_confirmed_at.py.
     assert set(rows.values()) == {None}, "schema migration must not hold a historical-row rewrite transaction"
 
     run_alembic_downgrade(db_url, PRE_REV)
