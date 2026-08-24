@@ -1263,6 +1263,10 @@ def env_with_media_buy(integration_db):
     its PUT target from ``req.media_buy_id`` falling back to this attribute, so a
     copy that forgets it silently PUTs to ``/media-buys/NOT_SEEDED`` — and
     ``env._owner_tenant`` for tests that need the tenant row.
+
+    The two class-scoped copies that shadowed it are gone; both had already
+    drifted (each omitted one of the two attributes), which is the failure mode
+    a "single home" that is not actually single always produces.
     """
     from tests.bdd.conftest import _setup_existing_media_buy
     from tests.harness.media_buy_dual import MediaBuyDualEnv
@@ -1273,5 +1277,4 @@ def env_with_media_buy(integration_db):
         _setup_existing_media_buy(ctx, env, tenant, principal, product)
         env._seeded_media_buy_id = ctx["existing_media_buy"].media_buy_id
         env._owner_tenant = tenant
-        env._seeded_package = ctx["existing_package"]
         yield env, ctx["existing_media_buy"]
