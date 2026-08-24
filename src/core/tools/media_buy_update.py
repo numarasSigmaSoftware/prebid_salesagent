@@ -172,6 +172,38 @@ def _adcp_status_and_actions(
     return media_buy_status, valid_actions
 
 
+def _update_success(
+    *,
+    media_buy_id: str,
+    revision: int,
+    status_and_actions: tuple[MediaBuyStatus | None, list[str]],
+    affected_packages: list[Any],
+    req: UpdateMediaBuyRequest,
+    adapter: Any,
+) -> UpdateMediaBuySuccess:
+    """Assemble the one shape an update success has, for all three success arms.
+
+    ``_update_media_buy_impl`` returns a success from three places — the dry-run
+    preview, the campaign-level pause/resume arm, and the finalizer — and each
+    hand-built the same model. They drifted: the pause arm was missing
+    ``context=req.context``, so a buyer correlating responses by the context it
+    sent got nothing back on exactly that path while the other two echoed it.
+    One assembly is what stops that recurring; the per-arm inputs (which row the
+    revision came from, which status/actions pair, which affected-package list)
+    stay at the call sites because they are genuinely different.
+    """
+    media_buy_status, valid_actions = status_and_actions
+    return UpdateMediaBuySuccess(
+        media_buy_id=media_buy_id,
+        revision=revision,
+        media_buy_status=media_buy_status,  # AdCP 3.1: mirrors `status`
+        affected_packages=affected_packages,
+        valid_actions=valid_actions,
+        context=req.context,
+        errors=property_list_unsupported_advisories(req.packages, adapter),
+    )
+
+
 def _requested_actions(req: UpdateMediaBuyRequest) -> list[str]:
     """Derive the AdCP buyer-action names implied by an update request.
 
@@ -634,15 +666,14 @@ def _update_media_buy_impl(
                 # outcome, which IS completion -> "completed" is a truthful preview, not a
                 # lie. Guarded by tests/integration/test_media_buy_dry_run_status.py.
                 _dry_run_mbs, _dry_run_actions = _adcp_status_and_actions(_dry_run_mb)
-                dry_run_response = UpdateMediaBuySuccess(
+                dry_run_response = _update_success(
                     media_buy_id=req.media_buy_id or "",
                     # dry-run: nothing persisted — echo the current revision
                     revision=_dry_run_mb.revision,
-                    media_buy_status=_dry_run_mbs,  # AdCP 3.1: mirrors `status`
+                    status_and_actions=(_dry_run_mbs, _dry_run_actions),
                     affected_packages=simulated_affected,
-                    valid_actions=_dry_run_actions,
-                    context=req.context,
-                    errors=property_list_unsupported_advisories(req.packages, adapter),
+                    req=req,
+                    adapter=adapter,
                 )
 
                 return UpdateMediaBuyResult(response=dry_run_response, status=AdcpTaskStatus.completed.value)
@@ -820,16 +851,15 @@ def _update_media_buy_impl(
                     _post_action_mbs, _post_action_actions = _adcp_status_and_actions(
                         _post_action_mb, fallback_status=("paused" if req.paused else "active")
                     )
-                    success_response = UpdateMediaBuySuccess(
+                    success_response = _update_success(
                         media_buy_id=media_buy_id,
                         # Current persisted revision for this buy. bump_revision_or_raise
                         # returns the non-optional locked row, so read it directly.
                         revision=_post_action_mb.revision,
-                        media_buy_status=_post_action_mbs,  # AdCP 3.1: mirrors `status`
+                        status_and_actions=(_post_action_mbs, _post_action_actions),
                         affected_packages=affected_pkgs,
-                        valid_actions=_post_action_actions,
-                        context=req.context,
-                        errors=property_list_unsupported_advisories(req.packages, adapter),
+                        req=req,
+                        adapter=adapter,
                     )
                     # Log successful update_media_buy (pause/resume)
                     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
@@ -855,6 +885,24 @@ def _update_media_buy_impl(
             # transitions (draft -> pending_creatives on creative assignment)
             # stage into this dict rather than writing ``.status`` directly.
             pending_field_updates: dict[str, Any] = {}
+
+            def _stage_draft_unblock(creatives_supplied: object, media_buy_obj: "MediaBuy", detail: str) -> None:
+                """Stage draft -> pending_creatives once creatives arrive on an approved buy.
+
+                A buy approved WITHOUT creatives sits in ``draft``; supplying creatives
+                on this update is what unblocks it. The rule fired at two points in this
+                flow — the creative_ids arm and the creative_assignments arm — written
+                twice with an identical predicate and staging write, so a change to one
+                (the status it targets, the approved_at precondition) silently left the
+                other behind. Staged, never written raw: the single update_fields() call
+                at the end of the flow applies it, so the revision bumps exactly once.
+                """
+                if creatives_supplied and media_buy_obj.status == "draft" and media_buy_obj.approved_at is not None:
+                    pending_field_updates["status"] = "pending_creatives"
+                    logger.info(
+                        f"[UPDATE] Media buy {media_buy_obj.media_buy_id} transitioned from draft "
+                        f"to pending_creatives ({detail})"
+                    )
 
             # Handle package-level updates
             if req.packages:
@@ -1035,19 +1083,11 @@ def _update_media_buy_impl(
                             )
                             session.add(assignment)
 
-                        # If media buy was approved (approved_at set) but is in draft status
-                        # (meaning it was approved without creatives), transition to pending_creatives
-                        # Check whenever creative_ids are being set (not just when new ones added)
-                        if (
-                            pkg_update.creative_ids
-                            and media_buy_obj.status == "draft"
-                            and media_buy_obj.approved_at is not None
-                        ):
-                            pending_field_updates["status"] = "pending_creatives"
-                            logger.info(
-                                f"[UPDATE] Media buy {actual_media_buy_id} transitioned from draft to pending_creatives "
-                                f"(creative_ids: {pkg_update.creative_ids})"
-                            )
+                        _stage_draft_unblock(
+                            pkg_update.creative_ids,
+                            media_buy_obj,
+                            f"creative_ids: {pkg_update.creative_ids}",
+                        )
 
                         # Flush to persist assignment changes within the session
                         session.flush()
@@ -1271,19 +1311,11 @@ def _update_media_buy_impl(
                                 updated_assignments.append(creative_id)
                                 new_assignments_created.append(creative_id)
 
-                        # If media buy was approved (approved_at set) but is in draft status
-                        # (meaning it was approved without creatives), transition to pending_creatives
-                        # Check whenever creative_assignments are being set (not just when new ones created)
-                        if (
-                            pkg_update.creative_assignments
-                            and media_buy_obj.status == "draft"
-                            and media_buy_obj.approved_at is not None
-                        ):
-                            pending_field_updates["status"] = "pending_creatives"
-                            logger.info(
-                                f"[UPDATE] Media buy {actual_media_buy_id} transitioned from draft to pending_creatives "
-                                f"(creative_assignments processed: {updated_assignments})"
-                            )
+                        _stage_draft_unblock(
+                            pkg_update.creative_assignments,
+                            media_buy_obj,
+                            f"creative_assignments processed: {updated_assignments}",
+                        )
 
                         # Flush to persist assignment changes within the session
                         session.flush()
@@ -1509,16 +1541,15 @@ def _update_media_buy_impl(
 
             _final_mb = _require_current_buy(uow.media_buys.get_by_id(req.media_buy_id))
             _final_mbs, _final_actions = _adcp_status_and_actions(_final_mb)
-            final_response = UpdateMediaBuySuccess(
+            final_response = _update_success(
                 media_buy_id=req.media_buy_id or "",
                 # Persisted revision after this update's mutations (bumped by
                 # update_fields / bump_revision above).
                 revision=_final_mb.revision,
-                media_buy_status=_final_mbs,  # AdCP 3.1: mirrors `status`
+                status_and_actions=(_final_mbs, _final_actions),
                 affected_packages=affected_packages_list,
-                valid_actions=_final_actions,
-                context=req.context,
-                errors=property_list_unsupported_advisories(req.packages, adapter),
+                req=req,
+                adapter=adapter,
             )
 
             # Log successful update_media_buy call
