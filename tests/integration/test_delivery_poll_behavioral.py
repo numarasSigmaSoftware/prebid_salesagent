@@ -472,7 +472,7 @@ class TestFinalWebhookSurvivesStatusHandoff:
             # 1) Status scheduler runs first (its real transition), flipping the
             #    ended buy to persisted "completed" — the exact state that used to
             #    make the hourly delivery batch drop it.
-            await MediaBuyStatusScheduler()._update_statuses()
+            MediaBuyStatusScheduler()._update_statuses()
             session = env.get_session()
             session.expire(buy)
             assert buy.status == "completed", "status scheduler must flip the ended buy to persisted completed"

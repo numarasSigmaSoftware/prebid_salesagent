@@ -522,6 +522,25 @@ class DeliveryWebhookScheduler:
         database (e.g. two replicas) can both pass them and both POST. Making the
         send exactly-once needs the send reserved durably BEFORE the POST (a
         transactional outbox), which is tracked separately.
+
+        NOT offloaded to a thread, deliberately — the asymmetry with
+        ``media_buy_status_scheduler._update_statuses`` (which IS wrapped in
+        ``asyncio.to_thread``) is a decision, not an oversight. Everything before
+        the single ``await`` below is synchronous and does block the loop, but it
+        runs on the BATCH-WIDE ``session`` this method is handed: the one opened
+        once in ``_send_reports`` and shared across every buy in the run, which
+        that loop's error handler also rolls back. Three call sites use it
+        directly — ``PushNotificationConfigRepository(session, ...)``,
+        ``delivery_repo.get_max_sequence_number(...)`` and
+        ``delivery_repo.get_idempotency_key_for_sequence(...)`` (``delivery_repo``
+        wraps the same session) — plus every ``media_buy.<attr>`` read, whose
+        lazy-load path goes there too. A SQLAlchemy ``Session`` is not
+        thread-safe, so wrapping this region would hand one shared session to a
+        worker thread per buy, concurrently with the batch loop's own use of it.
+        Fixing the blocking properly means giving this method its own session (or
+        detaching what it needs) first; opening a session inside the thread or
+        narrowing the wrap to dodge the shared reads would trade a latency
+        problem for a data-corruption one.
         """
         # Reporting period for daily frequency: yesterday (full day).
         start_date_obj = datetime.now(UTC).date() - timedelta(days=1)

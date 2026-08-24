@@ -206,7 +206,7 @@ async def test_scheduled_transitions_to_active_when_start_time_passed(integratio
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status changed to active
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
@@ -237,7 +237,7 @@ async def test_scheduled_stays_scheduled_when_start_time_not_passed(integration_
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status unchanged
     assert _get_media_buy_status(tenant_id, media_buy_id) == "scheduled"
@@ -282,7 +282,7 @@ async def test_pending_activation_transitions_to_active_with_approved_creatives(
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status changed to active
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
@@ -322,7 +322,7 @@ async def test_pending_activation_stays_pending_with_unapproved_creatives(integr
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status unchanged (creatives not approved)
     assert _get_media_buy_status(tenant_id, media_buy_id) == "pending_activation"
@@ -353,7 +353,7 @@ async def test_pending_activation_activates_without_creatives(integration_db):
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status changed to active (no creatives = nothing to block)
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
@@ -393,7 +393,7 @@ async def test_pending_activation_stays_pending_when_start_time_not_passed(integ
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status unchanged (start time not passed)
     assert _get_media_buy_status(tenant_id, media_buy_id) == "pending_activation"
@@ -429,7 +429,7 @@ async def test_active_transitions_to_completed_when_end_time_passed(integration_
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status changed to completed
     assert _get_media_buy_status(tenant_id, media_buy_id) == "completed"
@@ -460,7 +460,7 @@ async def test_active_stays_active_when_end_time_not_passed(integration_db):
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status unchanged
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
@@ -517,7 +517,7 @@ async def test_scheduler_updates_multiple_media_buys(integration_db):
 
     # Run scheduler
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify expected transitions
     assert _get_media_buy_status(tenant_id, "mb_multi_1") == "active"
@@ -557,7 +557,7 @@ async def test_scheduler_uses_start_date_when_start_time_not_set(integration_db)
 
     # Run scheduler - should use start_date for transition
     scheduler = MediaBuyStatusScheduler()
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
 
     # Verify status changed to active (using start_date fallback)
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
@@ -586,15 +586,15 @@ async def test_scheduler_idempotent(integration_db):
     scheduler = MediaBuyStatusScheduler()
 
     # Run scheduler first time
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
 
     # Run scheduler second time - should be no-op
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
 
     # Run scheduler third time - still no-op
-    await scheduler._update_statuses()
+    scheduler._update_statuses()
     assert _get_media_buy_status(tenant_id, media_buy_id) == "active"
 
 
@@ -637,7 +637,7 @@ async def test_legacy_serving_alias_transitions_to_active_when_start_time_passed
             end_time=datetime.now(UTC) + timedelta(days=7),
         )
 
-        await MediaBuyStatusScheduler()._update_statuses()
+        MediaBuyStatusScheduler()._update_statuses()
 
         env.get_session().expire_all()
         row = env.get_one(MediaBuyModel, media_buy_id=buy.media_buy_id)
@@ -671,7 +671,7 @@ async def test_legacy_ready_transitions_to_completed_when_end_time_passed(integr
             end_time=datetime.now(UTC) - timedelta(hours=1),
         )
 
-        await MediaBuyStatusScheduler()._update_statuses()
+        MediaBuyStatusScheduler()._update_statuses()
 
         env.get_session().expire_all()
         row = env.get_one(MediaBuyModel, media_buy_id=buy.media_buy_id)
@@ -719,7 +719,7 @@ async def test_one_unprocessable_buy_does_not_strand_the_rest(integration_db):
             return real(self, media_buy, now, session)
 
         with patch.object(MediaBuyStatusScheduler, "_compute_new_status", raise_for_bad):
-            await MediaBuyStatusScheduler()._update_statuses()
+            MediaBuyStatusScheduler()._update_statuses()
 
         env.get_session().expire_all()
         assert env.get_one(MediaBuyModel, media_buy_id=good.media_buy_id).status == "active", (
@@ -774,7 +774,7 @@ async def test_row_faults_continue_but_session_faults_abort(integration_db, rais
             raise raised
 
         with patch.object(MediaBuyStatusScheduler, "_compute_new_status", always_raise):
-            await MediaBuyStatusScheduler()._update_statuses()
+            MediaBuyStatusScheduler()._update_statuses()
 
         assert len(calls) == expected_calls, f"{why} (saw {len(calls)} calls: {calls})"
 
@@ -820,7 +820,7 @@ async def test_status_sweep_summary_accounts_for_every_selected_buy(integration_
         # unchanged: already active mid-flight
         MediaBuyFactory(media_buy_id="mb_sweep_unchanged", status="active", **mid_flight, **common)
 
-        summary = await MediaBuyStatusScheduler()._update_statuses()
+        summary = MediaBuyStatusScheduler()._update_statuses()
 
         assert summary.selected >= 2, (
             f"expected both seeded buys to be selected, got {summary.selected} — "
@@ -883,7 +883,7 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
         )
 
         with capture_scheduler_summary("src.services.media_buy_status_scheduler") as lines:
-            summary = await MediaBuyStatusScheduler()._update_statuses()
+            summary = MediaBuyStatusScheduler()._update_statuses()
 
         assert summary.updated == 0, f"seeding no longer produces a no-op sweep (updated={summary.updated})"
         sweep = [line for line in lines if "Status sweep:" in line]

@@ -113,7 +113,16 @@ class MediaBuyStatusScheduler:
         """Main scheduler loop - runs on a fixed cadence."""
         while self.is_running:
             try:
-                await self._update_statuses()
+                # Offloaded: _update_statuses is fully synchronous (queries, per-row
+                # _compute_new_status, session.commit()) and this loop is started into
+                # the MCP server's lifespan loop, so running it inline blocked every
+                # other request for the length of a sweep. Safe to hand to a worker
+                # thread because the function opens its OWN session inside itself and
+                # get_db_session resolves through a thread-local scoped_session — no
+                # Session crosses the boundary. Contrast _deliver_report in
+                # delivery_webhook_scheduler.py, which cannot be offloaded for exactly
+                # the opposite reason.
+                await asyncio.to_thread(self._update_statuses)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -122,8 +131,15 @@ class MediaBuyStatusScheduler:
                 # Wait before next check
                 await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
 
-    async def _update_statuses(self) -> StatusSweepSummary:
+    def _update_statuses(self) -> StatusSweepSummary:
         """Check and update media buy statuses based on flight dates.
+
+        Synchronous by design: every statement in here blocks (repository query,
+        per-row ``_compute_new_status``, ``session.commit()``) and there is nothing
+        to await. Declaring it ``async`` only disguised that — it ran the whole
+        sweep inline on the caller's event loop. ``_run_scheduler`` hands it to
+        ``asyncio.to_thread`` instead; the session it opens below is created,
+        used and closed entirely within whichever thread runs it.
 
         Returns the run's :class:`StatusSweepSummary`. Returned rather than only
         logged so the partition invariant (every selected buy lands in exactly one
