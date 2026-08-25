@@ -24,6 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.harness.capabilities import CapabilitiesEnv
 from tests.harness.media_buy_create import OMIT_IDEMPOTENCY_KEY, MediaBuyCreateEnv
 from tests.harness.transport import Transport
 from tests.helpers import assert_envelope_field, assert_envelope_shape
@@ -284,6 +285,45 @@ class TestA2ADefaultsDoNotBreakReplay:
             assert second.is_success, f"identical A2A retry must replay, got: {second.error}"
             assert second.payload.replayed is True
             assert second.payload.response.media_buy_id == first.payload.response.media_buy_id
+
+
+class TestUnresolvableTenantReadWireMatrix:
+    """A keyed read whose identity carries no resolvable tenant rejects
+    AUTH_REQUIRED/correctable on the real A2A wire, not SERVICE_UNAVAILABLE/
+    transient.
+
+    ``_read_scope`` (src/services/idempotency_replay.py) treats an unroutable
+    subdomain / missing tenant context as PERMANENT, mirroring
+    ``src/core/auth.py``'s ``require_tenant`` for the identical condition.
+    ``tests/unit/test_read_idempotency_orchestration.py::
+    test_unresolvable_tenant_on_a_keyed_read_is_a_correctable_4xx_not_transient_503``
+    already pins this against the reconstructed exception at the ``_impl``
+    boundary; this test grades the same recode at the real wire, through
+    ``AdCPRequestHandler.on_message_send`` -> ``_execute_explicit_skill_handler``
+    -> ``execute_idempotent_read`` -> ``_read_scope`` (A2A is the transport the
+    unit test's own docstring names as the real production call site).
+    """
+
+    def test_unresolvable_tenant_on_a_keyed_read_rejects_auth_required(self, integration_db) -> None:
+        key = f"wire-unresolvable-tenant-{uuid.uuid4().hex}"
+
+        with CapabilitiesEnv() as env:
+            env.setup_default_data()
+            # Clear tenant_id/tenant (nothing to resolve a scope from) and
+            # auth_token (a truthy token routes the harness through the real
+            # DB auth chain, which would re-derive a tenant rather than
+            # exercising this override — see _run_a2a_handler in
+            # tests/harness/_base.py).
+            unresolvable = env.identity_for(Transport.A2A).model_copy(
+                update={"tenant_id": None, "tenant": None, "auth_token": None}
+            )
+
+            result = env.call_via(Transport.A2A, identity=unresolvable, idempotency_key=key)
+
+        assert result.is_error, "an unresolvable-tenant keyed read must reject, not succeed"
+        envelope = result.wire_error_envelope
+        assert envelope is not None, f"expected a two-layer error envelope on the wire: {result.error!r}"
+        assert_envelope_shape(envelope, "AUTH_REQUIRED", recovery="correctable")
 
 
 @pytest.mark.parametrize("transport", [Transport.A2A, Transport.MCP], ids=lambda t: t.value)
