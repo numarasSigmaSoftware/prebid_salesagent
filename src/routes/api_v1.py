@@ -27,7 +27,13 @@ from src.core.adcp_version import validate_adcp_version_pins
 from src.core.application_context import dump_adcp_response
 from src.core.auth_context import require_auth, resolve_auth
 from src.core.exceptions import AdCPValidationError
-from src.core.request_compat import ADCP_NEGOTIATION_FIELDS, validate_standard_read_idempotency_key
+from src.core.request_compat import (
+    ADCP_NEGOTIATION_FIELDS,
+    DROPPED_FIELDS_NEGOTIATION,
+    DROPPED_FIELDS_UNDECLARED_ENVELOPE,
+    _log_dropped_fields,
+    validate_standard_read_idempotency_key,
+)
 from src.core.schema_helpers import (
     coerce_creative_filters,
     to_account_reference,
@@ -294,6 +300,29 @@ def _validate_rest_read_idempotency(tool_name: str, body: _VersionedBody) -> Non
     """Validate a present read key after auth/version dependencies have run."""
     if "idempotency_key" in body.model_fields_set:
         validate_standard_read_idempotency_key(tool_name, {"idempotency_key": body.idempotency_key})
+
+
+def _dump_body_dropping_envelope(
+    tool_name: str,
+    body: _VersionedBody,
+    exclude: frozenset[str],
+) -> dict[str, Any]:
+    """Serialize a REST body minus ``exclude``, auditing what the buyer sent.
+
+    REST is the third transport to strip the AdCP envelope before dispatch;
+    MCP (``mcp_compat_middleware``) and A2A (``adcp_a2a_server``) both record the
+    drop through ``_log_dropped_fields`` with the two canonical labels. Routing
+    every REST strip site through this one funnel keeps that audit trail
+    complete — an operator alerting on one label sees the event regardless of
+    which transport handled the request — and keeps the four sites from drifting
+    apart. ``model_dump`` cannot report what it excluded, so presence comes from
+    ``model_fields_set`` (the same "buyer actually sent it" test
+    ``_validate_rest_read_idempotency`` uses); a defaulted-absent pin is not a drop.
+    """
+    supplied = body.model_fields_set & exclude
+    _log_dropped_fields(tool_name, DROPPED_FIELDS_NEGOTIATION, sorted(supplied & ADCP_NEGOTIATION_FIELDS))
+    _log_dropped_fields(tool_name, DROPPED_FIELDS_UNDECLARED_ENVELOPE, sorted(supplied - ADCP_NEGOTIATION_FIELDS))
+    return body.model_dump(exclude=exclude, exclude_none=True)
 
 
 class GetProductsBody(_VersionedBody):
@@ -574,7 +603,7 @@ async def list_creative_formats(body: ListCreativeFormatsBody, identity: Resolve
     from src.core.schemas import ListCreativeFormatsRequest
 
     _validate_rest_read_idempotency("list_creative_formats", body)
-    body_fields = body.model_dump(exclude=_READ_ENVELOPE_EXCLUDE, exclude_none=True)
+    body_fields = _dump_body_dropping_envelope("list_creative_formats", body, _READ_ENVELOPE_EXCLUDE)
     with adcp_validation_boundary(context="list_creative_formats request"):
         req = ListCreativeFormatsRequest(**body_fields) if body_fields else None
 
@@ -591,7 +620,7 @@ async def list_authorized_properties(
 
     # Local/non-standard read: tolerate the shared envelope field without
     # inventing AdCP validation semantics for this custom tool.
-    body_fields = body.model_dump(exclude=_READ_ENVELOPE_EXCLUDE, exclude_none=True)
+    body_fields = _dump_body_dropping_envelope("list_authorized_properties", body, _READ_ENVELOPE_EXCLUDE)
     with adcp_validation_boundary(context="list_authorized_properties request"):
         req = ListAuthorizedPropertiesRequest(**body_fields) if body_fields else None
 
@@ -830,7 +859,7 @@ async def list_accounts(body: ListAccountsBody, identity: ResolvedIdentity = req
 
     _validate_rest_read_idempotency("list_accounts", body)
     with adcp_validation_boundary(context="list_accounts request"):
-        req = ListAccountsRequest(**body.model_dump(exclude_none=True, exclude=_READ_ENVELOPE_EXCLUDE))
+        req = ListAccountsRequest(**_dump_body_dropping_envelope("list_accounts", body, _READ_ENVELOPE_EXCLUDE))
     response = accounts_module.list_accounts_raw(req=req, identity=identity)
     return dump_adcp_response(response)
 
@@ -842,7 +871,7 @@ async def sync_accounts(body: SyncAccountsBody, identity: ResolvedIdentity = req
 
     require_idempotency_key(body.idempotency_key)
     with adcp_validation_boundary(context="sync_accounts request"):
-        req = SyncAccountsRequest(**body.model_dump(exclude_none=True, exclude=ADCP_NEGOTIATION_FIELDS))
+        req = SyncAccountsRequest(**_dump_body_dropping_envelope("sync_accounts", body, ADCP_NEGOTIATION_FIELDS))
     # Same registration-time callback policy the sibling surfaces apply
     # (update_media_buy, sync_creatives above): the config arrives on the
     # request via model_dump, so without this funnel REST was the one entry

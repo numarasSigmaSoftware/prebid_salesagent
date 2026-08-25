@@ -8,8 +8,11 @@ beads: salesagent-4ud
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
+from src.core.request_compat import DROPPED_FIELDS_NEGOTIATION, DROPPED_FIELDS_UNDECLARED_ENVELOPE
 from tests.factories.account import AccountFactory, AgentAccountAccessFactory
 from tests.helpers import assert_envelope_field, assert_envelope_shape
 
@@ -44,6 +47,37 @@ class TestListAccountsRestRoute:
             data = rest_response.json()
             assert "accounts" in data
             assert len(data["accounts"]) == len(impl_response.accounts)
+
+    def test_list_accounts_audits_the_dropped_envelope_fields(self, integration_db, caplog):
+        """REST records the envelope strip on the same audit trail as MCP and A2A.
+
+        MCP (``mcp_compat_middleware``) and A2A (``adcp_a2a_server``) both call
+        ``_log_dropped_fields`` when they discard the negotiation pins or an
+        undeclared envelope key before dispatch. REST performs the same strip via
+        ``model_dump(exclude=...)``, so without the same call the buyer's fields
+        vanish on this one transport with nothing in the log for an operator to
+        correlate against the canonical labels.
+        """
+        from tests.harness.account_list import AccountListEnv
+
+        with AccountListEnv() as env:
+            env.setup_default_data()
+            client = env.get_rest_client()
+
+            with caplog.at_level(logging.DEBUG, logger="src.core.request_compat"):
+                response = client.post(
+                    "/api/v1/accounts",
+                    json={"adcp_version": "3.1", "idempotency_key": "account-rest-audit-0001"},
+                )
+
+            assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+            audited = [record.getMessage() for record in caplog.records if record.name == "src.core.request_compat"]
+            assert f"Dropped {DROPPED_FIELDS_NEGOTIATION} fields from list_accounts: adcp_version" in audited, (
+                f"REST dropped the negotiation pin without auditing it; logged: {audited}"
+            )
+            assert (
+                f"Dropped {DROPPED_FIELDS_UNDECLARED_ENVELOPE} fields from list_accounts: idempotency_key" in audited
+            ), f"REST dropped the undeclared envelope key without auditing it; logged: {audited}"
 
 
 @pytest.mark.requires_db
