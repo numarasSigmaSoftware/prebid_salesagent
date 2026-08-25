@@ -99,7 +99,7 @@ def find_silent_loop_handlers(tree: ast.Module, relpath: str) -> list[tuple[str,
         if isinstance(node, ast.For | ast.AsyncFor | ast.While):
             in_loop = True
         if isinstance(node, ast.ExceptHandler):
-            if in_loop and not in_handler and func_name.endswith("_impl") and _handler_is_silent(node):
+            if in_loop and not in_handler and func_name.endswith(("_impl", "_work")) and _handler_is_silent(node):
                 violations.append((relpath, func_name, node.lineno))
             in_handler = True
         for child in ast.iter_child_nodes(node):
@@ -141,6 +141,15 @@ KNOWN_BAD_SNIPPETS = {
         "            step(req)\n"
         "        except Exception:\n"
         "            pass\n"
+    ),
+    "log-and-continue-in-_work": (
+        "def _qux_work(req):\n"
+        "    for item in req.items:\n"
+        "        try:\n"
+        "            results.append(process(item))\n"
+        "        except ValueError as e:\n"
+        "            logger.warning('skipping %s', item)\n"
+        "            continue\n"
     ),
 }
 
