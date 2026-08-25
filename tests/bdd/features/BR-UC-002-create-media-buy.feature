@@ -1956,14 +1956,7 @@ Feature: BR-UC-002 Create Media Buy
     Given a create_media_buy request with idempotency_key "buy-2026-q1-inflight-001"
     And a prior request for the same (seller, account, idempotency_key) pair is still in flight
     When the Buyer Agent sends the create_media_buy request
-    Then the response should indicate a transient failure
-    # LOCAL DIVERGENCE (mirror upstream): generated as "terminal failure". The
-    # pinned spec's dist/schemas/3.1.1/enums/error-code.json
-    # recovery-classification block gives "IDEMPOTENCY_IN_FLIGHT" recovery
-    # "transient" (the buyer should retry after the wait hint below, not treat
-    # it as unretryable) -- production (AdCPIdempotencyInFlightError's
-    # _default_recovery = "transient") and TestInFlightWireMatrix already
-    # agree with the spec; the generated scenario text was wrong.
+    Then the response should indicate a terminal failure
     And the error code should be "IDEMPOTENCY_IN_FLIGHT"
     And the error should include "retry_after" field
     And the error should include "suggestion" field
