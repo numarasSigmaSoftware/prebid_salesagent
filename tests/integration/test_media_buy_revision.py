@@ -480,17 +480,23 @@ class TestConflictDetailsShapeParity:
 
     @staticmethod
     def _assert_valid_conflict_details(details: dict, label: str) -> None:
-        """Validate a details body against the PINNED conflict.json (draft-07)."""
-        import json
-        from pathlib import Path
+        """Validate a details body against the PINNED conflict.json (draft-07).
 
-        import adcp
-        from jsonschema import Draft7Validator
+        Resolution goes through ``tests.helpers.pinned_schema``, the repo's single
+        pinned-schema resolver. This used to hand-roll a second one — building
+        ``Path(adcp.__file__).parent / "_schemas" / "3.1" / ...`` with the spec
+        minor as a frozen literal — which is exactly the two-independent-pins
+        defect ``tests/unit/test_pinned_schema_single_source.py`` exists to
+        prevent: the helper derives the version from
+        ``adcp.get_adcp_spec_version()``, so an SDK bump to a new spec minor moves
+        the helper and left this literal grading the old tree (or, once the SDK
+        stopped shipping 3.1, failing on a missing file). The helper also wires
+        ``$ref`` resolution, which the bare ``Draft7Validator(schema)`` did not.
+        """
+        from tests.helpers.pinned_schema import validator_for
 
-        schema_path = Path(adcp.__file__).parent / "_schemas" / "3.1" / "error-details" / "conflict.json"
-        assert schema_path.exists(), f"pinned conflict schema missing at {schema_path}"
-        schema = json.loads(schema_path.read_text())
-        errors = sorted(Draft7Validator(schema).iter_errors(details), key=lambda e: list(e.path))
+        validator = validator_for("error-details/conflict.json")
+        errors = sorted(validator.iter_errors(details), key=lambda e: list(e.path))
         assert not errors, (
             f"{label} CONFLICT details is invalid against the pinned conflict.json: "
             + "; ".join(f"{list(error.path)}: {error.message}" for error in errors)
