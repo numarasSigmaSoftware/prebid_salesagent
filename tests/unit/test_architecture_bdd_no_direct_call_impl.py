@@ -53,7 +53,7 @@ def _has_direct_impl_call(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for node in iter_call_expressions(func):
         if isinstance(node.func, ast.Attribute) and node.func.attr == "call_impl":
             return True
-        if isinstance(node.func, ast.Name) and node.func.id.endswith("_impl"):
+        if isinstance(node.func, ast.Name) and node.func.id.endswith(("_impl", "_work")):
             return True
     return False
 

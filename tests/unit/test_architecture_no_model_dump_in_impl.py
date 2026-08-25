@@ -53,7 +53,7 @@ def _find_model_dump_in_impl() -> list[tuple[str, int, str, str]]:
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not node.name.endswith("_impl"):
+            if not node.name.endswith(("_impl", "_work")):
                 continue
 
             for child in iter_call_expressions(node):

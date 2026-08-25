@@ -144,8 +144,8 @@ def _scan_file(py_file: Path) -> list[tuple[str, int, str]]:
             # `if not <x>.is_authenticated: raise` — flagged in any function
             elif func is not None and _is_not_is_authenticated_raise(child):
                 hits.append((func, lineno, "if not identity.is_authenticated: raise"))
-            # bare/or-chain identity None-guard — flagged only inside *_impl functions
-            elif func is not None and func.endswith("_impl"):
+            # bare/or-chain identity None-guard — flagged only inside *_impl / *_work functions
+            elif func is not None and func.endswith(("_impl", "_work")):
                 kind = _if_identity_guard_kind(child)
                 if kind is not None:
                     hits.append((func, lineno, kind))

@@ -29,7 +29,7 @@ def _find_impl_functions(file_path: Path) -> list[tuple[str, ast.FunctionDef]]:
     results = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name.endswith("_impl"):
+            if node.name.endswith(("_impl", "_work")):
                 results.append((node.name, node))
     return results
 
@@ -54,6 +54,24 @@ def _get_function_calls(func_node: ast.FunctionDef) -> list[tuple[int, str]]:
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 calls.append((node.lineno, f"{node.func.value.id}.{node.func.attr}"))
     return calls
+
+
+def _find_transport_import_violations(base_dir: Path) -> list[str]:
+    """Scan every ``*.py`` file under *base_dir* for banned transport imports
+    inside ``_impl``/``_work`` functions. Parameterized over the directory so
+    the real sweep (``TOOLS_DIR``) and the scanner's own self-test (a
+    ``tmp_path`` probe) share one implementation.
+    """
+    violations = []
+    for py_file in base_dir.rglob("*.py"):
+        for func_name, func_node in _find_impl_functions(py_file):
+            imports = _get_imports_in_function(func_node)
+            for lineno, module in imports:
+                top_module = module.split(".")[0]
+                if top_module in BANNED_TRANSPORT_MODULES:
+                    rel_path = py_file.relative_to(base_dir)
+                    violations.append(f"{rel_path}:{lineno} — {func_name} imports '{module}'")
+    return violations
 
 
 class TestNoTransportImportsInImpl:
@@ -88,21 +106,26 @@ class TestNoTransportImportsInImpl:
     @pytest.mark.arch_guard
     def test_no_transport_imports_in_any_impl(self):
         """Sweep: no _impl function in any tool file imports transport modules."""
-        violations = []
-        for py_file in TOOLS_DIR.rglob("*.py"):
-            if py_file.name.startswith("_") and py_file.name != "__init__.py":
-                continue
-            for func_name, func_node in _find_impl_functions(py_file):
-                imports = _get_imports_in_function(func_node)
-                for lineno, module in imports:
-                    top_module = module.split(".")[0]
-                    if top_module in BANNED_TRANSPORT_MODULES:
-                        rel_path = py_file.relative_to(TOOLS_DIR)
-                        violations.append(f"{rel_path}:{lineno} — {func_name} imports '{module}'")
-
+        violations = _find_transport_import_violations(TOOLS_DIR)
         assert not violations, "Transport-specific imports found in _impl functions:\n" + "\n".join(
             f"  - {v}" for v in violations
         )
+
+    @pytest.mark.arch_guard
+    def test_transport_import_scanner_scans_underscore_prefixed_files(self, tmp_path):
+        """The scanner must not skip underscore-prefixed files.
+
+        Regression for a prior bug where the loop skipped every file whose
+        name started with ``_`` (except ``__init__.py``) — e.g.
+        ``src/core/tools/creatives/_sync.py`` was never scanned. Proven by
+        planting a known-bad probe file under that exact naming shape and
+        confirming the scanner (driven against tmp_path, not the real
+        TOOLS_DIR) still flags it.
+        """
+        probe = tmp_path / "_sync.py"
+        probe.write_text("def _process_impl():\n    import fastmcp\n", encoding="utf-8")
+        violations = _find_transport_import_violations(tmp_path)
+        assert violations, "Scanner must flag a banned import inside an _impl function in an underscore-prefixed file"
 
 
 class TestNoPresentationLogicInImpl:
