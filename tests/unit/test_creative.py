@@ -3589,6 +3589,12 @@ class TestMediaBuyStatusTransition:
 
     def _run_assignment_with_media_buy(self, mock_db, *, media_buy_status, approved_at, existing_assignment=None):
         """Run _process_assignments and return the mock media buy for status inspection."""
+        # One tenant id for both the buy and the tenant dict the flow builds its
+        # MediaBuyRepository from: the status-transition seam resolves the row
+        # against the repository's tenant binding and rejects a mismatch, so a
+        # buy whose tenant_id drifts from this dict never reaches the transition.
+        tenant_id = "t1"
+
         mock_uow = MagicMock()
         mock_assignment_repo = MagicMock()
         mock_uow.assignments = mock_assignment_repo
@@ -3602,6 +3608,7 @@ class TestMediaBuyStatusTransition:
 
         mock_media_buy = MagicMock()
         mock_media_buy.media_buy_id = "mb_1"
+        mock_media_buy.tenant_id = tenant_id
         mock_media_buy.status = media_buy_status
         mock_media_buy.approved_at = approved_at
 
@@ -3628,7 +3635,7 @@ class TestMediaBuyStatusTransition:
         _process_assignments(
             assignments={"c1": ["pkg_1"]},
             results=results,
-            tenant={"tenant_id": "t1"},
+            tenant={"tenant_id": tenant_id},
             validation_mode="strict",
             principal_id="principal_1",
         )

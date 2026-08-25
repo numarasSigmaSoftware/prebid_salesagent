@@ -26,11 +26,19 @@ from tests.harness import make_mock_uow
 # ---------------------------------------------------------------------------
 
 
+# The tenant that owns every mock media buy in this module. Shared by the
+# ``tenant`` fixture and the ``_make_db_package`` factory so the two cannot
+# drift: the media-buy status-transition seam resolves the row against its
+# repository's tenant binding (built from the tenant dict) and rejects a
+# mismatch, so a buy whose tenant_id disagrees never reaches the transition.
+_TENANT_ID = "tenant_test"
+
+
 @pytest.fixture
 def tenant():
     """Standard tenant config for assignment tests."""
     return {
-        "tenant_id": "tenant_test",
+        "tenant_id": _TENANT_ID,
         "approval_mode": "auto-approve",
         "slack_webhook_url": None,
     }
@@ -54,6 +62,7 @@ def _make_db_package():
 
         db_media_buy = Mock()
         db_media_buy.media_buy_id = media_buy_id
+        db_media_buy.tenant_id = _TENANT_ID
         db_media_buy.status = mb_status
         db_media_buy.approved_at = mb_approved_at
 
