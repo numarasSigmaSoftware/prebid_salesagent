@@ -100,13 +100,6 @@ def upgrade() -> None:
         "WHERE status IN ('completed', 'failed', 'rejected', 'canceled')"
     )
 
-    op.alter_column(
-        "downstream_mutation_claims",
-        "result_metadata",
-        existing_type=sa.JSON(),
-        type_=JSONType,
-        postgresql_using="result_metadata::jsonb",
-    )
     op.drop_constraint(
         "ck_downstream_mutation_claim_status",
         "downstream_mutation_claims",
@@ -228,13 +221,6 @@ def downgrade() -> None:
         "ck_downstream_mutation_claim_status",
         "downstream_mutation_claims",
         "status IN ('planned', 'invoked', 'applied', 'unknown')",
-    )
-    op.alter_column(
-        "downstream_mutation_claims",
-        "result_metadata",
-        existing_type=JSONType,
-        type_=sa.JSON(),
-        postgresql_using="result_metadata::json",
     )
 
     op.drop_column("workflow_steps", "notification_claim_token")

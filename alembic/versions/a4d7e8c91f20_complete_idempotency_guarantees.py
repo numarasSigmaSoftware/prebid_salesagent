@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 
 from alembic import op
+from src.core.database.json_type import JSONType
 
 revision: str = "a4d7e8c91f20"
 down_revision: str | Sequence[str] | None = "f3a1c92b47de"
@@ -50,7 +51,7 @@ def upgrade() -> None:
         sa.Column("downstream_request_id", sa.String(length=64), nullable=False),
         sa.Column("request_hash", sa.String(length=64), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False, server_default="planned"),
-        sa.Column("result_metadata", sa.JSON(), nullable=True),
+        sa.Column("result_metadata", JSONType, nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
