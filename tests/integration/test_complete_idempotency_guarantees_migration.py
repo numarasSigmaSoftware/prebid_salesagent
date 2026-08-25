@@ -73,6 +73,96 @@ def _seed_scope_and_attempts(engine) -> None:
             )
 
 
+def _seed_webhook_log_scope_and_rows(engine, *, count: int) -> None:
+    """A minimal, self-contained tenant/principal/media_buy plus pre-existing
+    webhook_delivery_log rows, seeded BEFORE the migration under test runs so
+    its batched backfill has real rows to clear.
+
+    Uses IDs distinct from ``_seed_scope_and_attempts`` — this test shares the
+    module-scoped ``migration_db`` engine with
+    ``test_upgrade_downgrade_upgrade_preserves_documented_state`` (tox runs
+    integration with ``-p no:randomly``, so file order is preserved and both
+    tests' seed rows coexist in the same database for the module's lifetime),
+    so reusing that helper's fixed IDs would collide.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO tenants (tenant_id, name, subdomain, created_at, updated_at) "
+                "VALUES ('idem_backfill_t', 'Idempotency Backfill', 'idem-backfill', NOW(), NOW())"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO principals "
+                "(principal_id, tenant_id, name, platform_mappings, access_token, created_at) "
+                "VALUES ('idem_backfill_p', 'idem_backfill_t', 'Principal', '{}', "
+                "'idem_backfill_token', NOW())"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO media_buys "
+                "(media_buy_id, tenant_id, principal_id, order_name, advertiser_name, "
+                "start_date, end_date, status, raw_request) "
+                "VALUES ('idem-backfill-buy', 'idem_backfill_t', 'idem_backfill_p', "
+                "'Backfill Order', 'Backfill Advertiser', CURRENT_DATE, "
+                "CURRENT_DATE + 1, 'active', '{}')"
+            )
+        )
+        for i in range(count):
+            conn.execute(
+                text(
+                    "INSERT INTO webhook_delivery_log "
+                    "(id, tenant_id, principal_id, media_buy_id, webhook_url, task_type, status) "
+                    "VALUES (:id, 'idem_backfill_t', 'idem_backfill_p', 'idem-backfill-buy', "
+                    "'https://buyer.example/callback', 'delivery_report', 'success')"
+                ),
+                {"id": f"idem-backfill-webhook-log-{i}"},
+            )
+
+
+def test_migration_backfills_logical_event_key_and_builds_valid_indexes(migration_db) -> None:
+    """The batched backfill actually completes, and the CONCURRENTLY-built
+    indexes are VALID — nothing else in this suite references CONCURRENTLY,
+    autocommit_block, or the batched backfill function, so a single-line
+    revert of either would otherwise go undetected.
+
+    Two real Postgres failure modes this pins:
+    - An aborted ``CREATE INDEX CONCURRENTLY`` build leaves an ``INVALID``
+      index behind (queried via ``pg_index.indisvalid``, not merely
+      existence).
+    - A broken/no-op backfill loop would leave ``logical_event_key`` NULL on
+      pre-existing rows instead of clearing every one of them.
+    """
+    engine, db_url = migration_db
+    run_alembic_upgrade(db_url, RESERVATION_REV)
+    _seed_webhook_log_scope_and_rows(engine, count=5)
+
+    run_alembic_upgrade(db_url, COMPLETE_GUARANTEES_REV)
+
+    with engine.connect() as conn:
+        null_count = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM webhook_delivery_log "
+                "WHERE tenant_id = 'idem_backfill_t' AND logical_event_key IS NULL"
+            )
+        ).scalar_one()
+        assert null_count == 0, "the batched backfill must clear logical_event_key on every pre-existing row"
+
+        total_count = conn.execute(
+            text("SELECT COUNT(*) FROM webhook_delivery_log WHERE tenant_id = 'idem_backfill_t'")
+        ).scalar_one()
+        assert total_count == 5, "seeded rows must survive the migration"
+
+        for index_name in ("uq_webhook_log_logical_event", "idx_push_notification_configs_media_buy"):
+            is_valid = conn.execute(
+                text("SELECT indisvalid FROM pg_index WHERE indexrelid = (:name)::regclass"),
+                {"name": index_name},
+            ).scalar_one()
+            assert is_valid is True, f"{index_name} must be a VALID index after a successful CONCURRENTLY build"
+
+
 def test_upgrade_downgrade_upgrade_preserves_documented_state(migration_db) -> None:
     engine, db_url = migration_db
     run_alembic_upgrade(db_url, RESERVATION_REV)
