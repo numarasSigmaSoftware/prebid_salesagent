@@ -600,6 +600,75 @@ class TestRevisionBumpsOnStatusTransition:
             )
             assert blocked.revision == 2
 
+    def test_creative_sync_draft_unblock_stamps_confirmed_at_and_bumps_revision(
+        self, tenant_a, principal_a, bound_factories
+    ):
+        """sync_creatives' own draft unblock goes through the repository seam.
+
+        Assigning creatives to an approved buy still sitting in ``draft`` moves it
+        to ``pending_creatives`` — a SELLER-CONFIRMED status. That write lived raw
+        on the ORM row inside ``_process_assignments``, and the surrounding UoW
+        committed it, so the buy went seller-confirmed with ``confirmed_at`` NULL
+        and the AdCP revision token frozen: exactly the state the repository
+        docstring claims no path can produce. Drives the real assignment flow.
+        """
+        from sqlalchemy import select as sa_select
+
+        from src.core.database.models import Principal as PrincipalModel
+        from src.core.database.models import Tenant as TenantModel
+        from src.core.tools.creatives._assignments import _process_assignments
+        from tests.factories import CreativeFactory
+
+        approved_at = datetime.now(UTC) - timedelta(hours=2)
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(
+                make_media_buy(
+                    tenant_a,
+                    principal_a,
+                    "mb_sync_unblock",
+                    status="draft",
+                    approved_at=approved_at,
+                    approved_by="admin@example.com",
+                )
+            )
+            uow.media_buys.create_package(
+                "mb_sync_unblock",
+                "pkg_sync_unblock",
+                {"name": "Package pkg_sync_unblock"},
+            )
+
+        tenant_row = bound_factories.scalars(sa_select(TenantModel).filter_by(tenant_id=tenant_a)).first()
+        principal_row = bound_factories.scalars(
+            sa_select(PrincipalModel).filter_by(tenant_id=tenant_a, principal_id=principal_a)
+        ).first()
+        creative = CreativeFactory(tenant=tenant_row, principal=principal_row, status="approved")
+
+        _process_assignments(
+            {creative.creative_id: ["pkg_sync_unblock"]},
+            [],
+            {"tenant_id": tenant_a},
+            "strict",
+            principal_a,
+        )
+
+        with MediaBuyUoW(tenant_a) as uow:
+            unblocked = uow.media_buys.get_by_id("mb_sync_unblock")
+            assert unblocked is not None
+            assert unblocked.status == "pending_creatives", (
+                f"creative sync must unblock the approved draft, got {unblocked.status!r}"
+            )
+            assert unblocked.revision == 2, (
+                "the unblock is a seller-side state change and must advance the revision token, "
+                f"got {unblocked.revision}"
+            )
+            assert unblocked.confirmed_at is not None, (
+                "pending_creatives is seller-confirmed — a raw status write committed it with no confirmation instant"
+            )
+            assert unblocked.confirmed_at == unblocked.approved_at, (
+                f"confirmed_at must be the approval instant, got confirmed_at={unblocked.confirmed_at!r} "
+                f"approved_at={unblocked.approved_at!r}"
+            )
+
     def test_manual_approval_stamps_confirmed_at_and_bumps_revision(self, tenant_a, principal_a):
         """create (pending_approval) → approve → get: confirmed_at is the approval
         instant (not created_at) and revision advanced past the create value."""

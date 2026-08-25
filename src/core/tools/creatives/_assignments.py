@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import (
     AdCPCreativeNotFoundError,
@@ -278,10 +279,24 @@ def _process_assignments(
                     if actual_package_id is not None:
                         assignments_by_creative[creative_id].append(actual_package_id)
 
-            # Update media buy status if needed (draft -> pending_creatives)
+            # Update media buy status if needed (draft -> pending_creatives).
+            #
+            # Routed through the repository seam, not written raw: pending_creatives
+            # IS a seller-confirmed status, so a raw `.status =` here committed a
+            # seller-confirmed buy with confirmed_at NULL and the AdCP revision token
+            # frozen — the exact state repositories/media_buy.py says no path can
+            # produce. The seam locks the row, stamps the write-once confirmation
+            # instant and bumps the counter, and it writes on THIS UoW's session, so
+            # the transition commits with the assignments in one transaction.
+            #
+            # The predicate is restated rather than shared: the extracted
+            # `_stage_draft_unblock` in media_buy_update.py is a closure over that
+            # flow's pending_field_updates dict (it stages a deferred update_fields
+            # call), so it cannot be applied to a row on this session.
+            media_buy_repo = MediaBuyRepository(uow.session, tenant["tenant_id"])
             for mb_id, mb_obj in media_buys_with_new_assignments.items():
                 if mb_obj.status == "draft" and mb_obj.approved_at is not None:
-                    mb_obj.status = "pending_creatives"
+                    media_buy_repo.apply_status_transition(mb_obj, "pending_creatives")
                     logger.info(f"[SYNC_CREATIVES] Media buy {mb_id} transitioned from draft to pending_creatives")
 
             # UoW auto-commits on clean exit
