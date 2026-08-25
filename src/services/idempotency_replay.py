@@ -530,10 +530,14 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
     running the read directly, exactly as it would with no ``idempotency_key``
     supplied at all; the underlying tool's own authorization (if it has one)
     still applies inside that call, unaffected by this function, which makes a
-    caching decision, not an authorization one. This mirrors the existing
-    write-path precedent (media_buy_create.py: skip the cache, not the
-    operation, when ``principal_id`` is ``None``) rather than adding a second
-    mechanism for the same shape of decision.
+    caching decision, not an authorization one. Skipping the durable cache
+    here is also the least-nonconformant option available against
+    ``security.mdx``'s storage-layer scoping requirement: "Sellers MUST ...
+    scope cache reads by (authenticated_agent, account_id) at the storage
+    layer" — an unauthenticated caller has no ``authenticated_agent`` to scope
+    by, so the only spec-consistent choices are refuse the read (breaks the
+    public-operation MUST above) or never persist a cache row for it (this
+    function's choice).
     """
     tenant_id = identity.tenant_id if identity is not None else None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):

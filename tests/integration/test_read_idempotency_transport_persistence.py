@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -109,8 +109,43 @@ def test_each_read_replays_through_every_exposed_transport(integration_db, case:
             assert replay.wire_response["context"] == {"correlation_id": "retry"}
 
 
+@dataclass(frozen=True)
+class _AnonymousReadCase:
+    tool_name: str
+    env_type: type[IntegrationEnv]
+    extra_kwargs: dict[str, Any]
+    supports_context: bool = True
+    env_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+_ANONYMOUS_READ_CASES = (
+    # get_adcp_capabilities is the spec's bootstrap carve-out (exempt from
+    # security.mdx rules 1-9 entirely) — it proves nothing about the actual
+    # skip-cache deviation _read_scope takes for the OTHER two public tools.
+    _AnonymousReadCase("get_adcp_capabilities", CapabilitiesEnv, {}),
+    # get_products' own business policy (brand_manifest_policy, independent of
+    # transport-layer AUTH_OPTIONAL_TOOLS) defaults to "require_auth" and
+    # rejects an anonymous caller regardless of idempotency handling. Opt the
+    # tenant into "public" so this case actually reaches _read_scope's
+    # skip-cache path rather than failing on an unrelated auth gate.
+    _AnonymousReadCase(
+        "get_products", ProductEnv, {"brief": "video inventory"}, env_kwargs={"brand_manifest_policy": "public"}
+    ),
+    # list_creative_formats' REST body (ListCreativeFormatsBody) has no
+    # ``context`` field, mirroring _READ_CASES' supports_context=False above.
+    _AnonymousReadCase("list_creative_formats", CreativeFormatsEnv, {}, supports_context=False),
+)
+
+
+def _anonymous_case_ids(case: _AnonymousReadCase) -> str:
+    return case.tool_name
+
+
 @pytest.mark.parametrize("transport", _MCP_A2A_REST)
-def test_anonymous_read_with_a_key_succeeds_and_persists_nothing(integration_db, transport: Transport) -> None:
+@pytest.mark.parametrize("case", _ANONYMOUS_READ_CASES, ids=_anonymous_case_ids)
+def test_anonymous_read_with_a_key_succeeds_and_persists_nothing(
+    integration_db, case: _AnonymousReadCase, transport: Transport
+) -> None:
     """An anonymous keyed read succeeds normally and leaves no durable row.
 
     Two things this pins together, because neither alone is the contract:
@@ -128,21 +163,37 @@ def test_anonymous_read_with_a_key_succeeds_and_persists_nothing(integration_db,
       envelope to another. Asserting only success would leave that reachable
       again under a different implementation — the durable absence is what
       proves no scope exists to fuse.
+
+    Covers all three AUTH_OPTIONAL_TOOLS that can carry an idempotency_key:
+    get_adcp_capabilities is graded here only as the bootstrap exemption
+    baseline; get_products and list_creative_formats are the two tools where
+    _read_scope's skip-cache deviation from the spec's per-agent scoping
+    requirement actually applies.
     """
     suffix = uuid.uuid4().hex[:10]
     key = f"anonymous-read-{transport.value}-{uuid.uuid4().hex}"
-    with CapabilitiesEnv(
+    with case.env_type(
         tenant_id=f"anonymous_read_{suffix}",
         principal_id=f"seed_agent_{suffix}",
+        **case.env_kwargs,
     ) as env:
         env.setup_default_data()
-        anonymous = env.identity_for(transport).model_copy(update={"principal_id": None, "account_id": None})
+        # Clear auth_token too, not just principal_id/account_id: MCP/A2A dispatch
+        # takes a "real auth chain" path whenever the identity carries a truthy
+        # auth_token (re-resolving the REAL principal from the DB via the token,
+        # which would silently defeat the anonymous override for any tool that
+        # gates on principal_id, e.g. get_products' brand_manifest_policy check).
+        anonymous = env.identity_for(transport).model_copy(
+            update={"principal_id": None, "account_id": None, "auth_token": None}
+        )
 
+        context_kwargs = {"context": {"correlation_id": "first"}} if case.supports_context else {}
         result = env.call_via(
             transport,
             identity=anonymous,
             idempotency_key=key,
-            context={"correlation_id": "first"},
+            **context_kwargs,
+            **case.extra_kwargs,
         )
 
         assert not result.is_error, f"an anonymous keyed read to a public tool must succeed: {result.error!r}"
