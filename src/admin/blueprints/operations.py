@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from adcp import Error, create_a2a_webhook_payload, create_mcp_webhook_payload
@@ -19,9 +20,67 @@ from src.core.exceptions import AdCPMediaBuyRejectedError
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
 from src.core.tools._media_buy_status import REPORTABLE_PERSISTED_STATUSES
 from src.core.webhook_validator import validate_webhook_task_type
+from src.services.delivery_webhook_scheduler import TriggerReportOutcome
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
+
+
+# One banner per outcome. A single "Failed to trigger delivery webhook" for
+# everything that was not a send reported a failure that did not happen: the
+# commonest case here is a completed buy whose final already went out, which
+# is the gate working, not breaking. Neutral outcomes are "info"; only the
+# two that need an operator to change something are "warning". A genuine
+# failure raises and is handled by the route's except, so it never reaches
+# this table.
+#
+# At module scope so the completeness check below runs at IMPORT. Inside the
+# route it was an unchecked lookup within a `try` whose `except Exception`
+# flashes "Error triggering delivery webhook" — so a new TriggerReportOutcome
+# member without an entry here raised KeyError and the operator was told the
+# trigger failed when it had not, which is the exact misreading this table
+# exists to eliminate.
+_OUTCOME_BANNER: dict[TriggerReportOutcome, tuple[str, str]] = {
+    TriggerReportOutcome.SENT: ("Delivery webhook triggered successfully", "success"),
+    TriggerReportOutcome.SUPPRESSED: (
+        "Nothing to send for this media buy — its delivery report was already delivered or is not due yet.",
+        "info",
+    ),
+    TriggerReportOutcome.NO_WEBHOOK_CONFIG: (
+        "No reporting webhook is configured for this media buy.",
+        "warning",
+    ),
+    TriggerReportOutcome.NOT_FOUND: (
+        "Media buy not found.",
+        "warning",
+    ),
+}
+
+
+def assert_outcome_banner_is_complete(banner: Mapping[TriggerReportOutcome, tuple[str, str]]) -> None:
+    """Raise if any ``TriggerReportOutcome`` member has no banner entry.
+
+    Deliberately a ``raise`` and not a bare ``assert``: ``python -O`` strips
+    assert statements, so an assert would silently restore the hole this closes
+    in exactly the production configuration where a false "Error triggering
+    delivery webhook" banner is most expensive.
+
+    Takes the mapping as a parameter rather than reading the module global so
+    the check itself is testable against a deliberately incomplete table — an
+    eagerly-derived table needs a late-binding completeness assertion, and a
+    guard nothing exercises is not a guard.
+    """
+    missing = sorted(outcome.value for outcome in TriggerReportOutcome if outcome not in banner)
+    if missing:
+        raise RuntimeError(
+            f"TriggerReportOutcome member(s) {missing} have no entry in the admin outcome-banner "
+            "table. Without a banner the route's lookup raises KeyError inside a try whose "
+            "except flashes 'Error triggering delivery webhook', reporting a failure that did "
+            "not happen. Add an entry in src/admin/blueprints/operations.py._OUTCOME_BANNER."
+        )
+
+
+assert_outcome_banner_is_complete(_OUTCOME_BANNER)
 
 
 def _as_request_dict(value: dict[str, Any] | str | None) -> dict[str, Any]:
@@ -667,36 +726,14 @@ def trigger_delivery_webhook(tenant_id, media_buy_id, **kwargs):
     """Trigger a delivery report webhook for a media buy manually."""
     from flask import flash, redirect, url_for
 
-    from src.services.delivery_webhook_scheduler import TriggerReportOutcome, get_delivery_webhook_scheduler
-
-    # One banner per outcome. A single "Failed to trigger delivery webhook" for
-    # everything that was not a send reported a failure that did not happen: the
-    # commonest case here is a completed buy whose final already went out, which
-    # is the gate working, not breaking. Neutral outcomes are "info"; only the
-    # two that need an operator to change something are "warning". A genuine
-    # failure raises and is handled below, so it never reaches this table.
-    outcome_banner = {
-        TriggerReportOutcome.SENT: ("Delivery webhook triggered successfully", "success"),
-        TriggerReportOutcome.SUPPRESSED: (
-            "Nothing to send for this media buy — its delivery report was already delivered or is not due yet.",
-            "info",
-        ),
-        TriggerReportOutcome.NO_WEBHOOK_CONFIG: (
-            "No reporting webhook is configured for this media buy.",
-            "warning",
-        ),
-        TriggerReportOutcome.NOT_FOUND: (
-            "Media buy not found.",
-            "warning",
-        ),
-    }
+    from src.services.delivery_webhook_scheduler import get_delivery_webhook_scheduler
 
     try:
         # Trigger webhook using scheduler - pass IDs to avoid detached instance errors
         scheduler = get_delivery_webhook_scheduler()
         outcome = asyncio.run(scheduler.trigger_report_for_media_buy_by_id(media_buy_id, tenant_id))
 
-        message, category = outcome_banner[outcome]
+        message, category = _OUTCOME_BANNER[outcome]
         flash(message, category)
 
         return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))

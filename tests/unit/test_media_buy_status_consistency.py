@@ -797,3 +797,89 @@ class TestNotificationTypeCrossPinnedToSdk:
             f"pinned SDK NotificationType enum {sorted(members)} — that value is persisted and "
             "matched by equality, so a reader spelling it from the enum will never match it"
         )
+
+
+class TestAdminOutcomeBannerCompleteness:
+    """Every ``TriggerReportOutcome`` must carry an admin banner, checked at import.
+
+    The route looks the outcome up inside a ``try`` whose ``except Exception``
+    flashes "Error triggering delivery webhook". So a member added without a
+    banner entry does not surface as a missing-banner bug — it surfaces to the
+    operator as a delivery failure that never happened, which is precisely what
+    the banner table was introduced to stop.
+
+    An eagerly-derived table needs a late-binding completeness assertion; these
+    tests grade the assertion, rather than only observing that it exists.
+    """
+
+    def test_the_shipped_table_covers_every_outcome(self):
+        """Reddens the moment a member is added without a banner.
+
+        (If the import-time check fires first this module fails to import at all,
+        which is the same signal one step earlier — that is the intent.)
+        """
+        from src.admin.blueprints.operations import _OUTCOME_BANNER
+        from src.services.delivery_webhook_scheduler import TriggerReportOutcome
+
+        missing = sorted(o.value for o in TriggerReportOutcome if o not in _OUTCOME_BANNER)
+        assert not missing, (
+            f"TriggerReportOutcome member(s) {missing} have no admin banner — the route would "
+            "raise KeyError and flash a failure that did not happen"
+        )
+
+    def test_the_guard_raises_on_an_incomplete_table(self):
+        """The guard's own logic, exercised against a deliberately short table.
+
+        Without this, the check above could pass forever while the import-time
+        guard silently did nothing — a table that grades itself proves only the
+        table.
+        """
+        from src.admin.blueprints.operations import assert_outcome_banner_is_complete
+        from src.services.delivery_webhook_scheduler import TriggerReportOutcome
+
+        incomplete = {TriggerReportOutcome.SENT: ("only this one", "success")}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            assert_outcome_banner_is_complete(incomplete)
+
+        message = str(exc_info.value)
+        for absent in (o for o in TriggerReportOutcome if o is not TriggerReportOutcome.SENT):
+            assert absent.value in message, (
+                f"the guard must name the missing member {absent.value!r} so the fix is obvious; got: {message}"
+            )
+
+    def test_the_guard_still_fires_under_python_O(self):
+        """The check must survive ``python -O``, which strips ``assert`` statements.
+
+        A bare ``assert`` here would vanish under optimisation, silently restoring
+        the hole in exactly the deployment where a false failure banner costs the
+        most — and the difference is invisible to every ordinary test run, because
+        those run with assertions enabled. So this actually runs the guard in an
+        optimised interpreter rather than inspecting how it is written.
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        probe = (
+            "from src.admin.blueprints.operations import assert_outcome_banner_is_complete as guard\n"
+            "from src.services.delivery_webhook_scheduler import TriggerReportOutcome as Outcome\n"
+            "try:\n"
+            "    guard({Outcome.SENT: ('only this one', 'success')})\n"
+            "except RuntimeError:\n"
+            "    print('RAISED')\n"
+            "else:\n"
+            "    print('SILENT')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-O", "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parents[2],
+            timeout=120,
+        )
+
+        assert "RAISED" in result.stdout, (
+            "the incomplete-table check did not fire under `python -O` — it is a bare `assert`, "
+            f"which optimisation strips. stdout={result.stdout!r} stderr={result.stderr[-2000:]!r}"
+        )
