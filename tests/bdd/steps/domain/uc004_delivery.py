@@ -947,7 +947,6 @@ def when_webhook_fires(ctx: dict, mb_id: str) -> None:
         _scheduler_buy_for(ctx, mb_id)
         payloads = asyncio.run(env.run_delivery_batch())
         assert len(payloads) == 1, f"Expected one scheduled webhook, got {len(payloads)}"
-        ctx["scheduler_wire"] = payloads[0]
         ctx["webhook_result"] = True
     except Exception as exc:
         ctx["error"] = exc
