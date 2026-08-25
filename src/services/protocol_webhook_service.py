@@ -247,7 +247,8 @@ class ProtocolWebhookService:
         if not push_notification_config or not push_notification_config.url:
             # TODO: @yusuf - Double check logging actually works for Task, TaskStatusUpdateEvent and McpWebhookPayload types
             logger.debug(
-                f"No webhook URL configured in the push notification. Here's payload: {payload}, skipping notification"
+                "No webhook URL configured in the push notification. Here's payload: %s, skipping notification",
+                payload,
             )
             return False
 
@@ -471,7 +472,9 @@ class ProtocolWebhookService:
                 if not (200 <= response.status_code < 300):
                     error_message = _safe_delivery_error_message(url, reason=f"HTTP {response.status_code} response")
                     logger.error(
-                        f"Webhook failed for task {task_id} with non-2xx response {response.status_code} - not retrying"
+                        "Webhook failed for task %s with non-2xx response %s - not retrying",
+                        task_id,
+                        response.status_code,
                     )
 
                     self._write_delivery_log(
@@ -547,8 +550,12 @@ class ProtocolWebhookService:
                 if attempt < max_attempts - 1:
                     wait_seconds = min(2**attempt, 60)  # Exponential backoff, max 60 seconds
                     logger.warning(
-                        f"Webhook failed for task {task_id}: HTTP {status_code}. "
-                        f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_attempts})"
+                        "Webhook failed for task %s: HTTP %s. Retrying in %ss (attempt %s/%s)",
+                        task_id,
+                        status_code,
+                        wait_seconds,
+                        attempt + 1,
+                        max_attempts,
                     )
 
                     next_retry = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=wait_seconds)
@@ -591,8 +598,12 @@ class ProtocolWebhookService:
                 if attempt < max_attempts - 1:
                     wait_seconds = min(2**attempt, 60)
                     logger.warning(
-                        f"Webhook network error for task {task_id}: {type(e).__name__}. "
-                        f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_attempts})"
+                        "Webhook network error for task %s: %s. Retrying in %ss (attempt %s/%s)",
+                        task_id,
+                        type(e).__name__,
+                        wait_seconds,
+                        attempt + 1,
+                        max_attempts,
                     )
                     next_retry = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=wait_seconds)
                     self._write_delivery_log(

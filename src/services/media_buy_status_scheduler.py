@@ -198,7 +198,9 @@ class MediaBuyStatusScheduler:
                         raise
                     except Exception as e:
                         logger.error(
-                            f"Skipping status update for media buy {media_buy.media_buy_id}: {e}",
+                            "Skipping status update for media buy %s: %s",
+                            media_buy.media_buy_id,
+                            e,
                             exc_info=True,
                         )
                         summary.errors += 1
