@@ -37,8 +37,16 @@ from src.core.utils import utc_flight_end, utc_flight_start
 
 logger = logging.getLogger(__name__)
 
-# Configurable via env var - default 60 seconds
-STATUS_CHECK_INTERVAL_SECONDS = int(os.getenv("MEDIA_BUY_STATUS_CHECK_INTERVAL") or "60")
+# The sweep runs every minute; tests may override the interval through the
+# environment without changing the shipped default. Named rather than inlined as
+# a string literal, mirroring DEFAULT_SLEEP_INTERVAL_SECONDS in the sibling
+# delivery scheduler — the two schedulers spell the same idea, so they spell it
+# the same way.
+DEFAULT_STATUS_CHECK_INTERVAL_SECONDS = 60
+# Configurable via env var for testing
+STATUS_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("MEDIA_BUY_STATUS_CHECK_INTERVAL") or str(DEFAULT_STATUS_CHECK_INTERVAL_SECONDS)
+)
 
 
 @dataclass
@@ -92,7 +100,7 @@ class MediaBuyStatusScheduler:
 
             self.is_running = True
             self._task = asyncio.create_task(self._run_scheduler())
-            logger.info(f"Media buy status scheduler started (checking every {STATUS_CHECK_INTERVAL_SECONDS}s)")
+            logger.info("Media buy status scheduler started (checking every %ss)", STATUS_CHECK_INTERVAL_SECONDS)
 
     async def stop(self) -> None:
         """Stop the scheduler background task."""
@@ -124,7 +132,7 @@ class MediaBuyStatusScheduler:
                 # the opposite reason.
                 await asyncio.to_thread(self._update_statuses)
             except Exception as e:
-                logger.error(f"Error in media buy status scheduler: {e}", exc_info=True)
+                logger.error("Error in media buy status scheduler: %s", e, exc_info=True)
 
             # Cancellation must reach here as a live exception, so this sleep is an
             # ordinary cancellable await in the loop body — NOT a `finally`, and there
@@ -200,7 +208,9 @@ class MediaBuyStatusScheduler:
                         old_status = media_buy.status
                         media_buy.status = new_status
                         summary.updated += 1
-                        logger.info(f"Updated media buy {media_buy.media_buy_id} status: {old_status} -> {new_status}")
+                        logger.info(
+                            "Updated media buy %s status: %s -> %s", media_buy.media_buy_id, old_status, new_status
+                        )
                     else:
                         summary.unchanged += 1
 
@@ -221,7 +231,7 @@ class MediaBuyStatusScheduler:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to update media buy statuses: {e}", exc_info=True)
+            logger.error("Failed to update media buy statuses: %s", e, exc_info=True)
 
         return summary
 

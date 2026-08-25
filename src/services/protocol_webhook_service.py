@@ -287,7 +287,7 @@ class ProtocolWebhookService:
             ),
             # DO NOT log authentication_token - security risk
         }
-        logger.info(f"push_notification_config (sanitized): {safe_config}")
+        logger.info("push_notification_config (sanitized): %s", safe_config)
 
         # Serialize payload to dict at the delivery boundary (for HMAC signing
         # and JSON send). Single seam: a2a protobuf -> camelCase + A2A 0.3
@@ -526,7 +526,7 @@ class ProtocolWebhookService:
 
                 # Don't retry on 4xx errors (client errors - permanent failures)
                 if status_code and 400 <= status_code < 500:
-                    logger.error(f"Webhook failed for task {task_id} with client error {status_code} - not retrying")
+                    logger.error("Webhook failed for task %s with client error %s - not retrying", task_id, status_code)
 
                     self._write_delivery_log(
                         context=delivery_log_context,
@@ -564,7 +564,9 @@ class ProtocolWebhookService:
 
                     await asyncio.sleep(wait_seconds)
                 else:
-                    logger.error(f"Webhook failed for task {task_id} after {max_attempts} attempts: HTTP {status_code}")
+                    logger.error(
+                        "Webhook failed for task %s after %s attempts: HTTP %s", task_id, max_attempts, status_code
+                    )
 
                     self._write_delivery_log(
                         context=delivery_log_context,

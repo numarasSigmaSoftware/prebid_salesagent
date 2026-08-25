@@ -74,3 +74,22 @@ class TestMediaBuyStatusSchedulerEnvVar:
             _reload_with_real_db_session(media_buy_status_scheduler_module)
 
             assert media_buy_status_scheduler_module.STATUS_CHECK_INTERVAL_SECONDS == 120
+
+    def test_the_unset_default_comes_from_the_named_constant(self):
+        """The named default and the resolved default cannot drift apart.
+
+        ``DEFAULT_STATUS_CHECK_INTERVAL_SECONDS`` exists so the fallback is not an
+        inline string literal (mirroring the sibling delivery scheduler). That is
+        only worth anything if the constant is what the fallback actually reads —
+        a constant the resolution ignores is decoration, and would leave the two
+        spellings of "60" free to diverge.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("MEDIA_BUY_STATUS_CHECK_INTERVAL", None)
+
+            _reload_with_real_db_session(media_buy_status_scheduler_module)
+
+            assert (
+                media_buy_status_scheduler_module.STATUS_CHECK_INTERVAL_SECONDS
+                == media_buy_status_scheduler_module.DEFAULT_STATUS_CHECK_INTERVAL_SECONDS
+            )
