@@ -23,11 +23,11 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
+from adcp.types import PricingModel
 
 from src.adapters import ADAPTER_REGISTRY, get_adapter_schemas
 from src.adapters.base import AdServerAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
-from src.adapters.mock_ad_server import MockAdServer
 from src.core.schemas import Principal
 
 pytestmark = pytest.mark.unit
@@ -64,6 +64,17 @@ def gam_adapter() -> GoogleAdManager:
     )
 
 
+def spec_pricing_models() -> set[str]:
+    """Every pricing model AdCP defines — the canonical universe for these tests.
+
+    Taken from the spec enum rather than from another adapter's declaration: an
+    adapter-sourced universe makes GAM's contract move whenever that adapter's set
+    moves, and re-spelling the members as a literal here would reproduce the
+    two-declarations defect this file exists to close.
+    """
+    return {model.value for model in PricingModel}
+
+
 def _validate_pricing(adapter: AdServerAdapter, pricing_model: str) -> list[str]:
     """Run the adapter's real pre-validation for a single package's pricing model.
 
@@ -92,9 +103,17 @@ class TestGamReportsWhatItEnforces:
         """
         served = served_pricing_models("google_ad_manager")
         assert served is not None, "GAM reported 'all pricing models supported'"
-        assert set(served) < set(MockAdServer.supported_pricing_models), (
-            f"GAM must report fewer models than the simulator can execute; got {served}"
-        )
+        assert set(served) < spec_pricing_models(), f"GAM must report fewer models than AdCP defines; got {served}"
+
+    def test_gam_enforces_exactly_the_models_it_is_configured_for(self):
+        """Pin GAM's content, not only its relations.
+
+        Every other assertion here compares GAM against itself: the served set is derived
+        from the enforced frozenset, so narrowing that frozenset moves both sides together
+        and reddens nothing. This is the assertion that notices a change to what GAM
+        actually sells.
+        """
+        assert GoogleAdManager.supported_pricing_models == frozenset({"cpm", "vcpm", "cpc", "flat_rate"})
 
     def test_served_set_equals_enforced_set(self, gam_adapter):
         """What the endpoint serves is what the validator enforces."""
@@ -113,11 +132,13 @@ class TestGamReportsWhatItEnforces:
         """Every model kept off the wire is actually refused.
 
         Pairs with the test above: together they pin the served list to the validator's
-        answer in both directions, so a list that is merely non-empty cannot pass.
+        answer in both directions, so a list that is merely non-empty cannot pass. The
+        omitted set is measured against the whole spec, so every model GAM withholds is
+        exercised — not just the ones some other adapter happens to declare.
         """
         served = served_pricing_models("google_ad_manager")
-        omitted = set(MockAdServer.supported_pricing_models) - set(served or [])
-        assert omitted, "no omitted models to check — GAM should not support all seven"
+        omitted = spec_pricing_models() - set(served or [])
+        assert omitted, "no omitted models to check — GAM should not support every model AdCP defines"
         for pricing_model in sorted(omitted):
             errors = _validate_pricing(gam_adapter, pricing_model)
             assert errors, f"GAM omits '{pricing_model}' from its capabilities but accepts it"
