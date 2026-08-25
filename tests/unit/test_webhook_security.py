@@ -1567,3 +1567,68 @@ class TestStrictModeFollowsDeclaredProductionOnly:
 
         is_valid, _ = WebhookURLValidator.validate_webhook_url_registration(self.PLAIN_HTTP_PUBLIC_URL)
         assert is_valid is True
+
+
+class TestRegistrationSourceUrlExtraction:
+    """``reject_unsafe_registration_source_url``'s two arms fail differently, on purpose.
+
+    A ``None`` url is a documented no-op for this gate, so anything that yields
+    ``None`` during extraction SKIPS the SSRF check silently. The two arms differ
+    in whether that skip is reachable from outside:
+
+    * the MODEL arm cannot legitimately produce it — both named types declare
+      ``url`` as required — so it must be loud;
+    * the MAPPING arm can, because a raw buyer-supplied dict reaches it unparsed
+      from the A2A wire, so it must stay quiet until that parsing exists.
+
+    Locking both halves here means a later "make it symmetric" cleanup has to
+    confront the asymmetry deliberately rather than discover it in production.
+    """
+
+    def test_a_model_like_object_without_url_now_raises(self):
+        """The silent gate-skip on the model arm is gone.
+
+        Before this, ``getattr(url_source, "url", None)`` returned ``None`` for an
+        object the signature never admitted, and a ``None`` url is a no-op — so a
+        wrong argument sailed past an SSRF gate with no type error and no runtime
+        signal. Passing something url-less must now fail loudly instead.
+        """
+        from src.core.webhook_validator import reject_unsafe_registration_source_url
+
+        class NotAWebhookConfig:
+            """Deliberately url-less: exactly what the annotation does not admit."""
+
+            authentication = {"schemes": ["Bearer"], "credentials": "x"}
+
+        with pytest.raises(AttributeError, match="url"):
+            reject_unsafe_registration_source_url(NotAWebhookConfig(), field="push_notification_config.url")
+
+    def test_a_url_less_mapping_is_still_a_silent_no_op(self):
+        """The buyer-input path must NOT raise — pinned so a cleanup cannot break it.
+
+        ``adcp_a2a_server`` passes a raw ``push_notification_config`` dict straight
+        off the A2A wire into ``sync_creatives``, whose signature accepts ``dict``
+        and never parses it. A buyer omitting ``url`` therefore reaches this gate
+        as a url-less Mapping. Subscripting would convert that malformed-but-
+        survivable input into an unhandled ``KeyError``, so this arm stays quiet
+        until the wrapper parses the dict.
+
+        This test passes both BEFORE and AFTER the model-arm change — which is
+        the point: it is the evidence that the change never reached this path.
+        """
+        from src.core.webhook_validator import reject_unsafe_registration_source_url
+
+        buyer_supplied = {"authentication": {"schemes": ["Bearer"], "credentials": "x"}}
+
+        assert reject_unsafe_registration_source_url(buyer_supplied, field="push_notification_config.url") is None
+
+    def test_a_mapping_with_a_url_is_still_validated(self):
+        """Sanity: keeping the Mapping arm quiet did not disable it for real dicts."""
+        from src.core.exceptions import AdCPValidationError
+        from src.core.webhook_validator import reject_unsafe_registration_source_url
+
+        with pytest.raises(AdCPValidationError):
+            reject_unsafe_registration_source_url(
+                {"url": "http://169.254.169.254/latest/meta-data/"},
+                field="push_notification_config.url",
+            )

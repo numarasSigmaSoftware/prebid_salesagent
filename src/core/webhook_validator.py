@@ -274,18 +274,33 @@ def reject_unsafe_registration_source_url(
     own None-is-a-no-op contract.
 
     The parameter names the concrete sources rather than ``object`` on purpose:
-    extraction falls back to ``None`` for anything lacking a ``url``, and a
-    ``None`` url is a documented no-op, so an ``object`` annotation let a wrong
-    argument silently SKIP this security gate with neither a type error nor a
-    runtime signal.
+    a ``None`` url is a documented no-op, so an ``object`` annotation would let a
+    wrong argument silently SKIP this security gate with neither a type error nor
+    a runtime signal.
+
+    On the MODEL arm that is now enforced rather than merely argued: both named
+    types declare ``url`` as required, so ``url_source.url`` raises
+    ``AttributeError`` on anything else instead of yielding ``None`` and skipping
+    the gate. A ``getattr(..., "url", None)`` fallback there reinstated at runtime
+    exactly the silent skip this paragraph claims the annotation prevents, and
+    protected against nothing the signature admits.
+
+    The ``Mapping`` arm deliberately keeps ``.get("url")``. It is NOT symmetric
+    with the model arm, because it has a live caller that hands it unvalidated
+    buyer input: ``adcp_a2a_server`` passes a raw ``push_notification_config``
+    dict straight off the A2A wire into ``sync_creatives``, which accepts
+    ``dict`` and never parses it. A url-less dict is therefore reachable, and
+    subscripting would turn malformed buyer input into an unhandled ``KeyError``
+    — a worse failure than the skip. Making this arm loud requires parsing at
+    the transport wrapper first; that is tracked separately.
 
     Returns the extracted URL (stringified; ``None`` when the source is ``None``
-    or carries no url) so a caller that must also log or persist it reuses this
-    one extraction rather than re-deriving it — see ``creatives/_sync.py``.
+    or is a mapping carrying no url) so a caller that must also log or persist it
+    reuses this one extraction rather than re-deriving it — see ``creatives/_sync.py``.
     """
     if url_source is None:
         return None
-    raw_url = url_source.get("url") if isinstance(url_source, Mapping) else getattr(url_source, "url", None)
+    raw_url = url_source.get("url") if isinstance(url_source, Mapping) else url_source.url
     url = str(raw_url) if raw_url is not None else None
     reject_unsafe_webhook_registration_url(url, field=field, context=context)
     return url
