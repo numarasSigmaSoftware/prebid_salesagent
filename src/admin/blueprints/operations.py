@@ -17,6 +17,7 @@ from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.exceptions import AdCPMediaBuyRejectedError
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess
+from src.core.tools._media_buy_status import compute_flight_window_status
 from src.core.webhook_validator import validate_webhook_task_type
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
@@ -425,34 +426,17 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     # transition it applies stamps the write-once confirmed_at and
                     # bumps the AdCP revision counter (a raw `.status =` here did
                     # neither, so approval left both untouched).
+                    # The flight-window half is NOT re-derived here: it is the one
+                    # rule ``compute_flight_window_status`` owns for all three
+                    # approval paths, which previously disagreed on the same buy.
+                    # Only the creative-approval gate is local to this route.
                     def _approved_status(refreshed: MediaBuy) -> str:
                         if not all_creatives_approved:
                             # Keep it in a state that shows it needs creative approval
                             # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
                             return "draft"
 
-                        if not (refreshed.start_time and refreshed.end_time):
-                            # No start or end time - set to active
-                            return "active"
-
-                        # Compute flight window
-                        start_time = (
-                            refreshed.start_time.astimezone(UTC)
-                            if refreshed.start_time.tzinfo
-                            else refreshed.start_time.replace(tzinfo=UTC)
-                        )
-                        end_time = (
-                            refreshed.end_time.astimezone(UTC)
-                            if refreshed.end_time.tzinfo
-                            else refreshed.end_time.replace(tzinfo=UTC)
-                        )
-
-                        now = datetime.now(UTC)
-                        if now < start_time:
-                            return "scheduled"
-                        if now > end_time:
-                            return "completed"
-                        return "active"
+                        return compute_flight_window_status(refreshed)
 
                     # The approval stamp goes through the repository too: it is
                     # seller-side state the confirmation back-fill reads, so it

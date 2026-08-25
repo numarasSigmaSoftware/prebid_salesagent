@@ -40,6 +40,11 @@ def make_pending_media_buy(integration_db):
     the workflow step — drives the approve webhook's context-echo branch.
     ``protocol``: the workflow step's originating protocol ("mcp" default; "a2a"
     drives the create_a2a_webhook_payload branch).
+    ``start_days``/``end_days``: the buy's flight window as day offsets from now.
+    The default (+7, +37) is PRE-FLIGHT. Passing a negative ``start_days`` builds an
+    IN-FLIGHT buy, which is what discriminates a computed approval target from a
+    hardcoded one — every approval path answers "scheduled" for a pre-flight buy
+    whether it read the window or not.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -61,7 +66,12 @@ def make_pending_media_buy(integration_db):
     engine = get_engine()
     session = SASession(bind=engine)
 
-    def _make(request_data_context: dict | None = None, protocol: str = "mcp"):
+    def _make(
+        request_data_context: dict | None = None,
+        protocol: str = "mcp",
+        start_days: int = 7,
+        end_days: int = 37,
+    ):
         tenant = TenantFactory(tenant_id="reject_wh_tenant")
         PropertyTagFactory(tenant=tenant, tag_id="all_inventory", name="All Inventory")
         principal = PrincipalFactory(
@@ -80,13 +90,13 @@ def make_pending_media_buy(integration_db):
             principal=principal,
             media_buy_id="mb_reject_wh",
             status="pending_approval",
-            start_time=now + timedelta(days=7),
-            end_time=now + timedelta(days=37),
+            start_time=now + timedelta(days=start_days),
+            end_time=now + timedelta(days=end_days),
             raw_request={
                 "brand": {"domain": "reject-wh.example.com"},
                 "po_number": "REJECT-WH-1",
-                "start_time": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "end_time": (now + timedelta(days=37)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "start_time": (now + timedelta(days=start_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_time": (now + timedelta(days=end_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "packages": [
                     {"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}
                 ],
@@ -549,17 +559,17 @@ class TestWorkflowApprovalConfirmationInstant:
            instant. A non-NULL assertion cannot see that; the value must equal the
            approval instant and must NOT be the create instant.
         2. STALE ROW. The buy is loaded on the request session before that nested
-           call commits a new status on its own session, so
-           ``apply_status_transition`` captured a stale ``expected_from_status``,
-           read a different committed value under the lock and declined as a lost
-           update — no status write, no revision bump. Re-resolving the row after
-           the nested call is what makes the arm land. The exact revision is the
-           oracle: 1 (seeded) -> 2 (the nested activation) -> 3 (this arm). A
-           ``>``-style assertion would stay green on the silent no-op, because the
+           call commits a new status on its own session, so the copy this arm holds
+           carries a stale status AND a stale flight window. The exact revision is
+           the oracle: 1 (seeded) -> 2 (the nested activation) -> 3 (this arm). A
+           ``>``-style assertion would stay green on a silent no-op, because the
            nested activation bumps either way.
 
-        Also pins the committed FINAL status of this arm so a human can judge it:
-        with the seam working, the route's ``"scheduled"`` target is what lands.
+        Also pins the committed FINAL status. This fixture's buy is PRE-FLIGHT
+        (starts in 7 days), so the computed target is ``"scheduled"`` — the same
+        value the route used to hardcode, which is exactly why this case alone
+        cannot tell a computed target from a hardcoded one. The in-flight sibling
+        below is the discriminator; keep both.
         """
         from src.core.database.repositories import MediaBuyUoW
 
@@ -598,6 +608,44 @@ class TestWorkflowApprovalConfirmationInstant:
                 "a value of 2 means the transition seam silently no-opped on a stale row"
             )
             assert after.status == "scheduled", (
-                f"workflow approve arm committed status={after.status!r}; the route's target is 'scheduled' "
-                "and a value of 'active' means the seam no-opped and left the nested activation's status"
+                f"workflow approve arm committed status={after.status!r}; this buy starts in 7 days, so the "
+                "computed target is 'scheduled'"
+            )
+
+    def test_workflow_approve_of_an_in_flight_buy_commits_the_computed_active_target(
+        self, authenticated_admin_session, make_pending_media_buy
+    ):
+        """An IN-FLIGHT buy approved via the workflow route must land ``active``, not ``scheduled``.
+
+        This is the case the hardcoded target got wrong. The route committed
+        ``"scheduled"`` for every approval regardless of the buy's own window, so a
+        buy whose flight window was already open was demoted to a pre-flight status
+        — and ``delivery_webhook_scheduler`` sweeps ``["active", "approved"]``, so the
+        buy silently dropped out of its own delivery-webhook sweep until the status
+        scheduler restored it.
+
+        The pre-flight sibling above cannot see this: its computed target is
+        ``"scheduled"`` too, so it stays green against a hardcoded route. Only an
+        in-flight buy separates "read the window" from "assumed pre-flight".
+        """
+        from src.core.database.repositories import MediaBuyUoW
+
+        ids = make_pending_media_buy(start_days=-1, end_days=30)
+        tenant_id = ids["tenant_id"]
+        media_buy_id = ids["media_buy_id"]
+
+        resp = authenticated_admin_session.post(
+            f"/tenant/{tenant_id}/workflows/{ids['workflow_id']}/steps/{ids['step_id']}/approve"
+        )
+        assert resp.status_code == 200, f"workflow approve failed: {resp.status_code} {resp.data!r}"
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            after = uow.media_buys.get_by_id(media_buy_id)
+            assert after is not None, "approved media buy vanished"
+            assert after.status == "active", (
+                f"workflow approve committed status={after.status!r} for a buy already inside its flight "
+                "window (started 1 day ago, ends in 30); a value of 'scheduled' means the route ignored the "
+                "window and hardcoded a pre-flight status, dropping the buy out of the "
+                "delivery_webhook_scheduler sweep over ['active', 'approved']"
             )

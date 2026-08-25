@@ -13,6 +13,7 @@ from src.core.database.models import Context
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.tools._media_buy_status import compute_flight_window_status
 
 logger = logging.getLogger(__name__)
 
@@ -261,10 +262,8 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
 
                     # Re-resolve the row: the nested call committed a new status on a
                     # SEPARATE session, so the copy loaded above still carries the
-                    # pre-adapter status. apply_status_transition captures its
-                    # expected_from_status from THAT copy, and a stale one never
-                    # matches the committed value — the seam would decline as a lost
-                    # update and silently no-op (no status write, no bump).
+                    # pre-adapter status — a stale window/status for the target
+                    # computation below.
                     media_buy = media_buy_repo.get_by_id(media_buy_id, populate_existing=True)
                     if media_buy is None:
                         logger.error(f"[APPROVAL] Media buy {media_buy_id} vanished after adapter creation")
@@ -274,7 +273,16 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     # adapter-success arm bumps revision exactly like the
                     # early-return arm above. confirmed_at was already stamped by the
                     # nested activation, and it is write-once, so it stays put.
-                    media_buy_repo.apply_status_transition(media_buy, "scheduled")
+                    #
+                    # The target is COMPUTED from the buy's own flight window, not
+                    # hardcoded. This arm used to commit "scheduled" unconditionally,
+                    # so approving a buy whose window was already open overwrote the
+                    # nested activation's "active" with a pre-flight status — and
+                    # delivery_webhook_scheduler sweeps ["active", "approved"], so the
+                    # buy silently dropped out of its own delivery-webhook sweep until
+                    # the status scheduler restored it. Same rule, same function, as
+                    # the media-buy approve and creative-approval routes.
+                    media_buy_repo.apply_computed_status_transition(media_buy, compute_flight_window_status)
                     db.commit()
 
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")

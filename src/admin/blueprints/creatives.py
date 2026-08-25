@@ -45,6 +45,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 from src.admin.utils import echo_context, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.repositories.uow import AdminCreativeUoW
+from src.core.tools._media_buy_status import compute_flight_window_status
 from src.core.tools.media_buy_create import execute_approved_media_buy, push_creative_to_existing_buy
 
 # Note: CreativeFormat table was dropped in migration f2addf453200
@@ -77,31 +78,6 @@ def _cleanup_completed_tasks():
         for task_id in completed_tasks:
             del _ai_review_tasks[task_id]
             logger.debug(f"Cleaned up completed AI review task: {task_id}")
-
-
-def _compute_media_buy_status_from_flight_dates(media_buy) -> str:
-    """Compute status based on flight dates: 'active' if within window, else 'scheduled'."""
-    now = datetime.now(UTC)
-
-    start_time = None
-    if media_buy.start_time:
-        raw_start = media_buy.start_time
-        start_time = raw_start.replace(tzinfo=UTC) if raw_start.tzinfo is None else raw_start.astimezone(UTC)
-    elif media_buy.start_date:
-        start_time = datetime.combine(media_buy.start_date, datetime.min.time()).replace(tzinfo=UTC)
-
-    end_time = None
-    if media_buy.end_time:
-        raw_end = media_buy.end_time
-        end_time = raw_end.replace(tzinfo=UTC) if raw_end.tzinfo is None else raw_end.astimezone(UTC)
-    elif media_buy.end_date:
-        end_time = datetime.combine(media_buy.end_date, datetime.max.time()).replace(tzinfo=UTC)
-
-    # If start time passed and end time not passed, set to active
-    if start_time and end_time and now >= start_time and now <= end_time:
-        return "active"
-
-    return "scheduled"
 
 
 async def _call_webhook_for_creative_status(
@@ -665,9 +641,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                         # afterwards freezes the buyer's CREATE instant as the
                         # seller's COMMITMENT instant, uncorrectably.
                         uow2.media_buys.stamp_approval(mb, approved_by="system")
-                        uow2.media_buys.apply_computed_status_transition(
-                            mb, _compute_media_buy_status_from_flight_dates
-                        )
+                        uow2.media_buys.apply_computed_status_transition(mb, compute_flight_window_status)
                     # auto-commits
 
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")

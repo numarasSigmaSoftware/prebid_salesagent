@@ -1,4 +1,11 @@
-"""Shared persisted-status resolver for the two required read tools.
+"""Shared media-buy status resolvers — one for reads, one for approval writes.
+
+READ side (:func:`resolve_canonical_status`): maps an already-persisted
+``MediaBuy.status`` onto the AdCP *wire* vocabulary for the two required read
+tools. WRITE side (:func:`compute_flight_window_status`, at the foot of this
+module): resolves which *persisted* status a just-approved buy should hold,
+from its own flight window — the single rule the three admin approval paths
+had each written differently.
 
 ``get_media_buy_delivery`` and ``get_media_buys`` each map the persisted
 ``MediaBuy.status`` column onto a wire status vocabulary, refining generic
@@ -39,7 +46,7 @@ clock, a further legitimate divergence.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -181,5 +188,90 @@ def resolve_canonical_status(buy: Any, reference_date: date, *, simulate: bool =
     if reference_date < start_compare:
         return "pending_start"
     if reference_date > end_compare:
+        return "completed"
+    return "active"
+
+
+# ---------------------------------------------------------------------------
+# Persisted lifecycle target for an APPROVED buy
+# ---------------------------------------------------------------------------
+#
+# Distinct from ``resolve_canonical_status`` above, which maps an already-
+# persisted status onto the AdCP *wire* vocabulary for the read tools. This one
+# answers the WRITE-side question the three admin approval paths ask: "the
+# seller has just accepted this buy — which persisted ``MediaBuy.status`` should
+# it now hold?" Its output is therefore the persisted lifecycle vocabulary
+# (``scheduled``/``active``/``completed``), not the canonical wire one.
+#
+# It exists because that one rule was written three times, with three answers
+# for the same buy: the workflow-approval route hardcoded ``"scheduled"``
+# (ignoring the flight window entirely), the media-buy approve route computed
+# from ``start_time``/``end_time`` only, and the creative-approval route
+# computed from ``start_time`` with a ``start_date`` fallback but had no
+# ``completed`` outcome. A buy left at ``"scheduled"`` while its flight window
+# is open also drops out of the delivery-webhook sweep
+# (``delivery_webhook_scheduler`` selects ``["active", "approved"]``) until the
+# status scheduler restores it, so the divergence was buyer-visible.
+APPROVED_LIFECYCLE_STATUSES: frozenset[str] = frozenset({"scheduled", "active", "completed"})
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a naive-or-aware datetime to UTC (naive is read as UTC)."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def compute_flight_window_status(buy: Any, *, now: datetime | None = None) -> str:
+    """Resolve the persisted status an approved buy should hold, from its own window.
+
+    Args:
+        buy: A media buy exposing ``start_time``/``end_time`` (preferred, may be
+            NULL) and ``start_date``/``end_date`` (the NOT NULL fallback).
+        now: The instant to evaluate against; defaults to ``datetime.now(UTC)``.
+
+    Returns:
+        One of :data:`APPROVED_LIFECYCLE_STATUSES` — ``"scheduled"`` before the
+        flight window opens, ``"active"`` inside it, ``"completed"`` after it.
+
+    The timestamp columns are preferred and the date columns are the fallback,
+    so a buy carrying only ``start_date``/``end_date`` still date-refines instead
+    of being treated as window-less (the approve route used to answer ``active``
+    for every such buy). A date-only window spans the whole day: midnight UTC to
+    the end of the end date.
+
+    A buy with NO resolvable edge on a side is schema-impossible (``start_date``
+    and ``end_date`` are NOT NULL) and cannot be date-refined; it resolves to the
+    serving state, matching the same defensive choice
+    :func:`resolve_canonical_status` makes for a corrupt/legacy row. An approved
+    buy with no discoverable window is serving, not indefinitely scheduled.
+    """
+    reference = _as_utc(now) if now is not None else datetime.now(UTC)
+
+    start_time = getattr(buy, "start_time", None)
+    end_time = getattr(buy, "end_time", None)
+    start_date = getattr(buy, "start_date", None)
+    end_date = getattr(buy, "end_date", None)
+
+    start_at = (
+        _as_utc(start_time)
+        if start_time
+        else (datetime.combine(start_date, datetime.min.time()).replace(tzinfo=UTC) if start_date else None)
+    )
+    end_at = (
+        _as_utc(end_time)
+        if end_time
+        else (datetime.combine(end_date, datetime.max.time()).replace(tzinfo=UTC) if end_date else None)
+    )
+
+    if start_at is None or end_at is None:
+        logger.warning(
+            "Media buy %r has no resolvable flight %s edge; treating as serving",
+            getattr(buy, "media_buy_id", "<unknown>"),
+            "start" if start_at is None else "end",
+        )
+        return "active"
+
+    if reference < start_at:
+        return "scheduled"
+    if reference > end_at:
         return "completed"
     return "active"
