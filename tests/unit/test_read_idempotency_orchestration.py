@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastmcp.tools.tool import ToolResult
 
-from src.core.exceptions import AdCPAuthRequiredError, AdCPIdempotencyConflictError
+from src.core.exceptions import AdCPAuthenticationError, AdCPAuthRequiredError, AdCPIdempotencyConflictError
 from src.services.idempotency_replay import (
     ReservationResult,
     _decode_read_response,
@@ -174,3 +174,36 @@ def test_read_scope_extracts_tenant_id_from_dict_tenant_fallback() -> None:
 
     assert scope is not None
     assert scope[0] == "some-tenant"
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_tenant_on_a_keyed_read_is_a_correctable_4xx_not_transient_503() -> None:
+    """An unroutable subdomain / missing tenant context is PERMANENT, not
+    transient — retrying can never succeed, so it must not wire as
+    SERVICE_UNAVAILABLE/503/transient. src/core/auth.py's require_tenant
+    raises AUTH_REQUIRED/correctable for the identical condition ("no tenant
+    context available"); _read_scope now matches it.
+
+    execute_idempotent_read (called from the A2A skill-handler wrapper,
+    adcp_a2a_server.py's _execute_explicit_skill_handler, BEFORE the tool's
+    own handler runs) is the real production call this exercises — not a
+    reimplementation of it.
+    """
+    identity = PrincipalFactory.make_identity(tenant_id=None, tenant=None, principal_id="principal-1")
+
+    with (
+        patch("src.services.idempotency_replay.reserve_idempotent") as reserve,
+        pytest.raises(AdCPAuthenticationError) as exc_info,
+    ):
+        await execute_idempotent_read(
+            tool_name="get_adcp_capabilities",
+            idempotency_key="k1",
+            identity=identity,
+            raw_wire_payload={"idempotency_key": "k1"},
+            response_type=None,
+            work=AsyncMock(),
+        )
+
+    assert exc_info.value.error_code == "AUTH_REQUIRED"
+    assert exc_info.value.recovery == "correctable"
+    reserve.assert_not_called()

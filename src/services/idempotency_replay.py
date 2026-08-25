@@ -43,6 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from src.core.application_context_values import serialize_application_context
 from src.core.database.repositories.idempotency_attempt import COMPLETED, EXPIRED, IN_FLIGHT, RESERVED
 from src.core.exceptions import (
+    AdCPAuthenticationError,
     AdCPIdempotencyConflictError,
     AdCPIdempotencyExpiredError,
     AdCPIdempotencyInFlightError,
@@ -543,9 +544,19 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
         tenant_id = identity.tenant.get("tenant_id")
     if not tenant_id:
-        raise AdCPServiceUnavailableError(
-            "A tenant scope is required to honor the supplied idempotency_key",
-            retry_after=1,
+        # An unroutable subdomain / missing tenant context is a PERMANENT
+        # condition, not a transient one — retrying will never succeed, so
+        # this must not be classified 503/transient. src/core/auth.py's
+        # require_tenant raises this same AUTH_REQUIRED/correctable error for
+        # exactly this condition ("no tenant context available"); mirrored
+        # here rather than delegated to because require_tenant checks
+        # identity.tenant truthiness directly, not the tenant_id this
+        # function derives (which also accepts the dict-tenant fallback
+        # above) — calling it would silently narrow what this function
+        # accepts.
+        raise AdCPAuthenticationError(
+            "No tenant scope could be resolved to honor the supplied idempotency_key. "
+            "Check x-adcp-auth token and host headers.",
         )
     principal_id = identity.principal_id if identity else None
     if not principal_id:
