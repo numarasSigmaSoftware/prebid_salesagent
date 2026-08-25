@@ -13,6 +13,9 @@ the harness (``result.wire_error_envelope`` + ``assert_envelope_shape``):
   with a zero fractional part, so the pinned schema ACCEPTS it — on every
   transport, not just the one whose wire happens to deliver protobuf doubles.
 - non-integral float (``7.5``): rejected everywhere, with the same code.
+- non-finite number (a bare ``Infinity`` literal): rejected with that same code,
+  pinned at the REST request-model layer — see ``_put_raw_revision_literal`` for
+  why that is the only layer a non-finite float survives to reach.
 """
 
 from __future__ import annotations
@@ -55,6 +58,54 @@ def _assert_attributed_to_revision(envelope) -> None:
     assert "revision" in suggestion, (
         f"the suggestion must name the offending field rather than the request root, got {suggestion!r}"
     )
+
+
+def _put_raw_revision_literal(env, media_buy_id: str, revision_literal: str) -> dict:
+    """PUT an update whose ``revision`` is the given RAW JSON literal; return the 400 body.
+
+    The layer graded here is the REST route's request model — ``UpdateMediaBuyBody``
+    carries ``revision`` as ``SkipValidation``, so whatever ``json.loads`` produced
+    travels untouched into ``RevisionValidator``.
+
+    It has to be raw BYTES rather than ``env.call_via(...)`` because no harness
+    transport can carry a non-finite float to that validator at all:
+
+    - MCP serialises ``inf`` to ``null``, so it arrives as a PRESENT key with a
+      ``None`` value — a different rejection, already pinned by
+      ``test_present_but_null_revision_is_rejected_not_treated_as_absent``.
+    - REST via ``client.put(json=...)`` never leaves the client: httpx dumps with
+      ``allow_nan=False`` and raises ``Out of range float values are not JSON compliant``.
+    - A2A never leaves the client either: a protobuf ``Value.number_value`` cannot
+      hold ``Infinity``.
+
+    A real buyer is under no such constraint — ``Infinity`` is a bare literal that
+    ``json.loads`` (and therefore starlette's body parser) accepts — so the value IS
+    reachable in production, and the validator arm that rejects it is what this
+    grades. Uses ``_prepare_rest_request`` (identity + commit + auth-dep override:
+    the same preamble ``_run_update_rest_request`` uses) because the harness offers
+    no raw-body entry point, and hand-rolling the auth override would fork it.
+    """
+    client, identity = env._prepare_rest_request({})
+    response = client.put(
+        f"/api/v1/media-buys/{media_buy_id}",
+        content=f'{{"paused": true, "revision": {revision_literal}}}'.encode(),
+        headers={
+            "content-type": "application/json",
+            "x-adcp-auth": identity.auth_token,
+            "x-adcp-tenant": identity.tenant_id,
+        },
+    )
+    assert response.status_code == 400, (
+        f"revision={revision_literal} must be rejected as a buyer-facing validation error, "
+        f"got HTTP {response.status_code}: {response.text[:500]}"
+    )
+    return response.json()
+
+
+# Values already pinned as rejected elsewhere in this module, restated as the raw JSON
+# literals a buyer would actually send. The non-finite case must land on the SAME
+# envelope as these, not on a shape of its own.
+_ALREADY_REJECTED_LITERALS = ("0", "true", "1.5", '"7"')
 
 
 class TestUpdateRevisionValidationWire:
@@ -142,6 +193,33 @@ class TestUpdateRevisionValidationWire:
         assert result.wire_error_envelope is not None, "wire envelope not captured"
         assert_envelope_shape(result.wire_error_envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
         _assert_attributed_to_revision(result.wire_error_envelope)
+
+    def test_non_finite_revision_is_rejected_like_every_other_invalid_value(self, env_with_media_buy):
+        """A bare ``Infinity`` must draw the ordinary validation envelope, not blow up.
+
+        ``RevisionValidator``'s float arm carries ``allow_inf_nan=False``. Drop it and
+        ``inf`` passes both ``ge=1`` and ``multiple_of=1``, so the normaliser's
+        ``int(inf)`` raises a raw ``OverflowError`` out of the validator — an internal
+        fault where the buyer had earned a correctable "fix your request". (``nan`` and
+        ``-inf`` are held out by ``ge=1`` regardless, so only ``+inf`` grades this arm.)
+        """
+        env, media_buy = env_with_media_buy
+
+        envelope = _put_raw_revision_literal(env, media_buy.media_buy_id, "Infinity")
+
+        assert_envelope_shape(envelope, _SCHEMA_REJECTION_CODE, recovery="correctable")
+        _assert_attributed_to_revision(envelope)
+
+        # Consistency: same layer, same buyer, same envelope as the values this module
+        # already pins as rejected — a non-finite number is not a special case.
+        non_finite = envelope["errors"][0]
+        for literal in _ALREADY_REJECTED_LITERALS:
+            peer = _put_raw_revision_literal(env, media_buy.media_buy_id, literal)["errors"][0]
+            assert (non_finite["code"], non_finite["recovery"], non_finite["field"]) == (
+                peer["code"],
+                peer["recovery"],
+                peer["field"],
+            ), f"Infinity must be rejected exactly as revision={literal} is, got {non_finite!r} vs {peer!r}"
 
     @pytest.mark.parametrize("transport", _PRESENT_NULL_TRANSPORTS, ids=lambda t: t.value)
     def test_present_but_null_revision_is_rejected_not_treated_as_absent(self, env_with_media_buy, transport):
