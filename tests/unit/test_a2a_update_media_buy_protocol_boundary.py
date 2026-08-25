@@ -179,3 +179,65 @@ def test_update_media_buy_rejects_explicit_null_revision_before_core_call() -> N
     data = _extract_artifact_data(_extract_jsonrpc_result(response))
     assert_envelope_shape(data, "INVALID_REQUEST", recovery="correctable", message_substr="must be an integer")
     mock_core.assert_not_called()
+
+
+def test_a2a_data_part_encoding_loses_integer_typing() -> None:
+    """Characterize the A2A-only integer loss on the outbound wire.
+
+    This is a PIN of current transport behaviour, not an endorsement of it.
+    ``_restore_a2a_integer_version_pin`` repairs integers on the way IN; there
+    is no outbound counterpart because ``google.protobuf.Value`` has exactly
+    one numeric field, ``number_value``, typed ``double``. Every JSON integer
+    handed to ``_dict_to_value`` is therefore emitted as ``3.0`` at any nesting
+    depth, while ``bool`` (a distinct ``bool_value``) survives.
+
+    Divergences this records, against the pinned adcp 6.6.0 / AdCP 3.1.1:
+
+    * ``error-details/version-unsupported.json`` types ``supported_majors``
+      items as ``{type: integer, minimum: 1}``, so A2A buyers see ``[3.0]``
+      where the schema says ``[3]``. Impact is bounded: that same schema
+      documents the field as "DEPRECATED in favor of ``supported_versions``
+      ... removed in 4.0", and ``supported_versions`` is string-typed and so
+      unaffected.
+    * The more serious case is the echoed application ``context``. AdCP L2
+      ``context-sessions.mdx`` rule 5 forbids an agent to "add, remove,
+      rename, reorder, or retype" echoed context, and int -> float IS a
+      retype — of buyer-supplied values this agent never inspects, at
+      arbitrary depth.
+
+    If protobuf ever grows integer-preserving encoding, or someone lands an
+    outbound repair, this test goes RED and should be deleted along with the
+    docstrings it anchors, not relaxed. Upstream question:
+    https://github.com/adcontextprotocol/adcp/issues/6879
+    """
+    from google.protobuf import json_format
+
+    from src.a2a_server.adcp_a2a_server import _dict_to_value
+
+    payload = {
+        "supported_majors": [3, 4],
+        "context": {"retry_after": 30, "nested": {"attempt": 1}, "ids": [7, 8]},
+        "dry_run": True,
+        "live": False,
+    }
+
+    on_the_wire = json_format.MessageToDict(_dict_to_value(payload))
+
+    # Integers are retyped to float at every depth: top level via a list,
+    # dict-nested, doubly-nested, and list-nested inside a dict.
+    assert on_the_wire["supported_majors"] == [3.0, 4.0]
+    assert [type(v) for v in on_the_wire["supported_majors"]] == [float, float]
+    assert type(on_the_wire["context"]["retry_after"]) is float
+    assert type(on_the_wire["context"]["nested"]["attempt"]) is float
+    assert [type(v) for v in on_the_wire["context"]["ids"]] == [float, float]
+
+    # bool is NOT collapsed into the numeric field — it keeps its own type.
+    assert on_the_wire["dry_run"] is True
+    assert on_the_wire["live"] is False
+
+    # The loss is visible in the serialized bytes buyers actually receive,
+    # not merely in the decoded Python objects.
+    wire_json = "".join(json_format.MessageToJson(_dict_to_value(payload)).split())
+    assert '"supported_majors":[3.0,4.0]' in wire_json
+    assert '"retry_after":30.0' in wire_json
+    assert '"dry_run":true' in wire_json

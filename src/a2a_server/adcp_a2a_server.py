@@ -166,6 +166,17 @@ def _restore_a2a_integer_version_pin(params: dict[str, Any]) -> dict[str, Any]:
     strict about accepting only integer major pins. Fractional, non-finite,
     boolean, and all other values are left untouched for the core validator to
     reject. Preserve the original mapping when no repair is needed.
+
+    This is the INBOUND half only, and no outbound counterpart is possible.
+    ``google.protobuf.Value`` exposes exactly one numeric field,
+    ``number_value``, typed ``double``; ``json_format.Parse`` therefore stores
+    every JSON integer as a double at any nesting depth, and nothing downstream
+    of ``_dict_to_value`` can tell an integer from a whole-valued float. The
+    consequence is buyer-visible: spec-integer fields leave this transport as
+    ``3.0`` rather than ``3``. Pinned by
+    ``tests/unit/test_a2a_update_media_buy_protocol_boundary.py::
+    test_a2a_data_part_encoding_loses_integer_typing``. Upstream question:
+    https://github.com/adcontextprotocol/adcp/issues/6879
     """
     major = params.get("adcp_major_version")
     if type(major) is not float or not math.isfinite(major) or not major.is_integer():
@@ -174,7 +185,12 @@ def _restore_a2a_integer_version_pin(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dict_to_value(d: dict) -> struct_pb2.Value:
-    """Convert a Python dict to a protobuf Value for use in Part.data."""
+    """Convert a Python dict to a protobuf Value for use in Part.data.
+
+    Integers do NOT survive this conversion, and cannot be normalized back on
+    the way out: see ``_restore_a2a_integer_version_pin`` for why an outbound
+    counterpart to that inbound repair is impossible rather than merely absent.
+    """
     val = struct_pb2.Value()
     json_format.Parse(json.dumps(d, default=str), val)
     return val
