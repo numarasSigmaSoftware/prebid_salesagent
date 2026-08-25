@@ -161,6 +161,94 @@ class TestBearerAuthenticatesOnRestWire:
 
 
 @pytest.mark.requires_db
+class TestRestQueryVersionPinAcceptsAsciiDigitsOnly:
+    """The REST-only query coercion of the deprecated integer pin narrows on TWO operands.
+
+    URL query values are always strings, so ``_coerce_rest_query_version_pins`` converts
+    ``adcp_major_version`` to an ``int`` before the core negotiator sees it — and the core
+    types that pin as an integer, so anything left textual is rejected VALIDATION_ERROR.
+    That makes the coercion's ``digits.isascii() and digits.isdigit()`` the whole gate, and
+    each half is load-bearing on its own because ``int()`` is more permissive than either:
+
+    - ``"٣".isdigit()`` is True while ``.isascii()`` is False, and ``int("٣") == 3`` — so
+      without ``.isascii()`` a non-ASCII digit negotiates supported major 3.
+    - ``"0_3".isascii()`` is True while ``.isdigit()`` is False, and ``int("0_3") == 3``
+      (Python allows ``_`` between digits) — so without ``.isdigit()`` an underscore
+      spelling also negotiates major 3. ``int("1_0") == 10`` shifts the buyer to a
+      different major entirely.
+
+    Either way REST alone would resolve a pin no other transport accepts, since MCP/A2A
+    receive a real JSON integer and never run this coercion.
+    """
+
+    @pytest.mark.parametrize(
+        "major_pin",
+        [
+            pytest.param("٣", id="arabic-indic-digit-guarded-by-isascii"),
+            pytest.param("３", id="fullwidth-digit-guarded-by-isascii"),
+            pytest.param("0_3", id="underscore-separator-guarded-by-isdigit"),
+            pytest.param("1_0", id="underscore-separator-crossing-major-guarded-by-isdigit"),
+        ],
+    )
+    def test_non_ascii_digit_and_underscore_spellings_are_rejected(self, integration_db, major_pin):
+        """A spelling ``int()`` would swallow must not be coerced into a negotiated pin."""
+        from starlette.testclient import TestClient
+
+        from src.app import app
+
+        with CapabilitiesEnv() as env:
+            tenant, principal = env.setup_default_data()
+
+            client = TestClient(app)
+            response = client.post(
+                "/api/v1/creatives",
+                json={},
+                params={"adcp_major_version": major_pin},
+                headers={
+                    "Authorization": f"Bearer {principal.access_token}",
+                    "x-adcp-tenant": tenant.tenant_id,
+                },
+            )
+
+            assert response.status_code == 400, (
+                f"adcp_major_version={major_pin!r} was coerced into a negotiated pin instead of "
+                f"being rejected; got {response.status_code}: {response.text}"
+            )
+            body = response.json()
+            assert_envelope_shape(body, "VALIDATION_ERROR", recovery="correctable")
+            assert body["errors"][0]["field"] == "adcp_major_version", (
+                f"the malformed pin was not attributed to adcp_major_version: {body}"
+            )
+
+    def test_an_ascii_integer_pin_still_negotiates(self, integration_db):
+        """Control: the coercion still admits the spelling it exists to admit (no false red above)."""
+        from starlette.testclient import TestClient
+
+        from src.app import app
+        from src.core.adcp_version import supported_adcp_versions
+
+        supported_major = supported_adcp_versions()[0].split(".")[0]
+
+        with CapabilitiesEnv() as env:
+            tenant, principal = env.setup_default_data()
+
+            client = TestClient(app)
+            response = client.post(
+                "/api/v1/creatives",
+                json={},
+                params={"adcp_major_version": supported_major},
+                headers={
+                    "Authorization": f"Bearer {principal.access_token}",
+                    "x-adcp-tenant": tenant.tenant_id,
+                },
+            )
+
+            assert response.status_code == 200, (
+                f"a plain ASCII major pin was rejected: {response.status_code}: {response.text}"
+            )
+
+
+@pytest.mark.requires_db
 class TestBearerAuthenticatesOnA2AWire:
     """Authorization: Bearer authenticates end-to-end on the A2A wire, padded or not."""
 
