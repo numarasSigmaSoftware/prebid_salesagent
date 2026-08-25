@@ -33,6 +33,8 @@ import json
 
 import pytest
 
+from tests.helpers import assert_envelope_shape
+
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 # Raw bytes, not a dict: the point is that this is what a buyer can actually put
@@ -69,9 +71,7 @@ class TestRestBoundaryEmitsAnEnvelopeForNonJsonContext:
         response = _put_with_non_json_context()
 
         assert response.status_code == 401, f"expected the auth error, got {response.status_code}"
-        body = response.json()
-        assert body["adcp_error"]["code"] == "AUTH_REQUIRED"
-        assert body["errors"][0]["code"] == "AUTH_REQUIRED"
+        assert_envelope_shape(response.json(), "AUTH_REQUIRED", recovery="correctable")
 
     def test_the_non_finite_value_is_echoed_as_null_not_dropped(self, integration_db):
         """Context echo is positional as well as value-wise: the key must survive."""
@@ -123,7 +123,7 @@ class TestRestBoundaryNeverGoesSilentOnAnUnencodableEnvelope:
         response = _put_with_non_json_context()
 
         assert response.status_code == 401, "a raising builder must not cost the buyer their error"
-        assert response.json()["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert_envelope_shape(response.json(), "AUTH_REQUIRED", recovery="correctable")
         assert calls["n"] == 2, "the guard should have retried the build without the context"
 
     def test_an_unencodable_envelope_still_yields_the_error_without_the_echo(self, monkeypatch, integration_db):
@@ -142,7 +142,7 @@ class TestRestBoundaryNeverGoesSilentOnAnUnencodableEnvelope:
 
         assert response.status_code == 401, "the buyer's real error must survive an unencodable echo"
         body = response.json()
-        assert body["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert_envelope_shape(body, "AUTH_REQUIRED", recovery="correctable")
         assert "context" not in body, "the unencodable echo must be dropped, not emitted"
 
 
@@ -158,31 +158,41 @@ class TestTheTerminalNetCannotItselfRaise:
 
     No AdCPError subclass overrides `__str__` today. The point is that this tier
     must not depend on that remaining true, and it had zero coverage.
+
+    Recovery is `transient` on this tier and `correctable` on the two above it:
+    tier 3 synthesizes a fresh error rather than echoing the original's
+    classification, because reaching it means the server failed to build its own
+    error twice. The difference is pinned here so the degradation stays visible.
     """
 
     def test_all_three_tiers_failing_still_produces_an_envelope(self, monkeypatch, integration_db):
         import src.app as app_module
 
-        class _HostileError(Exception):
-            """Raises from every accessor the terminal net might touch."""
+        real_builder = app_module.build_two_layer_error_envelope
+        buyers = {}
 
-            status_code = 401
-            error_code = "AUTH_REQUIRED"
-            context = None
-            recovery = "correctable"
+        def _hostile_to_the_buyers_error(exc):
+            """Chokes on the buyer's own error object, the way a bad context does.
 
-            def __str__(self) -> str:
-                raise RuntimeError("__str__ is hostile")
+            Tiers 1 and 2 both hand the builder that same object (with, then
+            without, its context); tier 3 hands it a freshly synthesized minimal
+            error. Modelling the hostility by identity rather than
+            unconditionally is what the boundary actually suffers, and it leaves
+            tier 3's own build reachable — which is the point of routing the
+            terminal net through the same constructor instead of hand-rolling
+            the envelope.
+            """
+            buyers.setdefault("exc", exc)
+            if exc is buyers["exc"]:
+                raise ValueError("builder is hostile to the buyer's error")
+            return real_builder(exc)
 
-        def _always_raises(exc):
-            raise ValueError("builder is hostile")
-
-        monkeypatch.setattr(app_module, "build_two_layer_error_envelope", _always_raises)
+        monkeypatch.setattr(app_module, "build_two_layer_error_envelope", _hostile_to_the_buyers_error)
 
         response = _put_with_non_json_context()
 
         assert response.status_code == 401, "the buyer must still get their status"
-        assert response.json()["adcp_error"]["code"] == "AUTH_REQUIRED"
+        assert_envelope_shape(response.json(), "AUTH_REQUIRED", recovery="transient")
 
     def test_a_raising_str_degrades_to_a_readable_message(self, integration_db):
         """The unit of the fix: guarded reads, not a guarded caller."""
@@ -194,16 +204,37 @@ class TestTheTerminalNetCannotItselfRaise:
             def __str__(self) -> str:
                 raise RuntimeError("nope")
 
-        envelope = _minimal_envelope(_Hostile())
+        assert_envelope_shape(
+            _minimal_envelope(_Hostile()),
+            "AUTH_REQUIRED",
+            recovery="transient",
+            message_substr="could not be rendered",
+        )
 
-        assert envelope["adcp_error"]["code"] == "AUTH_REQUIRED"
-        assert "could not be rendered" in envelope["adcp_error"]["message"]
+    def test_a_missing_error_code_degrades_to_a_standard_wire_code(self):
+        """No internal code reaches the wire from the terminal net.
 
-    def test_a_missing_error_code_degrades_to_internal_error(self):
+        The pre-fix tier read `error_code` straight onto the envelope, so an
+        internal taxonomy code (`INTERNAL_ERROR` here; `GAM_UPDATE_FAILED` from
+        the adapter path, which names the ad server) shipped verbatim. Routing
+        through `to_wire_error_code` collapses both to SERVICE_UNAVAILABLE.
+        """
         from src.app import _minimal_envelope, _safe_status_code
 
         class _Bare(Exception):
             pass
 
-        assert _minimal_envelope(_Bare())["adcp_error"]["code"] == "INTERNAL_ERROR"
+        assert_envelope_shape(_minimal_envelope(_Bare()), "SERVICE_UNAVAILABLE", recovery="transient")
         assert _safe_status_code(_Bare()) == 500
+
+    def test_an_internal_adapter_code_does_not_name_the_ad_server_on_the_wire(self):
+        """The disclosure case, not just the generic one."""
+        from src.app import _minimal_envelope
+
+        class _GamFailure(Exception):
+            error_code = "GAM_UPDATE_FAILED"
+
+        envelope = _minimal_envelope(_GamFailure())
+
+        assert_envelope_shape(envelope, "SERVICE_UNAVAILABLE", recovery="transient")
+        assert "GAM" not in json.dumps(envelope), f"internal adapter code leaked: {envelope}"

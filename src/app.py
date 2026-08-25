@@ -44,6 +44,7 @@ from src.core.exceptions import (
     build_validation_error_details,
     missing_idempotency_key_error_from_validation,
     normalize_to_adcp_error,
+    to_wire_error_code,
 )
 from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
 from src.core.lifecycle import run_all_shutdown_callbacks
@@ -173,6 +174,23 @@ def _minimal_envelope(exc: AdCPError) -> dict[str, object]:
     Every access is defensive because this runs after two prior attempts have
     already failed: a custom `__str__` that raises, or a missing/odd
     `error_code`, must not turn a degraded response into no response.
+
+    The reads are guarded; the SHAPE is not hand-assembled. It comes from
+    ``build_two_layer_error_envelope``, the same constructor tiers 1 and 2 use,
+    so the terminal net cannot drift from the envelope the buyer gets on every
+    other path. Building it here by hand is what let an internal code
+    (``GAM_UPDATE_FAILED``, which names the ad server) reach the wire with no
+    ``recovery`` at all, and put the SAME dict object in both layers — the
+    aliasing footgun the builder avoids by copying. ``to_wire_error_code`` is
+    the translation the other two tiers get for free through
+    ``exc.wire_error_code``; it collapses anything non-standard to
+    SERVICE_UNAVAILABLE, so no internal code can escape here either.
+
+    ``recovery`` is the synthesized error's base default, ``transient``, not
+    the original exception's. Reaching this tier means the server failed to
+    build its own error twice, so retry-later is the honest hint for that
+    state — and reading ``exc.recovery`` would be one more unguarded access at
+    the single point in the chain where nothing may raise.
     """
     code = getattr(exc, "error_code", None)
     if not isinstance(code, str) or not code:
@@ -181,8 +199,7 @@ def _minimal_envelope(exc: AdCPError) -> dict[str, object]:
         message = str(exc)
     except Exception:  # noqa: BLE001 - a raising __str__ must not cost the buyer the envelope
         message = "An internal error occurred and its detail could not be rendered."
-    minimal = {"code": code, "message": message}
-    return {"adcp_error": minimal, "errors": [minimal]}
+    return build_two_layer_error_envelope(AdCPError.synthesize(message, error_code=to_wire_error_code(code)))
 
 
 async def _envelope_response(request: Request, exc: AdCPError) -> JSONResponse:
