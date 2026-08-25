@@ -61,13 +61,48 @@ def _write_source(directory: Path) -> Path:
     return source
 
 
-def test_wholesale_compile_keeps_replay_live_and_applies_boundary_overlay(tmp_path):
+def _isolate_boundary_overlay(tmp_path: Path, monkeypatch) -> None:
+    """Point ``compile_bdd.OVERLAY_DIR`` at a synthetic overlay containing ONLY
+    the boundary-fixture scenario these tests exercise.
+
+    Without this, both tests below read the REAL ``tests/bdd/overlays/
+    BR-UC-002-create-media-buy.feature`` on disk (same filename as
+    ``FEATURE_FILENAME``) — so any unrelated overlay scenario added there for
+    a scenario ID this module's tiny ``UPSTREAM_SOURCE``/``LEGACY_COMPILED``
+    fixtures don't define (e.g. the idempotency-in-flight overlay) makes
+    ``_apply_scenario_overlays`` raise "targets missing generated scenarios"
+    here. Mirrors the isolation
+    ``test_multiple_overlays_apply_by_generated_position_not_overlay_file_order``
+    already uses below.
+    """
+    overlay_dir = tmp_path / "overlays"
+    overlay_dir.mkdir()
+    monkeypatch.setattr(compile_bdd, "OVERLAY_DIR", overlay_dir)
+    (overlay_dir / FEATURE_FILENAME).write_text(
+        f"""\
+Feature: BR-UC-002 local capability reconciliation
+
+  @{BOUNDARY_SCENARIO_ID} @v31 @idempotency-key @validation @post-f2 @ext-w
+  Scenario Outline: v3.1 idempotency_key violates length/pattern constraints
+    Given a create_media_buy request with idempotency_key "<value>"
+    When the Buyer Agent sends the create_media_buy request
+    Then the response should indicate a validation error
+
+    Examples:
+      | value       | violation               |
+      | <256 chars> | maxLength 255 violated  |
+"""
+    )
+
+
+def test_wholesale_compile_keeps_replay_live_and_applies_boundary_overlay(tmp_path, monkeypatch):
     """The ``--all`` path passes the upstream replay scenario through UNCHANGED.
 
     With create_media_buy replay restored, the only local overlay is the
     exact-length boundary fixture — regeneration must neither reconcile the
     replay scenario away nor restore the hand-counted over-max literal.
     """
+    _isolate_boundary_overlay(tmp_path, monkeypatch)
     source = _write_source(tmp_path)
 
     _, output, _, scenario_ids = compile_bdd.compile_feature(source, {}, "test-sha", dry_run=True)
@@ -82,8 +117,9 @@ def test_wholesale_compile_keeps_replay_live_and_applies_boundary_overlay(tmp_pa
     assert "| AAAA" not in output
 
 
-def test_merge_classifies_boundary_fixture_as_local_overlay(tmp_path):
+def test_merge_classifies_boundary_fixture_as_local_overlay(tmp_path, monkeypatch):
     """The ``--merge`` path applies the boundary overlay; the replay scenario is a NO-OP."""
+    _isolate_boundary_overlay(tmp_path, monkeypatch)
     source = _write_source(tmp_path)
     legacy = tmp_path / "legacy.feature"
     legacy.write_text(LEGACY_COMPILED)
