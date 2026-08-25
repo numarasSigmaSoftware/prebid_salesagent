@@ -13,7 +13,9 @@ before their start date.
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from sqlalchemy import select
 
@@ -23,6 +25,8 @@ from src.core.database.repositories import MediaBuyRepository
 from src.core.utils import utc_flight_end, utc_flight_start
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # Configurable via env var - default 60 seconds
 STATUS_CHECK_INTERVAL_SECONDS = int(os.getenv("MEDIA_BUY_STATUS_CHECK_INTERVAL") or "60")
@@ -107,35 +111,64 @@ class MediaBuyStatusScheduler:
 
         from src.services.creative_unblock_recovery import recover_stale_creative_unblock_workflows
 
-        try:
-            unblock_result = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
-            if unblock_result.recovered:
-                logger.info("Recovered %d stale creative-unblock workflow(s)", unblock_result.recovered)
-            if unblock_result.deferred:
-                logger.warning(
-                    "Deferred %d stale creative-unblock workflow(s) pending an ambiguous provider outcome",
-                    unblock_result.deferred,
-                )
-        except Exception as e:
-            logger.error(f"Failed to recover stale creative-unblock workflows: {e}", exc_info=True)
+        await self._run_drain_stage(
+            "recover stale creative-unblock workflows",
+            recover_stale_creative_unblock_workflows,
+            self._report_creative_unblock_recovery,
+        )
 
         from src.core.context_manager import publish_pending_workflow_notifications
 
-        try:
-            published_count = await asyncio.to_thread(publish_pending_workflow_notifications)
-            if published_count:
-                logger.info("Published %d pending workflow notification(s)", published_count)
-        except Exception as e:
-            logger.error(f"Failed to publish pending workflow notifications: {e}", exc_info=True)
+        await self._run_drain_stage(
+            "publish pending workflow notifications",
+            publish_pending_workflow_notifications,
+            self._report_published_workflow_notifications,
+        )
 
         from src.services.a2a_task_lifecycle import publish_pending_task_notifications
 
+        await self._run_drain_stage(
+            "publish pending native task notifications",
+            publish_pending_task_notifications,
+            self._report_published_task_notifications,
+        )
+
+    async def _run_drain_stage(
+        self,
+        label: str,
+        drain: Callable[[], T],
+        report: Callable[[T], None] | None = None,
+    ) -> None:
+        """Run one drain stage in a worker thread, isolating its failure from siblings.
+
+        A raise from *drain* is logged and swallowed here so that the caller's
+        remaining stages still run — mirrors the try/except-per-stage shape each
+        of the three call sites in ``_update_statuses`` used to hand-roll.
+        """
         try:
-            published_task_count = await asyncio.to_thread(publish_pending_task_notifications)
-            if published_task_count:
-                logger.info("Published %d pending native task notification(s)", published_task_count)
+            result = await asyncio.to_thread(drain)
         except Exception as e:
-            logger.error(f"Failed to publish pending native task notifications: {e}", exc_info=True)
+            logger.error(f"Failed to {label}: {e}", exc_info=True)
+            return
+        if report is not None:
+            report(result)
+
+    def _report_creative_unblock_recovery(self, unblock_result) -> None:
+        if unblock_result.recovered:
+            logger.info("Recovered %d stale creative-unblock workflow(s)", unblock_result.recovered)
+        if unblock_result.deferred:
+            logger.warning(
+                "Deferred %d stale creative-unblock workflow(s) pending an ambiguous provider outcome",
+                unblock_result.deferred,
+            )
+
+    def _report_published_workflow_notifications(self, published_count: int) -> None:
+        if published_count:
+            logger.info("Published %d pending workflow notification(s)", published_count)
+
+    def _report_published_task_notifications(self, published_task_count: int) -> None:
+        if published_task_count:
+            logger.info("Published %d pending native task notification(s)", published_task_count)
 
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
         """Compute the new status for a media buy based on flight dates.
