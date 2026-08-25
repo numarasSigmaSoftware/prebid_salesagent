@@ -651,59 +651,6 @@ def _decode_read_response(
         return None
 
 
-def execute_idempotent_read_sync[T: BaseModel | dict[str, Any]](
-    *,
-    tool_name: str,
-    idempotency_key: str | None,
-    identity: ResolvedIdentity | None,
-    raw_wire_payload: dict[str, Any],
-    response_type: type[T] | None,
-    work: Callable[[], T],
-) -> T:
-    """Execute a synchronous read with durable replay when a key is supplied."""
-    if idempotency_key is None:
-        return work()
-
-    from src.core.database.repositories.idempotency_attempt import DEFAULT_IN_FLIGHT_LEASE
-    from src.core.database.repositories.uow import IdempotencyUoW
-    from src.core.idempotency_canonical import canonical_payload_hash
-
-    scope = _read_scope(identity)
-    if scope is None:
-        # No authenticated agent to scope a durable cache entry to (see
-        # _read_scope). Run the read directly, exactly as with no
-        # idempotency_key at all; the tool's own authorization, if any,
-        # still applies inside work().
-        return work()
-    tenant_id, principal_id, account_id = scope
-    reservation = reserve_idempotent(
-        IdempotencyUoW,
-        tenant_id,
-        principal_id=principal_id,
-        account_id=account_id,
-        tool_name=tool_name,
-        idempotency_key=idempotency_key,
-        request_hash=canonical_payload_hash(raw_wire_payload),
-        lease=DEFAULT_IN_FLIGHT_LEASE,
-        decode=lambda envelope: _decode_read_response(envelope, response_type, raw_wire_payload.get("context")),
-        enforce_ceiling=True,
-        operation_class="read",
-    )
-    if reservation.replay is not None:
-        return reservation.replay
-    assert reservation.attempt_id is not None
-    with release_reservation_on_error(IdempotencyUoW, tenant_id, reservation.attempt_id):
-        response = work()
-        with IdempotencyUoW(tenant_id) as uow:
-            complete_idempotent(
-                uow,
-                attempt_id=reservation.attempt_id,
-                response_model=response,
-                protocol_status="completed",
-            )
-        return response
-
-
 async def execute_idempotent_read[T: BaseModel | dict[str, Any]](
     *,
     tool_name: str,
