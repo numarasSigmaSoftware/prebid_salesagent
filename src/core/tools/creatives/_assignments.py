@@ -293,7 +293,7 @@ def _process_assignments(
             # `_stage_draft_unblock` in media_buy_update.py is a closure over that
             # flow's pending_field_updates dict (it stages a deferred update_fields
             # call), so it cannot be applied to a row on this session.
-            # FIXME(salesagent-9f2): CreativeUoW should provide a media-buy repo directly
+            # FIXME(#2080): CreativeUoW should provide a media-buy repo directly
             assert uow.session is not None
             media_buy_repo = MediaBuyRepository(uow.session, tenant["tenant_id"])
             for mb_id, mb_obj in media_buys_with_new_assignments.items():
