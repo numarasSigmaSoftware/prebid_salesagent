@@ -88,15 +88,18 @@ MODEL_NAME = "MediaBuy"
 _PRODUCER_MARKER = "media_buy"
 
 
-def _dotted(node: ast.expr) -> str:
-    """``uow.media_buys.get_by_id`` for an attribute chain; "" for anything else."""
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
+def _names_a_media_buy_producer(node: ast.expr) -> bool:
+    """True when any identifier in a call target says it deals in media buys.
+
+    ``uow.media_buys.get_by_id`` and ``repo.find_package_with_media_buy`` both
+    qualify. Only whether SOME identifier carries the marker matters, so the
+    chain is not reassembled into a dotted string.
+    """
+    return any(
+        _PRODUCER_MARKER in (part.attr if isinstance(part, ast.Attribute) else part.id)
+        for part in ast.walk(node)
+        if isinstance(part, ast.Attribute | ast.Name)
+    )
 
 
 def _base_name(node: ast.expr) -> str | None:
@@ -125,15 +128,15 @@ def _yields_media_buy(value: ast.expr | None, known: set[str]) -> bool:
 
     Three provenance sources, none of which is the receiving variable's name:
     constructing the model, calling a producer that says ``media_buy`` in its own
-    dotted path (``uow.media_buys.get_by_id``, ``find_package_with_media_buy``),
-    and re-reading something already known to hold one.
+    name (``uow.media_buys.get_by_id``, ``find_package_with_media_buy``), and
+    re-reading something already known to hold one.
     """
     if value is None:
         return False
     if isinstance(value, ast.Call):
         if isinstance(value.func, ast.Name) and value.func.id == MODEL_NAME:
             return True
-        if _PRODUCER_MARKER in _dotted(value.func):
+        if _names_a_media_buy_producer(value.func):
             return True
         return _base_name(value.func) in known
     if isinstance(value, ast.Name):
