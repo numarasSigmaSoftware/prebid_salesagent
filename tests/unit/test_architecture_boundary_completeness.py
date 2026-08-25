@@ -115,9 +115,9 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
         node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     imported_helpers = {
-        alias.asname or alias.name: (node.module, alias.name)
+        alias.asname or alias.name: (node.module, node.level, alias.name)
         for node in tree.body
-        if isinstance(node, ast.ImportFrom) and node.module is not None
+        if isinstance(node, ast.ImportFrom) and (node.module is not None or node.level > 0)
         for alias in node.names
     }
 
@@ -128,8 +128,23 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
         imported = imported_helpers.get(helper_name)
         if imported is None:
             return None
-        helper_module, original_name = imported
-        helper_path = _module_to_filepath(helper_module)
+        helper_module, level, original_name = imported
+        if level > 0:
+            # Relative import (``from .sibling import X`` / ``from ..pkg.sibling
+            # import X``): node.module excludes the leading dots, so resolving
+            # it as an absolute dotted path (as _module_to_filepath does) is
+            # wrong for any package-relative helper — which silently defeated
+            # resolution for every relative-imported helper (a real gap this
+            # surfaced once the call-site-name union fallback above was
+            # removed). level=1 is the importing file's own containing
+            # package (its directory); each additional level climbs one
+            # further parent.
+            base_dir = file_path.parent
+            for _ in range(level - 1):
+                base_dir = base_dir.parent
+            helper_path = base_dir / f"{helper_module}.py" if helper_module else base_dir / "__init__.py"
+        else:
+            helper_path = _module_to_filepath(helper_module)
         if not helper_path.exists():
             return None
         helper_tree = ast.parse(helper_path.read_text(), filename=str(helper_path))
@@ -167,7 +182,15 @@ def _find_impl_call_args_in_function(file_path: Path, wrapper_name: str, impl_na
         for keyword in node.keywords:
             if keyword.arg is not None or not isinstance(keyword.value, ast.Call):
                 continue
-            kwargs.update(nested.arg for nested in keyword.value.keywords if nested.arg is not None)
+            # NOTE: do NOT union in the names of the keyword args the wrapper
+            # passed INTO the helper call (e.g. resolve_helper(foo=bar)) — a
+            # helper is free to rename fields between what it accepts and what
+            # its returned dict actually keys the forwarded kwargs by. Trust
+            # only the helper's OWN return-dict literal keys below, which are
+            # what **actually** reaches the _impl call. Crediting the
+            # call-site's own arg names here let a param that was silently
+            # renamed (or dropped) between the helper's input and output still
+            # register as "forwarded".
             helper_name = keyword.value.func.id if isinstance(keyword.value.func, ast.Name) else None
             helper_node = resolve_helper(helper_name or "")
             if helper_node is None:
@@ -279,3 +302,49 @@ class TestBoundaryCompleteness:
             KNOWN_VIOLATIONS,
             fix_hint="Remove fixed entries from KNOWN_VIOLATIONS.",
         )
+
+
+@pytest.mark.arch_guard
+def test_helper_call_site_kwarg_names_are_not_credited_as_forwarded(tmp_path: Path) -> None:
+    """Regression test for a mutation-proven hollow-out (order R3-9): a wrapper
+    that forwards ``**helper(...)`` must be graded on the HELPER'S RETURN
+    DICT KEYS, never on the kwarg names the wrapper happened to pass INTO the
+    helper call. Before this fix, ``kwargs.update(nested.arg for nested in
+    keyword.value.keywords ...)`` unioned the call-site's own argument names
+    into the "forwarded" set directly — so a helper renaming (or silently
+    dropping) a field between its input and its returned dict still credited
+    the OLD name as forwarded to ``_impl``, hiding a genuine boundary drop.
+
+    Empirically confirmed against the real codebase: deleting that union
+    surfaced ``sync_creatives_raw``'s ``**_sync_creatives_core_kwargs(...)``
+    call site (creatives/sync_wrappers.py -> creatives/_sync.py, a relative
+    import) as a false failure — a SEPARATE, real gap in ``resolve_helper``'s
+    relative-import resolution (it treated ``node.module`` as an absolute
+    dotted path, silently ignoring ``node.level``), fixed alongside this one.
+    """
+    wrapper_file = tmp_path / "wrapper_mod.py"
+    wrapper_file.write_text(
+        "def _resolve_helper(**kwargs):\n"
+        "    # Renames the field between what it accepts and what it returns.\n"
+        "    return {'renamed_param': kwargs.get('original_kwarg_name')}\n"
+        "\n"
+        "\n"
+        "def call_impl(original_kwarg_name):\n"
+        "    return _my_impl(**_resolve_helper(original_kwarg_name=original_kwarg_name))\n"
+    )
+
+    results = _find_impl_call_args_in_function(wrapper_file, "call_impl", "_my_impl")
+
+    assert results == [({"renamed_param"}, 0)], (
+        "the call-site's own kwarg name ('original_kwarg_name'), passed INTO "
+        "the helper, must not be credited as forwarded to _my_impl -- only "
+        f"the helper's actual return-dict key ('renamed_param') may be. Got: {results}"
+    )
+
+    # The guard-level consequence: if _my_impl actually expects a param named
+    # 'original_kwarg_name' (i.e. the wrapper intended to forward it under
+    # that name but the helper silently renamed it), that param is genuinely
+    # NOT in the detected kwargs -- exactly the drop the guard exists to catch.
+    detected_kwargs, n_positional = results[0]
+    assert "original_kwarg_name" not in detected_kwargs
+    assert n_positional == 0
