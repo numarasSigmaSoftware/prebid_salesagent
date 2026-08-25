@@ -107,26 +107,35 @@ class MediaBuyStatusScheduler:
 
         from src.services.creative_unblock_recovery import recover_stale_creative_unblock_workflows
 
-        unblock_result = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
-        if unblock_result.recovered:
-            logger.info("Recovered %d stale creative-unblock workflow(s)", unblock_result.recovered)
-        if unblock_result.deferred:
-            logger.warning(
-                "Deferred %d stale creative-unblock workflow(s) pending an ambiguous provider outcome",
-                unblock_result.deferred,
-            )
+        try:
+            unblock_result = await asyncio.to_thread(recover_stale_creative_unblock_workflows)
+            if unblock_result.recovered:
+                logger.info("Recovered %d stale creative-unblock workflow(s)", unblock_result.recovered)
+            if unblock_result.deferred:
+                logger.warning(
+                    "Deferred %d stale creative-unblock workflow(s) pending an ambiguous provider outcome",
+                    unblock_result.deferred,
+                )
+        except Exception as e:
+            logger.error(f"Failed to recover stale creative-unblock workflows: {e}", exc_info=True)
 
         from src.core.context_manager import publish_pending_workflow_notifications
 
-        published_count = await asyncio.to_thread(publish_pending_workflow_notifications)
-        if published_count:
-            logger.info("Published %d pending workflow notification(s)", published_count)
+        try:
+            published_count = await asyncio.to_thread(publish_pending_workflow_notifications)
+            if published_count:
+                logger.info("Published %d pending workflow notification(s)", published_count)
+        except Exception as e:
+            logger.error(f"Failed to publish pending workflow notifications: {e}", exc_info=True)
 
         from src.services.a2a_task_lifecycle import publish_pending_task_notifications
 
-        published_task_count = await asyncio.to_thread(publish_pending_task_notifications)
-        if published_task_count:
-            logger.info("Published %d pending native task notification(s)", published_task_count)
+        try:
+            published_task_count = await asyncio.to_thread(publish_pending_task_notifications)
+            if published_task_count:
+                logger.info("Published %d pending native task notification(s)", published_task_count)
+        except Exception as e:
+            logger.error(f"Failed to publish pending native task notifications: {e}", exc_info=True)
 
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> str | None:
         """Compute the new status for a media buy based on flight dates.

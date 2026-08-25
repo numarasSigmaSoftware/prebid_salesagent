@@ -184,6 +184,44 @@ def test_terminal_notification_outbox_is_autonomously_drained() -> None:
     )
 
 
+def test_workflow_notification_drain_isolates_per_item_failures() -> None:
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.__exit__.return_value = None
+    pending = [
+        PendingWorkflowNotification(
+            tenant_id="tenant-1",
+            step_id="step-1",
+            status="completed",
+            event_id="workflow:step-1:1:completed",
+            response_data={"ok": True},
+        ),
+        PendingWorkflowNotification(
+            tenant_id="tenant-1",
+            step_id="step-2",
+            status="completed",
+            event_id="workflow:step-2:1:completed",
+            response_data={"ok": True},
+        ),
+    ]
+    with (
+        patch("src.core.context_manager.get_independent_db_session", return_value=session),
+        patch(
+            "src.core.context_manager.WorkflowRepository.list_pending_workflow_notifications",
+            return_value=pending,
+        ),
+        patch(
+            "src.core.context_manager.publish_workflow_notifications",
+            side_effect=[RuntimeError("boom"), True],
+        ) as publish,
+    ):
+        assert publish_pending_workflow_notifications() == 1
+
+    assert publish.call_count == 2
+    publish.assert_any_call("step-1", "completed", "tenant-1", event_id="workflow:step-1:1:completed")
+    publish.assert_any_call("step-2", "completed", "tenant-1", event_id="workflow:step-2:1:completed")
+
+
 @pytest.mark.parametrize("first_delivery", [False, RuntimeError("delivery failed")])
 def test_failed_terminal_delivery_releases_claim_and_successful_retry_acknowledges(
     first_delivery: bool | RuntimeError,

@@ -144,8 +144,8 @@ def publish_task_notification(event_id: str, tenant_id: str) -> bool:
             return True
         assert claimed.claim_token is not None
 
-    task = json_format.ParseDict(claimed.task_payload, Task())
     try:
+        task = json_format.ParseDict(claimed.task_payload, Task())
         succeeded = _run_task_delivery(
             task,
             tenant_id=tenant_id,
@@ -177,8 +177,15 @@ def publish_pending_task_notifications() -> int:
         pending = A2ATaskRepository.list_pending_notifications(session)
     published = 0
     for item in pending:
-        if publish_task_notification(item.event_id, item.tenant_id):
-            published += 1
+        try:
+            if publish_task_notification(item.event_id, item.tenant_id):
+                published += 1
+        except Exception:
+            logger.warning(
+                "Failed to publish pending A2A task notification for event_id=%s",
+                item.event_id,
+                exc_info=True,
+            )
     return published
 
 

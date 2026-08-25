@@ -10,7 +10,7 @@ from a2a.server.context import ServerCallContext
 from a2a.types import Artifact, CancelTaskRequest, Part, Task, TaskNotCancelableError, TaskState, TaskStatus
 from google.protobuf import json_format, struct_pb2
 
-from src.core.database.repositories.a2a_task import ClaimedA2ATaskNotification
+from src.core.database.repositories.a2a_task import ClaimedA2ATaskNotification, PendingA2ATaskNotification
 from src.services.a2a_task_lifecycle import publish_workflow_task_transition, send_native_task_webhooks
 from tests.factories.principal import PrincipalFactory
 
@@ -251,6 +251,55 @@ def test_task_notification_delivery_does_not_report_success_after_lost_claim() -
         patch("src.services.a2a_task_lifecycle._run_task_delivery", return_value=True),
     ):
         assert publish_task_notification("event-1", "tenant-1") is False
+
+
+def test_malformed_task_payload_still_releases_notification_claim() -> None:
+    """A ParseDict failure on a corrupt task_payload must not leave the claim dangling."""
+    from src.services.a2a_task_lifecycle import publish_task_notification
+
+    claimed = ClaimedA2ATaskNotification(
+        task_payload={"this_field_does_not_exist_on_task": "boom"},
+        principal_id="principal-1",
+        status="completed",
+        claim_token="claim-1",
+    )
+    claim_uow = _uow()
+    claim_uow.tasks.claim_notification_publication.return_value = claimed
+    release_uow = _uow()
+    with patch("src.services.a2a_task_lifecycle.A2ATaskUoW", side_effect=[claim_uow, release_uow]):
+        assert publish_task_notification("event-1", "tenant-1") is False
+
+    release_uow.tasks.release_notification_claim.assert_called_once_with("event-1", claim_token="claim-1")
+    release_uow.tasks.mark_notification_published.assert_not_called()
+
+
+def test_pending_task_notification_drain_isolates_per_item_failures() -> None:
+    """One item's publish failure must not stop the rest of the drain tick."""
+    from src.services.a2a_task_lifecycle import publish_pending_task_notifications
+
+    pending = [
+        PendingA2ATaskNotification(tenant_id="tenant-1", event_id="event-1"),
+        PendingA2ATaskNotification(tenant_id="tenant-1", event_id="event-2"),
+    ]
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.__exit__.return_value = None
+    with (
+        patch("src.services.a2a_task_lifecycle.get_independent_db_session", return_value=session),
+        patch(
+            "src.services.a2a_task_lifecycle.A2ATaskRepository.list_pending_notifications",
+            return_value=pending,
+        ),
+        patch(
+            "src.services.a2a_task_lifecycle.publish_task_notification",
+            side_effect=[RuntimeError("boom"), True],
+        ) as publish,
+    ):
+        assert publish_pending_task_notifications() == 1
+
+    assert publish.call_count == 2
+    publish.assert_any_call("event-1", "tenant-1")
+    publish.assert_any_call("event-2", "tenant-1")
 
 
 def test_committed_rejection_uses_rejected_state_and_exact_error_artifact() -> None:

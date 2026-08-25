@@ -1143,6 +1143,13 @@ def publish_pending_workflow_notifications() -> int:
         pending = WorkflowRepository.list_pending_workflow_notifications(session)
     published = 0
     for item in pending:
-        if publish_workflow_notifications(item.step_id, item.status, item.tenant_id, event_id=item.event_id):
-            published += 1
+        try:
+            if publish_workflow_notifications(item.step_id, item.status, item.tenant_id, event_id=item.event_id):
+                published += 1
+        except Exception:
+            logger.warning(
+                "Failed to publish pending workflow notification for step_id=%s",
+                item.step_id,
+                exc_info=True,
+            )
     return published
