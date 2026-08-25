@@ -843,5 +843,10 @@ async def sync_accounts(body: SyncAccountsBody, identity: ResolvedIdentity = req
     require_idempotency_key(body.idempotency_key)
     with adcp_validation_boundary(context="sync_accounts request"):
         req = SyncAccountsRequest(**body.model_dump(exclude_none=True, exclude=ADCP_NEGOTIATION_FIELDS))
-    response = await accounts_module.sync_accounts_raw(req=req, identity=identity)
+    # Same registration-time callback policy the sibling surfaces apply
+    # (update_media_buy, sync_creatives above): the config arrives on the
+    # request via model_dump, so without this funnel REST was the one entry
+    # point that let an unvalidated buyer callback URL through.
+    async with validated_callback_url_scope(push_notification_config=req.push_notification_config):
+        response = await accounts_module.sync_accounts_raw(req=req, identity=identity)
     return dump_adcp_response(response)
