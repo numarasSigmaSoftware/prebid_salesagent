@@ -82,6 +82,12 @@ WEAK_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_sync_creatives_behavioral.py", "test_slack_notification_only_when_webhook_configured"),
     ("tests/unit/test_transport_tenant_resolution.py", "test_ensure_resolved_sets_current_tenant"),
     ("tests/unit/test_update_media_buy_behavioral.py", "test_update_both_start_and_end_time"),
+    # FIXME(#1370): genuinely split, not upgradeable — Signature/Signature-Input/
+    # Content-Digest are per-call computed values (RFC 9421 signing), so an atomic
+    # assert_called_once_with() would need an exact-match dict for fields that
+    # legitimately vary call to call. assert_called_once() pins the call count;
+    # the field-by-field asserts below it are the intended, stronger check.
+    ("tests/unit/test_webhook_security.py", "test_send_notification_treats_3xx_as_failed_delivery"),
     # FIXME(#1370): pre-existing split assertions outside tests/unit/ (surfaced by SCAN_DIRS widen)
     ("tests/integration/test_auth_header_propagation.py", "test_creative_agent_custom_auth_header_propagation"),
     ("tests/integration/test_auth_header_propagation.py", "test_signals_agent_custom_auth_header_propagation"),

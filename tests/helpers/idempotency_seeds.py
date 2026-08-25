@@ -1,4 +1,4 @@
-"""Shared seed helper for the idempotency verbatim success cache.
+"""Shared seed and concurrency-race helpers for idempotency/notification-claim tests.
 
 Tests seed the cache through the same repository production uses (a real
 ``MediaBuyUoW`` → ``IdempotencyAttemptRepository.record_success``) so the
@@ -7,7 +7,11 @@ probe's ``find_by_key`` serves exactly what production would have stored.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from threading import Event
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -153,3 +157,42 @@ def create_media_buy_kwargs(
         "po_number": po_number,
         "idempotency_key": idempotency_key,
     }
+
+
+def run_hold_and_block_race[T](
+    hold_winner: Callable[[Event, Event], None],
+    attempt_loser: Callable[[Event], T],
+) -> T:
+    """Two-thread hold-and-block race, proving the loser is genuinely BLOCKED on
+    the winner's real row lock — not merely not-yet-scheduled — before the
+    winner is released.
+
+    A naive ``threading.Barrier``-synchronized race (both threads start at
+    once) does not reliably drive contention: each thread pays its own lazy
+    connection setup after the barrier releases, so the two ``SELECT ... FOR
+    UPDATE`` calls often never overlap and the "exactly one winner" assertion
+    passes for the wrong reason (sequential execution, not lock contention).
+    This is the deterministic replacement: the winner holds its transaction
+    open on a signal, and a real block is proven with a wall-clock window
+    before release.
+
+    ``hold_winner(claimed_event, release_event)`` must claim/hold its lock,
+    call ``claimed_event.set()``, then ``release_event.wait()`` before
+    returning — keeping the row lock held for the duration.
+    ``attempt_loser(claimed_event)`` must itself wait on ``claimed_event``
+    before attempting its own claim, so it only starts once the winner has
+    genuinely claimed. Returns ``attempt_loser``'s result; the caller
+    inspects whatever ``hold_winner`` stashed (e.g. a shared dict) for the
+    winner's own result.
+    """
+    claimed_event = Event()
+    release_event = Event()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner_future = executor.submit(hold_winner, claimed_event, release_event)
+        assert claimed_event.wait(timeout=5)
+        loser_future = executor.submit(attempt_loser, claimed_event)
+        time.sleep(0.2)
+        assert not loser_future.done(), "loser must be blocked on the winner's row lock, not just unscheduled"
+        release_event.set()
+        winner_future.result(timeout=5)
+        return loser_future.result(timeout=5)

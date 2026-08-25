@@ -14,8 +14,6 @@ Prior coverage exercised ``WorkflowRepository`` claim/CAS only with
 ``session = MagicMock()`` — same-process, sequential, no real row contention.
 """
 
-import time
-from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from uuid import uuid4
 
@@ -24,6 +22,7 @@ import pytest
 from src.core.context_manager import ContextManager
 from src.core.database.repositories.uow import WorkflowUoW
 from tests.factories import PrincipalFactory, TenantFactory
+from tests.helpers import run_hold_and_block_race
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -63,32 +62,22 @@ def test_concurrent_claim_publication_only_one_thread_wins(integration_db) -> No
     with BareIntegrationEnv():
         tenant_id, step_id, status = _new_workflow_scope()
 
-        claimed_event = Event()
-        release_event = Event()
         winner_result: dict[str, object] = {}
 
-        def hold_winner_claim() -> None:
+        def hold_winner_claim(claimed_event: Event, release_event: Event) -> None:
             with WorkflowUoW(tenant_id) as uow:
                 assert uow.workflows is not None
                 winner_result["claim"] = uow.workflows.claim_notification_publication(step_id, status)
                 claimed_event.set()
                 assert release_event.wait(timeout=5)
 
-        def attempt_loser_claim():
+        def attempt_loser_claim(claimed_event: Event):
             assert claimed_event.wait(timeout=5)
             with WorkflowUoW(tenant_id) as uow:
                 assert uow.workflows is not None
                 return uow.workflows.claim_notification_publication(step_id, status)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            winner_future = executor.submit(hold_winner_claim)
-            assert claimed_event.wait(timeout=5)
-            loser_future = executor.submit(attempt_loser_claim)
-            time.sleep(0.2)
-            assert not loser_future.done(), "loser must be blocked on the winner's row lock, not just unscheduled"
-            release_event.set()
-            winner_future.result(timeout=5)
-            loser_result = loser_future.result(timeout=5)
+        loser_result = run_hold_and_block_race(hold_winner_claim, attempt_loser_claim)
 
     winner_claim = winner_result["claim"]
     assert winner_claim is not None and winner_claim[1] is not None  # (event_id, claim_token, response_data)

@@ -85,6 +85,7 @@ from tests.helpers.envelope_assertions import (
 from tests.helpers.idempotency_seeds import (
     create_media_buy_kwargs,
     make_active_cached_success,
+    run_hold_and_block_race,
     seed_cached_success,
     seed_media_buy,
     seed_principal,
@@ -107,6 +108,7 @@ __all__ = [
     "seed_cached_success",
     "seed_media_buy",
     "seed_principal",
+    "run_hold_and_block_race",
     # Product factories
     "create_test_product",
     "create_minimal_product",
