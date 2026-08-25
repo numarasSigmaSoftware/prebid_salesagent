@@ -229,6 +229,28 @@ class IdempotencyAttemptRepository:
         stmt = select(IdempotencyAttempt).where(*self._scope_filter(principal_id, account_id, idempotency_key)).limit(1)
         return self._session.scalars(stmt).first()
 
+    def find_any_by_key(self, *, idempotency_key: str) -> IdempotencyAttempt | None:
+        """Return any cached row for this key in this tenant, across every principal/account scope.
+
+        Existence-only check with NO ``(principal, account)`` filter — unlike
+        ``find_by_key``/``find_including_expired``, which are scoped to one
+        caller's identity. Proves genuine absence of a durable row for a key
+        (e.g. confirming an anonymous read never persisted anything under ANY
+        principal), which a principal-scoped lookup cannot: a
+        ``find_by_key(principal_id=None, ...)`` absence only proves no row
+        exists under ``principal_id=NULL`` specifically, not that the key was
+        never cached under a real principal.
+        """
+        stmt = (
+            select(IdempotencyAttempt)
+            .where(
+                IdempotencyAttempt.tenant_id == self._tenant_id,
+                IdempotencyAttempt.idempotency_key == idempotency_key,
+            )
+            .limit(1)
+        )
+        return self._session.scalars(stmt).first()
+
     def record_success(
         self,
         *,

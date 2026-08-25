@@ -200,14 +200,13 @@ def test_anonymous_read_with_a_key_succeeds_and_persists_nothing(
 
         with IdempotencyUoW(anonymous.tenant_id) as uow:
             assert uow.idempotency_attempts is not None
-            assert (
-                uow.idempotency_attempts.find_by_key(
-                    principal_id=None,
-                    account_id=None,
-                    idempotency_key=key,
-                )
-                is None
-            ), "an anonymous read must not leave a tenant-wide shared row behind"
+            # find_any_by_key has NO principal/account filter — proves genuine
+            # absence, not merely absence-under-principal_id=NULL specifically
+            # (which a regression writing under a REAL principal would still
+            # satisfy).
+            assert uow.idempotency_attempts.find_any_by_key(idempotency_key=key) is None, (
+                "an anonymous read must not leave a tenant-wide shared row behind"
+            )
 
 
 @pytest.mark.parametrize("transport", _MCP_A2A)
