@@ -150,11 +150,57 @@ class TestUpdateRevisionValidationWire:
         Before this pin the shared gate rejected any float, and A2A passed only because
         the skill handler hand-coerced whole-number floats to int before the gate saw
         them: A2A was the sole transport meeting the pinned schema.
+
+        ``is_success`` alone would also be satisfied by an update that never applied,
+        so the emitted counter is graded too: the seeded buy is at revision 1 and one
+        accepted update bumps it to 2. (What that pair still cannot see is a token
+        DROPPED between the route and the gate — such an update succeeds and bumps
+        just the same. That is the job of
+        ``test_mismatching_float_revision_emits_conflict_on_every_transport``.)
         """
         env, media_buy = env_with_media_buy
         result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=1.0)
 
         assert result.is_success, f"expected revision=1.0 to be accepted, got error: {result.error!r}"
+        wire = result.wire_response
+        assert isinstance(wire, dict), f"no wire body captured on {transport.value}: {wire!r}"
+        assert wire["revision"] == 2, (
+            f"the accepted update must have applied and bumped the counter 1 -> 2, "
+            f"{transport.value} emitted revision={wire['revision']!r}"
+        )
+
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
+    def test_mismatching_float_revision_emits_conflict_on_every_transport(self, env_with_media_buy, transport):
+        """A whole-number float that does NOT match must draw CONFLICT, not succeed.
+
+        Accepting ``1.0`` proves the float clears schema validation; it does not prove
+        the value was ever COMPARED. An update whose token is dropped somewhere between
+        the transport wrapper and the compare-and-set succeeds and bumps the counter
+        exactly like a matching token does — so every acceptance-shaped assertion stays
+        green while the buyer's optimistic concurrency has silently become
+        last-write-wins.
+
+        A MISMATCH is the case a dropped token cannot fake: with no token there is
+        nothing to conflict with, and the update succeeds. Graded on every transport
+        because each wrapper forwards the token separately.
+        """
+        env, media_buy = env_with_media_buy
+        # The seeded buy is at revision 1, so 2.0 is schema-valid but stale.
+        result = env.call_via(transport, media_buy_id=media_buy.media_buy_id, paused=True, revision=2.0)
+
+        assert result.is_error, (
+            f"{transport.value} accepted the stale float token 2.0 against a buy at revision 1 — "
+            f"the token was not compared: {result!r}"
+        )
+        assert result.wire_error_envelope is not None, "wire envelope not captured"
+        assert_envelope_shape(result.wire_error_envelope, "CONFLICT", recovery="transient")
+        details = result.wire_error_envelope["errors"][0]["details"]
+        assert details["expected_version"] == 2, (
+            f"the conflict must report the token the buyer sent, got {details['expected_version']!r}"
+        )
+        assert details["current_version"] == 1, (
+            f"the conflict must report the buy's actual revision, got {details['current_version']!r}"
+        )
 
     @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_stale_revision_on_a_terminal_buy_emits_conflict_on_every_transport(self, env_with_media_buy, transport):
