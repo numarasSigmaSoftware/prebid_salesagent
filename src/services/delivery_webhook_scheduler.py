@@ -14,8 +14,8 @@ from enum import StrEnum
 from typing import Any
 
 from adcp import create_mcp_webhook_payload
+from adcp.types import ErrorCode, MediaBuyStatus
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-from adcp.types import MediaBuyStatus
 from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
     NotificationType,
 )  # TODO: no stable alias — response-level NotificationType differs from top-level
@@ -130,7 +130,9 @@ def _delivery_lookup_is_usable(media_buy: MediaBuy, delivery_response: GetMediaB
         # data" case the contract lists as a legitimate False — and SERVICE_UNAVAILABLE
         # when the adapter actually failed. Returning False for both let a real adapter
         # failure count as a skip; raising for both would make every no-data buy an error.
-        if any(e.code != "MEDIA_BUY_NOT_FOUND" for e in delivery_response.errors):
+        # Same SDK enum the producer emits (media_buy_delivery.py), so the two ends of
+        # this decision cannot drift apart into two independently-renamable literals.
+        if any(e.code != ErrorCode.MEDIA_BUY_NOT_FOUND.value for e in delivery_response.errors):
             raise RuntimeError(
                 f"Delivery lookup for media buy {media_buy.media_buy_id} failed: "
                 f"{[e.code for e in delivery_response.errors]}"

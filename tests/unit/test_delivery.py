@@ -26,10 +26,11 @@ Cross-references:
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from adcp.types import MediaBuyStatus
+from adcp.types import Error, MediaBuyStatus
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
@@ -2539,3 +2540,60 @@ class TestTimeSimulationReachesFinalNotification:
         )
 
         assert response.media_buy_deliveries[0].status == "pending_creatives"
+
+
+class TestNoDataAdvisoryBindsProducerToConsumer:
+    """The delivery scheduler's skip-vs-error decision must track the producer's code.
+
+    ``_delivery_lookup_is_usable`` decides whether an advisory error on a
+    ``GetMediaBuyDeliveryResponse`` is a legitimate "no data for this buy" skip
+    or a real adapter failure that must be counted as a batch error. It makes
+    that call by comparing the error's ``code`` against a value produced two
+    layers away, in ``media_buy_delivery``.
+
+    Renaming the producer's code silently reclassifies EVERY no-data buy as an
+    adapter failure. So these tests do not assert that a shared constant is
+    used — they run the real producer, take the code it actually emitted, and
+    hand it to the real consumer. A rename at either end reddens them.
+    """
+
+    @staticmethod
+    def _not_found_response() -> GetMediaBuyDeliveryResponse:
+        """The producer's REAL output for a buy that does not resolve."""
+        response = _run_impl_with_patches(
+            GetMediaBuyDeliveryRequest(media_buy_ids=["mb_ghost"]),
+            target_buys=[],
+        )
+        assert response.errors, "producer emitted no advisory error for a missing buy"
+        return response
+
+    def test_the_producers_not_found_advisory_is_a_skip_not_a_batch_error(self):
+        """Fails if the producer's code stops matching what the scheduler skips on.
+
+        This is the desync itself: the consumer raises for any code it does not
+        recognise, so a producer-side rename turns this into a RuntimeError.
+        """
+        from src.services.delivery_webhook_scheduler import _delivery_lookup_is_usable
+
+        response = self._not_found_response()
+        media_buy = SimpleNamespace(media_buy_id="mb_ghost")
+
+        assert _delivery_lookup_is_usable(media_buy, response) is False, (
+            "a buy with no delivery data must be a legitimate skip, not a usable lookup"
+        )
+
+    def test_an_unrecognised_advisory_code_still_raises(self):
+        """The discrimination survives — the skip arm did not swallow everything.
+
+        Without this, the test above would still pass if ``_delivery_lookup_is_usable``
+        were reduced to ``return False``, which is the other half of the defect: a
+        genuine adapter failure counted as a quiet skip.
+        """
+        from src.services.delivery_webhook_scheduler import _delivery_lookup_is_usable
+
+        response = self._not_found_response()
+        response.errors = [Error(code="SERVICE_UNAVAILABLE", message="adapter exploded")]
+        media_buy = SimpleNamespace(media_buy_id="mb_ghost")
+
+        with pytest.raises(RuntimeError, match="SERVICE_UNAVAILABLE"):
+            _delivery_lookup_is_usable(media_buy, response)

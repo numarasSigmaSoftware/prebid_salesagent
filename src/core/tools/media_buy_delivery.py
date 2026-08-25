@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 from adcp.types import AccountReference as LibraryAccountReference
-from adcp.types import ContextObject, Duration, Error, MediaBuyStatus
+from adcp.types import ContextObject, Duration, Error, ErrorCode, MediaBuyStatus
 from adcp.types.generated_poc.core.attribution_window import (
     AttributionWindow as ResponseAttributionWindow,  # TODO: no stable alias in adcp.types
 )
@@ -247,7 +247,13 @@ def _get_media_buy_delivery_impl(
                 if requested_id not in found_ids:
                     not_found_errors.append(
                         Error(  # structural-guard: advisory per-buy result in GetMediaBuyDeliveryResponse.errors[]
-                            code="MEDIA_BUY_NOT_FOUND",
+                            # Spelled from the SDK enum, not a literal: the delivery webhook
+                            # scheduler discriminates "no data for this buy" (a legitimate
+                            # skip) from "the adapter failed" (a batch error) by comparing
+                            # against this exact code. Two independently-typed literals let a
+                            # rename here silently reclassify every no-data buy as an adapter
+                            # failure, with nothing red.
+                            code=ErrorCode.MEDIA_BUY_NOT_FOUND.value,
                             message=f"Media buy {requested_id} not found",
                         )
                     )
