@@ -355,6 +355,27 @@ class AdCPRequestHandler(RequestHandler):
 
         return build_two_layer_error_envelope(normalize_to_adcp_error(exc, context=context))
 
+    @classmethod
+    def _fail_task_with_error_artifact(cls, task: Task, exc: Exception, *, context: Any = None) -> None:
+        """Mark ``task`` failed and replace its artifacts with the error envelope.
+
+        Single source of truth for the failed-task error Artifact, shared by the
+        push_notification_config rejection and the top-level ``on_message_send``
+        catch-all. The artifact carries the same spec-compliant two-layer envelope
+        the failed-skill DataParts do, so storyboard runners can ``JSON.parse`` it
+        uniformly regardless of which failure path produced it — a uniformity the
+        two open-coded copies only asserted in a comment.
+        """
+        task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
+        del task.artifacts[:]
+        task.artifacts.append(
+            Artifact(
+                artifact_id="error_1",
+                name="processing_error",
+                parts=[Part(data=_dict_to_value(cls._build_error_envelope(exc, context=context)))],
+            )
+        )
+
     @staticmethod
     def _build_failed_skill_result(
         skill_name: str,
@@ -849,24 +870,7 @@ class AdCPRequestHandler(RequestHandler):
                     logger.warning(
                         "Rejected push_notification_config callback: %s", scrub_control_chars(str(callback_exc))
                     )
-                    task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-                    del task.artifacts[:]
-                    task.artifacts.append(
-                        Artifact(
-                            artifact_id="error_1",
-                            name="processing_error",
-                            parts=[
-                                Part(
-                                    data=_dict_to_value(
-                                        self._build_error_envelope(
-                                            callback_exc,
-                                            context=request_application_context,
-                                        )
-                                    )
-                                )
-                            ],
-                        )
-                    )
+                    self._fail_task_with_error_artifact(task, callback_exc, context=request_application_context)
                     self.tasks[task_id] = task
                     return task
                 self._task_push_configs[task_id] = push_notification_config
@@ -1254,30 +1258,9 @@ class AdCPRequestHandler(RequestHandler):
             contextual_error = normalize_to_adcp_error(e, context=request_application_context)
             record_boundary_error_for_identity("a2a", "message_processing", contextual_error, identity)
 
-            # Send protocol-level webhook notification for failure if configured
-            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-            # Attach error to task artifacts as a spec-compliant two-layer
-            # envelope (same shape as failed-skill DataParts) so storyboard
-            # runners can ``JSON.parse`` the artifact uniformly regardless of
-            # which failure path produced it.
-            del task.artifacts[:]
-            task.artifacts.append(
-                Artifact(
-                    artifact_id="error_1",
-                    name="processing_error",
-                    parts=[
-                        Part(
-                            data=_dict_to_value(
-                                self._build_error_envelope(
-                                    contextual_error,
-                                    context=request_application_context,
-                                )
-                            )
-                        )
-                    ],
-                )
-            )
+            self._fail_task_with_error_artifact(task, contextual_error, context=request_application_context)
 
+            # Send protocol-level webhook notification for failure if configured
             await self._send_protocol_webhook(task, status="failed")
 
             # Raise A2A error instead of creating failed task
