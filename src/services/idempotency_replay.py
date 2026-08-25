@@ -503,7 +503,10 @@ def release_reservation_on_error(
 def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None] | None:
     """Resolve the durable read scope, or None when the caller cannot be safely scoped.
 
-    AdCP 3.1.1 (security.mdx, "Idempotency"): cache entries are scoped per
+    AdCP 3.1.1 — security.mdx, "Idempotency" (vendored at
+    dist/docs/3.1.0/building/by-layer/L1/security.mdx; no 3.1.1 doc snapshot
+    exists at its own tag — the suite grades against this vendored freeze, not
+    upstream live): cache entries are scoped per
     ``(authenticated_agent, account_id, idempotency_key)`` — there is no
     anonymous slot in that tuple. An unauthenticated caller has no
     ``authenticated_agent``, so there is no scope the durable cache can safely
@@ -521,9 +524,12 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
     and ``list_creative_formats`` public (no auth required), and
     ``security.mdx`` states buyer SDKs send ``idempotency_key`` uniformly across
     every tool call and that a seller accepting a supplied key on a pure-read
-    task MUST apply the replay contract. A blanket refusal turns every
-    SDK-originated anonymous discovery call into ``AUTH_REQUIRED``, which is not
-    "applying" the contract, it is breaking the public operation.
+    task MUST apply the replay contract — a MUST this function does not fully
+    satisfy for an anonymous caller either (see the least-nonconformant-option
+    discussion below: skipping the cache is itself a partial deviation, not
+    full compliance). A blanket refusal turns every SDK-originated anonymous
+    discovery call into ``AUTH_REQUIRED``, which is not "applying" the
+    contract, it is breaking the public operation.
 
     The resolution: for an unauthenticated caller, this returns ``None`` so the
     reservation/replay/rate-limit machinery is skipped entirely — no row is

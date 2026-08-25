@@ -22,10 +22,15 @@ def _batch_backfill_logical_event_key(*, batch_size: int = 1000) -> None:
     """Backfill ``logical_event_key`` in bounded chunks.
 
     ``webhook_delivery_log`` is a hot, populated production table; a single
-    unbatched ``UPDATE ... WHERE logical_event_key IS NULL`` would hold its
-    row locks for however long the full-table scan+write takes. Chunking
-    keeps each transaction's lock hold bounded, mirroring the size used
-    elsewhere in this migration's autocommit index builds.
+    unbatched ``UPDATE ... WHERE logical_event_key IS NULL`` would scan and
+    lock the whole table in one statement. ``alembic/env.py`` runs this
+    migration's entire ``upgrade()`` inside ONE transaction
+    (``context.begin_transaction()``), so chunking does NOT bound the total
+    lock HOLD duration — locks acquired by earlier chunks are still held when
+    later chunks run, same as an unbatched UPDATE, and all release together at
+    commit. What chunking DOES bound is each individual UPDATE statement's
+    row-scan/lock-acquisition footprint, so no single statement holds the
+    full-table scan open at once.
     """
     bind = op.get_bind()
     while True:
