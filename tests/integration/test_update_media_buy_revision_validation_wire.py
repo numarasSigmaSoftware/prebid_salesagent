@@ -35,11 +35,6 @@ _WIRE_TRANSPORTS = [Transport.A2A, Transport.MCP, Transport.REST]
 # these tests stays "every transport agrees", not "this literal string".
 _SCHEMA_REJECTION_CODE = "VALIDATION_ERROR"
 
-# The boundaries that can still tell a PRESENT ``revision`` key from an omitted
-# one. A2A is excluded deliberately: its raw-payload path reaches the shared
-# request model with the distinction already collapsed.
-_PRESENT_NULL_TRANSPORTS = [Transport.MCP, Transport.REST]
-
 
 def _assert_attributed_to_revision(envelope) -> None:
     """The rejection must name ``revision``, not the request root.
@@ -267,7 +262,7 @@ class TestUpdateRevisionValidationWire:
                 peer["field"],
             ), f"Infinity must be rejected exactly as revision={literal} is, got {non_finite!r} vs {peer!r}"
 
-    @pytest.mark.parametrize("transport", _PRESENT_NULL_TRANSPORTS, ids=lambda t: t.value)
+    @pytest.mark.parametrize("transport", _WIRE_TRANSPORTS, ids=lambda t: t.value)
     def test_present_but_null_revision_is_rejected_not_treated_as_absent(self, env_with_media_buy, transport):
         """A ``revision`` key sent with no usable value must REJECT, not silently
         fall back to last-write-wins.
@@ -280,8 +275,16 @@ class TestUpdateRevisionValidationWire:
         pinned ``update-media-buy-request.json`` types ``revision`` as
         ``integer``, which admits no such value.
 
-        Pinned on the two boundaries that can still see the key-present/key-absent
-        distinction.
+        Pinned on EVERY wire transport. Each boundary detects presence in its own
+        shape — a raw arguments dict (MCP), ``model_fields_set`` (REST), a raw
+        params dict (A2A) — and delegates the decision to the one shared helper.
+        A2A was excluded here on the belief that its raw-payload path reaches the
+        shared request model with the distinction already collapsed; it does not.
+        The payload arrives as a plain dict that still carries the key, and the
+        collapse happens later, at the ``params.get("revision")`` that feeds the
+        core call. Excluding A2A left the transport with no gate at all: the
+        present-but-null token was read as absent, so the buyer got silent
+        last-write-wins plus a revision bump.
         """
         from tests.helpers.media_buy import read_back_media_buy
 

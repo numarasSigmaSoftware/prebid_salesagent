@@ -1959,7 +1959,7 @@ class AdCPRequestHandler(RequestHandler):
         # Identity already resolved at transport boundary (on_message_send)
 
         # Parse parameters into typed request model (validation at A2A boundary)
-        from src.core.schemas import UpdateMediaBuyRequest
+        from src.core.schemas import UpdateMediaBuyRequest, raise_if_revision_present_but_unusable
 
         # Pre-process: support legacy 'updates.packages' → 'packages'
         params = {**parameters}
@@ -1976,9 +1976,19 @@ class AdCPRequestHandler(RequestHandler):
                 suggestion="Provide the media_buy_id of the media buy to update",
             )
 
+        # Reject a present-but-unusable ``revision`` token, via the same shared
+        # helper the MCP and REST boundaries use. This is the last seam that still
+        # knows the key was SENT: ``params.get("revision")`` below delivers ``None``
+        # for a present-but-null token and for an omitted field alike, so without
+        # this the token reads as absent and the buyer gets silent last-write-wins
+        # plus a revision bump. ``params`` is a plain dict here, so presence is
+        # simply ``in`` — the same detection this handler already does for
+        # ``media_buy_id`` above.
+        raise_if_revision_present_but_unusable("revision" in params, params.get("revision"))
+
         # Validate top-level fields via typed model (packages validated by _raw
         # which handles legacy formats with extra fields like 'status').
-        # ``revision`` stays raw through every transport and is validated by the
+        # A ``revision`` that IS usable stays raw from here and is validated by the
         # shared request builder below, so a schema-invalid value produces the same
         # response regardless of how it reached A2A.
         with adcp_validation_boundary():
