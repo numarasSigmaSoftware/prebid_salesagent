@@ -621,6 +621,10 @@ def register_webhook(tenant_id, principal_id):
         url = request.form.get("url")
         auth_type = request.form.get("auth_type", "none")
 
+        if not url:
+            flash("Webhook URL is required", "error")
+            return redirect(url_for("principals.manage_webhooks", tenant_id=tenant_id, principal_id=principal_id))
+
         # Principal webhooks are buyer callbacks, so registration must use the
         # same HTTPS/userinfo/private-target policy enforced at delivery.
         is_valid, error_msg = WebhookURLValidator.validate_callback_url(url)

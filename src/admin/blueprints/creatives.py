@@ -511,6 +511,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             assert uow.assignments is not None
             assert uow.media_buys is not None
             assert uow.tenant_config is not None
+            assert uow.workflows is not None
 
             creative = uow.creatives.admin_get_by_id(creative_id)
 

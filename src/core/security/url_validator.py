@@ -6,7 +6,7 @@ property list resolution and webhook URL validation.
 
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 # Link-local / cloud-metadata / this-network ranges. ALWAYS blocked — never a
 # legitimate webhook target, in any environment (this is the cloud-credential-
@@ -125,75 +125,116 @@ def resolve_and_validate_target(
     try:
         parsed = urlparse(url)
 
-        if require_https:
-            if parsed.scheme != "https":
-                return None, f"{HTTPS_SCHEME_ERROR_PREFIX}, got '{parsed.scheme}'"
-        elif parsed.scheme not in ("http", "https"):
-            return None, "URL must use http or https protocol"
+        scheme_error = _validate_scheme(parsed, require_https=require_https)
+        if scheme_error is not None:
+            return None, scheme_error
 
         hostname = parsed.hostname
         if not hostname:
             return None, "URL must have a valid hostname"
 
-        lowered = hostname.lower()
-        if lowered in METADATA_HOSTNAMES:
-            return None, f"URL hostname '{hostname}' is a blocked cloud-metadata endpoint"
-        if lowered in LOCAL_HOSTNAMES and not allow_private:
-            return None, f"URL hostname '{hostname}' is blocked (internal/private)"
+        hostname_error = _blocked_hostname_reason(hostname, allow_private=allow_private)
+        if hostname_error is not None:
+            return None, hostname_error
 
-        if not resolve_dns:
-            # Registration-time mode: a fixture hostname (buyer.example.com) must
-            # not be rejected for NXDOMAIN — send-time validation still resolves
-            # and pins. A literal-IP hostname is still fully validated below.
-            try:
-                literal = ipaddress.ip_address(hostname)
-            except ValueError:
-                return None, ""
-            resolved = [str(literal)]
-        else:
-            try:
-                resolved = _resolve_ips(hostname)
-            except OSError:
-                return None, f"Cannot resolve hostname: {hostname}"
-            if not resolved:
-                return None, f"Cannot resolve hostname: {hostname}"
+        resolved, resolve_error = _resolve_target_addresses(hostname, resolve_dns=resolve_dns)
+        if resolved is None:
+            return None, resolve_error
 
         # Validate EVERY resolved A/AAAA record — a hostname with one public and one
         # private/IPv6 record must not pass on the strength of its public record
         # (multi-record / DNS-rebinding surface). The caller connects to the returned
         # address (connection pinning) so the checked IP is the one actually used.
         for ip_str in resolved:
-            try:
-                ip = ipaddress.ip_address(ip_str)
-            except ValueError:
-                return None, f"Invalid IP address from hostname resolution: {ip_str}"
-
-            # Unwrap an IPv4-mapped IPv6 address (::ffff:a.b.c.d) BEFORE any
-            # membership test, so the IPv4 rules apply to the embedded address —
-            # otherwise ::ffff:169.254.169.254 / ::ffff:127.0.0.1 would slip past
-            # the IPv4-only ranges. ``ipv4_mapped`` exists only on IPv6Address.
-            mapped = getattr(ip, "ipv4_mapped", None)
-            if mapped is not None:
-                ip = mapped
-
-            # Always-blocked tier (regardless of allow_private) — see
-            # _always_blocked_reason for the ranges and the loopback carve-out.
-            blocked_reason = _always_blocked_reason(ip)
-            if blocked_reason is not None:
-                return None, blocked_reason
-
-            if not allow_private:
-                for network in PRIVATE_NETWORKS:
-                    if ip in network:
-                        return None, f"URL resolves to blocked IP range {network} (private/internal network)"
-                if ip.is_loopback or ip.is_private:
-                    return None, f"URL resolves to private/internal IP address: {ip}"
+            ip_error = _validate_resolved_ip(ip_str, allow_private=allow_private)
+            if ip_error is not None:
+                return None, ip_error
 
         # Every record validated — pin to the first (a literal-IP host pins to itself).
         return resolved[0], ""
 
     except Exception as e:
         return None, f"Invalid URL: {e}"
+
+
+def _validate_scheme(parsed: ParseResult, *, require_https: bool) -> str | None:
+    """Return an error message when the URL's scheme fails the scheme policy, else ``None``."""
+    if require_https:
+        if parsed.scheme != "https":
+            return f"{HTTPS_SCHEME_ERROR_PREFIX}, got '{parsed.scheme}'"
+    elif parsed.scheme not in ("http", "https"):
+        return "URL must use http or https protocol"
+    return None
+
+
+def _blocked_hostname_reason(hostname: str, *, allow_private: bool) -> str | None:
+    """Return an error message when ``hostname`` is blocked by name, else ``None``."""
+    lowered = hostname.lower()
+    if lowered in METADATA_HOSTNAMES:
+        return f"URL hostname '{hostname}' is a blocked cloud-metadata endpoint"
+    if lowered in LOCAL_HOSTNAMES and not allow_private:
+        return f"URL hostname '{hostname}' is blocked (internal/private)"
+    return None
+
+
+def _resolve_target_addresses(hostname: str, *, resolve_dns: bool) -> tuple[list[str] | None, str]:
+    """Resolve ``hostname`` to candidate IP(s), or classify why resolution failed.
+
+    Returns ``(addresses, error)``. When ``resolve_dns`` is ``False`` and
+    ``hostname`` is not a literal IP, returns ``(None, "")`` — accepted,
+    nothing to pin (registration-time mode; see
+    :func:`resolve_and_validate_target`'s ``resolve_dns`` doc).
+    """
+    if not resolve_dns:
+        # Registration-time mode: a fixture hostname (buyer.example.com) must
+        # not be rejected for NXDOMAIN — send-time validation still resolves
+        # and pins. A literal-IP hostname is still fully validated by the caller.
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            return None, ""
+        return [str(literal)], ""
+    try:
+        resolved = _resolve_ips(hostname)
+    except OSError:
+        return None, f"Cannot resolve hostname: {hostname}"
+    if not resolved:
+        return None, f"Cannot resolve hostname: {hostname}"
+    return resolved, ""
+
+
+def _validate_resolved_ip(ip_str: str, *, allow_private: bool) -> str | None:
+    """Validate one resolved address against the blocked/private tiers.
+
+    Returns an error message when the address is rejected, else ``None``.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return f"Invalid IP address from hostname resolution: {ip_str}"
+
+    # Unwrap an IPv4-mapped IPv6 address (::ffff:a.b.c.d) BEFORE any
+    # membership test, so the IPv4 rules apply to the embedded address —
+    # otherwise ::ffff:169.254.169.254 / ::ffff:127.0.0.1 would slip past
+    # the IPv4-only ranges. ``ipv4_mapped`` exists only on IPv6Address.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+
+    # Always-blocked tier (regardless of allow_private) — see
+    # _always_blocked_reason for the ranges and the loopback carve-out.
+    blocked_reason = _always_blocked_reason(ip)
+    if blocked_reason is not None:
+        return blocked_reason
+
+    if not allow_private:
+        for network in PRIVATE_NETWORKS:
+            if ip in network:
+                return f"URL resolves to blocked IP range {network} (private/internal network)"
+        if ip.is_loopback or ip.is_private:
+            return f"URL resolves to private/internal IP address: {ip}"
+
+    return None
 
 
 def _always_blocked_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
