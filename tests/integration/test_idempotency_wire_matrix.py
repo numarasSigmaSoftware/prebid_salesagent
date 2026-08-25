@@ -249,6 +249,14 @@ class TestInFlightWireMatrix:
         assert envelope["errors"][0].get("retry_after"), (
             f"IN_FLIGHT must carry retry_after in errors[0] on {transport.value}: {envelope}"
         )
+        # The spec's IDEMPOTENCY_IN_FLIGHT description names the NESTED
+        # error.details.retry_after field specifically, distinct from the
+        # top-level mirrors asserted above — grade it independently so a
+        # regression that drops details.retry_after (while leaving the
+        # top-level mirrors intact) is still caught.
+        assert envelope["errors"][0].get("details", {}).get("retry_after"), (
+            f"IN_FLIGHT must carry retry_after in errors[0].details on {transport.value}: {envelope}"
+        )
 
 
 class TestA2ADefaultsDoNotBreakReplay:

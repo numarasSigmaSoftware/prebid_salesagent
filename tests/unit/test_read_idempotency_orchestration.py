@@ -9,6 +9,7 @@ from src.core.exceptions import AdCPAuthRequiredError, AdCPIdempotencyConflictEr
 from src.services.idempotency_replay import (
     ReservationResult,
     _decode_read_response,
+    _read_scope,
     execute_idempotent_read,
     raise_on_tool_conflict,
 )
@@ -154,3 +155,22 @@ def test_same_key_and_hash_cannot_be_reused_across_tools() -> None:
 
 def test_same_tool_replay_is_not_a_tool_conflict() -> None:
     raise_on_tool_conflict("get_products", "get_products")
+
+
+def test_read_scope_extracts_tenant_id_from_dict_tenant_fallback() -> None:
+    """The isinstance(identity.tenant, dict) fallback is LIVE production code,
+    not dead code: src/services/delivery_webhook_scheduler.py and
+    src/core/resolved_identity.py both construct ResolvedIdentity with a raw
+    dict ``tenant`` and no top-level ``tenant_id``. _read_scope must still
+    resolve the tenant scope from that dict rather than raising.
+    """
+    identity = PrincipalFactory.make_identity(
+        tenant_id=None,
+        tenant={"tenant_id": "some-tenant"},
+        principal_id="principal-1",
+    )
+
+    scope = _read_scope(identity)
+
+    assert scope is not None
+    assert scope[0] == "some-tenant"

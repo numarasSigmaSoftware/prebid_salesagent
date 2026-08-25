@@ -135,3 +135,61 @@ def test_finalize_notification_claim_rejects_wrong_token_from_a_second_claimant(
             assert uow.tasks.release_notification_claim(event_id, claim_token=wrong_token) is False
             # The real owner's lease is untouched — it can still finalize with its own token.
             assert uow.tasks.mark_notification_published(event_id, claim_token=real_token) is True
+
+
+def test_claim_notification_publication_cannot_cross_tenant_boundary(integration_db) -> None:
+    """A tenant scope can never observe or claim another tenant's real notification event.
+
+    ``event_id`` is the table's PRIMARY KEY (globally unique), so two tenants
+    can never legitimately share one — but ``claim_notification_publication``
+    still filters on ``tenant_id`` as a defense-in-depth guard against a
+    caller (buggy or malicious) passing an event_id it does not own. Prove
+    the guard directly: tenant B, given tenant A's real event_id, must not
+    be able to claim it.
+    """
+    from tests.harness._base import BareIntegrationEnv
+
+    with BareIntegrationEnv():
+        tenant_a_id, _task_id, event_id = _new_task_scope()
+        tenant_b = TenantFactory(tenant_id=f"a2a-claim-tenant-{uuid4().hex[:8]}")
+
+        with A2ATaskUoW(tenant_b.tenant_id) as uow:
+            assert uow.tasks is not None
+            cross_tenant_claim = uow.tasks.claim_notification_publication(event_id)
+
+    assert cross_tenant_claim is None, "a tenant must not observe another tenant's notification event"
+
+    # Sanity: the SAME event_id is genuinely claimable by its actual owner —
+    # proves the None above is the tenant filter, not e.g. a typo'd event_id.
+    with A2ATaskUoW(tenant_a_id) as uow:
+        assert uow.tasks is not None
+        own_claim = uow.tasks.claim_notification_publication(event_id)
+    assert own_claim is not None and own_claim.claim_token is not None
+
+
+def test_claim_notification_publication_steals_an_expired_lease(integration_db) -> None:
+    """A claim past its lease_seconds boundary can be re-claimed, not rejected as live.
+
+    Prior coverage only ever exercised the live/fresh lease (immediately
+    after claiming, before any lease_seconds could elapse). A near-zero
+    ``lease_seconds`` on the SECOND call treats the first claim — made a
+    moment earlier — as already past its boundary by the time this call
+    runs, genuinely driving the ``claimed_at >= now - lease_seconds`` steal
+    path rather than only ever observing "still live".
+    """
+    from tests.harness._base import BareIntegrationEnv
+
+    with BareIntegrationEnv():
+        tenant_id, _task_id, event_id = _new_task_scope()
+
+        with A2ATaskUoW(tenant_id) as uow:
+            assert uow.tasks is not None
+            first = uow.tasks.claim_notification_publication(event_id)
+        assert first is not None and first.claim_token is not None
+
+        with A2ATaskUoW(tenant_id) as uow:
+            assert uow.tasks is not None
+            second = uow.tasks.claim_notification_publication(event_id, lease_seconds=0)
+
+    assert second is not None and second.claim_token is not None
+    assert second.claim_token != first.claim_token, "the steal must mint a fresh claim_token, not reuse the stale one"
