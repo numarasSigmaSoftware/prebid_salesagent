@@ -1,8 +1,8 @@
 """Real-Postgres coverage for the A2A task notification outbox's lease + CAS.
 
-Mirrors ``test_webhook_event_claims.py``'s technique (``threading.Barrier`` +
-independent connections racing the same row) for a DIFFERENT claim mechanism:
-``A2ATaskRepository.claim_notification_publication`` /
+Mirrors ``test_webhook_event_claims.py``'s technique (``threading.Event``-based
+hold-and-block, independent connections racing the same row) for a DIFFERENT
+claim mechanism: ``A2ATaskRepository.claim_notification_publication`` /
 ``finalize_notification_claim``. Prior coverage (``test_creative_unblock_recovery.py``)
 only exercised the caller with ``session = MagicMock()`` — same-process,
 sequential, no real row contention — and ``finalize_notification_claim`` itself
@@ -10,8 +10,9 @@ had zero test references. These tests drive the actual ``SELECT ... FOR UPDATE``
 lease and the claim-token CAS against a real database.
 """
 
+import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -45,28 +46,47 @@ def _new_task_scope() -> tuple[str, str, str]:
     return tenant.tenant_id, task_id, event_id
 
 
-def _claim(tenant_id: str, event_id: str, barrier: Barrier):
-    barrier.wait(timeout=5)
-    with A2ATaskUoW(tenant_id) as uow:
-        assert uow.tasks is not None
-        return uow.tasks.claim_notification_publication(event_id)
-
-
 def test_concurrent_claim_publication_only_one_thread_wins(integration_db) -> None:
-    """Two threads racing to lease the same event: exactly one gets a real claim_token."""
+    """Two threads racing to lease the same event: the loser is genuinely
+    blocked on the winner's real row lock (not merely not-yet-scheduled), and
+    only the winner ends up with a live claim once the winner's transaction
+    (and thus its ``SELECT ... FOR UPDATE`` lock) commits.
+    """
     from tests.harness._base import BareIntegrationEnv
 
     with BareIntegrationEnv():
         tenant_id, _task_id, event_id = _new_task_scope()
-        barrier = Barrier(2)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(_claim, tenant_id, event_id, barrier) for _ in range(2)]
-            results = [future.result(timeout=5) for future in futures]
 
-    won = [r for r in results if r is not None and r.claim_token is not None]
-    lost = [r for r in results if r is None]
-    assert len(won) == 1, f"exactly one racer must win the lease, got: {results}"
-    assert len(lost) == 1, f"the loser must observe the live lease as unclaimable, got: {results}"
+        claimed_event = Event()
+        release_event = Event()
+        winner_result: dict[str, object] = {}
+
+        def hold_winner_claim() -> None:
+            with A2ATaskUoW(tenant_id) as uow:
+                assert uow.tasks is not None
+                winner_result["claim"] = uow.tasks.claim_notification_publication(event_id)
+                claimed_event.set()
+                assert release_event.wait(timeout=5)
+
+        def attempt_loser_claim():
+            assert claimed_event.wait(timeout=5)
+            with A2ATaskUoW(tenant_id) as uow:
+                assert uow.tasks is not None
+                return uow.tasks.claim_notification_publication(event_id)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            winner_future = executor.submit(hold_winner_claim)
+            assert claimed_event.wait(timeout=5)
+            loser_future = executor.submit(attempt_loser_claim)
+            time.sleep(0.2)
+            assert not loser_future.done(), "loser must be blocked on the winner's row lock, not just unscheduled"
+            release_event.set()
+            winner_future.result(timeout=5)
+            loser_result = loser_future.result(timeout=5)
+
+    winner_claim = winner_result["claim"]
+    assert winner_claim is not None and winner_claim.claim_token is not None
+    assert loser_result is None, f"the loser must observe the now-live lease as unclaimable, got: {loser_result}"
 
 
 def test_finalize_notification_claim_rejects_stale_token_after_real_ack(integration_db) -> None:
