@@ -210,9 +210,8 @@ class TestMiddlewareReadIdempotencyEnvelope:
     async def test_valid_key_is_consumed_before_dispatch_for_every_read(self, middleware, tool_name):
         ctx = _make_context(tool_name, {"idempotency_key": "valid-read-key-0001"})
         ctx.fastmcp_context = MagicMock()
-        ctx.fastmcp_context.get_state = AsyncMock(
-            return_value=MagicMock(tenant_id="tenant-1", principal_id="principal-1")
-        )
+        mock_identity = MagicMock(tenant_id="tenant-1", principal_id="principal-1")
+        ctx.fastmcp_context.get_state = AsyncMock(return_value=mock_identity)
         ctx.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=MagicMock(fn=lambda: None))
         captured_ctx = None
 
@@ -236,12 +235,19 @@ class TestMiddlewareReadIdempotencyEnvelope:
 
         assert captured_ctx is not None
         assert captured_ctx.message.arguments == {}
+        from fastmcp.tools.tool import ToolResult
+
         replay_service.assert_awaited_once_with(
             tool_name=tool_name,
             idempotency_key="valid-read-key-0001",
-            identity=ANY,
-            raw_wire_payload=ANY,
-            response_type=ANY,
+            identity=mock_identity,
+            # raw_wire_payload is dict(arguments) captured from
+            # context.message.arguments BEFORE the idempotency_key strip -- the
+            # same dict this test built the context with.
+            raw_wire_payload={"idempotency_key": "valid-read-key-0001"},
+            # _execute_read_with_replay always passes response_type=ToolResult
+            # for the MCP boundary.
+            response_type=ToolResult,
             work=ANY,
         )
 

@@ -80,9 +80,16 @@ class TestAuthOptionalSkills:
             replay_service.assert_awaited_once_with(
                 tool_name=skill_name,
                 idempotency_key=parameters["idempotency_key"],
-                identity=ANY,
-                raw_wire_payload=ANY,
-                response_type=ANY,
+                identity=self.mock_identity,
+                # raw_wire_payload is the params AS SENT (_json_safe_wire_params
+                # round-trips a plain JSON-safe dict unchanged), captured before
+                # the idempotency_key strip -- so it equals the original
+                # `parameters` this test passed in.
+                raw_wire_payload=parameters,
+                # _execute_explicit_skill_handler always passes response_type=None
+                # for explicit-skill reads (only the REST/MCP boundaries pass a
+                # concrete Pydantic type).
+                response_type=None,
                 work=ANY,
             )
         else:

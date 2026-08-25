@@ -8,7 +8,7 @@ Validates that each REST transport endpoint:
 beads: salesagent-b61l.15
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from adcp.types import AccountReference as LibraryAccountReference
@@ -89,7 +89,16 @@ class TestCapabilitiesProtocolsQuery:
 
         assert response.status_code == 200
         assert response.json()["supported_protocols"] == ["media_buy"]
-        assert execute_read.await_args.kwargs["idempotency_key"] == "valid-read-key-0001"
+        from src.core.tools.capabilities import GetAdcpCapabilitiesResponse
+
+        execute_read.assert_awaited_once_with(
+            tool_name="get_adcp_capabilities",
+            idempotency_key="valid-read-key-0001",
+            identity=None,
+            raw_wire_payload={"idempotency_key": "valid-read-key-0001"},
+            response_type=GetAdcpCapabilitiesResponse,
+            work=ANY,
+        )
 
     def test_malformed_idempotency_key_is_validation_error(self):
         response = client.get("/api/v1/capabilities?idempotency_key=short")
@@ -197,12 +206,30 @@ class TestStandardReadIdempotencyRestBoundary:
             response = client.post(url, json={**body, **key_fields}, headers=headers)
 
         assert response.status_code == 200, response.text
+        expected_identity = _MOCK_IDENTITY if auth_required else None
         if key_fields:
             validate_key.assert_called_once_with(tool_name, key_fields)
-            assert execute_read.await_args.kwargs["idempotency_key"] == key_fields["idempotency_key"]
+            execute_read.assert_awaited_once_with(
+                tool_name=tool_name,
+                idempotency_key=key_fields["idempotency_key"],
+                identity=expected_identity,
+                # raw_wire_payload/response_type are tool-specific (each of the 5
+                # cases builds a structurally different body/response model) — not
+                # cheaply reproducible in this shared parametrized test.
+                raw_wire_payload=ANY,
+                response_type=ANY,
+                work=ANY,
+            )
         else:
             validate_key.assert_not_called()
-            assert execute_read.await_args.kwargs["idempotency_key"] is None
+            execute_read.assert_awaited_once_with(
+                tool_name=tool_name,
+                idempotency_key=None,
+                identity=expected_identity,
+                raw_wire_payload=ANY,
+                response_type=ANY,
+                work=ANY,
+            )
 
     @pytest.mark.parametrize(
         ("tool_name", "url", "body", "core_target", "auth_required"),
