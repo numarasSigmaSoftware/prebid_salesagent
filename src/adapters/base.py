@@ -143,9 +143,9 @@ class AdapterCapabilities:
 
     # Pricing. DERIVED — an adapter must NOT declare this here. For every AdServerAdapter
     # subclass it is rebound from that class's ``supported_pricing_models`` frozenset by
-    # ``AdServerAdapter.__init_subclass__``, so the set the admin UI reports and the set
-    # validation enforces cannot drift apart. Stays None only on a bare AdapterCapabilities
-    # that belongs to no adapter.
+    # ``AdServerAdapter.__init_subclass__``, so the set this capabilities surface reports
+    # and the set validation enforces cannot drift apart. Stays None only on a bare
+    # AdapterCapabilities that belongs to no adapter.
     supported_pricing_models: list[str] | None = None
 
     # Reporting and webhooks
@@ -349,10 +349,10 @@ class AdServerAdapter(ABC):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Derive the reported capability from the executed one.
 
-        ``AdapterCapabilities.supported_pricing_models`` is what the admin UI reads over
-        HTTP; ``cls.supported_pricing_models`` is what ``validate_media_buy_request``
-        enforces. Rebinding the first from the second at class-creation time leaves ONE
-        declaration per adapter, so the two cannot disagree. ``replace`` rather than
+        ``AdapterCapabilities.supported_pricing_models`` is the capabilities surface's set;
+        ``cls.supported_pricing_models`` is what ``validate_media_buy_request`` enforces.
+        Rebinding the first from the second at class-creation time leaves ONE declaration
+        per adapter, so the two cannot drift apart. ``replace`` rather than
         mutation: adapters that declare no ``capabilities`` of their own inherit the base
         instance, and mutating it in place would rewrite every other adapter's answer.
         """
@@ -366,11 +366,14 @@ class AdServerAdapter(ABC):
         declaration but may be shadowed per-instance when an adapter is executing on
         another adapter's behalf (see ``MockAdServer.__init__``). This is the single
         reader of that declaration — callers ask the adapter, never a parallel table.
-        The adapter's ``capabilities`` are no exception: their pricing field is derived
-        from this same declaration by ``__init_subclass__``, not restated beside it.
+        The adapter's ``capabilities`` are no exception: their pricing field is derived by
+        ``__init_subclass__`` from the CLASS-level declaration, not restated beside it. A
+        per-instance shadow is therefore not reflected there: an instance constrained to
+        another adapter's set enforces the shadowed set while ``capabilities`` keep
+        reporting the class's own.
 
         Returns:
-            Set of pricing model strings: {"cpm", "cpcv", "cpp", "cpc", "cpv", "flat_rate"}
+            The set of pricing model strings this adapter accepts.
         """
         return set(self.supported_pricing_models)
 
