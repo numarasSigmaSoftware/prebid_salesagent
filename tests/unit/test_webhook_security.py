@@ -596,7 +596,7 @@ class TestPinnedOutboundClient:
             )
 
         assert delivered is False, "a 3xx response must be treated as a failed delivery"
-        mock_post.assert_called_once()
+        assert mock_post.call_count == 1
         call = mock_post.call_args
         assert call.args == ("https://buyer.example.com/webhook",)
         assert call.kwargs["data"] == b'{"status":"completed"}'
