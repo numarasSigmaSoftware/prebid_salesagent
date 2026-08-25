@@ -454,12 +454,17 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                             return "completed"
                         return "active"
 
-                    approve_repo.apply_computed_status_transition(media_buy, _approved_status)
-
                     # The approval stamp goes through the repository too: it is
                     # seller-side state the confirmation back-fill reads, so it
                     # belongs on the same side of the boundary as the status write.
+                    # It runs BEFORE the transition: the target above can be a
+                    # seller-confirmed status, and the write-once confirmed_at takes
+                    # `approved_at or created_at` at that moment — stamping afterwards
+                    # freezes the buyer's CREATE instant as the seller's COMMITMENT
+                    # instant, with no second chance to correct it.
                     approve_repo.stamp_approval(media_buy, approved_by=user_email)
+
+                    approve_repo.apply_computed_status_transition(media_buy, _approved_status)
                     db_session.commit()
 
                     # Execute adapter creation for approved media buy

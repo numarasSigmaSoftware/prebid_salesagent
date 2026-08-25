@@ -123,7 +123,7 @@ def make_pending_media_buy(integration_db):
             tenant_id=tenant.tenant_id,
             principal_id=principal.principal_id,
         )
-        cm.create_workflow_step(
+        step = cm.create_workflow_step(
             context_id=context.context_id,
             step_type="approval",
             owner="publisher",
@@ -142,6 +142,10 @@ def make_pending_media_buy(integration_db):
         return {
             "tenant_id": tenant.tenant_id,
             "media_buy_id": media_buy.media_buy_id,
+            # The workflow-approval route keys off the step; workflow_id is only a
+            # URL segment there, so the owning context id stands in for it.
+            "workflow_id": context.context_id,
+            "step_id": step.step_id,
         }
 
     try:
@@ -525,3 +529,75 @@ class TestAdminMediaBuyRejectWebhook:
             f"approve webhook must echo the buyer's request context verbatim, "
             f"got {embedded.get('context')!r} (expected {buyer_context!r})"
         )
+
+
+class TestWorkflowApprovalConfirmationInstant:
+    """The workflow-approval route must record the APPROVAL instant as confirmed_at."""
+
+    def test_workflow_approve_confirms_at_the_approval_instant_and_bumps_revision(
+        self, authenticated_admin_session, pending_reject_media_buy
+    ):
+        """Approving via the real workflow route stamps confirmed_at == approved_at and bumps.
+
+        Two defects this pins, both introduced by this PR:
+
+        1. ORDERING. ``confirmed_at`` is write-once and takes ``approved_at or
+           created_at``. The route used to record the approval only AFTER
+           ``execute_approved_media_buy``, whose own activation seam does the stamp
+           on a separate committed transaction — so the stamp saw ``approved_at``
+           NULL and froze the buyer's CREATE instant as the seller's COMMITMENT
+           instant. A non-NULL assertion cannot see that; the value must equal the
+           approval instant and must NOT be the create instant.
+        2. STALE ROW. The buy is loaded on the request session before that nested
+           call commits a new status on its own session, so
+           ``apply_status_transition`` captured a stale ``expected_from_status``,
+           read a different committed value under the lock and declined as a lost
+           update — no status write, no revision bump. Re-resolving the row after
+           the nested call is what makes the arm land. The exact revision is the
+           oracle: 1 (seeded) -> 2 (the nested activation) -> 3 (this arm). A
+           ``>``-style assertion would stay green on the silent no-op, because the
+           nested activation bumps either way.
+
+        Also pins the committed FINAL status of this arm so a human can judge it:
+        with the seam working, the route's ``"scheduled"`` target is what lands.
+        """
+        from src.core.database.repositories import MediaBuyUoW
+
+        ids = pending_reject_media_buy
+        tenant_id = ids["tenant_id"]
+        media_buy_id = ids["media_buy_id"]
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            before = uow.media_buys.get_by_id(media_buy_id)
+            assert before is not None, "test setup: pending media buy missing"
+            assert before.confirmed_at is None, "test setup: pending_approval buy must not be confirmed yet"
+            assert before.approved_at is None, "test setup: pending_approval buy must not be approved yet"
+            assert before.revision == 1, f"test setup: seeded buy should be at revision 1, got {before.revision}"
+
+        resp = authenticated_admin_session.post(
+            f"/tenant/{tenant_id}/workflows/{ids['workflow_id']}/steps/{ids['step_id']}/approve"
+        )
+        assert resp.status_code == 200, f"workflow approve failed: {resp.status_code} {resp.data!r}"
+
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.media_buys is not None
+            after = uow.media_buys.get_by_id(media_buy_id)
+            assert after is not None, "approved media buy vanished"
+            assert after.approved_at is not None, "workflow approval left approved_at unset"
+            assert after.confirmed_at == after.approved_at, (
+                f"confirmed_at must be the approval instant, got confirmed_at={after.confirmed_at!r} "
+                f"approved_at={after.approved_at!r} created_at={after.created_at!r}"
+            )
+            assert after.confirmed_at != after.created_at, (
+                "confirmed_at fell back to the buyer's CREATE instant — the seller's commitment "
+                "instant was recorded before the approval was stamped"
+            )
+            assert after.revision == 3, (
+                f"expected revision 3 (seed 1 -> nested activation 2 -> this arm 3), got {after.revision}; "
+                "a value of 2 means the transition seam silently no-opped on a stale row"
+            )
+            assert after.status == "scheduled", (
+                f"workflow approve arm committed status={after.status!r}; the route's target is 'scheduled' "
+                "and a value of 'active' means the seam no-opped and left the nested activation's status"
+            )

@@ -228,9 +228,25 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                             # on a committed buy, which get_media_buys emits verbatim.
                             # The seam stamps the write-once instant and bumps the
                             # AdCP revision counter under the row lock.
+                            #
+                            # The approval stamp runs FIRST: confirmed_at is write-once
+                            # and takes `approved_at or created_at`, so stamping after
+                            # the transition would freeze the buyer's CREATE instant as
+                            # the seller's COMMITMENT instant, uncorrectably.
+                            media_buy_repo.stamp_approval(media_buy, approved_by=user_email)
                             media_buy_repo.apply_status_transition(media_buy, "pending_creatives")
                             db.commit()
                             return jsonify({"success": True}), 200
+
+                    # Record the approval BEFORE the adapter runs, and commit it.
+                    # execute_approved_media_buy activates the buy on its OWN session,
+                    # and that seam does the write-once confirmed_at stamp, reading
+                    # approved_at from the COMMITTED row. Stamping the approval after
+                    # it returns is too late: confirmed_at would already be frozen at
+                    # created_at — the buyer's CREATE instant recorded as the seller's
+                    # COMMITMENT instant, and write-once means uncorrectable.
+                    media_buy_repo.stamp_approval(media_buy, approved_by=user_email)
+                    db.commit()
 
                     # Execute adapter creation
                     from src.core.tools.media_buy_create import execute_approved_media_buy
@@ -243,14 +259,22 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                         flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
                         return jsonify({"success": False, "error": error_msg}), 500
 
+                    # Re-resolve the row: the nested call committed a new status on a
+                    # SEPARATE session, so the copy loaded above still carries the
+                    # pre-adapter status. apply_status_transition captures its
+                    # expected_from_status from THAT copy, and a stale one never
+                    # matches the committed value — the seam would decline as a lost
+                    # update and silently no-op (no status write, no bump).
+                    media_buy = media_buy_repo.get_by_id(media_buy_id, populate_existing=True)
+                    if media_buy is None:
+                        logger.error(f"[APPROVAL] Media buy {media_buy_id} vanished after adapter creation")
+                        return jsonify({"success": False, "error": "Media buy not found"}), 500
+
                     # Update media buy status through the repository seam, so the
-                    # adapter-success arm stamps confirmed_at and bumps revision
-                    # exactly like the early-return arm above.
+                    # adapter-success arm bumps revision exactly like the
+                    # early-return arm above. confirmed_at was already stamped by the
+                    # nested activation, and it is write-once, so it stays put.
                     media_buy_repo.apply_status_transition(media_buy, "scheduled")
-                    # The approval stamp goes through the repository too: it is
-                    # seller-side state the confirmation back-fill reads, so it
-                    # belongs on the same side of the boundary as the status write.
-                    media_buy_repo.stamp_approval(media_buy, approved_by=user_email)
                     db.commit()
 
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")

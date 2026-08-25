@@ -656,13 +656,18 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                         # write-once confirmed_at and bumps the AdCP revision
                         # counter. A raw `.status =` here did neither, so a
                         # creative-driven activation left both untouched.
+                        # The approval stamp goes through the repository too: it is
+                        # seller-side state the confirmation back-fill reads, so it
+                        # belongs on the same side of the boundary as the status write
+                        # — and BEFORE it: the computed target is a seller-confirmed
+                        # status, and the write-once confirmed_at takes
+                        # `approved_at or created_at` at that moment. Stamping
+                        # afterwards freezes the buyer's CREATE instant as the
+                        # seller's COMMITMENT instant, uncorrectably.
+                        uow2.media_buys.stamp_approval(mb, approved_by="system")
                         uow2.media_buys.apply_computed_status_transition(
                             mb, _compute_media_buy_status_from_flight_dates
                         )
-                        # The approval stamp goes through the repository too: it is
-                        # seller-side state the confirmation back-fill reads, so it
-                        # belongs on the same side of the boundary as the status write.
-                        uow2.media_buys.stamp_approval(mb, approved_by="system")
                     # auto-commits
 
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
