@@ -35,6 +35,8 @@ from src.core.logging_config import scrub_control_chars
 from src.core.security.webhook_http import (
     BEARER_AUTH_SCHEME,
     HMAC_AUTH_SCHEME,
+    WEBHOOK_DELIVERY_MAX_RETRIES,
+    WEBHOOK_POST_TIMEOUT_SECONDS,
     UnsafeWebhookTargetError,
     create_pinned_webhook_session,
     is_auth_scheme,
@@ -243,7 +245,7 @@ class ProtocolWebhookService:
         body: bytes,
         headers: dict,
         metadata: dict[str, Any],
-        max_attempts: int = 3,
+        max_attempts: int = WEBHOOK_DELIVERY_MAX_RETRIES,
     ) -> bool:
         """Send webhook with exponential backoff retry logic, logging, and audit trail.
 
@@ -293,7 +295,7 @@ class ProtocolWebhookService:
                     url,
                     body=body,
                     headers=headers,
-                    timeout=10.0,
+                    timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
                 )
                 # Require a 2xx. raise_for_status() does NOT raise for 3xx, and with
                 # redirects disabled a 3xx is a REFUSED redirect — a failed delivery,
