@@ -143,29 +143,43 @@ discriminated-union boolean covering every mutating tool at once. This
 agent's real behavior does not fit that shape: `create_media_buy` deduplicates
 (verbatim replay of the stored success; a same-key different-payload retry
 rejects with `IDEMPOTENCY_CONFLICT`; a retry past the replay window raises
-`IDEMPOTENCY_EXPIRED`), while the other twelve `require_idempotency_key(` call
+`IDEMPOTENCY_EXPIRED`), while the remaining `require_idempotency_key(` call
 sites — including the spend-affecting `update_media_buy`, plus
 `sync_accounts` and `sync_creatives` — VALIDATE and accept the key but perform
-no cache read, so a retried request re-executes.
+no cache read, so a retried request re-executes. How the call sites split
+between the two groups is DERIVED at test time, not counted by hand here:
+`tests/unit/test_idempotency_capability_applicability.py::test_dedup_reaching_call_site_split_is_derived_not_asserted`
+is the single home for that figure. Earlier revisions of this note and of the
+PR body each carried a hand count, and both were wrong — they counted the
+sites living in `media_buy_create.py` and reported that as "sites reaching the
+dedup core", missing the A2A skill handler, which reaches the same core
+through `create_media_buy_raw`.
 
 Neither discriminant value is truthful for this mix:
 
 - `supported: true` claims every mutating call is safe to retry blind — false
-  for twelve of thirteen call sites, and the hazard the spec names for that
-  gap is buyer double-spend/double-sync on a retried mutation. This is what an
-  earlier revision of this PR advertised.
-- `supported: false` claims (per `IdempotencyUnsupported`'s own schema text)
-  that "sending a key is a no-op ... the seller will NOT return
+  for every non-deduplicating call site (see the derived split above), and the
+  hazard the spec names for that gap is buyer double-spend/double-sync on a
+  retried mutation. This is what an earlier revision of this PR advertised.
+- `supported: false` claims — per the pinned
+  `dist/schemas/3.1.1/protocol/get-adcp-capabilities-response.json`,
+  `adcp.idempotency` `oneOf[1]` (`IdempotencyUnsupported`), the branch this
+  agent ships — that "sending a key is a no-op, the seller will NOT return
   IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
   double-process" — false for `create_media_buy` specifically, which still
-  deduplicates, still conflicts, still expires.
+  deduplicates, still conflicts, still expires. That schema branch is the
+  authority for this divergence. The installed SDK is a cross-check only, and
+  here it is narrower than the schema: its generated `Idempotency3` keeps only
+  the discriminator field's one-line description ("False means the seller does
+  not deduplicate retries") and drops the branch text above, so reading the
+  SDK alone understates what `false` promises a buyer.
 
 The current code declares `false`. That is a deliberate choice of the
 NARROWER defect, not a resolved, truthful one: `create_media_buy` behaving
 BETTER than advertised (a buyer might not realize a retry is safe and send an
-unnecessary natural-key check) is a materially smaller hazard than the other
-twelve behaving WORSE than advertised (a buyer trusting `true` and retrying
-blind causes a real double-spend). Resolving this for real requires either (a)
+unnecessary natural-key check) is a materially smaller hazard than the
+non-deduplicating majority behaving WORSE than advertised (a buyer trusting
+`true` and retrying blind causes a real double-spend). Resolving this for real requires either (a)
 extending genuine replay/conflict/expired handling to every mutating tool,
 then flipping to `true`, or (b) removing `create_media_buy`'s dedup so `false`
 becomes wire-accurate — (a) is a substantial feature build with real

@@ -137,10 +137,22 @@ def _build_adcp_block() -> Adcp:
         # sync_accounts, sync_creatives) validates and accepts the key but
         # performs no cache read, so a retry re-executes and can double-spend
         # or double-sync — which is what `supported=true` would have falsely
-        # promised was safe, for twelve of thirteen call sites. `false` was
-        # chosen as the narrower defect (create_media_buy behaving BETTER
-        # than advertised is safer than the other twelve behaving WORSE than
-        # advertised), not as a truthful declaration. Resolving this for real
+        # promised was safe. How many `require_idempotency_key(` call sites
+        # fall on each side is DERIVED, not restated here: see
+        # `tests/unit/test_idempotency_capability_applicability.py::
+        # test_dedup_reaching_call_site_split_is_derived_not_asserted`, which
+        # is the single home for that split (two earlier hand counts in this
+        # comment and in the PR body were both wrong). `false` was chosen as
+        # the narrower defect (create_media_buy behaving BETTER than
+        # advertised is safer than the non-deduplicating majority behaving
+        # WORSE than advertised), not as a truthful declaration. The spec text
+        # we diverge from is `protocol/get-adcp-capabilities-response.json`
+        # (v3.1.1), the `adcp.idempotency` `oneOf[1]` branch: it promises
+        # buyers the seller "will NOT return IDEMPOTENCY_CONFLICT or
+        # IDEMPOTENCY_EXPIRED, and a naive retry WILL double-process". The
+        # installed SDK is only a cross-check and is narrower — the generated
+        # class below keeps just the discriminator's one-line description and
+        # drops that branch text. Resolving this for real
         # means either extending genuine replay/conflict/expired handling to
         # every mutating tool (then flipping to true) or removing
         # create_media_buy's dedup so false becomes wire-accurate — both are

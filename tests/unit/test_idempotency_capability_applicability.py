@@ -10,13 +10,23 @@ raises ``IDEMPOTENCY_CONFLICT`` on a same-key different-payload retry, and
 still raises ``IDEMPOTENCY_EXPIRED`` past the replay window — all three
 directly contradict ``IdempotencyUnsupported``'s own semantics ("sending a key
 is a no-op ... the seller will NOT return IDEMPOTENCY_CONFLICT or
-IDEMPOTENCY_EXPIRED"). The other twelve ``require_idempotency_key(`` call
-sites — including ``update_media_buy`` — validate and accept the key without
+IDEMPOTENCY_EXPIRED"). The remaining ``require_idempotency_key(`` call sites —
+including ``update_media_buy`` — validate and accept the key without
 deduplicating, which contradicts ``IdempotencySupported`` just as directly.
 ``supported=false`` was chosen as the NARROWER defect (create_media_buy
-behaving better than advertised is safer than the other twelve behaving worse
-than advertised), not as a resolved, truthful declaration — the tests below
-assert what the wire currently carries, not that it is correct.
+behaving better than advertised is safer than the non-deduplicating majority
+behaving worse than advertised), not as a resolved, truthful declaration — the
+tests below assert what the wire currently carries, not that it is correct.
+
+``test_dedup_reaching_call_site_split_is_derived_not_asserted`` below is the
+SINGLE home for the split between the two groups. It DERIVES both numbers from
+the source at test time rather than restating a hand-counted literal, because
+the hand count was wrong twice: the PR body said "twelve of thirteen", a review
+corrected it to "three of twelve", and both figures counted only the sites
+living in ``media_buy_create.py`` — missing the A2A skill handler, which
+reaches the same core through ``create_media_buy_raw``. Every other artifact
+describing this contradiction (the ``FIXME(#1607)`` in ``capabilities.py`` and
+the grounding note) points at that test instead of repeating the arithmetic.
 
 This DOES cost real external conformance credit: the published storyboard
 (``dist/compliance/3.1.1/universal/idempotency.yaml``) grades its replay /
@@ -40,6 +50,7 @@ implement (in-flight tracking and its error-detail siblings) stay visible but
 unwired.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -47,6 +58,12 @@ from src.core.config_loader import current_tenant
 from src.core.tools.capabilities import _get_adcp_capabilities_impl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = PROJECT_ROOT / "src"
+# The module that owns create_media_buy's deduplicating core. Any key-validating
+# site inside it is on the path that actually replays; sites elsewhere reach the
+# core only by calling its A2A/REST entrypoint.
+DEDUP_CORE_MODULE = SRC_ROOT / "core" / "tools" / "media_buy_create.py"
+DEDUP_CORE_ENTRYPOINT = "create_media_buy_raw"
 GENERATED_UC002 = PROJECT_ROOT / "tests" / "bdd" / "features" / "BR-UC-002-create-media-buy.feature"
 LOCAL_OVERLAYS = PROJECT_ROOT / "tests" / "bdd" / "overlays" / "BR-UC-002-create-media-buy.feature"
 
@@ -70,14 +87,106 @@ REMAINING_UNWIRED_SCENARIOS = frozenset(
 )
 
 
+def _called_names(node: ast.AST) -> set[str]:
+    """Every bare function name called anywhere under ``node``."""
+    return {
+        child.func.id for child in ast.walk(node) if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+
+
+def _dedup_core_aliases(tree: ast.Module) -> set[str]:
+    """Local names bound to ``create_media_buy_raw`` in this module.
+
+    The A2A server imports it as ``core_create_media_buy_tool``, so matching the
+    bare symbol name would miss the site that the two earlier hand counts missed.
+    """
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            aliases |= {a.asname or a.name for a in node.names if a.name == DEDUP_CORE_ENTRYPOINT}
+    return aliases
+
+
+def _idempotency_call_sites() -> dict[str, bool]:
+    """Map every ``require_idempotency_key(`` call site in ``src/`` to reachability.
+
+    A site "reaches the dedup core" iff it lives in the module owning that core,
+    or its enclosing function calls the core's entrypoint under any local alias.
+    Derived from the AST so neither number can go stale behind a moved call site.
+    """
+    sites: dict[str, bool] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        source = path.read_text()
+        if "require_idempotency_key(" not in source:
+            continue
+        tree = ast.parse(source)
+        aliases = _dedup_core_aliases(tree)
+        functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
+        # Innermost first, so a nested def wins over its enclosing one.
+        functions.sort(key=lambda n: (n.end_lineno or n.lineno) - n.lineno)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            if node.func.id != "require_idempotency_key":
+                continue
+            enclosing = next(
+                (f for f in functions if f.lineno <= node.lineno <= (f.end_lineno or f.lineno)),
+                None,
+            )
+            reaches = path == DEDUP_CORE_MODULE or bool(enclosing is not None and _called_names(enclosing) & aliases)
+            sites[f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}"] = reaches
+    return sites
+
+
+def test_dedup_reaching_call_site_split_is_derived_not_asserted():
+    """The one home for how many key-validating sites actually deduplicate.
+
+    Both prior hand counts were wrong in the same way — they counted sites
+    living in ``media_buy_create.py`` and reported that as "sites reaching the
+    dedup core", missing ``_handle_create_media_buy_skill``, which reaches the
+    same core via ``create_media_buy_raw``. So the split is derived here rather
+    than written down: a new mutating tool, or a wrapper moving between files,
+    changes these numbers without anyone remembering to edit a comment.
+
+    The divergence this quantifies is against the PINNED spec (adcp 6.6.0 /
+    AdCP 3.1.1), ``protocol/get-adcp-capabilities-response.json``, the
+    ``adcp.idempotency`` ``oneOf[1]`` (``IdempotencyUnsupported``) branch we
+    ship: it tells buyers "sending a key is a no-op, the seller will NOT return
+    IDEMPOTENCY_CONFLICT or IDEMPOTENCY_EXPIRED, and a naive retry WILL
+    double-process." That is false for every reaching site below. Note the
+    installed SDK is NOT the authority here and is narrower than the schema:
+    its generated ``Idempotency3`` carries only the discriminator field's
+    one-line description ("False means the seller does not deduplicate
+    retries") and drops the branch text above entirely — the schema is what a
+    buyer's conformance runner reads.
+    """
+    sites = _idempotency_call_sites()
+    reaching = sorted(site for site, reaches in sites.items() if reaches)
+    not_reaching = sorted(site for site, reaches in sites.items() if not reaches)
+
+    assert len(sites) == 12, f"idempotency-key call sites changed: {sorted(sites)}"
+    assert len(reaching) == 4, f"sites reaching the dedup core changed: {reaching}"
+    assert len(not_reaching) == 8, f"non-deduplicating sites changed: {not_reaching}"
+
+    # The site both hand counts missed: reached through the alias, not the file.
+    assert any(site.startswith("src/a2a_server/adcp_a2a_server.py") for site in reaching), (
+        "the A2A create skill handler reaches the dedup core via create_media_buy_raw; "
+        f"reaching set no longer includes it: {reaching}"
+    )
+    # Every non-reaching site accepts a key and then re-executes on retry —
+    # that is the group `supported=false` describes accurately.
+    assert all(not site.startswith("src/core/tools/media_buy_create.py") for site in not_reaching)
+
+
 def test_advertised_idempotency_is_the_narrower_defect_not_a_resolved_claim():
     """Pin the current wire value; this is NOT an assertion that it is fully truthful.
 
     An agent-wide ``supported=true`` was previously justified purely by
     create_media_buy's real replay, while update_media_buy/sync_accounts/
     sync_creatives silently re-execute a retried request — the worse defect
-    (double-spend risk across twelve sites), which is why this asserts
-    ``False``. But ``False`` is not truthful either: create_media_buy still
+    (double-spend risk across every non-deduplicating site, counted by
+    ``test_dedup_reaching_call_site_split_is_derived_not_asserted``), which is
+    why this asserts ``False``. But ``False`` is not truthful either: create_media_buy still
     deduplicates, conflicts, and expires, directly contradicting
     ``IdempotencyUnsupported``'s own semantics. Flip to ``True`` only
     alongside evidence every ``require_idempotency_key(`` call site actually
