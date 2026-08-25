@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +117,49 @@ async def test_callback_proof_is_value_bound_and_prevents_second_resolution() ->
                 require_valid_callback_config_urls(push_notification_config=callback_config)
 
     validate.assert_called_once_with(_CALLBACK_URL, allow_private=False)
+
+
+@pytest.mark.asyncio
+async def test_callback_proof_with_forged_signature_is_rejected() -> None:
+    """An unsealed proof is refused even when its callback values are unchanged."""
+    callback_config = {"url": _CALLBACK_URL}
+    with patch(
+        "src.core.webhook_validator._validate_callback_url_with_policy",
+        return_value=(True, ""),
+    ):
+        proof = await require_valid_callback_config_urls_async(
+            push_notification_config=callback_config,
+        )
+
+    forged = replace(proof, _signature=b"\x00" * 32)
+    with pytest.raises(AdCPValidationError, match="changed after security validation"):
+        require_valid_callback_config_urls(
+            push_notification_config=callback_config,
+            validation_proof=forged,
+        )
+
+
+@pytest.mark.asyncio
+async def test_callback_proof_issued_under_another_private_target_policy_is_rejected() -> None:
+    """A proof sealed under one private-target policy cannot clear a different one."""
+    callback_config = {"url": _CALLBACK_URL}
+    with (
+        patch(
+            "src.core.webhook_validator._validate_callback_url_with_policy",
+            return_value=(True, ""),
+        ),
+        patch("src.core.webhook_validator._allow_private_webhook_targets", return_value=False),
+    ):
+        proof = await require_valid_callback_config_urls_async(
+            push_notification_config=callback_config,
+        )
+
+    with patch("src.core.webhook_validator._allow_private_webhook_targets", return_value=True):
+        with pytest.raises(AdCPValidationError, match="changed after security validation"):
+            require_valid_callback_config_urls(
+                push_notification_config=callback_config,
+                validation_proof=proof,
+            )
 
 
 @pytest.mark.asyncio
