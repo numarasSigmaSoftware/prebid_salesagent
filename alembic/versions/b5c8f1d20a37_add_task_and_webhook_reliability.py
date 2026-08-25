@@ -18,16 +18,34 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _batch_backfill_logical_event_key(*, batch_size: int = 1000) -> None:
+    """Backfill ``logical_event_key`` in bounded chunks.
+
+    ``webhook_delivery_log`` is a hot, populated production table; a single
+    unbatched ``UPDATE ... WHERE logical_event_key IS NULL`` would hold its
+    row locks for however long the full-table scan+write takes. Chunking
+    keeps each transaction's lock hold bounded, mirroring the size used
+    elsewhere in this migration's autocommit index builds.
+    """
+    bind = op.get_bind()
+    while True:
+        result = bind.execute(
+            sa.text(
+                "UPDATE webhook_delivery_log SET logical_event_key = id "
+                "WHERE id IN ("
+                "SELECT id FROM webhook_delivery_log WHERE logical_event_key IS NULL LIMIT :batch_size"
+                ")"
+            ),
+            {"batch_size": batch_size},
+        )
+        if result.rowcount == 0:
+            break
+
+
 def upgrade() -> None:
     """Add durable task, callback, revision, and expanded claim state."""
     op.add_column("webhook_delivery_log", sa.Column("logical_event_key", sa.String(length=64), nullable=True))
-    op.execute("UPDATE webhook_delivery_log SET logical_event_key = id WHERE logical_event_key IS NULL")
-    op.create_index(
-        "uq_webhook_log_logical_event",
-        "webhook_delivery_log",
-        ["tenant_id", "principal_id", "media_buy_id", "webhook_url", "logical_event_key"],
-        unique=True,
-    )
+    _batch_backfill_logical_event_key()
     op.add_column("webhook_delivery_log", sa.Column("event_payload", JSONType, nullable=True))
 
     op.add_column("push_notification_configs", sa.Column("media_buy_id", sa.String(length=100), nullable=True))
@@ -47,12 +65,25 @@ def upgrade() -> None:
         ["media_buy_id"],
         ondelete="CASCADE",
     )
-    op.create_index(
-        "idx_push_notification_configs_media_buy",
-        "push_notification_configs",
-        ["tenant_id", "principal_id", "media_buy_id"],
-        unique=False,
-    )
+
+    # Both indexes are brand-new (no prior name to protect), so a plain
+    # CREATE INDEX CONCURRENTLY IF NOT EXISTS suffices -- no build-under-a-
+    # temp-name-then-rename dance is needed (unlike
+    # a164b85bab9e_widen_media_buys_idempotency_backstop_.py, which swaps an
+    # EXISTING index name and so must avoid a coverage gap). CONCURRENTLY
+    # cannot run inside a transaction alongside other DDL, so both builds are
+    # grouped into one autocommit_block(); the add_column/FK calls above and
+    # the DDL below run in the normal transactional mode on either side of it.
+    with op.get_context().autocommit_block():
+        op.execute(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_webhook_log_logical_event "
+            "ON webhook_delivery_log (tenant_id, principal_id, media_buy_id, webhook_url, logical_event_key)"
+        )
+        op.execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_push_notification_configs_media_buy "
+            "ON push_notification_configs (tenant_id, principal_id, media_buy_id)"
+        )
+
     op.add_column("media_buys", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
     op.add_column("workflow_steps", sa.Column("processing_started_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("workflow_steps", sa.Column("notifications_published_at", sa.DateTime(timezone=True), nullable=True))
@@ -214,7 +245,15 @@ def downgrade() -> None:
     op.drop_column("workflow_steps", "notification_sequence")
     op.drop_column("workflow_steps", "processing_started_at")
     op.drop_column("media_buys", "revision")
-    op.drop_index("idx_push_notification_configs_media_buy", table_name="push_notification_configs")
+
+    # Mirror upgrade()'s grouping: both DROP INDEX CONCURRENTLY statements
+    # together in one autocommit_block(), since CONCURRENTLY cannot run
+    # inside a transaction alongside other DDL. The FK/column drops that
+    # follow run in the normal transactional mode after the block exits.
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_push_notification_configs_media_buy")
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS uq_webhook_log_logical_event")
+
     op.drop_constraint(
         "fk_push_notification_configs_media_buy",
         "push_notification_configs",
@@ -228,5 +267,4 @@ def downgrade() -> None:
     op.drop_column("push_notification_configs", "media_buy_id")
 
     op.drop_column("webhook_delivery_log", "event_payload")
-    op.drop_index("uq_webhook_log_logical_event", table_name="webhook_delivery_log")
     op.drop_column("webhook_delivery_log", "logical_event_key")
