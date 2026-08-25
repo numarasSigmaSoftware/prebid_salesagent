@@ -126,12 +126,13 @@ class MediaBuyRepository:
                 f"Media buy '{media_buy_id}' is being modified by another request; retry shortly.",
                 field="media_buy_id",
                 suggestion="Another update holds the row lock. Re-read the media buy and retry.",
-                # Same details KEY SET as every other media-buy CONFLICT (shared
-                # shape), so a generic retry loop reading details["current_version"]
-                # gets an explicit "unknown" instead of a KeyError. The versions are
-                # genuinely unobserved here — the lock timed out BEFORE the row could
-                # be read — so they are explicit nulls, never guessed integers, and we
-                # do not take another lock or add a read to learn them.
+                # Same shared details builder as every other media-buy CONFLICT. The
+                # versions are genuinely unobserved here — the lock timed out BEFORE
+                # the row could be read — so the builder OMITS both keys, which is how
+                # the pinned conflict.json expresses "unknown" (they are optional, and
+                # typed number|string, so an explicit null would be schema-invalid on
+                # the wire). Never guessed integers, and we do not take another lock or
+                # add a read to learn them.
                 details=media_buy_conflict_details(media_buy_id),
                 recovery="transient",
                 context=context,

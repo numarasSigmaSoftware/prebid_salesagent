@@ -706,21 +706,31 @@ def media_buy_conflict_details(
     expected: int | None = None,
     current: int | None = None,
 ) -> dict[str, Any]:
-    """The spec CONFLICT ``details`` shape — the SAME keys at every raise site.
+    """The spec CONFLICT ``details`` shape, shared by every media-buy raise site.
 
-    ``dist/schemas/3.1.1/error-details/conflict.json`` models a conflict as
-    ``resource_id`` / ``expected_version`` / ``current_version``. A generic
-    optimistic-concurrency retry loop reads ``details["current_version"]``, so a
-    site that OMITS the key raises ``KeyError`` in the buyer's client instead of
-    reading "unknown". Every media-buy CONFLICT therefore carries all three keys.
+    The pinned ``error-details/conflict.json`` (AdCP 3.1.1) models a conflict as
+    ``resource_id`` / ``expected_version`` / ``current_version``, types both
+    version fields ``["number", "string"]``, and declares NO ``required`` array.
+    A version the seller never observed is therefore expressed by OMITTING the
+    key: an explicit ``null`` fails validation against that schema ("None is not
+    of type 'number', 'string'"), and ``details`` reaches the buyer verbatim, so
+    the null would put a schema-invalid body on the wire.
 
-    A version that is genuinely unobserved is an EXPLICIT ``None``, never a
-    guessed integer: the lock-timeout site times out BEFORE the row can be read,
-    so neither version was ever seen, and taking another lock to learn them is
-    precisely what just failed. ``None`` says "unknown"; a fabricated number
-    would say something false about the buyer's own token.
+    Absence is how the pin says "unknown" — not a gap a client trips over. The
+    fields are optional in the schema, so a retry loop reads them with ``.get()``;
+    the earlier reasoning here (that omitting a key would ``KeyError`` a generic
+    client, so a null was kinder) inverted the contract, trading a documented
+    optional field for an invalid one. A fabricated integer would be worse still:
+    it would state something false about the buyer's own token. The lock-timeout
+    site times out BEFORE the row can be read, and taking another lock to learn
+    the versions is exactly what just failed — so it omits both.
     """
-    return {"resource_id": media_buy_id, "expected_version": expected, "current_version": current}
+    details: dict[str, Any] = {"resource_id": media_buy_id}
+    if expected is not None:
+        details["expected_version"] = expected
+    if current is not None:
+        details["current_version"] = current
+    return details
 
 
 def media_buy_revision_conflict(

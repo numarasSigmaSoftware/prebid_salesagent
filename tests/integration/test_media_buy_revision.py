@@ -463,16 +463,41 @@ class TestRevisionOptimisticConcurrency:
 
 @pytest.mark.requires_db
 class TestConflictDetailsShapeParity:
-    """Every media-buy CONFLICT exposes the SAME ``details`` key set.
+    """Every media-buy CONFLICT ``details`` body validates against the pinned schema.
 
-    A generic optimistic-concurrency retry loop reads
-    ``details["current_version"]``. One raise site used to emit ``resource_id``
-    alone, so that loop raised ``KeyError`` instead of reading "unknown". The
-    keys are now uniform; a version that was never observed is an explicit
-    ``None``, never a fabricated integer.
+    ``details`` reaches the buyer verbatim, so the contract it answers to is
+    ``error-details/conflict.json`` at the pinned AdCP version, not an internal
+    convention. That schema types ``expected_version``/``current_version`` as
+    ``["number", "string"]`` and declares no ``required`` array: a version the
+    seller never observed is expressed by OMITTING the key, and an explicit
+    ``null`` is INVALID ("None is not of type 'number', 'string'").
+
+    An earlier version of this class asserted the two arms exposed the same key
+    set, which pinned exactly the defect — the lock-timeout arm carried both keys
+    as nulls and shipped a schema-invalid body. The two arms legitimately differ:
+    what both must satisfy is the schema.
     """
 
-    def test_revision_mismatch_and_lock_timeout_conflicts_share_a_details_key_set(self, env_and_buy):
+    @staticmethod
+    def _assert_valid_conflict_details(details: dict, label: str) -> None:
+        """Validate a details body against the PINNED conflict.json (draft-07)."""
+        import json
+        from pathlib import Path
+
+        import adcp
+        from jsonschema import Draft7Validator
+
+        schema_path = Path(adcp.__file__).parent / "_schemas" / "3.1" / "error-details" / "conflict.json"
+        assert schema_path.exists(), f"pinned conflict schema missing at {schema_path}"
+        schema = json.loads(schema_path.read_text())
+        errors = sorted(Draft7Validator(schema).iter_errors(details), key=lambda e: list(e.path))
+        assert not errors, (
+            f"{label} CONFLICT details is invalid against the pinned conflict.json: "
+            + "; ".join(f"{list(error.path)}: {error.message}" for error in errors)
+            + f" (body={details!r})"
+        )
+
+    def test_revision_mismatch_and_lock_timeout_conflict_details_match_the_pinned_schema(self, env_and_buy):
         env, created = env_and_buy
         from sqlalchemy import select
         from sqlalchemy.orm import Session as SASession
@@ -503,16 +528,25 @@ class TestConflictDetailsShapeParity:
         mismatch_details = mismatch.value.details
         timeout_details = timeout.value.details
         assert mismatch_details is not None and timeout_details is not None
-        assert mismatch_details.keys() == timeout_details.keys(), (
-            "both CONFLICT shapes must expose the same details keys; "
-            f"mismatch={sorted(mismatch_details)} lock_timeout={sorted(timeout_details)}"
-        )
-        # The unknown side says so explicitly rather than guessing a number.
-        assert timeout_details["expected_version"] is None
-        assert timeout_details["current_version"] is None
-        # ...and the known side still carries the real values.
+
+        # Both bodies answer to the pinned schema — the buyer-facing contract.
+        self._assert_valid_conflict_details(mismatch_details, "revision-mismatch")
+        self._assert_valid_conflict_details(timeout_details, "lock-timeout")
+
+        # The known-version arm carries both versions, with the real values.
         assert mismatch_details["expected_version"] == 5
         assert mismatch_details["current_version"] == 1
+
+        # The unknown-version arm carries NEITHER: the lock timed out before the
+        # row could be read, and absence is how the schema expresses "unknown".
+        # A null here validates as invalid above; a number would be fabricated.
+        assert "expected_version" not in timeout_details, (
+            f"lock-timeout CONFLICT reported an expected_version it never observed: {timeout_details!r}"
+        )
+        assert "current_version" not in timeout_details, (
+            f"lock-timeout CONFLICT reported a current_version it never observed: {timeout_details!r}"
+        )
+        assert timeout_details["resource_id"] == created.media_buy_id
 
 
 @pytest.mark.requires_db
