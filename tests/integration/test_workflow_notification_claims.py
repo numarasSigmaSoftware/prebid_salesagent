@@ -135,6 +135,36 @@ def test_finalize_notification_claim_rejects_wrong_token_from_a_second_claimant(
             assert uow.workflows.mark_notifications_published(event_id, claim_token=real_token) is True
 
 
+def test_claim_notification_publication_cannot_cross_tenant_boundary(integration_db) -> None:
+    """A tenant scope can never observe or claim another tenant's real notification event.
+
+    ``claim_notification_publication`` filters on ``tenant_id`` as well as
+    ``(step_id, status)`` — a caller (buggy or malicious) that somehow learns
+    another tenant's ``step_id`` must not be able to claim that tenant's
+    occurrence. Prove the guard directly: tenant B, given tenant A's real
+    step_id/status, must not be able to claim it.
+    """
+    from tests.harness._base import BareIntegrationEnv
+
+    with BareIntegrationEnv():
+        tenant_a_id, step_id, status = _new_workflow_scope()
+        tenant_b = TenantFactory(tenant_id=f"wf-claim-tenant-{uuid4().hex[:8]}")
+
+        with WorkflowUoW(tenant_b.tenant_id) as uow:
+            assert uow.workflows is not None
+            cross_tenant_claim = uow.workflows.claim_notification_publication(step_id, status)
+
+    assert cross_tenant_claim is None, "a tenant must not observe another tenant's notification event"
+
+    # Sanity: the SAME (step_id, status) is genuinely claimable by its actual
+    # owner — proves the None above is the tenant filter, not a mismatched
+    # step_id/status.
+    with WorkflowUoW(tenant_a_id) as uow:
+        assert uow.workflows is not None
+        own_claim = uow.workflows.claim_notification_publication(step_id, status)
+    assert own_claim is not None and own_claim[1] is not None
+
+
 def test_claim_notification_publication_steals_an_expired_lease(integration_db) -> None:
     """A claim past its lease_seconds boundary can be re-claimed, not rejected as live.
 
