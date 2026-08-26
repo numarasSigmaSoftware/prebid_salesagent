@@ -545,6 +545,23 @@ def _read_scope(identity: ResolvedIdentity | None) -> tuple[str, str, str | None
     by, so the only spec-consistent choices are refuse the read (breaks the
     public-operation MUST above) or never persist a cache row for it (this
     function's choice).
+
+    No buyer-facing signal is needed for this gap. The replay guarantee exists
+    to prevent double-execution of a STATE-CHANGING operation — that is what
+    ``replayed: true`` protects a buyer from re-triggering. ``AUTH_OPTIONAL_TOOLS``
+    (``src/core/mcp_auth_middleware.py``) is exactly
+    ``{get_adcp_capabilities, get_products, list_creative_formats,
+    list_authorized_properties}`` — every mutating tool requires auth
+    (``require_auth = tool_name not in AUTH_OPTIONAL_TOOLS``), so an anonymous
+    caller can never reach an operation with a real-world side effect. Skipping
+    the cache for them means an anonymous retry gets a fresh read instead of a
+    replayed snapshot — not a degraded guarantee, since there is no
+    double-booking or double-charge risk to protect against when there is
+    nothing to duplicate. Considered and rejected: a response-level advisory
+    field (no AdCP wire slot for a non-error informational note on a success
+    envelope; would be new, non-spec surface) and an identity-aware capability
+    declaration (bigger change to a foundational discovery endpoint, for a gap
+    that cannot cause buyer harm in the first place).
     """
     tenant_id = identity.tenant_id if identity is not None else None
     if tenant_id is None and identity is not None and isinstance(identity.tenant, dict):
