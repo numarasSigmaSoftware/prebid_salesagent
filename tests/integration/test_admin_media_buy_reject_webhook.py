@@ -45,6 +45,12 @@ def make_pending_media_buy(integration_db):
     IN-FLIGHT buy, which is what discriminates a computed approval target from a
     hardcoded one — every approval path answers "scheduled" for a pre-flight buy
     whether it read the window or not.
+
+    ``creative_status``: when given, assigns one creative in that status to the buy.
+    The admin approve route's target is ``"draft"`` — an UNCONFIRMED status — for a buy
+    with no creatives assigned, so nothing on that route stamps ``confirmed_at`` and its
+    stamp-before-transition ordering is never exercised. Passing ``"approved"`` makes
+    the computed target seller-confirmed, which is what puts the ordering under test.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -53,6 +59,8 @@ def make_pending_media_buy(integration_db):
     from src.core.database.database_session import get_engine
     from tests.factories import (
         ALL_FACTORIES,
+        CreativeAssignmentFactory,
+        CreativeFactory,
         MediaBuyFactory,
         MediaPackageFactory,
         PricingOptionFactory,
@@ -62,6 +70,7 @@ def make_pending_media_buy(integration_db):
         PushNotificationConfigFactory,
         TenantFactory,
     )
+    from tests.factories.creative_asset import build_assets, image_spec
 
     engine = get_engine()
     session = SASession(bind=engine)
@@ -71,6 +80,7 @@ def make_pending_media_buy(integration_db):
         protocol: str = "mcp",
         start_days: int = 7,
         end_days: int = 37,
+        creative_status: str | None = None,
     ):
         tenant = TenantFactory(tenant_id="reject_wh_tenant")
         PropertyTagFactory(tenant=tenant, tag_id="all_inventory", name="All Inventory")
@@ -114,6 +124,22 @@ def make_pending_media_buy(integration_db):
                 "pricing_option_id": "cpm_usd_fixed",
             },
         )
+        if creative_status is not None:
+            # "banner_image" is in MEDIA_ASSET_FALLBACK_IDS, so the adapter's asset
+            # extraction finds url/width/height without a format-spec lookup; the
+            # factory's default "banner" slot does not, and the adapter refuses the buy.
+            creative = CreativeFactory(
+                tenant=tenant,
+                principal=principal,
+                status=creative_status,
+                data={"assets": build_assets(image_spec("banner_image"))},
+            )
+            CreativeAssignmentFactory(
+                creative=creative,
+                media_buy=media_buy,
+                package_id="pkg_reject_wh_1",
+            )
+
         PushNotificationConfigFactory(
             tenant=tenant,
             principal=principal,
@@ -348,7 +374,7 @@ class TestAdminMediaBuyRejectWebhook:
         )
 
     def test_approve_webhook_embeds_confirmed_success_via_factory(
-        self, authenticated_admin_session, pending_reject_media_buy, webhook_capture
+        self, authenticated_admin_session, make_pending_media_buy, webhook_capture
     ):
         """The APPROVED media buy webhook embeds a confirmed completed Success.
 
@@ -360,11 +386,17 @@ class TestAdminMediaBuyRejectWebhook:
         internal fields. Guards the factory switch against any wire drift and
         pins that approve stays a Success (never the Submitted variant the
         pending-approval CREATE path now emits — PR #1567 round-2 item 2).
-        """
-        tenant_id = pending_reject_media_buy["tenant_id"]
-        media_buy_id = pending_reject_media_buy["media_buy_id"]
 
-        _post_approval_action(authenticated_admin_session, pending_reject_media_buy, {"action": "approve"})
+        Also the ORACLE for the operations.py stamp-before-transition ordering, which
+        is why the buy carries an APPROVED creative: with none assigned the route's
+        computed target is ``"draft"``, an unconfirmed status that stamps nothing, so
+        the ordering is never exercised and a presence-only assertion cannot see it.
+        """
+        ids = make_pending_media_buy(creative_status="approved")
+        tenant_id = ids["tenant_id"]
+        media_buy_id = ids["media_buy_id"]
+
+        _post_approval_action(authenticated_admin_session, ids, {"action": "approve"})
         body = _webhook_body(webhook_capture)
 
         assert body["status"] == "completed", f"outer status should be completed, got {body.get('status')!r}"
@@ -403,7 +435,21 @@ class TestAdminMediaBuyRejectWebhook:
             assert embedded.get("revision") == persisted_buy.revision, (
                 "webhook must carry the persisted optimistic-concurrency revision"
             )
-            assert embedded["confirmed_at"] is not None and persisted_buy.confirmed_at is not None
+            # The APPROVAL instant, not the buyer's CREATE instant. confirmed_at is
+            # write-once and takes `approved_at or created_at`, so a route that stamps
+            # the approval AFTER the transition freezes created_at — a non-null
+            # assertion cannot tell the two apart. Split so each failure names itself.
+            assert persisted_buy.confirmed_at is not None, (
+                "approved (committed) buy must carry a confirmation instant on the row"
+            )
+            assert persisted_buy.confirmed_at == persisted_buy.approved_at, (
+                f"confirmed_at must be the approval instant, got confirmed_at={persisted_buy.confirmed_at!r} "
+                f"approved_at={persisted_buy.approved_at!r} created_at={persisted_buy.created_at!r}"
+            )
+            assert persisted_buy.confirmed_at != persisted_buy.created_at, (
+                "confirmed_at fell back to the buyer's CREATE instant — the approval was recorded "
+                "after the transition that freezes the write-once stamp"
+            )
         assert "workflow_step_id" not in embedded, "internal workflow_step_id must not leak onto the wire"
         # Absent-context branch pin (PR #1567 round-3): with no "context" key in
         # the workflow step's request_data, the echo path stays dormant and the
