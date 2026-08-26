@@ -1,7 +1,9 @@
 """Creative-to-package assignment processing."""
 
 import logging
-from typing import Any
+from typing import Any, cast
+
+from sqlalchemy.orm import Session
 
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.uow import CreativeUoW
@@ -294,8 +296,15 @@ def _process_assignments(
             # flow's pending_field_updates dict (it stages a deferred update_fields
             # call), so it cannot be applied to a row on this session.
             # FIXME(#2080): CreativeUoW should provide a media-buy repo directly
-            assert uow.session is not None
-            media_buy_repo = MediaBuyRepository(uow.session, tenant["tenant_id"])
+            #
+            # ``cast``, not ``assert``: this narrows a type, it does not check a
+            # value. ``CreativeUoW.__enter__`` assigns a real Session or raises, so
+            # inside this ``with`` block ``uow.session`` cannot be None and a runtime
+            # check here would be unreachable. The ``assert`` that stood here read as
+            # a guard while being stripped under ``-O`` — a check in name only, on a
+            # production path. Saying ``cast`` says the true thing.
+            session = cast(Session, uow.session)
+            media_buy_repo = MediaBuyRepository(session, tenant["tenant_id"])
             for mb_id, mb_obj in media_buys_with_new_assignments.items():
                 if mb_obj.status == "draft" and mb_obj.approved_at is not None:
                     media_buy_repo.apply_status_transition(mb_obj, "pending_creatives")

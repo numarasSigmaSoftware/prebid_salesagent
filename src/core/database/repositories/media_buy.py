@@ -1057,10 +1057,25 @@ class MediaBuyRepository:
         right after calling a transition seam; ``tests/unit/
         test_architecture_media_buy_status_writes.py`` now reddens on that shape.
 
-        Deliberately does NOT bump ``revision``: every caller stamps in the same
-        transaction as a transition seam that already bumped exactly once, and a
-        second bump here would double-count one approval. Callers that need the
-        counter advanced without a status change use :meth:`bump_revision`.
+        Deliberately does NOT bump ``revision``. The reason is NOT that every caller
+        pairs the stamp with a transition seam in the same transaction — the
+        pre-adapter arms of the workflow-approval and creative-approval routes
+        (``src/admin/blueprints/workflows.py``, ``src/admin/blueprints/creatives.py``)
+        each stamp and COMMIT alone, so that claim was false as written. The reason is
+        that this method writes no buyer-visible lifecycle state:
+        ``approved_at``/``approved_by`` are seller-side bookkeeping, and the buy's
+        status is unchanged, so the buyer's optimistic-concurrency token has nothing
+        to be stale against.
+
+        The lone-stamp case is coherent for the same reason. This method never calls
+        :meth:`_stamp_confirmation_if_needed` — the write-once ``confirmed_at`` is
+        frozen only by the transition seams — so a stamp on its own commits nothing
+        irreversible, and a retry simply overwrites ``approved_at``. When the paired
+        transition does arrive it bumps exactly once, which is the count one approval
+        should produce.
+
+        Callers that need the counter advanced without a status change use
+        :meth:`bump_revision`.
 
         The row is resolved against THIS repository's tenant binding, like the
         transition seams — an instance method cannot be handed a buy from another

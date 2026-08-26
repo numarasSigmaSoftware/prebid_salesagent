@@ -604,12 +604,18 @@ class TestWorkflowApprovalConfirmationInstant:
            NULL and froze the buyer's CREATE instant as the seller's COMMITMENT
            instant. A non-NULL assertion cannot see that; the value must equal the
            approval instant and must NOT be the create instant.
-        2. STALE ROW. The buy is loaded on the request session before that nested
-           call commits a new status on its own session, so the copy this arm holds
-           carries a stale status AND a stale flight window. The exact revision is
-           the oracle: 1 (seeded) -> 2 (the nested activation) -> 3 (this arm). A
-           ``>``-style assertion would stay green on a silent no-op, because the
-           nested activation bumps either way.
+        2. BUMP COUNT. The exact revision is the oracle: 1 (seeded) -> 2 (the nested
+           activation) -> 3 (this arm). It reddens when this arm's bump goes MISSING
+           — delete its ``apply_computed_status_transition`` call and the row commits
+           at 2 — which a ``>``-style assertion could not see, because the nested
+           activation bumps either way.
+
+           It does NOT redden on the stale-row shapes this pin was once described as
+           catching: dropping ``populate_existing=True`` from the re-resolve leaves
+           the test green, and removing the re-resolve altogether fails earlier, on
+           the 200 status-code assertion (the route 500s). Defect 1 above also
+           reddens earlier, on ``confirmed_at``. So the revision line grades the
+           bump count and nothing else — keep it exact.
 
         Also pins the committed FINAL status. This fixture's buy is PRE-FLIGHT
         (starts in 7 days), so the computed target is ``"scheduled"`` — the same
