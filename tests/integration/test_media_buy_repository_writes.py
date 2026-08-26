@@ -530,6 +530,120 @@ class TestRevisionBumpsOnStatusTransition:
             assert unblocked.revision == 2
             assert unblocked.confirmed_at is not None
 
+    def test_creative_unblock_confirms_at_the_approval_instant_not_the_create_instant(
+        self, authenticated_admin_session, bound_factories
+    ):
+        """The creative-approval route records the APPROVAL instant as confirmed_at.
+
+        ``confirmed_at`` is write-once and takes ``approved_at or created_at``.
+        ``execute_approved_media_buy`` activates the buy on its OWN session, and THAT
+        activation seam performs the stamp, reading ``approved_at`` off the committed
+        row. Recording the approval only after that call returns is too late: the stamp
+        has already frozen the buyer's CREATE instant as the seller's COMMITMENT
+        instant, and write-once makes that uncorrectable.
+
+        The sibling above patches ``execute_approved_media_buy`` OUT, so nothing
+        freezes the stamp there and a non-null assertion stays green either way. This
+        one drives the REAL call, on a ``draft`` buy with the product/package/raw_request
+        it needs to reconstruct and execute.
+        """
+        from unittest.mock import patch
+
+        from tests.factories import (
+            CreativeAssignmentFactory,
+            CreativeFactory,
+            MediaBuyFactory,
+            MediaPackageFactory,
+            PricingOptionFactory,
+            PrincipalFactory,
+            ProductFactory,
+            PropertyTagFactory,
+            TenantFactory,
+        )
+        from tests.factories.creative_asset import build_assets, image_spec
+
+        tenant = TenantFactory(tenant_id="creative_confirm_tenant")
+        PropertyTagFactory(tenant=tenant, tag_id="all_inventory", name="All Inventory")
+        principal = PrincipalFactory(
+            tenant=tenant,
+            principal_id="creative_confirm_principal",
+            platform_mappings={"mock": {"id": "creative_confirm_advertiser"}},
+        )
+        product = ProductFactory(tenant=tenant, product_id="prod_creative_confirm")
+        PricingOptionFactory(product=product)
+
+        now = datetime.now(UTC)
+        # IN-FLIGHT so the post-adapter computed target is "active"; the buy sits in
+        # "draft", which is what routes it into the creative-unblock loop.
+        buy = MediaBuyFactory(
+            tenant=tenant,
+            principal=principal,
+            media_buy_id="mb_creative_confirm",
+            status="draft",
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(days=7),
+            raw_request={
+                "brand": {"domain": "creative-confirm.example.com"},
+                "po_number": "CREATIVE-CONFIRM-1",
+                "start_time": (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_time": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "packages": [
+                    {"product_id": product.product_id, "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}
+                ],
+            },
+        )
+        MediaPackageFactory(
+            media_buy=buy,
+            package_id="pkg_creative_confirm",
+            package_config={
+                "package_id": "pkg_creative_confirm",
+                "product_id": product.product_id,
+                "budget": 5000.0,
+                "pricing_option_id": "cpm_usd_fixed",
+            },
+        )
+        # "banner_image" is in MEDIA_ASSET_FALLBACK_IDS, so the adapter's asset
+        # extraction finds url/width/height without a format-spec lookup; the default
+        # "banner" slot does not, and the adapter refuses the buy.
+        creative = CreativeFactory(
+            tenant=tenant,
+            principal=principal,
+            status="pending_review",
+            data={"assets": build_assets(image_spec("banner_image"))},
+        )
+        CreativeAssignmentFactory(creative=creative, media_buy=buy, package_id="pkg_creative_confirm")
+
+        with MediaBuyUoW("creative_confirm_tenant") as uow:
+            before = uow.media_buys.get_by_id("mb_creative_confirm")
+            assert before is not None, "test setup: draft media buy missing"
+            assert before.approved_at is None, "test setup: draft buy must not be approved yet"
+            assert before.confirmed_at is None, "test setup: draft buy must not be confirmed yet"
+
+        with patch("src.admin.blueprints.creatives._send_post_commit_side_effects"):
+            response = authenticated_admin_session.post(
+                f"/tenant/creative_confirm_tenant/creatives/review/{creative.creative_id}/approve",
+                content_type="application/json",
+                json={"approved_by": "admin@example.com"},
+            )
+        assert response.status_code == 200, response.get_data(as_text=True)
+
+        with MediaBuyUoW("creative_confirm_tenant") as uow:
+            after = uow.media_buys.get_by_id("mb_creative_confirm")
+            assert after is not None, "unblocked media buy vanished"
+            # Split so each failure names itself.
+            assert after.status == "active", (
+                f"the unblocked in-flight buy must be activated, got status={after.status!r}"
+            )
+            assert after.approved_at is not None, "creative-driven approval left approved_at unset"
+            assert after.confirmed_at == after.approved_at, (
+                f"confirmed_at must be the approval instant, got confirmed_at={after.confirmed_at!r} "
+                f"approved_at={after.approved_at!r} created_at={after.created_at!r}"
+            )
+            assert after.confirmed_at != after.created_at, (
+                "confirmed_at fell back to the buyer's CREATE instant — the adapter activation froze "
+                "the write-once stamp before the approval was recorded"
+            )
+
     def test_workflow_approval_pending_creatives_return_still_stamps_confirmed_at(
         self, authenticated_admin_session, tenant_a, principal_a, bound_factories
     ):

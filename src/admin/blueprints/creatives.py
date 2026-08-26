@@ -618,6 +618,23 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 f"[CREATIVE APPROVAL] All creatives approved for media buy {action['media_buy_id']}, executing adapter creation"
             )
 
+            # Record the approval for THIS buy, and COMMIT it, before the adapter runs.
+            # execute_approved_media_buy activates the buy on its OWN session, and that
+            # activation seam performs the write-once confirmed_at stamp, reading
+            # approved_at off the COMMITTED row. Stamping after it returns is too late:
+            # confirmed_at would already be frozen at created_at — the buyer's CREATE
+            # instant recorded as the seller's COMMITMENT instant, and write-once means
+            # uncorrectable. Same ordering as src/admin/blueprints/workflows.py.
+            with AdminCreativeUoW(tenant_id) as uow_approval:
+                assert uow_approval.media_buys is not None
+                unblocked_buy = uow_approval.media_buys.get_by_id(action["media_buy_id"])
+                if unblocked_buy:
+                    # Through the repository seam, not a raw `.approved_at =`:
+                    # approved_at/approved_by are seller-side state the confirmation
+                    # back-fill reads, and the lifecycle guard reddens on a raw write.
+                    uow_approval.media_buys.stamp_approval(unblocked_buy, approved_by="system")
+                # auto-commits
+
             success, error_msg = execute_approved_media_buy(action["media_buy_id"], tenant_id)
 
             if success:
@@ -632,15 +649,11 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                         # write-once confirmed_at and bumps the AdCP revision
                         # counter. A raw `.status =` here did neither, so a
                         # creative-driven activation left both untouched.
-                        # The approval stamp goes through the repository too: it is
-                        # seller-side state the confirmation back-fill reads, so it
-                        # belongs on the same side of the boundary as the status write
-                        # — and BEFORE it: the computed target is a seller-confirmed
-                        # status, and the write-once confirmed_at takes
-                        # `approved_at or created_at` at that moment. Stamping
-                        # afterwards freezes the buyer's CREATE instant as the
-                        # seller's COMMITMENT instant, uncorrectably.
-                        uow2.media_buys.stamp_approval(mb, approved_by="system")
+                        # The approval is NOT stamped here: it is stamped and
+                        # committed ABOVE, before execute_approved_media_buy. This
+                        # whole block runs after that call, whose activation already
+                        # froze the write-once confirmed_at off the committed row —
+                        # a stamp at this point could not reach it.
                         uow2.media_buys.apply_computed_status_transition(mb, compute_flight_window_status)
                     # auto-commits
 
