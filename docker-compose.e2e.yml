@@ -66,6 +66,33 @@ services:
       # Per-run secret for narrowly scoped live-server test controls. Empty in
       # normal compose usage, which keeps those controls undiscoverable.
       ADCP_TEST_CONTROL_TOKEN: ${ADCP_TEST_CONTROL_TOKEN:-}
+      # Keep this server's log files OFF the bind mount it shares with `tests`.
+      # The image bakes USER app (uid 1001) while `tests` runs as the invoking
+      # host user, so with the default CWD-relative path both create
+      # /app/logs/*.log on the same mounted tree. Whoever got there first owned
+      # the files at umask-derived mode 644 and the other uid could no longer
+      # open them for append — surfacing as `PermissionError: [Errno 13]
+      # Permission denied: '/app/logs/audit.log'` and killing entire suites at
+      # pytest COLLECTION, apparently at random because it depended purely on
+      # which container won the race.
+      #
+      # A container-local path (not a volume at /app/logs — Docker would create
+      # THAT mount point on the host as root:755 and lock `tests` out of its own
+      # log directory instead; measured) means the two never share a path at
+      # all. /tmp is writable by any uid, so this holds however the image's user
+      # is configured. The database remains the audit authority; these files are
+      # a backup.
+      ADCP_LOG_DIR: /tmp/adcp-logs
+      # Must match the `tests` service's ADCP_WEBHOOK_HOST below: this is the
+      # SERVER's own trusted-test-host allowlist entry for outbound webhook SSRF
+      # validation (WebhookURLValidator._is_trusted_test_host), not just the
+      # runner's callback-URL construction. Without it here, every webhook the
+      # server tries to send to the e2e capture server (http://tests/webhook,
+      # which DNS-resolves to a private compose-network IP) is rejected by the
+      # SSRF gate even under ADCP_TESTING=true, because the gate only trusts
+      # literal localhost/127.0.0.1 plus whatever ADCP_WEBHOOK_HOST names --
+      # and this service never saw that name.
+      ADCP_WEBHOOK_HOST: tests
       # The SERVER must know about the pinned in-network creative agent: sync/
       # create flows resolve format specs server-side, and references carry the
       # PUBLIC canonical agent_url — without this, the registry's connection
@@ -102,6 +129,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      # 60s, not creative-agent's 30s (below) -- adcp-server does more work
+      # at startup (DB migrations, etc.) and is the service that actually
+      # showed this bug live: marked genuinely UNHEALTHY (not just
+      # `starting`) under heavy concurrent test-suite load, because there
+      # was no grace period for Docker to report `starting` during
+
+      start_period: 60s
 
   proxy:
     image: nginx:stable
@@ -130,33 +164,45 @@ services:
   # (see run_all_tests.sh).
   tests:
     profiles: ["runner"]
-    # Runs as the INVOKING host user, not the image's default root --
-    # Dockerfile.test has no USER directive, so without this the container
-    # writes test-results/.tox/schemas/logs into the bind-mounted /app as
-    # literal root (no userns-remap on these hosts, so container root IS host
-    # root), and the next run -- as an ordinary user -- dies on `mkdir:
-    # Permission denied` before a single suite starts.
-    #
-    # Derived, never hardcoded. run_all_tests.sh exports TEST_UID/TEST_GID from
-    # `id -u`/`id -g`; the defaults here are only for a bare `docker compose
-    # run tests` and reproduce the old root behaviour rather than guessing.
-    # A literal uid here was correct on exactly one machine: pinning the CI
-    # box's 1003:1001 turned GitHub Actions red with
-    # `PermissionError: '/app/.tox'`, because .tox lives on the bind mount
-    # (see the volumes block) and the Actions checkout is owned by a different
-    # uid. Nothing local can catch that -- `BDD In-Network (e2e_rest)` is the
-    # only job that runs the suite INSIDE this container.
-    user: "${TEST_UID:-0}:${TEST_GID:-0}"
+    # NO `user:` directive, deliberately. This used to pin
+    # user: "${TEST_UID:-0}:${TEST_GID:-0}", derived from `id -u`/`id -g` by
+    # run_all_tests.sh. The reasoning it carried assumed "no userns-remap on
+    # these hosts, so container root IS host root" -- false on the ROOTLESS
+    # daemon the run boxes use, and wrong in BOTH directions there:
+    #   - with TEST_UID exported, the container runs as that uid INSIDE the
+    #     container, which rootless maps to a host SUBUID (~100000+uid), so the
+    #     bind-mounted /app collects files the run itself cannot write;
+    #   - without it -- any path that does not source run_all_tests.sh, e.g.
+    #     cassini's supervisor calling `docker compose run tests`, or a plain
+    #     `docker compose up` for adcp-server -- the `:-0` default applies.
+    # Under rootless, container root ALREADY maps to the invoking user, which is
+    # exactly the outcome the pin was hand-building. Unset gets it for free.
+    # cassini removed the identical workaround on its own side for the same
+    # reason (cassini/identity.py: "a workaround for a root daemon, and there is
+    # no longer a root daemon"). Symptom this caused live: /app/logs/* created
+    # root-owned, adcp-server (uid 1001) dying at import on a module-level
+    # FileHandler, cascading into ~2100 test failures.
     build:
       context: .
       dockerfile: Dockerfile.test
     environment:
-      # Non-root (user: above) has no /etc/passwd entry for a raw numeric
-      # UID, so HOME defaults to "/" and Dockerfile.test's baked
-      # UV_CACHE_DIR=/cache/uv (root:root 755, no group-write) is
-      # unreachable -- uv fails with "Permission denied" trying to even
-      # create its cache dir, surfacing as a confusing "could not find
-      # python interpreter" error from tox. Redirect both to a
+      # Unbuffered stdout/stderr for the tox process that actually runs the
+      # suite. cassini sets PYTHONUNBUFFERED on its supervisor's own subprocess
+      # env, but the work runs HERE -- a separate container started by
+      # `docker compose run tests` -- and this environment: block is a curated
+      # allowlist with no host passthrough, so it never arrived. Verified live
+      # by `docker exec ... env | grep PYTHONUNBUFFERED` returning nothing.
+      # Consequence: output sat in the buffer, so cassini's RunState.quiet_for
+      # climbed monotonically (0m34s -> 12m+) on a genuinely busy run at 1082%
+      # CPU that finished exit=0, crossing the 5-minute false-red threshold
+      # (reproduced end-to-end on a full in-network run).
+      PYTHONUNBUFFERED: "${PYTHONUNBUFFERED:-1}"
+      # Written for the `user:` pin removed above, and RETAINED. Under that pin
+      # a raw numeric UID had no /etc/passwd entry, so HOME defaulted to "/"
+      # and Dockerfile.test's baked UV_CACHE_DIR=/cache/uv (root:root 755, no
+      # group-write) was unreachable -- uv failed with "Permission denied"
+      # trying to even create its cache dir, surfacing as a confusing "could
+      # not find python interpreter" error from tox. Both stay redirected to a
       # container-local writable path (not the bind mount -- this is a
       # throwaway per-run cache, no reason to fight over its ownership too).
       HOME: /tmp
@@ -218,10 +264,24 @@ services:
       # Integration/unit xdist worker counts (0/unset = serial). Plumbed so the
       # box fast-profile (INTEGRATION_XDIST_N=auto) actually reaches pytest inside
       # the runner container. integration_db creates a uuid-named DB per test, so
-      # parallel workers never share rows -> race-free. UNIT_XDIST_N stays 0 by
-      # default (unit -n auto has flaked); exposed for parity.
+      # parallel workers never share rows -> race-free.
+      #
+      # UNIT_XDIST_N defaults to `auto`, NOT 0. It was 0 because unit "flaked"
+      # under xdist; the flake had a single cause, now fixed -- a leaked
+      # patch("os.getpid") put a MagicMock in every LogRecord.process, which
+      # pytest-json-report copied onto the report and execnet could not
+      # serialize, killing the worker and truncating the session behind a
+      # summary that read "0 failed" (see tests/_xdist_report_safety.py).
+      #
+      # The value matters, not just the default: compose ALWAYS sets a listed
+      # key, so `${UNIT_XDIST_N:-0}` here made tox.ini's own
+      # `-n {env:UNIT_XDIST_N:auto}` unreachable -- the tox default is consulted
+      # only when the variable is UNSET, and this line guarantees it is set.
+      # Leaving it at 0 would have made the tox flip a silent no-op in the only
+      # environment that runs the full suite. `:-auto` keeps the override working
+      # while making the in-network default match tox's.
       INTEGRATION_XDIST_N: "${INTEGRATION_XDIST_N:-0}"
-      UNIT_XDIST_N: "${UNIT_XDIST_N:-0}"
+      UNIT_XDIST_N: "${UNIT_XDIST_N:-auto}"
       # Opt-in fast per-test DB path: clone from a schema template (default off).
       # TEST_DB_SKIP_DROP additionally skips the per-test DROP — safe ONLY on a
       # throwaway (tmpfs) Postgres, where clones are wiped on container restart;
@@ -277,12 +337,12 @@ services:
       # tox_data named volume removed (Aug 2026): it's destroyed+recreated
       # fresh every run (cleanup's `dc down -v`), so nothing ever persisted
       # across runs anyway, and a fresh named volume's mountpoint is created
-      # root:root regardless of the `user:` override above (volume dir
+      # root:root regardless of any `user:` override (volume dir
       # creation happens at the Docker daemon level, before the container
       # process starts) -- permanently EACCES-blocking the non-root tests
       # user from `mkdir .tox/<env>` every single run. .tox now lives on the
       # bind mount instead, same as test-results, which already works
-      # correctly under the `user:` override.
+      # correctly. (Both references are to the `user:` pin since removed above.)
     working_dir: /app
     # venv lives at /opt/venv (UV_PROJECT_ENVIRONMENT in Dockerfile.test), outside
     # the /app bind mount, so it is never shadowed — no .venv anonymous volume.

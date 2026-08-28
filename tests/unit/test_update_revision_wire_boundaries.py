@@ -28,7 +28,9 @@ _VALID_REQUEST = {
 
 def _success_result() -> UpdateMediaBuyResult:
     return UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id="mb-revision-boundary", affected_packages=[]),
+        # carrier(), not sync_success(): this stands in for a mocked _impl return, so it
+        # does not speak for the repository and has no persisted revision to report.
+        response=UpdateMediaBuySuccess.carrier(media_buy_id="mb-revision-boundary", affected_packages=[]),
         status="completed",
     )
 

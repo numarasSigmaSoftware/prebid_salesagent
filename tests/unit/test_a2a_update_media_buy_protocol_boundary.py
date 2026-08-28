@@ -99,7 +99,9 @@ def test_update_media_buy_accepts_omitted_revision_before_core_call() -> None:
     from src.core.schemas import UpdateMediaBuyRequest, UpdateMediaBuyResult, UpdateMediaBuySuccess
 
     success = UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[]),
+        # carrier(), not sync_success(): this stands in for a mocked _impl return, so it
+        # does not speak for the repository and has no persisted revision to report.
+        response=UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[]),
         status="completed",
     )
     with (

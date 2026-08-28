@@ -6,7 +6,6 @@ that need tenant-level configuration data without calling get_db_session().
 Core invariant: every query includes tenant_id in the WHERE clause. The tenant_id
 is set at construction time and injected into all queries automatically.
 
-beads: salesagent-9y0
 """
 
 from __future__ import annotations
