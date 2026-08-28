@@ -17,7 +17,6 @@ from src.admin.utils.approval import (
     waiting_for_creatives_message,
 )
 from src.core.database.models import PushNotificationConfig
-from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.exceptions import AdCPMediaBuyRejectedError
@@ -352,12 +351,13 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
             # claim_approval/reject_if_approvable methods guard on. An inline
             # {requires_approval, pending_approval} filter here would drop legacy ``approval``
             # steps before they ever reached the claim/reject below.
-            step = (
-                WorkflowRepository(db_session, tenant_id).get_approvable_step_for_object(
-                    "media_buy", media_buy_id, step_id=requested_step_id
-                )
-                if requested_step_id
-                else None
+            # ``workflow_step_id`` is OPTIONAL. When present it FILTERS the lookup, so a
+            # step mapped to a different media buy is refused rather than actioned; when
+            # absent the repository resolves the buy's own approvable step. Requiring the
+            # field instead would refuse a perfectly ordinary approve that simply did not
+            # carry it, which is not the confusion the filter exists to stop.
+            step = WorkflowRepository(db_session, tenant_id).get_approvable_step_for_object(
+                "media_buy", media_buy_id, step_id=requested_step_id
             )
 
             if not step:
@@ -425,24 +425,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 # never executed and the creative gate never run.
                 preparation = prepare_media_buy_approval_execution(
                     media_buys=approve_repo,
-                    assignments=CreativeAssignmentRepository(db_session, tenant_id),
-                    creatives=CreativeRepository(db_session, tenant_id),
                     media_buy_id=media_buy_id,
-                    approved_by=user_email,
                 )
                 if preparation.status is not ApprovalExecutionStatus.NOT_EXECUTABLE:
-                    # Commit the human decision and irreversible domain claim
-                    # atomically. A crash after this commit is recoverable from
-                    # ``activating``; no second request may dispatch the adapter.
-                    if preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
-                        db_session.commit()
-                        flash(
-                            waiting_for_creatives_message(len(preparation.blocking_creative_ids)),
-                            "info",
-                        )
-                        return redirect(
-                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
-                        )
                     if preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
                         db_session.rollback()
                         return _refused_media_buy_redirect(
@@ -450,6 +435,14 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                             media_buy_id,
                             "This media buy is already executing or no longer pending approval.",
                         )
+                    # Commit the human decision and irreversible domain claim
+                    # atomically. A crash after this commit is recoverable from
+                    # ``activating``; no second request may dispatch the adapter.
+                    #
+                    # It also has to happen BEFORE the writer runs: the callee opens
+                    # nested sessions, and get_db_session()'s exit closes the shared
+                    # thread-scoped session without committing, which would discard the
+                    # step approval and its audit comment.
                     db_session.commit()
 
                     logger.info(
@@ -461,7 +454,24 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         media_buy_id=media_buy_id,
                         step_id=step_data["step_id"],
                         context=echo_context(request_data),
+                        approved_by=user_email,
                     )
+                    if outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+                        # The creative gate lives in the writer now, so the hold arrives
+                        # as an outcome rather than as a decision this route made.
+                        flash(
+                            waiting_for_creatives_message(len(outcome.blocking_creative_ids)),
+                            "info",
+                        )
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
+                    if outcome.status is ApprovalExecutionStatus.CLAIM_REFUSED:
+                        return _refused_media_buy_redirect(
+                            tenant_id,
+                            media_buy_id,
+                            "This media buy is already executing or no longer pending approval.",
+                        )
                     if outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
                         logger.error(
                             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",

@@ -3,7 +3,6 @@
 Verifies that when ADCP_SALES_PORT is set, AdminAccountEnv uses requests.Session
 to hit the Docker stack instead of Flask test_client (integration mode).
 
-beads: salesagent-oj0.1.3
 """
 
 from __future__ import annotations

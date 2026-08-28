@@ -64,11 +64,11 @@ KNOWN_VIOLATIONS: set[tuple[str, int]] = set()
 AUDITED_INTERPOLATED_OPT_INS: dict[tuple[str, int], str] = {
     (
         "src/core/tools/media_buy_create.py",
-        2567,
+        2721,
     ): "interpolates the duplicate product_ids from the buyer's OWN packages[] — their data, echoed back",
     (
         "src/core/tools/media_buy_create.py",
-        2923,
+        3077,
     ): "interpolates targeting-validator violations describing the buyer's OWN targeting_overlay",
     (
         "src/core/validation_helpers.py",

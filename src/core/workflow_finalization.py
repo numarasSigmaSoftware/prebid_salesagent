@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING, Any, cast
 from adcp.types import ContextObject
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.repositories import ApprovalUoW, WorkflowUoW
-from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.media_buy import (
     ApprovalTrigger,
     MediaBuyRepository,
@@ -136,9 +136,16 @@ def _approval_terminal_payload(
         response_data: dict[str, Any] = {"approved": True}
         if media_buy_id is not None:
             packages = uow.media_buys.get_packages(media_buy_id)
+            # ``confirmed_at`` and ``revision`` carry no default: the pin lists both in
+            # ``required`` and the always-include serializer keeps a null confirmed_at on
+            # the wire, so they come off the persisted row the writer just committed
+            # rather than being fabricated here.
+            row = uow.media_buys.get_by_id(media_buy_id)
             result = CreateMediaBuySuccess.sync_success(
                 media_buy_id=media_buy_id,
                 packages=[Package(package_id=package.package_id) for package in packages],
+                confirmed_at=row.confirmed_at if row else None,
+                revision=row.revision if row else 1,
                 context=context,
             )
             response_data = result.model_dump(mode="json", exclude_none=True)
@@ -246,18 +253,24 @@ def _finalize_media_buy_approval_once(
                 media_buy_id=media_buy_id,
             )
         if not succeeded and media_buy_id is not None and mark_media_buy_failed and not mark_media_buy_unknown:
-            uow.media_buys.update_status(media_buy_id, "failed")
+            uow.media_buys.update_status(media_buy_id, PersistedMediaBuyStatus.FAILED)
         elif succeeded and media_buy_id is not None and apply_flight_status:
             media_buy = uow.media_buys.get_by_id(media_buy_id)
             if media_buy is None:
                 raise SQLAlchemyError("approved media buy disappeared during terminal finalization")
+            # Coerced through the vocabulary's own parser rather than passed as a bare
+            # string: the column is typed now, and this helper reports the flight rule's
+            # answer in the persistence spelling.
             uow.media_buys.update_status(
                 media_buy_id,
-                media_buy_status_from_flight_dates(
-                    start_time=media_buy.start_time,
-                    end_time=media_buy.end_time,
-                    start_date=cast(date, media_buy.start_date),
-                    end_date=cast(date, media_buy.end_date),
+                PersistedMediaBuyStatus.parse(
+                    media_buy_status_from_flight_dates(
+                        start_time=media_buy.start_time,
+                        end_time=media_buy.end_time,
+                        start_date=cast(date, media_buy.start_date),
+                        end_date=cast(date, media_buy.end_date),
+                    ),
+                    media_buy_id=media_buy_id,
                 ),
             )
         return ApprovalFinalization(applied=True, result=payload.result)
@@ -388,43 +401,28 @@ def media_buy_status_from_flight_dates(
     return "scheduled" if canonical == "pending_start" else canonical
 
 
-def _approval_creative_gate(
-    *,
-    assignments: CreativeAssignmentRepository,
-    creatives: CreativeRepository,
-    media_buy_id: str,
-    principal_id: str,
-) -> tuple[bool, tuple[str, ...]]:
-    """Return whether the buy has at least one assignment and all are approved.
-
-    ``approved`` is the only creative status that satisfies the gate. The other
-    members of the creative status enum — ``processing``, ``pending_review``,
-    ``suspended``, ``rejected``, ``archived`` — all block.
-    """
-    creative_ids = list(
-        dict.fromkeys(assignment.creative_id for assignment in assignments.get_by_media_buy(media_buy_id))
-    )
-    if not creative_ids:
-        return False, ()
-    creative_rows = creatives.get_by_ids(creative_ids, principal_id)
-    status_by_id = {creative.creative_id: creative.status for creative in creative_rows}
-    blocking_ids = tuple(creative_id for creative_id in creative_ids if status_by_id.get(creative_id) != "approved")
-    return not blocking_ids, blocking_ids
-
-
 def prepare_media_buy_approval_execution(
     *,
     media_buys: MediaBuyRepository,
-    assignments: CreativeAssignmentRepository,
-    creatives: CreativeRepository,
     media_buy_id: str,
-    approved_by: str | None,
     trigger: ApprovalTrigger = ApprovalTrigger.HUMAN_DECISION,
 ) -> ApprovalExecutionOutcome:
     """Decide, and if it applies claim, one adapter execution for a media buy.
 
-    The caller owns the surrounding UoW so the human workflow decision and
-    the irreversible domain claim can commit together.
+    Eligibility and the claim only. The CREATIVE gate is NOT here: it belongs to
+    ``CreativeAssignmentRepository.unapproved_creative_ids`` and runs inside
+    ``execute_approved_media_buy`` immediately before the adapter, which is the one
+    place that can hold it against the row it is about to act on. This function's
+    earlier copy of that gate was the third of three disagreeing open-codings.
+
+    This function survives rather than folding into the writer because the caller
+    owns the surrounding UoW: the human workflow decision and the irreversible
+    domain claim must commit together, and the writer opens its own units of work.
+
+    It does NOT stamp ``approved_at``/``approved_by``. The claim is a raw guarded
+    UPDATE that does not bump the revision, so the approval identity travels to the
+    writer instead and rides the SAME write as the status: one approval, one status
+    move, one revision bump.
 
     This owns the WHOLE eligibility decision — callers must not pre-filter on
     ``media_buy.status``. Four of them used to, each with its own literal, and their
@@ -446,30 +444,8 @@ def prepare_media_buy_approval_execution(
     if media_buy is None or media_buy.status not in source_statuses:
         return ApprovalExecutionOutcome(ApprovalExecutionStatus.NOT_EXECUTABLE)
 
-    gate_satisfied, blocking_ids = _approval_creative_gate(
-        assignments=assignments,
-        creatives=creatives,
-        media_buy_id=media_buy_id,
-        principal_id=media_buy.principal_id,
-    )
-    approval_fields: dict[str, Any] = {}
-    if approved_by is not None:
-        approval_fields = {"approved_at": datetime.now(UTC), "approved_by": approved_by}
-    if not gate_satisfied:
-        media_buys.update_status(
-            media_buy_id,
-            "pending_creatives",
-            **approval_fields,
-        )
-        return ApprovalExecutionOutcome(
-            ApprovalExecutionStatus.WAITING_FOR_CREATIVES,
-            blocking_creative_ids=blocking_ids,
-        )
-
     if not media_buys.claim_approved_execution(media_buy_id, trigger=trigger):
         return ApprovalExecutionOutcome(ApprovalExecutionStatus.CLAIM_REFUSED)
-    if approval_fields:
-        media_buys.update_fields(media_buy_id, **approval_fields)
     return ApprovalExecutionOutcome(ApprovalExecutionStatus.READY)
 
 
@@ -549,21 +525,46 @@ def execute_and_finalize_media_buy_approval(
     step_id: str | None,
     context: ContextObject | dict[str, Any] | None = None,
     apply_flight_status: bool = False,
+    approved_by: str | None = None,
 ) -> ApprovalExecutionOutcome:
-    """Execute one claimed media buy and publish its durable tri-state result."""
-    from src.core.tools.media_buy_create import execute_approved_media_buy
+    """Execute one claimed media buy and publish its durable tri-state result.
 
-    success, error_message = execute_approved_media_buy(
+    Translates the writer's ``ApprovalResult`` into the workflow-step vocabulary.
+    The creative HOLD is reported by the writer now that the gate lives there, so it
+    arrives here as an outcome rather than as a decision this module made.
+    """
+    from src.core.tools.media_buy_create import ApprovalOutcome, execute_approved_media_buy
+
+    approval = execute_approved_media_buy(
         media_buy_id,
         tenant_id,
         execution_claimed=True,
+        # ``None`` for a creative unblock: human approval was recorded when the buy
+        # entered pending_creatives, and update_status leaves a None alone, so the
+        # unblock cannot replace that audit identity with a system actor.
+        approved_by=approved_by,
+        approved_at=datetime.now(UTC) if approved_by is not None else None,
     )
+    if approval.outcome is ApprovalOutcome.HELD_PENDING_CREATIVES:
+        return ApprovalExecutionOutcome(
+            ApprovalExecutionStatus.WAITING_FOR_CREATIVES,
+            error_message=approval.error_msg,
+            blocking_creative_ids=approval.blocking_creative_ids,
+        )
+    if approval.outcome is ApprovalOutcome.CLAIM_REFUSED:
+        return ApprovalExecutionOutcome(
+            ApprovalExecutionStatus.CLAIM_REFUSED,
+            error_message=approval.error_msg,
+        )
+    # ``None`` is the ambiguous arm: the adapter was dispatched and its outcome could
+    # not be confirmed, so no terminal workflow transition may be written.
+    success: bool | None = None if approval.outcome is ApprovalOutcome.PENDING_RECONCILIATION else approval.ok
     return apply_media_buy_execution_outcome(
         tenant_id=tenant_id,
         media_buy_id=media_buy_id,
         step_id=step_id,
         success=success,
-        error_message=error_message,
+        error_message=approval.error_msg,
         context=context,
         apply_flight_status=apply_flight_status,
     )

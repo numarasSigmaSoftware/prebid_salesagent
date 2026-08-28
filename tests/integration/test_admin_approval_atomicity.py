@@ -9,13 +9,15 @@ as a conflict: no overwrite, and no ``execute_approved_media_buy``.
 """
 
 import uuid
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
 from src.admin.app import create_app
 from src.core.context_manager import ContextManager
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.repositories import MediaBuyUoW, WorkflowUoW
+from src.core.tools.media_buy_create import ApprovalOutcome, ApprovalResult
 
 app = create_app()
 
@@ -118,6 +120,14 @@ def _authed_media_buy_awaiting_approval(
             media_buy=media_buy,
             package_id=f"pkg_{suffix}",
         )
+    # Commit the factory session before the route runs. ``MediaBuyFactory`` assigns the
+    # repository-managed ``confirmed_at``/``revision`` columns AFTER its own commit and
+    # then flushes, which leaves an open transaction holding a row lock on media_buys.
+    # The admin route updates that same row on a DIFFERENT connection, so without this
+    # the request blocks on the lock until the test times out. It is masked whenever a
+    # later factory (a creative, an assignment) commits the shared session for us.
+    MediaBuyFactory._meta.sqlalchemy_session.commit()
+
     _auth(client, media_buy.tenant_id)
     step_id = _make_step(
         media_buy.tenant_id,
@@ -298,7 +308,8 @@ class TestOperationsApproveAtomicity:
         tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(client)
 
         with patch(
-            "src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=ApprovalResult(outcome=ApprovalOutcome.EXECUTED),
         ) as mock_execute:
             client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
@@ -306,13 +317,27 @@ class TestOperationsApproveAtomicity:
                 follow_redirects=True,
             )
 
-        mock_execute.assert_called_once_with(media_buy_id, tenant_id, execution_claimed=True)
+        mock_execute.assert_called_once_with(
+            media_buy_id,
+            tenant_id,
+            execution_claimed=True,
+            # The approval identity rides the writer's SINGLE status write, so one
+            # approval is one status move and one revision bump.
+            approved_by="admin@example.com",
+            approved_at=ANY,
+        )
         assert _status(tenant_id, step_id) == "completed", (
             "a successful adapter execution must terminalize the claimed step"
         )
 
     def test_media_buy_detail_approval_honors_shared_creative_gate(self, client, factory_session):
-        """The detail route must not bypass the creative gate used by workflow approval."""
+        """The detail route must not bypass the creative gate used by workflow approval.
+
+        The gate lives inside ``execute_approved_media_buy`` now, so patching that callee
+        would remove the very thing under test. The AD-SERVER boundary is patched instead:
+        the route reaches the writer, the writer holds the buy, and nothing is created
+        externally.
+        """
         from src.core.database.models import MediaBuy
         from tests.factories import CreativeAssignmentFactory, CreativeFactory
 
@@ -330,7 +355,9 @@ class TestOperationsApproveAtomicity:
             package_id="pkg_creative_gate",
         )
 
-        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+        factory_session.commit()
+
+        with patch("src.core.tools.media_buy_create._execute_adapter_media_buy_creation") as adapter_boundary:
             response = client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
                 data={"action": "approve", "workflow_step_id": step_id},
@@ -338,7 +365,7 @@ class TestOperationsApproveAtomicity:
             )
 
         assert response.status_code in (302, 303)
-        mock_execute.assert_not_called()
+        adapter_boundary.assert_not_called()
         assert _status(tenant_id, step_id) == "approved"
         with MediaBuyUoW(tenant_id) as uow:
             assert uow.media_buys is not None
@@ -382,7 +409,8 @@ class TestOperationsApproveAtomicity:
         factory_session.commit()
 
         with patch(
-            "src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=ApprovalResult(outcome=ApprovalOutcome.EXECUTED),
         ) as mock_execute:
             response = client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
@@ -391,7 +419,15 @@ class TestOperationsApproveAtomicity:
             )
 
         assert response.status_code in (302, 303)
-        mock_execute.assert_called_once_with(media_buy_id, tenant_id, execution_claimed=True)
+        mock_execute.assert_called_once_with(
+            media_buy_id,
+            tenant_id,
+            execution_claimed=True,
+            # The approval identity rides the writer's SINGLE status write, so one
+            # approval is one status move and one revision bump.
+            approved_by="admin@example.com",
+            approved_at=ANY,
+        )
         with MediaBuyUoW(tenant_id) as uow:
             assert uow.media_buys is not None
             persisted = uow.media_buys.get_by_id(media_buy_id)
@@ -400,14 +436,22 @@ class TestOperationsApproveAtomicity:
                 "the buy must have been claimed for execution, not left in its source state"
             )
 
-    def test_media_buy_detail_approval_without_assignments_waits_for_creatives(self, client, factory_session):
-        """The detail route cannot execute a buy that has no creative assignment."""
+    def test_media_buy_detail_approval_without_assignments_is_not_held(self, client, factory_session):
+        """A buy with NO creative assignment is not waiting on any, so it is not held.
+
+        This inverts what the route used to do. The gate is
+        ``CreativeAssignmentRepository.unapproved_creative_ids``: it reports the assigned
+        creatives that are not approved, and an empty assignment list yields an empty
+        result. Reading "no assignments" as an unsatisfied gate held a buy for creatives
+        nobody had asked for, and rendered "waiting for 0 creative(s)" at the operator.
+        """
         tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
             client,
             with_approved_creative=False,
         )
 
         with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+            mock_execute.return_value = ApprovalResult(outcome=ApprovalOutcome.EXECUTED)
             response = client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
                 data={"action": "approve", "workflow_step_id": step_id},
@@ -415,13 +459,16 @@ class TestOperationsApproveAtomicity:
             )
 
         assert response.status_code in (302, 303)
-        mock_execute.assert_not_called()
-        assert _status(tenant_id, step_id) == "approved"
-        with MediaBuyUoW(tenant_id) as uow:
-            assert uow.media_buys is not None
-            persisted = uow.media_buys.get_by_id(media_buy_id)
-            assert persisted is not None
-            assert persisted.status == "pending_creatives"
+        mock_execute.assert_called_once_with(
+            media_buy_id,
+            tenant_id,
+            execution_claimed=True,
+            # The approval identity rides the writer's SINGLE status write, so one
+            # approval is one status move and one revision bump.
+            approved_by="admin@example.com",
+            approved_at=ANY,
+        )
+        assert _status(tenant_id, step_id) == "completed"
 
     def test_media_buy_is_claimed_before_adapter_dispatch(self, client, factory_session):
         """The route commits ``activating`` before entering the execution helper."""
@@ -434,6 +481,8 @@ class TestOperationsApproveAtomicity:
             observed_tenant_id,
             *,
             execution_claimed,
+            approved_by=None,
+            approved_at=None,
         ):
             assert execution_claimed is True
             with MediaBuyUoW(observed_tenant_id) as uow:
@@ -441,8 +490,8 @@ class TestOperationsApproveAtomicity:
                 media_buy = uow.media_buys.get_by_id(observed_media_buy_id)
                 assert media_buy is not None
                 assert media_buy.status == "activating"
-                uow.media_buys.update_status(observed_media_buy_id, "active")
-            return True, None
+                uow.media_buys.update_status(observed_media_buy_id, PersistedMediaBuyStatus.ACTIVE)
+            return ApprovalResult(outcome=ApprovalOutcome.EXECUTED, status=PersistedMediaBuyStatus.ACTIVE)
 
         with patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
@@ -473,12 +522,17 @@ class TestOperationsApproveAtomicity:
             observed_tenant_id,
             *,
             execution_claimed,
+            approved_by=None,
+            approved_at=None,
         ):
             assert execution_claimed is True
             with MediaBuyUoW(observed_tenant_id) as uow:
                 assert uow.media_buys is not None
                 assert uow.media_buys.mark_approved_execution_unknown(observed_media_buy_id) is True
-            return None, "local activation commit failed"
+            return ApprovalResult(
+                outcome=ApprovalOutcome.PENDING_RECONCILIATION,
+                error_msg="local activation commit failed",
+            )
 
         with patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
@@ -519,7 +573,10 @@ class TestOperationsApproveAtomicity:
             request_data={"context": request_context},
         )
 
-        with patch("src.core.tools.media_buy_create.execute_approved_media_buy", return_value=(True, None)):
+        with patch(
+            "src.core.tools.media_buy_create.execute_approved_media_buy",
+            return_value=ApprovalResult(outcome=ApprovalOutcome.EXECUTED),
+        ):
             client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
                 data={"action": "approve", "workflow_step_id": _step_id},
@@ -556,7 +613,7 @@ class TestOperationsApproveAtomicity:
 
         with patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
-            return_value=(False, SECRET_BEARING_MESSAGE),
+            return_value=ApprovalResult.failed(SECRET_BEARING_MESSAGE),
         ):
             client.post(
                 f"/tenant/{tenant_id}/media-buy/{media_buy_id}/approve",
@@ -676,6 +733,11 @@ class TestApprovalClaimCompareAndSet:
             status="pending_creatives",
         )
 
+        # See ``_authed_media_buy_awaiting_approval``: the factory leaves an open
+        # transaction holding a row lock on media_buys, and the CAS below runs on a
+        # different connection.
+        factory_session.commit()
+
         with MediaBuyUoW(media_buy.tenant_id) as uow:
             assert uow.media_buys is not None
             assert uow.media_buys.claim_approved_execution(media_buy.media_buy_id) is True
@@ -699,6 +761,11 @@ class TestApprovalClaimCompareAndSet:
             media_buy_id=f"mb_takeover_{suffix}",
             status="pending_approval",
         )
+
+        # See ``_authed_media_buy_awaiting_approval``: the factory leaves an open
+        # transaction holding a row lock on media_buys, and the CAS below runs on a
+        # different connection.
+        factory_session.commit()
 
         with MediaBuyUoW(media_buy.tenant_id) as uow:
             assert uow.media_buys is not None
@@ -724,6 +791,11 @@ class TestApprovalClaimCompareAndSet:
             media_buy_id=f"mb_renew_{suffix}",
             status="pending_approval",
         )
+
+        # See ``_authed_media_buy_awaiting_approval``: the factory leaves an open
+        # transaction holding a row lock on media_buys, and the CAS below runs on a
+        # different connection.
+        factory_session.commit()
 
         with MediaBuyUoW(media_buy.tenant_id) as uow:
             assert uow.media_buys is not None
@@ -894,18 +966,38 @@ class TestWorkflowsRouteConflict:
         resp = client.post(f"/tenant/{tenant_id}/workflows/wf_x/steps/step_missing/approve")
         assert resp.status_code == 404
 
-    def test_mapped_buy_without_assignments_waits_for_creatives(self, client, factory_session):
-        """The generic workflow route shares the zero-assignment creative gate."""
+    def test_mapped_buy_with_a_blocked_creative_is_held_by_the_writer(self, client, factory_session):
+        """The generic workflow route reaches the same gate the detail route does.
+
+        Both routes now share ONE gate, inside the writer, so this asserts the gate's
+        effect through this route rather than re-checking a route-local copy: the ad
+        server is never contacted and the buy is held at ``pending_creatives``.
+        """
+        from src.core.database.models import MediaBuy
+        from tests.factories import CreativeAssignmentFactory, CreativeFactory
+
         tenant_id, media_buy_id, step_id = _authed_media_buy_awaiting_approval(
             client,
             with_approved_creative=False,
         )
+        media_buy = factory_session.get(MediaBuy, media_buy_id)
+        assert media_buy is not None
+        CreativeAssignmentFactory(
+            creative=CreativeFactory(
+                tenant=media_buy.tenant,
+                principal=media_buy.principal,
+                status="pending_review",
+            ),
+            media_buy=media_buy,
+            package_id="pkg_workflow_gate",
+        )
+        factory_session.commit()
 
-        with patch("src.core.tools.media_buy_create.execute_approved_media_buy") as mock_execute:
+        with patch("src.core.tools.media_buy_create._execute_adapter_media_buy_creation") as adapter_boundary:
             response = client.post(f"/tenant/{tenant_id}/workflows/wf_x/steps/{step_id}/approve")
 
         assert response.status_code == 200
-        mock_execute.assert_not_called()
+        adapter_boundary.assert_not_called()
         assert _status(tenant_id, step_id) == "approved"
         with MediaBuyUoW(tenant_id) as uow:
             assert uow.media_buys is not None

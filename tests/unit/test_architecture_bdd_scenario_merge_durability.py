@@ -50,6 +50,12 @@ HAND_MAINTAINED_SCENARIOS = [
     # Grounded in transport-errors.mdx "Layer Separation"; upstream obligation
     # Until the upstream obligation lands, only @hand-edited keeps it alive.
     ("BR-UC-002-create-media-buy.feature", "@T-UC-002-ext-nl-unsupported"),
+    # Both arrived on main with #1941 (spec-required envelope status on get_media_buys
+    # and sync_accounts) and are registered here, not allowlisted: they are genuinely
+    # hand-maintained wire-shape scenarios with no adcp-req render, so without a registry
+    # entry `compile_bdd.py --merge` would classify them LEGACY-DELETE and drop them.
+    ("BR-UC-019-query-media-buys.feature", "@T-UC-019-envelope-status"),
+    ("BR-UC-011-manage-accounts.feature", "@T-UC-011-sync-schema-valid"),
 ]
 
 

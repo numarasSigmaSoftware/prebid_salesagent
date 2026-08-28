@@ -3,11 +3,11 @@
 Tests P0/P1 issues found during code review of the FastAPI unified app.
 Each test targets a specific beads issue to prevent regression.
 
-salesagent-c0gm: Non-async receive lambda (ASGI protocol)
-salesagent-agey: CORS origins configuration
-salesagent-9fy7: Apx-Incoming-Host hostname validation
-salesagent-agmq: Debug endpoints gated behind ADCP_TESTING
-salesagent-nb7k: format_resolver async event loop fix
+: Non-async receive lambda (ASGI protocol)
+: CORS origins configuration
+: Apx-Incoming-Host hostname validation
+: Debug endpoints gated behind ADCP_TESTING
+: format_resolver async event loop fix
 """
 
 import os
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# salesagent-c0gm [P0]: Async receive callable in messageId middleware
+# [P0]: Async receive callable in messageId middleware
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +84,7 @@ class TestAsyncReceiveCallable:
 
 
 # ---------------------------------------------------------------------------
-# salesagent-agey [P0]: CORS origins must not use wildcard with credentials
+# [P0]: CORS origins must not use wildcard with credentials
 # ---------------------------------------------------------------------------
 
 
@@ -135,7 +135,7 @@ class TestCORSConfiguration:
 
 
 # ---------------------------------------------------------------------------
-# salesagent-9fy7 [P0]: Apx-Incoming-Host hostname validation
+# [P0]: Apx-Incoming-Host hostname validation
 # ---------------------------------------------------------------------------
 
 
@@ -207,7 +207,7 @@ class TestHostnameValidation:
         assert "../../" not in card.get("url", "")
 
     def test_agent_card_ignores_invalid_host_header(self):
-        """Agent card falls back to default URL when Host header is invalid (salesagent-4r0m)."""
+        """Agent card falls back to default URL when Host header is invalid ."""
         from starlette.testclient import TestClient
 
         from src.app import app
@@ -229,7 +229,7 @@ class TestHostnameValidation:
 
 
 # ---------------------------------------------------------------------------
-# salesagent-agmq [P0]: Debug endpoints gated behind ADCP_TESTING
+# [P0]: Debug endpoints gated behind ADCP_TESTING
 # ---------------------------------------------------------------------------
 
 
@@ -285,7 +285,7 @@ class TestDebugEndpointGate:
 
 
 # ---------------------------------------------------------------------------
-# salesagent-nb7k [P1]: format_resolver uses run_async_in_sync_context
+# [P1]: format_resolver uses run_async_in_sync_context
 # ---------------------------------------------------------------------------
 
 

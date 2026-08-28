@@ -2673,6 +2673,7 @@ class AdCPRequestHandler(RequestHandler):
             reporting_webhook=params.get("reporting_webhook"),
             ext=params.get("ext"),
             idempotency_key=params.get("idempotency_key"),
+            revision=params.get("revision"),
             # Legacy date aliases and the flight-level economics fields. The REST body
             # accepts and forwards all five; A2A dropped them, so a buyer rescheduling a
             # flight or changing currency/pacing/daily cap over A2A had those edits

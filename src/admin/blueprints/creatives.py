@@ -602,24 +602,11 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 # decision must NOT be promoted by a creative approval.
                 preparation = prepare_media_buy_approval_execution(
                     media_buys=uow.media_buys,
-                    assignments=uow.assignments,
-                    creatives=uow.creatives,
                     media_buy_id=media_buy_id,
-                    # Human approval was recorded when the buy entered
-                    # pending_creatives. Creative unblocking must not replace
-                    # that audit identity or timestamp with a system actor.
-                    approved_by=None,
                     trigger=ApprovalTrigger.CREATIVE_UNBLOCK,
                 )
                 if preparation.status is ApprovalExecutionStatus.READY:
                     media_buy_actions.append({"media_buy_id": media_buy_id})
-                elif preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
-                    logger.info(
-                        "[CREATIVE APPROVAL] Media buy %s still waiting for %s creatives: %s",
-                        log_safe(media_buy_id),
-                        len(preparation.blocking_creative_ids),
-                        log_safe(preparation.blocking_creative_ids),
-                    )
                 elif preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
                     logger.info(
                         "[CREATIVE APPROVAL] Media buy %s execution was already claimed",
@@ -670,6 +657,15 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     "[CREATIVE APPROVAL] Adapter creation failed for %s: %s",
                     log_safe(action["media_buy_id"]),
                     log_safe(outcome.error_message),
+                )
+            elif outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+                # The creative gate lives in the writer now, so a buy still blocked by a
+                # sibling creative comes back as an outcome rather than being decided here.
+                logger.info(
+                    "[CREATIVE APPROVAL] Media buy %s still waiting for %s creatives: %s",
+                    log_safe(action["media_buy_id"]),
+                    len(outcome.blocking_creative_ids),
+                    log_safe(outcome.blocking_creative_ids),
                 )
             elif outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
                 logger.error(

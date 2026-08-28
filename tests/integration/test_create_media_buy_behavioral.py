@@ -1456,7 +1456,7 @@ class TestCrossCuttingObligations:
         # Success response has no errors field
         from src.core.schemas import Package as RespPkg
 
-        success = CreateMediaBuySuccess(
+        success = CreateMediaBuySuccess.carrier(
             media_buy_id="mb_1", packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)]
         )
         success_result = CreateMediaBuyResult(response=success, status="completed")
@@ -1985,7 +1985,7 @@ class TestUpgradeObligations:
         from src.core.schemas import Package as RespPkg
 
         # Verify account can be set on success
-        resp = CreateMediaBuySuccess(
+        resp = CreateMediaBuySuccess.carrier(
             media_buy_id="mb_1",
             packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)],
             account=None,  # Optional
@@ -2001,7 +2001,7 @@ class TestUpgradeObligations:
 
         from src.core.schemas import Package as RespPkg
 
-        resp = CreateMediaBuySuccess(
+        resp = CreateMediaBuySuccess.carrier(
             media_buy_id="mb_1", packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)], sandbox=True
         )
         assert resp.sandbox is True

@@ -19,7 +19,6 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import Context
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
-from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.workflow import APPROVABLE_STEP_STATUSES, WorkflowRepository
 from src.core.logging_config import log_safe
 from src.core.workflow_finalization import (
@@ -219,10 +218,7 @@ def _approve_mapped_media_buy(
     # gate and execution claim both skipped.
     preparation = prepare_media_buy_approval_execution(
         media_buys=media_buy_repo,
-        assignments=CreativeAssignmentRepository(db, tenant_id),
-        creatives=CreativeRepository(db, tenant_id),
         media_buy_id=media_buy_id,
-        approved_by=user_email,
     )
     if preparation.status is ApprovalExecutionStatus.NOT_EXECUTABLE:
         logger.warning(
@@ -231,16 +227,6 @@ def _approve_mapped_media_buy(
             media_buy.status if media_buy else "N/A",
         )
         return _complete_plain_workflow_approval(db, tenant_id, step_id)
-    if preparation.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
-        blocking_count = len(preparation.blocking_creative_ids)
-        logger.warning(
-            "[APPROVAL] Cannot execute adapter creation yet - %s creatives not approved: %s",
-            blocking_count,
-            log_safe(preparation.blocking_creative_ids),
-        )
-        flash(waiting_for_creatives_message(blocking_count), "info")
-        db.commit()
-        return jsonify({"success": True}), 200
     if preparation.status is ApprovalExecutionStatus.CLAIM_REFUSED:
         db.rollback()
         return jsonify({"success": False, "error": "Media buy is already executing or no longer pending"}), 409
@@ -251,7 +237,21 @@ def _approve_mapped_media_buy(
         media_buy_id=media_buy_id,
         step_id=step_id,
         context=echo_context(request_data),
+        approved_by=user_email,
     )
+    if outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
+        # The creative gate lives in the writer now, so the hold arrives as an outcome
+        # rather than as a decision this route made.
+        blocking_count = len(outcome.blocking_creative_ids)
+        logger.warning(
+            "[APPROVAL] Cannot execute adapter creation yet - %s creatives not approved: %s",
+            blocking_count,
+            log_safe(outcome.blocking_creative_ids),
+        )
+        flash(waiting_for_creatives_message(blocking_count), "info")
+        return jsonify({"success": True}), 200
+    if outcome.status is ApprovalExecutionStatus.CLAIM_REFUSED:
+        return jsonify({"success": False, "error": "Media buy is already executing or no longer pending"}), 409
     if outcome.status is ApprovalExecutionStatus.PENDING_RECONCILIATION:
         logger.error(
             "[APPROVAL] External media buy creation succeeded but activation remains pending for %s",

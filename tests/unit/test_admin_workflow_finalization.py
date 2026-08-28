@@ -1,7 +1,6 @@
 """Approval finalization retries DB commits without repeating adapter work."""
 
 import ast
-import os
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -11,11 +10,13 @@ from unittest.mock import ANY, Mock, patch
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.repositories.media_buy import (
     APPROVED_EXECUTION_SOURCE_STATUSES,
     ApprovalTrigger,
 )
 from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.tools.media_buy_create import ApprovalOutcome, ApprovalResult
 from src.core.workflow_finalization import (
     ApprovalExecutionStatus,
     ApprovalFinalization,
@@ -45,6 +46,16 @@ class _WorkflowRepo:
 
     def get_claimed_create_approval_step_for_media_buy(self, media_buy_id):
         return self.existing
+
+
+def _persisted_row(status: str, *, revision: int = 1, confirmed_at=None):
+    """A persisted media-buy row as the finalizer reads it.
+
+    ``revision`` and ``confirmed_at`` are not decoration: the pinned success document
+    lists both in ``required``, so the terminal payload reads them off the row rather
+    than fabricating them, and a double without them fails construction.
+    """
+    return SimpleNamespace(status=status, revision=revision, confirmed_at=confirmed_at)
 
 
 class _MediaBuyRepo:
@@ -182,6 +193,8 @@ def test_success_finalization_applies_requested_flight_status_atomically():
         end_time=None,
         start_date=date(2099, 1, 1),
         end_date=date(2099, 1, 31),
+        revision=1,
+        confirmed_at=None,
     )
     media_buys = _FailureMediaBuyRepo(media_buy=media_buy)
     uow = _ApprovalUoW(fail_commit=False, media_buys=media_buys)
@@ -278,13 +291,15 @@ def test_reconciliation_uses_persisted_domain_state_without_adapter_call():
     lookup_uow = _ApprovalUoW(
         fail_commit=False,
         workflows=_WorkflowRepo(existing=claimed_step),
-        media_buys=_MediaBuyRepo(media_buy=SimpleNamespace(status="active")),
+        media_buys=_MediaBuyRepo(media_buy=_persisted_row("active")),
     )
     finalization_media_buy = SimpleNamespace(
         start_time=None,
         end_time=None,
         start_date=date(2099, 1, 1),
         end_date=date(2099, 1, 31),
+        revision=1,
+        confirmed_at=None,
     )
     finalization_media_repo = _FailureMediaBuyRepo(media_buy=finalization_media_buy)
     finalization_uow = _ApprovalUoW(fail_commit=False, media_buys=finalization_media_repo)
@@ -313,7 +328,7 @@ def test_reconciliation_keeps_pre_adapter_pending_state_nonterminal():
     lookup_uow = _ApprovalUoW(
         fail_commit=False,
         workflows=_WorkflowRepo(existing=claimed_step),
-        media_buys=_MediaBuyRepo(media_buy=SimpleNamespace(status="pending_approval")),
+        media_buys=_MediaBuyRepo(media_buy=_persisted_row("pending_approval")),
     )
 
     with patch("src.core.workflow_finalization.ApprovalUoW", return_value=lookup_uow):
@@ -332,7 +347,7 @@ def test_reconciliation_terminalizes_ambiguous_activation_without_marking_buy_fa
     lookup_uow = _ApprovalUoW(
         fail_commit=False,
         workflows=_WorkflowRepo(existing=claimed_step),
-        media_buys=_MediaBuyRepo(media_buy=SimpleNamespace(status="activation_unknown")),
+        media_buys=_MediaBuyRepo(media_buy=_persisted_row("activation_unknown")),
     )
     finalization_media_repo = _FailureMediaBuyRepo()
     finalization_uow = _ApprovalUoW(fail_commit=False, media_buys=finalization_media_repo)
@@ -428,38 +443,44 @@ def test_expired_reconciliation_cannot_fail_task_after_worker_completes():
     assert media_repo.expected_lease_versions == [observed_lease_version]
 
 
-def test_adapter_failure_wrapper_persists_reconcilable_failed_status():
-    """The public execution helper leaves durable evidence for reconciliation."""
-    from src.core.tools.media_buy_create import _persist_approved_execution_outcome
+def test_definitive_adapter_refusal_persists_failed_status():
+    """A refusal the ad server ANSWERED leaves durable FAILED evidence.
+
+    This obligation used to live on a decorator that wrapped the whole execution and
+    keyed off a tri-state boolean. It is now the writer's own failure arm, reached only
+    where the adapter said no — which is the same rule, expressed where it applies.
+    """
+    from src.core.tools.media_buy_create import ApprovalOutcome, _mark_approval_failed
 
     media_repo = _FailureMediaBuyRepo()
     uow = _ApprovalUoW(fail_commit=False, media_buys=media_repo)
-    execute_once = Mock(return_value=(False, "adapter rejected"))
-    execute_with_outcome = _persist_approved_execution_outcome(execute_once)
+
+    with patch("src.core.database.repositories.uow.MediaBuyUoW", return_value=uow):
+        result = _mark_approval_failed("tenant_1", "mb_1", "adapter rejected")
+
+    assert result.outcome is ApprovalOutcome.FAILED
+    assert result.error_msg == "adapter rejected"
+    assert media_repo.status_updates == [("mb_1", PersistedMediaBuyStatus.FAILED)]
+
+
+def test_post_dispatch_ambiguity_does_not_persist_a_false_failure():
+    """An externally created order must never be rewritten as failed.
+
+    The ad server was asked and may have acted, so the outcome is unknown, not failed.
+    It is recorded as the claim's own ambiguous state for the lease reconciler, and
+    NOTHING writes FAILED.
+    """
+    from src.core.tools.media_buy_create import ApprovalOutcome, _mark_approved_execution_unknown
+
+    media_repo = _FailureMediaBuyRepo()
+    uow = _ApprovalUoW(fail_commit=False, media_buys=media_repo)
 
     with patch("src.core.database.repositories.MediaBuyUoW", return_value=uow):
-        result = execute_with_outcome("mb_1", "tenant_1")
+        result = _mark_approved_execution_unknown("mb_1", "tenant_1", "local status commit failed")
 
-    assert result == (False, "adapter rejected")
-    execute_once.assert_called_once_with("mb_1", "tenant_1", execution_claimed=False)
-    assert media_repo.status_updates == [("mb_1", "failed")]
-
-
-def test_post_creation_pending_wrapper_does_not_persist_false_failure():
-    """An externally created order must never be rewritten as failed."""
-    from src.core.tools.media_buy_create import _persist_approved_execution_outcome
-
-    media_repo = _FailureMediaBuyRepo()
-    uow = _ApprovalUoW(fail_commit=False, media_buys=media_repo)
-    execute_once = Mock(return_value=(None, "local status commit failed"))
-    execute_with_outcome = _persist_approved_execution_outcome(execute_once)
-
-    with patch("src.core.database.repositories.MediaBuyUoW", return_value=uow) as uow_type:
-        result = execute_with_outcome("mb_1", "tenant_1")
-
-    assert result == (None, "local status commit failed")
-    execute_once.assert_called_once_with("mb_1", "tenant_1", execution_claimed=False)
-    uow_type.assert_not_called()
+    assert result.outcome is ApprovalOutcome.PENDING_RECONCILIATION
+    assert result.error_msg == "local status commit failed"
+    assert media_repo.unknown_updates == ["mb_1"]
     assert media_repo.status_updates == []
 
 
@@ -555,9 +576,11 @@ def test_blocking_creative_log_sanitizes_identifiers(caplog):
         status="pending_approval",
         principal_id="principal_1",
     )
-    preparation = SimpleNamespace(
+    preparation = SimpleNamespace(status=ApprovalExecutionStatus.READY, blocking_creative_ids=())
+    held = SimpleNamespace(
         status=ApprovalExecutionStatus.WAITING_FOR_CREATIVES,
         blocking_creative_ids=("creative_1\r\nFORGED",),
+        error_message=None,
     )
 
     with (
@@ -567,6 +590,11 @@ def test_blocking_creative_log_sanitizes_identifiers(caplog):
             workflows_module,
             "prepare_media_buy_approval_execution",
             return_value=preparation,
+        ),
+        patch.object(
+            workflows_module,
+            "execute_and_finalize_media_buy_approval",
+            return_value=held,
         ),
         caplog.at_level("WARNING", logger="src.admin.blueprints.workflows"),
     ):
@@ -585,41 +613,6 @@ def test_blocking_creative_log_sanitizes_identifiers(caplog):
     assert "\n" not in message
 
 
-def test_shared_preparation_applies_creative_gate_before_execution_claim():
-    """Every admin entry point uses the same blocking-creative business rule."""
-    media_buy_repo = Mock()
-    media_buy_repo.get_by_id.return_value = SimpleNamespace(
-        status="pending_approval",
-        principal_id="principal_1",
-    )
-    assignments = Mock()
-    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
-    creatives = Mock()
-    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="pending_review")]
-
-    outcome = prepare_media_buy_approval_execution(
-        media_buys=media_buy_repo,
-        assignments=assignments,
-        creatives=creatives,
-        media_buy_id="mb_1",
-        approved_by="approver@example.com",
-    )
-
-    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
-    assert outcome.blocking_creative_ids == ("creative_1",)
-    media_buy_repo.update_status.assert_called_once_with(
-        "mb_1",
-        "pending_creatives",
-        approved_at=ANY,
-        approved_by="approver@example.com",
-    )
-    # ``ANY`` above matches a naive datetime just as happily as an aware one, so pin
-    # the tzinfo the same way the completed_at sibling does.
-    assert media_buy_repo.update_status.call_args.kwargs["approved_at"].tzinfo is UTC
-    creatives.get_by_ids.assert_called_once_with(["creative_1"], "principal_1")
-    media_buy_repo.claim_approved_execution.assert_not_called()
-
-
 def test_shared_preparation_uses_repository_execution_source_statuses():
     """The precheck and atomic CAS share one exact eligibility vocabulary."""
     assert APPROVED_EXECUTION_SOURCE_STATUSES == ("pending_approval", "pending_creatives", "draft")
@@ -631,17 +624,9 @@ def test_shared_preparation_uses_repository_execution_source_statuses():
             principal_id="principal_1",
         )
         media_buy_repo.claim_approved_execution.return_value = True
-        assignments = Mock()
-        assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
-        creatives = Mock()
-        creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
-
         outcome = prepare_media_buy_approval_execution(
             media_buys=media_buy_repo,
-            assignments=assignments,
-            creatives=creatives,
             media_buy_id="mb_1",
-            approved_by=None,
         )
 
         assert outcome.status is ApprovalExecutionStatus.READY
@@ -668,17 +653,9 @@ def test_creative_unblock_may_not_promote_a_buy_awaiting_a_human_decision():
         media_buy_repo = Mock()
         media_buy_repo.get_by_id.return_value = SimpleNamespace(status=status, principal_id="principal_1")
         media_buy_repo.claim_approved_execution.return_value = True
-        assignments = Mock()
-        assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
-        creatives = Mock()
-        creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
-
         outcome = prepare_media_buy_approval_execution(
             media_buys=media_buy_repo,
-            assignments=assignments,
-            creatives=creatives,
             media_buy_id="mb_1",
-            approved_by=None,
             trigger=trigger,
         )
 
@@ -694,20 +671,12 @@ def test_not_executable_is_distinct_from_claim_refused():
     CLAIM_REFUSED says "this WAS a candidate and another request already claimed it, do
     not proceed". Collapsing them is what made the routes pre-filter in the first place.
     """
-    assignments = Mock()
-    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
-    creatives = Mock()
-    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status="approved")]
-
     absent = Mock()
     absent.get_by_id.return_value = None
     assert (
         prepare_media_buy_approval_execution(
             media_buys=absent,
-            assignments=assignments,
-            creatives=creatives,
             media_buy_id="mb_1",
-            approved_by=None,
         ).status
         is ApprovalExecutionStatus.NOT_EXECUTABLE
     )
@@ -718,116 +687,68 @@ def test_not_executable_is_distinct_from_claim_refused():
     assert (
         prepare_media_buy_approval_execution(
             media_buys=lost_the_claim,
-            assignments=assignments,
-            creatives=creatives,
             media_buy_id="mb_1",
-            approved_by=None,
         ).status
         is ApprovalExecutionStatus.CLAIM_REFUSED
     )
 
 
 @pytest.mark.parametrize(
-    ("creative_status", "expected_status"),
+    ("creative_status", "blocks"),
     [
-        ("approved", ApprovalExecutionStatus.READY),
-        ("active", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
-        ("pending_review", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
-        ("rejected", ApprovalExecutionStatus.WAITING_FOR_CREATIVES),
+        ("approved", False),
+        ("active", True),
+        ("processing", True),
+        ("pending_review", True),
+        ("suspended", True),
+        ("rejected", True),
+        ("archived", True),
     ],
 )
-def test_creative_gate_admits_only_approved(creative_status, expected_status):
-    """``approved`` is the only creative status that satisfies the gate.
+def test_creative_gate_admits_only_approved(creative_status, blocks):
+    """``approved`` is the only creative status that clears the gate.
 
-    The two approve routes had drifted: one used ``not in ["approved", "active"]`` while the
-    other used ``!= "approved"``. The reconciliation had resolved to the permissive rule, but
-    ``active`` is not a member of the creative status enum (``processing``, ``pending_review``,
-    ``approved``, ``suspended``, ``rejected``, ``archived``) and no producer writes it for a
-    creative — so the permissive branch graded nothing real. The ``active`` row is kept here on
-    the REFUSAL side so the gate is pinned against re-admitting it.
+    The gate is ``CreativeAssignmentRepository.unapproved_creative_ids`` — one home,
+    rooted at the media buy and tenant-scoped by the repository itself. Three routes
+    used to open-code it and the three disagreed, one of them admitting ``active``.
 
-    Parametrized rather than added as a fifth near-identical scaffold, because the missing row
-    is exactly what a table makes visible and four copy-pasted mock blocks hid.
+    ``active`` sits on the REFUSAL side and every member of the pinned 3.1
+    ``enums/creative-status.json`` is present, so this table is the enum plus the one
+    value that is NOT in it. Re-admitting ``active`` reddens the second row.
     """
-    media_buy_repo = Mock()
-    media_buy_repo.get_by_id.return_value = SimpleNamespace(status="pending_approval", principal_id="principal_1")
-    media_buy_repo.claim_approved_execution.return_value = True
-    assignments = Mock()
-    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_1")]
-    creatives = Mock()
-    creatives.get_by_ids.return_value = [SimpleNamespace(creative_id="creative_1", status=creative_status)]
+    from src.core.database.repositories.creative import CreativeAssignmentRepository
 
-    outcome = prepare_media_buy_approval_execution(
-        media_buys=media_buy_repo,
-        assignments=assignments,
-        creatives=creatives,
-        media_buy_id="mb_1",
-        approved_by=None,
-    )
-
-    assert outcome.status is expected_status
-    if expected_status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES:
-        assert outcome.blocking_creative_ids == ("creative_1",)
+    repo = CreativeAssignmentRepository(Mock(), "tenant_1")
+    with (
+        patch.object(
+            CreativeAssignmentRepository,
+            "get_by_media_buy",
+            return_value=[SimpleNamespace(creative_id="creative_1")],
+        ),
+        patch(
+            "src.core.database.repositories.creative.CreativeRepository.admin_get_by_ids",
+            return_value=[SimpleNamespace(creative_id="creative_1", status=creative_status)],
+        ),
+    ):
+        assert repo.unapproved_creative_ids("mb_1") == (["creative_1"] if blocks else [])
 
 
-def test_shared_preparation_blocks_buy_without_creative_assignments():
-    """No-assignment buys remain pending_creatives and never claim execution."""
-    media_buy_repo = Mock()
-    media_buy_repo.get_by_id.return_value = SimpleNamespace(
-        status="pending_approval",
-        principal_id="principal_1",
-    )
-    assignments = Mock()
-    assignments.get_by_media_buy.return_value = []
-    creatives = Mock()
+def test_creative_gate_does_not_hold_a_buy_with_no_assignments():
+    """A buy with no creatives is not waiting on any, so the gate does not hold it.
 
-    outcome = prepare_media_buy_approval_execution(
-        media_buys=media_buy_repo,
-        assignments=assignments,
-        creatives=creatives,
-        media_buy_id="mb_1",
-        approved_by="approver@example.com",
-    )
+    This resolves the third disagreement between the old open-codings: one of them
+    read an empty assignment list as an unsatisfied gate, holding a buy for creatives
+    nobody had assigned.
+    """
+    from src.core.database.repositories.creative import CreativeAssignmentRepository
 
-    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
-    assert outcome.blocking_creative_ids == ()
-    creatives.get_by_ids.assert_not_called()
-    media_buy_repo.update_status.assert_called_once_with(
-        "mb_1",
-        "pending_creatives",
-        approved_at=ANY,
-        approved_by="approver@example.com",
-    )
-    # ``ANY`` above matches a naive datetime just as happily as an aware one, so pin
-    # the tzinfo the same way the completed_at sibling does.
-    assert media_buy_repo.update_status.call_args.kwargs["approved_at"].tzinfo is UTC
-    media_buy_repo.claim_approved_execution.assert_not_called()
-
-
-def test_shared_preparation_treats_missing_creative_rows_as_blocking():
-    """A dangling assignment cannot satisfy the canonical creative gate."""
-    media_buy_repo = Mock()
-    media_buy_repo.get_by_id.return_value = SimpleNamespace(
-        status="pending_approval",
-        principal_id="principal_1",
-    )
-    assignments = Mock()
-    assignments.get_by_media_buy.return_value = [SimpleNamespace(creative_id="creative_missing")]
-    creatives = Mock()
-    creatives.get_by_ids.return_value = []
-
-    outcome = prepare_media_buy_approval_execution(
-        media_buys=media_buy_repo,
-        assignments=assignments,
-        creatives=creatives,
-        media_buy_id="mb_1",
-        approved_by=None,
-    )
-
-    assert outcome.status is ApprovalExecutionStatus.WAITING_FOR_CREATIVES
-    assert outcome.blocking_creative_ids == ("creative_missing",)
-    creatives.get_by_ids.assert_called_once_with(["creative_missing"], "principal_1")
-    media_buy_repo.claim_approved_execution.assert_not_called()
+    repo = CreativeAssignmentRepository(Mock(), "tenant_1")
+    with (
+        patch.object(CreativeAssignmentRepository, "get_by_media_buy", return_value=[]),
+        patch("src.core.database.repositories.creative.CreativeRepository.admin_get_by_ids") as admin_get_by_ids,
+    ):
+        assert repo.unapproved_creative_ids("mb_1") == []
+    admin_get_by_ids.assert_not_called()
 
 
 def test_flight_status_uses_canonical_pre_active_and_completed_lifecycle():
@@ -895,7 +816,7 @@ def test_shared_execution_success_finalizes_exact_step_once():
     with (
         patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
-            return_value=(True, None),
+            return_value=ApprovalResult(outcome=ApprovalOutcome.EXECUTED),
         ) as execute,
         patch(
             "src.core.workflow_finalization.finalize_media_buy_approval_step",
@@ -911,7 +832,7 @@ def test_shared_execution_success_finalizes_exact_step_once():
 
     assert outcome.status is ApprovalExecutionStatus.SUCCEEDED
     assert outcome.finalization == ApprovalFinalization(applied=True, result=result)
-    execute.assert_called_once_with("mb_1", "tenant_1", execution_claimed=True)
+    execute.assert_called_once_with("mb_1", "tenant_1", execution_claimed=True, approved_by=None, approved_at=None)
     finalize.assert_called_once_with(
         tenant_id="tenant_1",
         step_id="step_1",
@@ -929,7 +850,7 @@ def test_shared_execution_persists_flight_aware_status_with_terminal_step():
     with (
         patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
-            return_value=(True, None),
+            return_value=ApprovalResult(outcome=ApprovalOutcome.EXECUTED),
         ),
         patch(
             "src.core.workflow_finalization.finalize_latest_media_buy_approval_step",
@@ -958,7 +879,10 @@ def test_shared_execution_ambiguous_outcome_stays_nonterminal():
     with (
         patch(
             "src.core.tools.media_buy_create.execute_approved_media_buy",
-            return_value=(None, "adapter outcome unknown"),
+            return_value=ApprovalResult(
+                outcome=ApprovalOutcome.PENDING_RECONCILIATION,
+                error_msg="adapter outcome unknown",
+            ),
         ),
         patch("src.core.workflow_finalization.finalize_media_buy_approval_step") as finalize_exact,
         patch("src.core.workflow_finalization.finalize_latest_media_buy_approval_step") as finalize_latest,
@@ -1098,70 +1022,29 @@ class TestWaitingForCreativesMessage:
         # The drift that shipped: GAM is one of several registered adapters.
         assert "GAM" not in message
 
-    def test_zero_blocking_creatives_gets_its_own_message(self):
-        """No assignments at all is a different situation, not "waiting for 0".
-
-        ``_approval_creative_gate`` returns ``(False, ())`` when the buy has NO creative
-        assignments — the gate is unsatisfied precisely because nothing is assigned — so a
-        single count-interpolated sentence renders "Waiting for 0 creative(s) to be
-        approved", telling the operator to wait for an empty set. The two cases need
-        opposite actions: assign creatives, versus wait for the assigned ones to clear.
-        """
-        from src.admin.utils.approval import waiting_for_creatives_message
-
-        message = waiting_for_creatives_message(0)
-
-        assert "0 creative(s)" not in message
-        assert "No creatives are assigned yet" in message
-        assert "assign" in message.lower(), "the operator must be told the action, not just the state"
-        assert "GAM" not in message
-
     def test_no_route_reinlines_the_message(self):
         """The wording lives in exactly one place — checked on the DISTINCTIVE clause.
 
         A route that re-inlines the sentence can drift again without any behavioural test
         noticing, so this guard carries the single-source property.
 
-        Fragment selection is the whole difficulty, and two earlier versions got it wrong
-        in opposite ways:
-
-        * the text AFTER "creative(s)" — "...before creating in the ad server" — which is
-          exactly the clause that HAD drifted to "...in GAM", so a re-inline of the
-          historical variant did not match and the guard passed. It caught only re-inlines
-          of the wording that was already correct.
-        * ``os.path.commonprefix`` of the two branches, which is "Media buy approved!" —
-          a generic salutation. A re-inline of the distinctive clause WITHOUT that opener
-          sails past it, and both mutations used to verify that version happened to include
-          the salutation, so it looked verified.
-
-        So match each branch on the clause that identifies it and is not shared with
-        anything else: the count-interpolated wait text, and the zero-assignment text. Both
-        are checked, because the guard exists to stop EITHER branch being re-inlined.
+        Fragment selection is the whole difficulty. Matching the text AFTER "creative(s)"
+        — "...before creating in the ad server" — is exactly the clause that HAD drifted
+        to "...in GAM", so a re-inline of the historical variant would not match and the
+        guard would pass. Matching the salutation "Media buy approved!" is generic enough
+        that a re-inline of the distinctive clause without it sails past. So the fragment
+        is the count-interpolated middle: distinctive AND drift-stable.
         """
         from src.admin.utils.approval import waiting_for_creatives_message
 
-        salutation = os.path.commonprefix([waiting_for_creatives_message(0), waiting_for_creatives_message(2)]).strip()
-        # Everything after the shared opener is what actually distinguishes each branch.
-        distinctive = [
-            waiting_for_creatives_message(0)[len(salutation) :].strip(),
-            waiting_for_creatives_message(2)[len(salutation) :].strip(),
-        ]
-        # The wait branch needs care: the count is interpolated (so the fragment must start
-        # after it) AND the trailing "before creating in the ad server" is the clause that
-        # HAS drifted (to "...in GAM"), so the fragment must end before it. What is left —
-        # "creative(s) to be approved" — is both distinctive and drift-stable. Taking the
-        # tail after "creative(s)" instead, as two earlier versions did, matches only the
-        # wording that is currently correct and lets a re-inline of the GAM variant pass.
-        wait = distinctive[1]
-        distinctive[1] = wait[wait.index("creative(s)") : wait.index("before")].strip()
-        for fragment in distinctive:
-            assert len(fragment) >= 25, (
-                f"message shape changed — {fragment!r} is too short to identify a branch. "
-                f"Re-derive this guard's fragments rather than letting them match broadly; a "
-                f"short fragment is how the salutation-only version passed."
-            )
+        message = waiting_for_creatives_message(2)
+        fragment = message[message.index("creative(s)") : message.index("before")].strip()
+        assert len(fragment) >= 25, (
+            f"message shape changed — {fragment!r} is too short to identify the branch. "
+            f"Re-derive this guard's fragment rather than letting it match broadly."
+        )
 
-        offenders = sorted({site for fragment in distinctive for site in _reinline_offenders(fragment)})
+        offenders = sorted(_reinline_offenders(fragment))
 
         assert offenders == [], f"WAITING_FOR_CREATIVES wording re-inlined outside approval.py: {offenders}"
 
