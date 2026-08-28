@@ -6,7 +6,6 @@ Provides two transports for admin account management BDD scenarios:
 
 Transport selection is automatic based on ``ADCP_SALES_PORT`` env var.
 
-beads: salesagent-oj0.1.2, salesagent-oj0.1.3
 """
 
 from __future__ import annotations

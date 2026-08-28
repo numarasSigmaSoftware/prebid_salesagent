@@ -3,7 +3,6 @@
 Bridges AccountReference from request payloads to a validated account id + sandbox mode.
 Used across the tool and transport layers wherever an AccountReference needs resolving.
 
-beads: salesagent-8n4
 """
 
 from __future__ import annotations

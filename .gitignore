@@ -54,6 +54,7 @@ Thumbs.db
 # BUT: Allow pre-commit hooks and scripts/ directory
 check_*.py
 !.pre-commit-hooks/check_*.py
+!scripts/check_*.py
 diagnose_*.py
 fix_*.py
 sync_*.py
@@ -153,3 +154,6 @@ test-results/
 
 # One-off presentation drafts
 docs/TRANSFORMATION_PRESENTATION.md
+
+# Session working notes — scratch, never a deliverable. The PR is their home.
+.claude/notes/

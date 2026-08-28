@@ -1334,7 +1334,7 @@ class GoogleAdManager(AdServerAdapter):
 
             if step_id:
                 # Manual approval success - no errors
-                return UpdateMediaBuySuccess(
+                return UpdateMediaBuySuccess.carrier(
                     media_buy_id=media_buy_id,
                     affected_packages=[],  # List of package_ids affected by update
                     implementation_date=today,
@@ -1354,7 +1354,7 @@ class GoogleAdManager(AdServerAdapter):
 
                 if step_id:
                     # Activation workflow created - success (no errors)
-                    return UpdateMediaBuySuccess(
+                    return UpdateMediaBuySuccess.carrier(
                         media_buy_id=media_buy_id,
                         affected_packages=[],
                         implementation_date=today,
@@ -1451,7 +1451,7 @@ class GoogleAdManager(AdServerAdapter):
                 session.commit()
                 self.log(f"✓ Updated package {package_id} budget to ${budget} in both GAM and database")
 
-            return UpdateMediaBuySuccess(
+            return UpdateMediaBuySuccess.carrier(
                 media_buy_id=media_buy_id,
                 affected_packages=[],  # Required by AdCP spec
                 implementation_date=today,
@@ -1521,7 +1521,7 @@ class GoogleAdManager(AdServerAdapter):
                         buyer_package_ref=None,
                     )
 
-                    return UpdateMediaBuySuccess(
+                    return UpdateMediaBuySuccess.carrier(
                         media_buy_id=media_buy_id,
                         affected_packages=[affected_package],
                         implementation_date=today,
@@ -1577,14 +1577,14 @@ class GoogleAdManager(AdServerAdapter):
                         for pkg in packages
                     ]
 
-                    return UpdateMediaBuySuccess(
+                    return UpdateMediaBuySuccess.carrier(
                         media_buy_id=media_buy_id,
                         affected_packages=affected_packages_list,
                         implementation_date=today,
                     )
 
             # Should not reach here - both pause/resume branches return above
-            return UpdateMediaBuySuccess(
+            return UpdateMediaBuySuccess.carrier(
                 media_buy_id=media_buy_id,
                 affected_packages=[],
                 implementation_date=today,

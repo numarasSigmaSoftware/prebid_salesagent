@@ -682,7 +682,7 @@ class BroadstreetAdapter(AdServerAdapter):
                     for pkg in db_packages
                 ]
 
-                return UpdateMediaBuySuccess(
+                return UpdateMediaBuySuccess.carrier(
                     media_buy_id=media_buy_id, affected_packages=affected, implementation_date=today
                 )
 
@@ -717,7 +717,7 @@ class BroadstreetAdapter(AdServerAdapter):
                 else:
                     self.log(f"[yellow]No Broadstreet advertisement IDs for package {package_id}[/yellow]")
 
-                return UpdateMediaBuySuccess(
+                return UpdateMediaBuySuccess.carrier(
                     media_buy_id=media_buy_id,
                     affected_packages=[
                         AffectedPackage(
@@ -746,7 +746,7 @@ class BroadstreetAdapter(AdServerAdapter):
                 session.commit()
                 self.log(f"Updated budget for package {package_id} to ${budget / 100:.2f}")
 
-            return UpdateMediaBuySuccess(
+            return UpdateMediaBuySuccess.carrier(
                 media_buy_id=media_buy_id,
                 affected_packages=[
                     AffectedPackage(
@@ -779,7 +779,7 @@ class BroadstreetAdapter(AdServerAdapter):
                 session.commit()
                 self.log(f"Updated impressions for package {package_id} to {budget:,}")
 
-            return UpdateMediaBuySuccess(
+            return UpdateMediaBuySuccess.carrier(
                 media_buy_id=media_buy_id,
                 affected_packages=[
                     AffectedPackage(
@@ -793,7 +793,7 @@ class BroadstreetAdapter(AdServerAdapter):
             )
 
         # Should not reach here - all actions are handled above
-        return UpdateMediaBuySuccess(media_buy_id=media_buy_id, affected_packages=[], implementation_date=today)
+        return UpdateMediaBuySuccess.carrier(media_buy_id=media_buy_id, affected_packages=[], implementation_date=today)
 
     async def get_available_inventory(self) -> dict[str, Any]:
         """Fetch available inventory (zones) from Broadstreet.

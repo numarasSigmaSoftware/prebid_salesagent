@@ -28,16 +28,7 @@ def wire_field(ctx: dict, field: str) -> Any:
     non-stashing env trips this instead of passing green. IMPL (and the
     non-parametrized ``None`` default) legitimately have no wire.
     """
-    wire = ctx.get("wire_response")
-    transport = ctx.get("transport")
-    if wire is None and transport not in (None, Transport.IMPL):
-        raise AssertionError(f"{transport}: wire_response missing — env does not stash success-path wire")
-    if wire is not None:
-        return wire[field]
-    # IMPL has no wire — serialize the typed payload through the production
-    # serializer. _require_response preserves the diagnostic if a (reused) sibling
-    # scenario hit an error path, instead of a bare ctx["response"] KeyError.
-    return _require_response(ctx).model_dump(mode="json")[field]
+    return wire_dict(ctx)[field]
 
 
 def wire_dict(ctx: dict) -> dict:
@@ -50,13 +41,23 @@ def wire_dict(ctx: dict) -> dict:
     the non-parametrized ``None`` default) serialize the typed payload through the
     production serializer.
     """
-    wire = ctx.get("wire_response")
+    result = ctx.get("result")
     transport = ctx.get("transport")
-    if wire is None and transport not in (None, Transport.IMPL):
-        raise AssertionError(f"{transport}: wire_response missing — env does not stash success-path wire")
-    if wire is not None:
+    if transport not in (None, Transport.IMPL):
+        # A real-wire transport: the guarded read lives on TransportResult, which is
+        # the object that holds the wire. One implementation, so a step definition
+        # cannot drift from an integration test asserting the same thing.
+        if result is not None:
+            return result.require_wire()
+        wire = ctx.get("wire_response")
+        if wire is None:
+            raise AssertionError(f"{transport}: wire_response missing — env does not stash success-path wire")
         return wire
-    return _require_response(ctx).model_dump(mode="json")
+    # IMPL has no wire — serialize the typed payload through the production
+    # serializer. _require_response preserves the diagnostic if a (reused) sibling
+    # scenario hit an error path, instead of a bare ctx["response"] KeyError.
+    wire = ctx.get("wire_response")
+    return wire if wire is not None else _require_response(ctx).model_dump(mode="json")
 
 
 def _require(ctx: dict, key: str, *, hint: str | None = None) -> object:
