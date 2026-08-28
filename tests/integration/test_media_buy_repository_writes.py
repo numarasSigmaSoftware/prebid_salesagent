@@ -7,6 +7,7 @@ Tests write operations against real PostgreSQL to verify:
 
 """
 
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ import pytest
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal, Tenant
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.exceptions import AdCPInvariantViolationError, AdCPRevisionConflictError
 from tests.integration.conftest import cleanup_tenant, make_media_buy, make_package
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -576,3 +578,126 @@ class TestCreatePackagesBulk:
         with pytest.raises(ValueError, match="not found"):
             with MediaBuyUoW(tenant_a) as uow:
                 uow.media_buys.create_packages_bulk("mb_bulk_iso", packages)
+
+
+# ---------------------------------------------------------------------------
+# MediaBuy.compare_and_set_revision — optimistic concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestCompareAndSetRevision:
+    """Repository.compare_and_set_revision() enforces the buyer's expected revision.
+
+    The pinned update-media-buy-request.json requires a mismatched `revision` to be
+    rejected with CONFLICT, and requires the comparison to be enforced atomically
+    with the write.
+    """
+
+    def test_matching_revision_bumps_and_returns_a_real_int(self, tenant_a, principal_a):
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_cas_ok"))
+
+        with MediaBuyUoW(tenant_a) as uow:
+            result = uow.media_buys.compare_and_set_revision("mb_cas_ok", expected_revision=1)
+            # _bump_revision leaves a SQL expression behind; this path must resolve it,
+            # because the update flow reports the value straight back to the buyer.
+            assert result.revision == 2
+            assert type(result.revision) is int
+
+        with get_db_session() as session:
+            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_ok")
+            assert fetched.revision == 2
+
+    def test_stale_revision_raises_conflict_carrying_both_versions(self, tenant_a, principal_a):
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_cas_stale"))
+        # Move the revision on, so the buyer's token 1 is now stale.
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.update_fields("mb_cas_stale", order_name="moved on")
+
+        with pytest.raises(AdCPRevisionConflictError) as exc_info:
+            with MediaBuyUoW(tenant_a) as uow:
+                uow.media_buys.compare_and_set_revision("mb_cas_stale", expected_revision=1)
+
+        exc = exc_info.value
+        assert exc.wire_error_code == "CONFLICT"
+        assert exc.details == {
+            "resource_id": "mb_cas_stale",
+            "expected_version": 1,
+            "current_version": 2,
+        }
+
+    def test_conflict_leaves_the_revision_untouched(self, tenant_a, principal_a):
+        """A rejected update must not have spent the token it rejected."""
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_cas_norev"))
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.update_fields("mb_cas_norev", order_name="moved on")
+
+        with pytest.raises(AdCPRevisionConflictError):
+            with MediaBuyUoW(tenant_a) as uow:
+                uow.media_buys.compare_and_set_revision("mb_cas_norev", expected_revision=1)
+
+        with get_db_session() as session:
+            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_norev")
+            assert fetched.revision == 2
+
+    def test_vanished_row_raises_the_typed_invariant_error(self, tenant_a):
+        """Not a bare RuntimeError: the boundary needs a typed envelope."""
+        with pytest.raises(AdCPInvariantViolationError):
+            with MediaBuyUoW(tenant_a) as uow:
+                uow.media_buys.compare_and_set_revision("mb_cas_never_existed", expected_revision=1)
+
+    def test_other_tenant_cannot_compare_and_set(self, tenant_a, tenant_b, principal_a):
+        """The locking re-read carries the same tenant filter as every other query."""
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_cas_iso"))
+
+        with pytest.raises(AdCPInvariantViolationError):
+            with MediaBuyUoW(tenant_b) as uow:
+                uow.media_buys.compare_and_set_revision("mb_cas_iso", expected_revision=1)
+
+    def test_racing_updates_with_the_same_token_produce_one_win_and_one_conflict(self, tenant_a, principal_a):
+        """The comparison is enforced ATOMICALLY with the write.
+
+        Two genuinely concurrent transactions, each on its own connection (MediaBuyUoW
+        opens its own session), both holding revision 1. A threading.Barrier releases
+        them together so both are inside their transaction before either compares.
+        Exactly one may win: the loser must see the winner's committed revision, which
+        it can only do if the comparison happened under the row lock. Two sequential
+        calls would pass even with no locking at all, and would prove nothing.
+        """
+        with MediaBuyUoW(tenant_a) as uow:
+            uow.media_buys.create(make_media_buy(tenant_a, principal_a, "mb_cas_race"))
+
+        start = threading.Barrier(2)
+        outcomes: list[str] = []
+        lock = threading.Lock()
+
+        def attempt() -> None:
+            try:
+                with MediaBuyUoW(tenant_a) as uow:
+                    # Open the transaction, THEN meet at the barrier, so both
+                    # transactions are live before either takes the lock.
+                    uow.media_buys.get_by_id("mb_cas_race")
+                    start.wait(timeout=30)
+                    uow.media_buys.compare_and_set_revision("mb_cas_race", expected_revision=1)
+                outcome = "won"
+            except AdCPRevisionConflictError:
+                outcome = "conflict"
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert not any(thread.is_alive() for thread in threads), "a racing transaction never finished"
+
+        assert sorted(outcomes) == ["conflict", "won"], outcomes
+
+        # The winner's bump landed exactly once: the loser neither wrote nor re-bumped.
+        with get_db_session() as session:
+            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_race")
+            assert fetched.revision == 2

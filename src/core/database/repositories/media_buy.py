@@ -16,7 +16,8 @@ from collections.abc import Collection
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database.models import (
@@ -24,9 +25,18 @@ from src.core.database.models import (
     MediaPackage,
     PersistedMediaBuyStatus,
 )
+from src.core.exceptions import AdCPInvariantViolationError, AdCPRevisionConflictError
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
+
+#: How long the revision re-read waits for the row lock before giving up. Long enough
+#: that an ordinary in-flight update finishes first, short enough that a buyer gets an
+#: answer instead of a hung connection.
+_REVISION_LOCK_TIMEOUT_MS = 3000
+
+#: PostgreSQL SQLSTATE for "could not obtain lock" -- what lock_timeout raises.
+_LOCK_NOT_AVAILABLE = "55P03"
 
 
 class MediaBuyRepository:
@@ -574,6 +584,97 @@ class MediaBuyRepository:
         self._stamp_confirmation_if_needed(media_buy, seller_committed=seller_committed)
         self._bump_revision(media_buy)
         self._session.flush()
+        return media_buy
+
+    def _lock_row_for_revision_check(self, media_buy_id: str, *, expected_revision: int) -> MediaBuy | None:
+        """Re-read the row under a row lock, bounded by a lock timeout.
+
+        ``with_for_update()`` is what makes the comparison correct: it is the lock, and
+        dropping it lets two racing transactions both read the same revision and both
+        commit -- the lost update the spec's "atomically" clause forbids. The race test
+        in tests/integration/test_media_buy_repository_writes.py grades exactly that.
+
+        ``populate_existing=True`` states the requirement the comparison depends on: the
+        row must come from THIS select, not from whatever the session already holds --
+        and in this flow it does already hold one, because the caller verified ownership
+        first. Measured on the pinned SQLAlchemy, ``with_for_update()`` alone already
+        refreshes the identity-map row's columns, so this option changes no behaviour
+        today; it is kept because the comparison's correctness should rest on something
+        the query says rather than on a refresh the ORM is not asked for.
+
+        The lock timeout keeps a contended request from pinning a connection behind
+        whoever holds the row. Timing out means the current revision was never
+        observed, which is a conflict the buyer can retry -- not a server fault.
+        """
+        # Postgres SET does not accept bind parameters; set_config(..., is_local=true)
+        # does, and is likewise reverted when this transaction ends.
+        self._session.execute(
+            text("SELECT set_config('lock_timeout', :timeout, true)"),
+            {"timeout": f"{_REVISION_LOCK_TIMEOUT_MS}ms"},
+        )
+        statement = (
+            select(MediaBuy)
+            .where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.media_buy_id == media_buy_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        try:
+            return self._session.scalars(statement).first()
+        except OperationalError as exc:
+            if getattr(exc.orig, "pgcode", None) != _LOCK_NOT_AVAILABLE:
+                raise
+            raise AdCPRevisionConflictError.unobserved(media_buy_id=media_buy_id, expected=expected_revision) from exc
+
+    def compare_and_set_revision(
+        self, media_buy_id: str, *, expected_revision: int, seller_committed: bool = False
+    ) -> MediaBuy:
+        """Enforce the buyer's expected ``revision`` atomically with this transaction's write.
+
+        The pinned update-media-buy-request.json requires that a supplied ``revision``
+        be rejected with ``CONFLICT`` when it does not match, and that the comparison
+        be enforced ATOMICALLY with the write. Locking the row is what supplies the
+        second half: a Postgres row lock is held until the transaction ends, so once
+        this returns, no other transaction can move the revision out from under the
+        writes that follow in the same unit of work. That is why a caller may -- and
+        the update flow does -- run this before it knows which fields it will write.
+
+        The bump is taken here rather than deferred, so the buyer's token is spent the
+        moment it is honoured. A caller that goes on to write fields will bump again;
+        ``revision`` is a monotonic concurrency token, not a count of API calls, and
+        the update flow already bumps a variable number of times per request.
+
+        Raises:
+            AdCPRevisionConflictError: the current revision differs from
+                ``expected_revision``, or the row could not be locked in time.
+            AdCPInvariantViolationError: the row is gone. Callers reach this method
+                having already read the row (ownership is verified first), so a
+                locked read that finds nothing means it was deleted mid-request.
+        """
+        media_buy = self._lock_row_for_revision_check(media_buy_id, expected_revision=expected_revision)
+        if media_buy is None:
+            raise AdCPInvariantViolationError(
+                f"media buy {media_buy_id} (tenant {self._tenant_id}) disappeared between the "
+                f"ownership check and the locked revision re-read"
+            )
+        if media_buy.revision != expected_revision:
+            raise AdCPRevisionConflictError.mismatch(
+                media_buy_id=media_buy_id,
+                expected=expected_revision,
+                current=media_buy.revision,
+            )
+        # Same ordering rule as update_status/update_fields: stamp (which reads
+        # attributes) before the bump (which replaces one with a SQL expression).
+        self._stamp_confirmation_if_needed(media_buy, seller_committed=seller_committed)
+        self._bump_revision(media_buy)
+        self._session.flush()
+        # _bump_revision leaves ``revision`` holding a SQL expression, and a flush alone
+        # does not resolve it. Callers here READ the new value (the update flow reports
+        # it back to the buyer), so unlike the other write paths this one cannot leave
+        # the window open -- refresh it into a real int before returning.
+        self._session.refresh(media_buy, ["revision"])
         return media_buy
 
     def update_fields(self, media_buy_id: str, *, seller_committed: bool = False, **kwargs: Any) -> MediaBuy | None:
