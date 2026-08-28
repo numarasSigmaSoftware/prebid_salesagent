@@ -162,9 +162,22 @@ class TestImplReplaysCachedSuccess:
         # and SERVICE_UNAVAILABLE satisfies "!= IDEMPOTENCY_CONFLICT" — so
         # inverting production from `return None` (miss) to a fail-closed raise
         # left this test, and all 42 in the replay/wire-matrix/race trio, green.
-        assert exc_info.value.error_code == "BUDGET_TOO_LOW", (
+        #
+        # The gate this trips moved from budget to start_time without any
+        # production reordering: `_make_request` used to send `packages=[]`, so
+        # `# 1. Budget validation` (validate_budget_positive on a 0 total) raised
+        # BUDGET_TOO_LOW first. Upstream #1941 gave that package a positive
+        # budget, so gate 1 now passes and execution reaches `# 2. DateTime
+        # validation`, whose start-time-in-the-past check rejects this helper's
+        # fixed 2026-06-01 start with INVALID_REQUEST. Both gates sit inside the
+        # same post-probe `try:` in the same order before and after the merge, so
+        # either code is equally proof that the probe returned a miss — and
+        # neither is reachable on the branches this discriminates against (a
+        # replay returns without raising, a conflict raises
+        # IDEMPOTENCY_CONFLICT, and fail-closed raises SERVICE_UNAVAILABLE).
+        assert exc_info.value.error_code == "INVALID_REQUEST", (
             "a drifted cache row must be treated as a MISS and re-execute — the bare request then "
-            "fails downstream in budget validation, which is the proof it ran. Got "
+            "fails downstream on its past start_time, which is the proof it ran. Got "
             f"{exc_info.value.error_code!r}: the probe took a different branch "
             "(SERVICE_UNAVAILABLE would mean it fail-closed instead of re-executing)"
         )
