@@ -232,7 +232,7 @@ class TestExecuteApprovedPlatformIds:
     def test_explicit_null_legacy_idempotency_key_is_synthesized(self, pending_media_buy_with_package):
         """A pre-requirement request serialized with a null key still executes after approval."""
         data = pending_media_buy_with_package
-        adapter_response = CreateMediaBuySuccess(media_buy_id=data["media_buy_id"], packages=[])
+        adapter_response = CreateMediaBuySuccess.carrier(media_buy_id=data["media_buy_id"], packages=[])
 
         success, error = _run_execute_approved(data["media_buy_id"], data["tenant_id"], adapter_response)
 
