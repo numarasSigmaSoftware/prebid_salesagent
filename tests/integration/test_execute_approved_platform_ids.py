@@ -234,9 +234,9 @@ class TestExecuteApprovedPlatformIds:
         data = pending_media_buy_with_package
         adapter_response = CreateMediaBuySuccess.carrier(media_buy_id=data["media_buy_id"], packages=[])
 
-        success, error = _run_execute_approved(data["media_buy_id"], data["tenant_id"], adapter_response)
+        result = _run_execute_approved(data["media_buy_id"], data["tenant_id"], adapter_response)
 
-        assert success is True, f"legacy approval replay failed: {error}"
+        assert result.ok, f"legacy approval replay failed: {result.error_msg}"
 
     def test_platform_line_item_ids_persisted_after_approval(self, pending_media_buy_with_package):
         """After adapter execution via manual approval, platform_line_item_id
