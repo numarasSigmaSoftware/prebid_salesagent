@@ -16,11 +16,31 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
-from src.core.exceptions import normalize_to_adcp_error
+from src.core.exceptions import AdCPError, normalize_to_adcp_error
 from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params
+from src.core.schemas import validate_revision_wire_value
 from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
 
 logger = logging.getLogger(__name__)
+
+#: The only AdCP tool whose request carries an optimistic-concurrency ``revision``.
+#: Named rather than applied to every tool so a stray key on some other tool keeps
+#: whatever handling that tool already has.
+_REVISION_TOOL = "update_media_buy"
+
+
+def _gate_revision_argument(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Validate and normalize a wire-supplied ``revision`` in place.
+
+    Returns whether the arguments were changed. Raises ``AdCPValidationError`` for a
+    value the pinned request schema does not admit -- including an explicit ``null``,
+    which is a schema violation rather than "no token supplied", and which nothing
+    downstream can still distinguish from an omitted key.
+    """
+    if tool_name != _REVISION_TOOL or "revision" not in arguments:
+        return False
+    arguments["revision"] = validate_revision_wire_value(present=True, value=arguments["revision"])
+    return True
 
 
 class RequestCompatMiddleware(Middleware):
@@ -57,6 +77,17 @@ class RequestCompatMiddleware(Middleware):
         normalized = compat_result.params
         if compat_result.translations_applied:
             modified = True
+
+        # Step 1.5: Apply the shared `revision` value contract to the RAW wire value.
+        # This cannot live in the tool wrapper: FastMCP coerces call arguments to the
+        # wrapper's `int | None` annotation before it runs, which reads the string "7"
+        # as 7 and an explicit null as "no token supplied". The arguments dict here is
+        # the last point at which what the buyer actually sent is still visible.
+        try:
+            if _gate_revision_argument(tool_name, normalized):
+                modified = True
+        except AdCPError as exc:
+            await self._emit_as_tool_error(context, tool_name, exc)
 
         # Step 2: Strip unknown fields (schema-aware, production only)
         # In dev mode, unknown fields reach TypeAdapter and fail loudly —
@@ -118,28 +149,38 @@ class RequestCompatMiddleware(Middleware):
                                 raise
                             exc = retry_exc
 
-            # Normalize once for the audit record, then pass the raw exception to
-            # _translate_to_tool_error so the emitted AdCPToolError keeps it as
-            # __cause__. The translator intentionally normalizes it a second time.
-            typed = normalize_to_adcp_error(exc)
-            tenant_id = None
-            principal_id = None
-            if context.fastmcp_context is not None:
-                try:
-                    identity = await context.fastmcp_context.get_state("identity")
-                    if identity is not None:
-                        tenant_id = identity.tenant_id
-                        principal_id = identity.principal_id
-                except Exception:
-                    logger.debug("Could not read MCP identity for validation error logging", exc_info=True)
-            record_boundary_error(
-                "mcp",
-                tool_name,
-                typed,
-                tenant_id=tenant_id,
-                principal_id=principal_id,
-            )
-            _translate_to_tool_error(exc)
+            await self._emit_as_tool_error(context, tool_name, exc)
+
+    async def _emit_as_tool_error(self, context: MiddlewareContext, tool_name: str, exc: Exception) -> None:
+        """Record *exc* and re-raise it as the AdCP two-layer MCP error envelope.
+
+        Every rejection this middleware makes has to leave through here. The tool's
+        own ``with_error_logging`` boundary is INSIDE ``call_next``, so anything
+        raised by the middleware itself would otherwise escape untranslated and
+        reach the buyer without an envelope at all.
+        """
+        # Normalize once for the audit record, then pass the raw exception to
+        # _translate_to_tool_error so the emitted AdCPToolError keeps it as
+        # __cause__. The translator intentionally normalizes it a second time.
+        typed = normalize_to_adcp_error(exc)
+        tenant_id = None
+        principal_id = None
+        if context.fastmcp_context is not None:
+            try:
+                identity = await context.fastmcp_context.get_state("identity")
+                if identity is not None:
+                    tenant_id = identity.tenant_id
+                    principal_id = identity.principal_id
+            except Exception:
+                logger.debug("Could not read MCP identity for validation error logging", exc_info=True)
+        record_boundary_error(
+            "mcp",
+            tool_name,
+            typed,
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+        )
+        _translate_to_tool_error(exc)
 
     @staticmethod
     def _should_retry(exc: Exception) -> bool:

@@ -70,7 +70,7 @@ from src.core.exceptions import (
 )
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import coerce_creative_filters, to_account_reference, to_brand_reference
-from src.core.schemas import CreativeStatusEnum
+from src.core.schemas import CreativeStatusEnum, validate_revision_wire_value
 from src.core.tool_context import ToolContext
 from src.core.tool_error_logging import record_boundary_error
 from src.core.tools import (
@@ -1987,6 +1987,12 @@ class AdCPRequestHandler(RequestHandler):
                 context=params.get("context"),
             )
 
+        # The buyer's optimistic-concurrency token, gated by the shared value contract.
+        # `params` is a plain dict, so this is the one place that can still tell an
+        # omitted `revision` from an explicitly-supplied null — the pinned request
+        # schema gives the field no null arm, and further in both read as None.
+        revision = validate_revision_wire_value(present="revision" in params, value=params.get("revision"))
+
         # Call core function with validated fields + raw nested structures and identity
         response = core_update_media_buy_tool(
             media_buy_id=req.media_buy_id or "",
@@ -1997,6 +2003,7 @@ class AdCPRequestHandler(RequestHandler):
             packages=params.get("packages"),
             push_notification_config=params.get("push_notification_config"),
             context=params.get("context"),
+            revision=revision,
             identity=identity,
         )
 
