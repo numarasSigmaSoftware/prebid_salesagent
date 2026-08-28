@@ -7,6 +7,7 @@ These tests verify that:
 4. AdCP protocol requirements are met
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -19,7 +20,11 @@ from src.core.database.models import (
     Principal as PrincipalModel,
 )  # Need both for contract test
 from src.core.database.models import Product as ProductModel
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import (
+    AdCPInvariantViolationError,
+    AdCPRevisionConflictError,
+    AdCPValidationError,
+)
 from src.core.schemas import (
     Budget,
     CreateMediaBuyRequest,
@@ -61,6 +66,7 @@ from src.core.schemas import (
     Product as ProductSchema,
 )
 from tests.factories.creative_asset import build_assets, image_spec, url_spec, video_spec
+from tests.helpers.pinned_schema import validate_against_pinned_schema
 
 
 class TestSchemaMatchesLibrary:
@@ -3650,6 +3656,72 @@ class TestRevisionValueContract:
         assert validate_revision_wire_value(present=True, value=2.0) == 2
         with pytest.raises(AdCPValidationError):
             validate_revision_wire_value(present=True, value="7")
+
+
+class TestRevisionConflictErrorShape:
+    """The CONFLICT a stale `revision` token must produce.
+
+    `details` is graded against the pinned error-details/conflict.json, read
+    through tests.helpers.pinned_schema so the spec version moves with the SDK pin
+    rather than being frozen as a literal here.
+    """
+
+    def test_mismatch_details_are_schema_valid_and_carry_both_versions(self):
+        exc = AdCPRevisionConflictError.mismatch(media_buy_id="mb_1", expected=3, current=5)
+        validate_against_pinned_schema("conflict.json", exc.details)
+        assert exc.details == {
+            "resource_id": "mb_1",
+            "expected_version": 3,
+            "current_version": 5,
+        }
+
+    def test_unobserved_details_omit_the_unknown_version_rather_than_nulling_it(self):
+        """An unobserved version is absent, not null.
+
+        conflict.json types current_version as ["number", "string"] with no null
+        arm and declares no `required` array, so omission is valid and an explicit
+        null is a schema violation.
+        """
+        exc = AdCPRevisionConflictError.unobserved(media_buy_id="mb_1", expected=3)
+        validate_against_pinned_schema("conflict.json", exc.details)
+        assert "current_version" not in exc.details
+        assert exc.details == {"resource_id": "mb_1", "expected_version": 3}
+
+    def test_explicit_null_version_would_violate_the_pinned_schema(self):
+        """Pins WHY the unobserved arm omits: the null form is not merely a style choice."""
+        with pytest.raises(AssertionError) as exc_info:
+            validate_against_pinned_schema(
+                "conflict.json",
+                {"resource_id": "mb_1", "expected_version": 3, "current_version": None},
+            )
+        assert "None is not of type 'number', 'string'" in str(exc_info.value)
+
+    def test_conflict_carries_the_spec_mandated_wire_identity(self):
+        exc = AdCPRevisionConflictError.mismatch(media_buy_id="mb_1", expected=3, current=5)
+        assert exc.wire_error_code == "CONFLICT"
+        assert exc.status_code == 409
+        assert exc.recovery == "transient"
+        assert exc.suggestion
+
+    def test_invariant_violation_is_transient_service_unavailable_with_a_generic_message(self):
+        """INTERNAL_ERROR is absent from the pinned enum; SERVICE_UNAVAILABLE is transient.
+
+        The diagnostic must stay out of the buyer-facing message -- it names internal
+        state the buyer neither supplied nor can act on.
+        """
+        diagnostic = "row mb_1 vanished between SELECT FOR UPDATE and mutate"
+        exc = AdCPInvariantViolationError(diagnostic)
+        assert exc.wire_error_code == "SERVICE_UNAVAILABLE"
+        assert exc.status_code == 503
+        assert exc.recovery == "transient"
+        assert diagnostic not in exc.message
+        assert "mb_1" not in exc.message
+
+    def test_invariant_violation_logs_the_diagnostic(self, caplog):
+        """The diagnostic is not discarded -- it goes to the log, at error level."""
+        with caplog.at_level(logging.ERROR, logger="src.core.exceptions"):
+            AdCPInvariantViolationError("row mb_1 vanished between SELECT FOR UPDATE and mutate")
+        assert "row mb_1 vanished between SELECT FOR UPDATE and mutate" in caplog.text
 
 
 if __name__ == "__main__":
