@@ -769,12 +769,24 @@ def then_error_field_with_value(ctx: dict, field: str, value: str) -> None:
 # ── Error details assertions ────────────────────────────────────────
 
 
-@then(parsers.parse("the error details should include {key} {value}"))
+@then(parsers.parse("the error details should include {key:w} {value:S}"))
 def then_error_details_include_unquoted(ctx: dict, key: str, value: str) -> None:
     """Assert error.details contains a key with the given value (numeric/unquoted).
 
     Handles numeric coercion: if the expected value looks like a number,
     compare numerically. Otherwise compare as strings.
+
+    ``{key:w} {value:S}`` — an identifier and a single non-whitespace token — is
+    the shape this body can actually grade: it looks ``key`` up in ``details``
+    and compares ``details[key]`` against ``value``. The untyped ``{key} {value}``
+    it replaced let ``value`` swallow arbitrary prose, so the parser matched
+    English sentences describing a detail rather than naming one. On
+    ``the error details should include supported_versions as a non-empty array``
+    that bound ``value="as a non-empty array"`` and shadowed
+    ``uc010_version_negotiation.then_details_supported_versions_nonempty``, which
+    reads the wire array and compares it element-wise to the seller's configured
+    releases. One sentence, one meaning: the prose-describing sentences belong to
+    the steps that can grade them, not to this one.
     """
     error = ctx.get("error")
     assert error is not None, "No error recorded in ctx"
