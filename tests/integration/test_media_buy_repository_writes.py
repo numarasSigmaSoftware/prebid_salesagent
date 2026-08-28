@@ -604,9 +604,8 @@ class TestCompareAndSetRevision:
             assert result.revision == 2
             assert type(result.revision) is int
 
-        with get_db_session() as session:
-            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_ok")
-            assert fetched.revision == 2
+        with MediaBuyUoW(tenant_a) as uow:
+            assert uow.media_buys.get_by_id("mb_cas_ok").revision == 2
 
     def test_stale_revision_raises_conflict_carrying_both_versions(self, tenant_a, principal_a):
         with MediaBuyUoW(tenant_a) as uow:
@@ -638,9 +637,8 @@ class TestCompareAndSetRevision:
             with MediaBuyUoW(tenant_a) as uow:
                 uow.media_buys.compare_and_set_revision("mb_cas_norev", expected_revision=1)
 
-        with get_db_session() as session:
-            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_norev")
-            assert fetched.revision == 2
+        with MediaBuyUoW(tenant_a) as uow:
+            assert uow.media_buys.get_by_id("mb_cas_norev").revision == 2
 
     def test_vanished_row_raises_the_typed_invariant_error(self, tenant_a):
         """Not a bare RuntimeError: the boundary needs a typed envelope."""
@@ -698,6 +696,5 @@ class TestCompareAndSetRevision:
         assert sorted(outcomes) == ["conflict", "won"], outcomes
 
         # The winner's bump landed exactly once: the loser neither wrote nor re-bumped.
-        with get_db_session() as session:
-            fetched = MediaBuyRepository(session, tenant_a).get_by_id("mb_cas_race")
-            assert fetched.revision == 2
+        with MediaBuyUoW(tenant_a) as uow:
+            assert uow.media_buys.get_by_id("mb_cas_race").revision == 2
