@@ -12,7 +12,7 @@ from decimal import Decimal
 # --- V2.3 Pydantic Models (Bearer Auth, Restored & Complete) ---
 # --- MCP Status System (AdCP PR #77) ---
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, TypeAlias
 
 from src.core.enum_helpers import enum_value
 
@@ -136,12 +136,17 @@ from adcp.types.generated_poc.core.collection_list_ref import (
     CollectionListReference,  # noqa: F401 — re-exported via src.core.schemas; used by callers and TargetingOverlay.collection_list type
 )
 from pydantic import (
+    AfterValidator,
     AnyUrl,
     AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
     RootModel,
+    StrictFloat,
+    StrictInt,
+    TypeAdapter,
+    ValidationError,
     model_serializer,
     model_validator,
 )
@@ -2304,6 +2309,88 @@ def validate_idempotency_key_shape(key: str | None) -> None:
         )
 
 
+# --- AdCP `revision` optimistic-concurrency token: the value contract ---
+#
+# The pinned update-media-buy-request.json types `revision` as
+# {"type": "integer", "minimum": 1}. Draft-07 `integer` admits ANY number with a zero
+# fractional part, so 2.0 is schema-VALID and must be accepted -- A2A delivers JSON
+# numbers as doubles, so rejecting the float form would reject a conformant buyer.
+#
+# Everything below exists so that one rule decides what a revision value may be, and
+# every transport therefore rejects the same inputs with the same envelope.
+
+#: Annotation for a ``revision`` value that has NOT yet passed ``RevisionValidator``.
+#:
+#: Deliberately ``Any``. Any narrower annotation lets the transport's own validation
+#: coerce the wire value before this shared gate runs, and the transports coerce
+#: differently -- FastMCP turns the string "7" into 7 against an ``int | None``
+#: annotation, while a plain dict boundary hands "7" through untouched. The result
+#: would be one rule on paper and three behaviours on the wire. Carry the wire value
+#: under this alias, then run it through ``validate_revision_wire_value``.
+type RawRevision = Any
+
+
+def _normalize_whole_number(value: int | float) -> int:
+    """Normalize an accepted revision to ``int``, rejecting a fractional value.
+
+    ``int(value)`` is safe here ONLY because the float arm carries
+    ``allow_inf_nan=False``: without it, ``int(float("inf"))`` raises a raw
+    ``OverflowError`` straight out of the validator, which escapes as a crash
+    rather than as a buyer-facing VALIDATION_ERROR envelope.
+    """
+    as_int = int(value)
+    if as_int != value:
+        raise ValueError("revision must be a whole number")
+    return as_int
+
+
+#: The single rule for what a ``revision`` value may be.
+#:
+#: ``StrictInt`` refuses the numeric string "7" and the bool ``True`` (which Python
+#: would otherwise happily read as 1); the ``StrictFloat`` arm admits the schema-valid
+#: whole-number float; ``allow_inf_nan=False`` refuses the non-finite floats; ``ge=1``
+#: carries the schema's ``"minimum": 1``; and the after-validator collapses the
+#: accepted value to a real ``int`` so nothing downstream has to care which arm matched.
+RevisionValidator: TypeAdapter[int] = TypeAdapter(
+    Annotated[
+        StrictInt | Annotated[StrictFloat, Field(allow_inf_nan=False)],
+        Field(ge=1),
+        AfterValidator(_normalize_whole_number),
+    ]
+)
+
+
+def _validate_revision(value: RawRevision) -> int:
+    """Run ``RevisionValidator``, translating a rejection into a buyer-facing error."""
+    try:
+        return RevisionValidator.validate_python(value)
+    except ValidationError as exc:
+        raise AdCPValidationError(
+            "revision must be an integer of at least 1.",
+            field="revision",
+            suggestion=(
+                "Send the revision value exactly as it appeared in the media buy's most "
+                "recent create/update response or in get_media_buys, or omit revision "
+                "entirely to skip the optimistic-concurrency check."
+            ),
+        ) from exc
+
+
+def validate_revision_wire_value(*, present: bool, value: RawRevision) -> int | None:
+    """Gate a wire-supplied ``revision`` at a transport boundary.
+
+    ``present`` is the boundary's own answer to "did the buyer send the key at all?".
+    That question can only be answered AT the boundary: by the time the request model
+    is built, an omitted key and an explicit ``null`` both read as ``None``. The pinned
+    request schema gives ``revision`` no null arm, so an explicit ``null`` is a schema
+    violation and must be rejected rather than silently read as "no token supplied" --
+    which would hand the buyer a 200 on an unchecked update.
+    """
+    if not present:
+        return None
+    return _validate_revision(value)
+
+
 class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
     """Update media buy request extending library type.
 
@@ -2388,6 +2475,26 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
             if isinstance(end_time, str):
                 values["end_time"] = datetime.fromisoformat(end_time)
 
+        return values
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_revision(cls, values):
+        """Apply the shared ``revision`` value contract before field coercion.
+
+        This has to run in ``mode="before"``: the inherited ``revision: int | None``
+        field is what would otherwise read the string "7" as 7 and ``True`` as 1. By
+        the time an ``mode="after"`` validator sees the value, the coercion has
+        already happened and the violation is invisible.
+
+        ``None`` is passed through, not rejected -- here it is indistinguishable from
+        an omitted key. Rejecting an explicitly-supplied ``null`` is the boundary's
+        job, via ``validate_revision_wire_value``.
+        """
+        if not isinstance(values, dict) or values.get("revision") is None:
+            return values
+        values = copy_before_mutating(values)
+        values["revision"] = _validate_revision(values["revision"])
         return values
 
     @model_validator(mode="after")

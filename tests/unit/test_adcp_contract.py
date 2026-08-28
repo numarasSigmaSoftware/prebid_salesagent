@@ -19,6 +19,7 @@ from src.core.database.models import (
     Principal as PrincipalModel,
 )  # Need both for contract test
 from src.core.database.models import Product as ProductModel
+from src.core.exceptions import AdCPValidationError
 from src.core.schemas import (
     Budget,
     CreateMediaBuyRequest,
@@ -50,6 +51,8 @@ from src.core.schemas import (
     SyncCreativesResponse,
     Targeting,
     TaskStatus,
+    UpdateMediaBuyRequest,
+    validate_revision_wire_value,
 )
 from src.core.schemas import (
     Principal as PrincipalSchema,
@@ -3568,6 +3571,85 @@ class TestProductV36FieldContract:
         # Internal fields must still be excluded
         assert "implementation_config" not in product_data
         assert "countries" not in product_data
+
+
+class TestRevisionValueContract:
+    """The `revision` optimistic-concurrency token's value contract.
+
+    The pinned update-media-buy-request.json types `revision` as
+    {"type": "integer", "minimum": 1}. Draft-07 `integer` admits any number with a
+    zero fractional part, so the whole-number float form is schema-VALID -- A2A
+    carries JSON numbers as doubles, and rejecting 2.0 would reject a conformant
+    buyer. Everything else in the table below is a schema violation.
+    """
+
+    @pytest.mark.parametrize(
+        ("wire_value", "expected"),
+        [
+            (1, 1),
+            (7, 7),
+            # Whole-number float: schema-valid under draft-07 `integer`, normalized to int.
+            (2.0, 2),
+            (7.0, 7),
+        ],
+    )
+    def test_accepts_and_normalizes_to_int(self, wire_value, expected):
+        req = UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True, revision=wire_value)
+        assert req.revision == expected
+        # Normalization is the point: a float must not survive into the impl, where it
+        # would be compared against an integer column.
+        assert type(req.revision) is int
+
+    @pytest.mark.parametrize(
+        "wire_value",
+        [
+            "7",  # numeric string: a lax int coercion would read this as 7
+            "1",
+            True,  # bool: Python would read this as 1
+            False,
+            1.5,  # fractional
+            0,  # below "minimum": 1
+            -1,
+            0.0,
+            float("inf"),  # non-finite: int(inf) would raise a raw OverflowError
+            float("-inf"),
+            float("nan"),
+            [1],
+            {"revision": 1},
+        ],
+    )
+    def test_rejects_schema_violations_with_buyer_facing_error(self, wire_value):
+        with pytest.raises(AdCPValidationError) as exc_info:
+            UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True, revision=wire_value)
+        assert exc_info.value.field == "revision"
+
+    def test_absent_revision_is_accepted_as_no_token(self):
+        assert UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True).revision is None
+
+    def test_ge_constraint_is_inherited_not_redeclared(self):
+        """The library's Ge(ge=1) must still be on the field.
+
+        Redeclaring `revision` locally as a bare `int | None` silently drops the
+        inherited constraint -- that has happened on this codebase before.
+        """
+        metadata = UpdateMediaBuyRequest.model_fields["revision"].metadata
+        assert any(getattr(m, "ge", None) == 1 for m in metadata), metadata
+
+    def test_boundary_helper_rejects_present_but_null(self):
+        """An explicit `null` is a schema violation, not "no token supplied".
+
+        Only a transport boundary can tell the two apart; by the time the request
+        model exists, an omitted key and an explicit null both read as None.
+        """
+        assert validate_revision_wire_value(present=False, value=None) is None
+        with pytest.raises(AdCPValidationError):
+            validate_revision_wire_value(present=True, value=None)
+
+    def test_boundary_helper_applies_the_same_table(self):
+        """The boundary helper and the request model share one rule, not two."""
+        assert validate_revision_wire_value(present=True, value=2.0) == 2
+        with pytest.raises(AdCPValidationError):
+            validate_revision_wire_value(present=True, value="7")
 
 
 if __name__ == "__main__":
