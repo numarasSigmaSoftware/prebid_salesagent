@@ -10,19 +10,15 @@ These tests grade the impl layer. The wire-level assertions for all three transp
 live in test_update_media_buy_revision_validation_wire.py.
 """
 
-from datetime import date, timedelta
-
 import pytest
 
 from src.core.config_loader import set_current_tenant
-from src.core.database.database_session import get_db_session
-from src.core.database.models import CurrencyLimit, MediaBuy, Tenant
-from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyUoW
 from src.core.exceptions import AdCPGoneError, AdCPRevisionConflictError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import UpdateMediaBuyRequest
 from src.core.tools.media_buy_update import _update_media_buy_impl
+from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -32,38 +28,26 @@ TOKEN = "test_revision_token_abc"
 
 
 @pytest.fixture
-def revision_tenant(integration_db):
-    """Tenant + principal + USD currency limit, torn down after each test."""
-    with get_db_session() as session:
-        session.add(
-            Tenant(
-                tenant_id=TENANT_ID,
-                name="Revision Tenant",
-                subdomain="revision-tenant",
-                ad_server="mock",
-                is_active=True,
-                human_review_required=False,
-                auto_approve_format_ids=[],
-                policy_settings={},
-            )
-        )
-        session.add(
-            ModelPrincipal(
-                tenant_id=TENANT_ID,
-                principal_id=PRINCIPAL_ID,
-                name="Revision Advertiser",
-                access_token=TOKEN,
-                platform_mappings={"mock": {"id": "adv_revision"}},
-            )
-        )
-        session.add(
-            CurrencyLimit(
-                tenant_id=TENANT_ID,
-                currency_code="USD",
-                max_daily_package_spend=10000.0,
-            )
-        )
-        session.commit()
+def revision_tenant(integration_db, bound_factory_session):
+    """Tenant + principal, built by the shared factories.
+
+    TenantFactory already provisions the USD CurrencyLimit that budget validation
+    requires, so this must not create a second one.
+    """
+    tenant = TenantFactory(
+        tenant_id=TENANT_ID,
+        name="Revision Tenant",
+        subdomain="revision-tenant",
+        ad_server="mock",
+    )
+    principal = PrincipalFactory(
+        tenant=tenant,
+        principal_id=PRINCIPAL_ID,
+        name="Revision Advertiser",
+        access_token=TOKEN,
+        platform_mappings={"mock": {"id": "adv_revision"}},
+    )
+    bound_factory_session.commit()
 
     set_current_tenant(
         {
@@ -75,48 +59,46 @@ def revision_tenant(integration_db):
         }
     )
 
-    yield TENANT_ID
-
-    with get_db_session() as session:
-        session.query(MediaBuy).filter_by(tenant_id=TENANT_ID).delete()
-        session.query(CurrencyLimit).filter_by(tenant_id=TENANT_ID).delete()
-        session.query(ModelPrincipal).filter_by(tenant_id=TENANT_ID).delete()
-        session.query(Tenant).filter_by(tenant_id=TENANT_ID).delete()
-        session.commit()
+    return tenant, principal
 
 
 def _identity() -> ResolvedIdentity:
-    return ResolvedIdentity(
+    return PrincipalFactory.make_identity(
         principal_id=PRINCIPAL_ID,
         tenant_id=TENANT_ID,
-        tenant={"tenant_id": TENANT_ID},
         auth_token=TOKEN,
-        protocol="mcp",
     )
 
 
-def seed_media_buy(media_buy_id: str, *, status: str = "active") -> None:
-    """Persist a media buy at revision 1 (the column default)."""
-    today = date.today()
-    with get_db_session() as session:
-        session.add(
-            MediaBuy(
-                tenant_id=TENANT_ID,
-                principal_id=PRINCIPAL_ID,
-                media_buy_id=media_buy_id,
-                order_name="Revision Order",
-                advertiser_name="Revision Advertiser",
-                status=status,
-                start_date=today,
-                end_date=today + timedelta(days=30),
-                start_time=today,
-                end_time=today + timedelta(days=30),
-                budget=1000.0,
-                currency="USD",
-                raw_request={},
-            )
+@pytest.fixture
+def seed_media_buy(revision_tenant, bound_factory_session):
+    """Return a helper that persists a media buy owned by the fixture's principal.
+
+    The principal OBJECT is passed, not its id: MediaBuyFactory declares ``principal``
+    as a SubFactory, so supplying only ``principal_id`` mints a SECOND principal and
+    the buy ends up owned by someone the test never authenticates as.
+
+    ``revision`` is a repository-managed seam field that ``MediaBuy.__init__`` refuses
+    outright; the factory assigns it the way the repository does, so a test can start
+    from a row in a state production actually reaches. Seeding it also makes the factory
+    flush AFTER its own commit, which leaves this session holding an open transaction --
+    and therefore a ROW LOCK. The compare-and-set under test takes SELECT ... FOR UPDATE
+    on that row, so the commit below is required, not tidiness.
+    """
+    tenant, principal = revision_tenant
+
+    def _seed(media_buy_id: str, *, status: str = "active", revision: int = 1):
+        media_buy = MediaBuyFactory(
+            tenant=tenant,
+            principal=principal,
+            media_buy_id=media_buy_id,
+            status=status,
+            revision=revision,
         )
-        session.commit()
+        bound_factory_session.commit()
+        return media_buy
+
+    return _seed
 
 
 def move_revision_on(media_buy_id: str) -> None:
@@ -131,13 +113,18 @@ def move_revision_on(media_buy_id: str) -> None:
 
 
 def read_revision(media_buy_id: str) -> int:
-    with get_db_session() as session:
-        row = session.query(MediaBuy).filter_by(tenant_id=TENANT_ID, media_buy_id=media_buy_id).one()
-        return row.revision
+    """Read the COMMITTED revision through a fresh unit of work.
+
+    Deliberately not the bound factory session: that one holds the row it wrote, so it
+    would answer from its own identity map rather than from what the update actually
+    persisted.
+    """
+    with MediaBuyUoW(TENANT_ID) as uow:
+        return uow.media_buys.get_by_id_or_raise(media_buy_id).revision
 
 
 class TestRevisionEnforcedByUpdateFlow:
-    def test_matching_token_succeeds_and_advances_the_revision(self, revision_tenant):
+    def test_matching_token_succeeds_and_advances_the_revision(self, seed_media_buy):
         seed_media_buy("mb_rev_match")
         before = read_revision("mb_rev_match")
 
@@ -153,7 +140,7 @@ class TestRevisionEnforcedByUpdateFlow:
         # be the persisted one, not the token it just sent.
         assert result.response.revision == after
 
-    def test_absent_token_still_updates(self, revision_tenant):
+    def test_absent_token_still_updates(self, seed_media_buy):
         """revision is optional; omitting it skips the check rather than failing."""
         seed_media_buy("mb_rev_absent")
         result = _update_media_buy_impl(
@@ -162,7 +149,7 @@ class TestRevisionEnforcedByUpdateFlow:
         )
         assert result.response.media_buy_id == "mb_rev_absent"
 
-    def test_stale_token_is_rejected_with_conflict_naming_both_versions(self, revision_tenant):
+    def test_stale_token_is_rejected_with_conflict_naming_both_versions(self, seed_media_buy):
         seed_media_buy("mb_rev_stale")
         # Someone else writes first, moving the revision past the buyer's token.
         move_revision_on("mb_rev_stale")
@@ -183,7 +170,7 @@ class TestRevisionEnforcedByUpdateFlow:
             "current_version": current,
         }
 
-    def test_rejected_update_is_not_applied(self, revision_tenant):
+    def test_rejected_update_is_not_applied(self, seed_media_buy):
         """A CONFLICT must be a no-op, not a partial write."""
         seed_media_buy("mb_rev_noop")
         move_revision_on("mb_rev_noop")
@@ -197,7 +184,7 @@ class TestRevisionEnforcedByUpdateFlow:
 
         assert read_revision("mb_rev_noop") == after_first
 
-    def test_stale_token_on_a_terminal_buy_yields_conflict_not_gone(self, revision_tenant):
+    def test_stale_token_on_a_terminal_buy_yields_conflict_not_gone(self, seed_media_buy):
         """Order matters: the CONFLICT check runs BEFORE the terminal-state gate.
 
         A buyer holding a stale token against a completed buy has a stale-token
@@ -205,11 +192,7 @@ class TestRevisionEnforcedByUpdateFlow:
         the terminal answer (INVALID_STATE via AdCPGoneError) hides the version pair
         and misdescribes the cause.
         """
-        seed_media_buy("mb_rev_terminal", status="completed")
-        with get_db_session() as session:
-            row = session.query(MediaBuy).filter_by(media_buy_id="mb_rev_terminal").one()
-            row.revision = 4
-            session.commit()
+        seed_media_buy("mb_rev_terminal", status="completed", revision=4)
 
         with pytest.raises(AdCPRevisionConflictError) as exc_info:
             _update_media_buy_impl(
@@ -218,7 +201,7 @@ class TestRevisionEnforcedByUpdateFlow:
             )
         assert exc_info.value.details["current_version"] == 4
 
-    def test_terminal_gate_still_applies_when_the_token_matches(self, revision_tenant):
+    def test_terminal_gate_still_applies_when_the_token_matches(self, seed_media_buy):
         """Running the CONFLICT check first must not disable the terminal gate.
 
         With a CURRENT token there is no conflict to report, so the buy's terminal
