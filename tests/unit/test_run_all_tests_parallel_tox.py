@@ -36,12 +36,41 @@ from scripts.check_truncated_reports import truncation_report
 from tests.unit.test_run_all_tests_contract import _REPO_ROOT, _RUNNER
 
 _CREATIVE_AGENT_STACK = _REPO_ROOT / "scripts" / "creative-agent-stack.sh"
+_TRUNCATION_PREDICATE = _REPO_ROOT / "scripts" / "check_truncated_reports.py"
 
 _DOCKER_STUB = """#!/usr/bin/env bash
 # Records every invocation of this fake `docker` (argv, space-joined) to
 # $DOCKER_STUB_LOG, then reports success unconditionally so run_all_tests.sh's
 # control flow proceeds exactly as it would against a real, healthy stack.
 printf '%s\\n' "$*" >> "$DOCKER_STUB_LOG"
+
+# Exiting 0 is not, on its own, what a healthy stack looks like: the suite run
+# also LEAVES ARTIFACTS. tox writes one .tox/<suite>.json per env, and the
+# runner gates on them -- a copy that finds nothing, or a suite whose report is
+# missing, fails the run on purpose (a run nobody can grade must not read
+# green). A stub that returns 0 and writes nothing therefore simulates a
+# BROKEN stack, and the runner is correct to fail it.
+#
+# So on the one invocation that runs tox, synthesize the reports that run would
+# have produced. The suite list is read back out of this argv rather than
+# restated here, so the stub cannot drift from the runner's own suite
+# resolution. `total` >= `collected` keeps scripts/check_truncated_reports.py
+# green: this stub stands in for a whole run, not a truncated one.
+if [[ " $* " == *" tox "* ]]; then
+    suites=""
+    prev=""
+    for arg in "$@"; do
+        [ "$prev" = "-e" ] && suites="$arg"
+        prev="$arg"
+    done
+    mkdir -p .tox
+    IFS=',' read -r -a _suites <<< "$suites"
+    for suite in "${_suites[@]}"; do
+        printf '{"summary": {"collected": 1, "total": 1, "passed": 1, "failed": 0, "deselected": 0}}\\n' \\
+            > ".tox/$suite.json"
+    done
+fi
+
 exit 0
 """
 
@@ -56,6 +85,9 @@ def _run_with_stubbed_docker(tmp_path: Path) -> tuple[subprocess.CompletedProces
     (workdir / "scripts").mkdir(parents=True)
     shutil.copy2(_RUNNER, workdir / "run_all_tests.sh")
     shutil.copy2(_CREATIVE_AGENT_STACK, workdir / "scripts" / "creative-agent-stack.sh")
+    # The runner shells out to this predicate once reports exist, so a workdir
+    # without it turns the truncation gate into a command-not-found failure.
+    shutil.copy2(_TRUNCATION_PREDICATE, workdir / "scripts" / _TRUNCATION_PREDICATE.name)
 
     stub_bin = tmp_path / "stub_bin"
     stub_bin.mkdir()
