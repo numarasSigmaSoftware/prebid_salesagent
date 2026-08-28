@@ -747,64 +747,39 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # a row that changes its expected outcome stops matching instead of silently
         # keeping someone else's exemption.
         #
-        # Two rows expect CONFLICT and are the coverage half of #1607. Verified failure:
-        # `_assert_error_outcome` raises `AssertionError: Expected an error for outcome:
-        # error "CONFLICT" with suggestion` — an assertion about a response that came
-        # back 200 OK, NOT a StepDefinitionNotFoundError. Production accepts the stale
-        # and ahead tokens on a2a, mcp and rest and returns success; enforcement is what
-        # #1607 owns. strict=True so implementing it XPASSes and the graduation workflow
-        # catches the row rather than letting it sit green-by-omission.
+        # Graduated (#1607, mcp + rest, 8 rows — 2 CONFLICT rows in each of the two
+        # outlines, on 2 transports): update_media_buy now compares the buyer's token
+        # under a row lock and raises AdCPRevisionConflictError, so a stale or ahead
+        # token gets the CONFLICT the spec mandates instead of a 200. That is exactly
+        # what the removed reason predicted would flip these rows, and strict=True is
+        # what surfaced them: all 8 reported XPASS(strict) before the arm came out and
+        # plain PASS after.
         #
-        # One row expects INVALID_REQUEST for revision 0 and fails for a DIFFERENT
-        # reason, which is why it is not filed under #1607: production DOES reject it,
-        # but `UpdateMediaBuyRequest.revision` carries `ge=1`, so pydantic raises during
-        # request construction inside the step — before any transport dispatch. The row
-        # cannot grade the seller's response because the request never reaches the
-        # seller. That is a harness limitation, not a production gap, and calling it one
-        # is the exact mislabelling this task exists to stop.
+        # Graduated (#1885, a2a, 4 rows — the same 4 CONFLICT rows on a2a): its reason
+        # said implementing CONFLICT ALONE would leave these red, because
+        # _handle_update_media_buy_skill rebuilt the request from hand-listed fields and
+        # `revision` was in none of them, so the token never reached the tool. That drop
+        # is fixed too — the handler now gates and forwards `revision`
+        # (adcp_a2a_server.py, `validate_revision_wire_value`) — which is why these xpass
+        # rather than staying red. This work closes #1885 as well as #1607.
+        #
+        # STILL ROUTED below, and deliberately NOT graduated with the others: the rows
+        # expecting INVALID_REQUEST fail for a DIFFERENT reason, which is why they are not
+        # filed under #1607 and why enforcing CONFLICT does nothing for them. Production
+        # DOES reject revision 0, but `UpdateMediaBuyRequest.revision` carries `ge=1`, so
+        # pydantic raises during request construction inside the step — before any
+        # transport dispatch. The row cannot grade the seller's response because the
+        # request never reaches the seller. That is a harness limitation, not a production
+        # gap, and calling it one is the exact mislabelling this task exists to stop.
+        # Measured with the two arms above removed: these rows still report XFAIL, not
+        # XPASS, so nothing about this work made them gradeable.
         if marker_names & {"T-UC-003-boundary-revision", "T-UC-003-partition-revision"}:
             # pytest-bdd nests a Scenario Outline's Examples row under the single
             # `_pytest_bdd_example` param rather than exposing each column, so reading
             # `params["outcome"]` returns None and every row falls through unrouted.
             _row = (getattr(item, "callspec", None) and item.callspec.params.get("_pytest_bdd_example")) or {}
             _row_outcome = str(_row.get("outcome") or "")
-            if "CONFLICT" in _row_outcome and is_a2a:
-                # a2a fails EARLIER than the others and for a different reason, so it
-                # does not carry #1607's label. Measured: a probe in _update_media_buy_impl
-                # reads `req.revision=None` on a2a and `6` on mcp/rest, because
-                # _handle_update_media_buy_skill rebuilds the request from five hand-listed
-                # fields and forwards another hand-listed subset — `revision` is in neither.
-                # Implementing CONFLICT would NOT xpass this row; the token never arrives.
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=(
-                            "cause=transport-drops-parameter scope=per-transport ref=#1885 — the "
-                            "a2a skill handler discards `revision` before it reaches the tool, so "
-                            "this row cannot grade CONFLICT enforcement on a2a at all. NOT #1607: "
-                            "enforcing the check would leave this row red. #1885 is the remedy — "
-                            "route the handler through media_buy_update._build_update_request, which "
-                            "already forwards every field — so closing it makes this row gradeable. "
-                            "#1259 owns the separate question of why no guard sees the drop."
-                        ),
-                        strict=True,
-                    )
-                )
-            elif "CONFLICT" in _row_outcome:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=(
-                            "cause=production-gap scope=per-transport ref=#1607 — update_media_buy "
-                            "accepts a stale or ahead revision and returns success; the spec MUST "
-                            "reject it with CONFLICT. Steps execute, the token arrives (probed: "
-                            "req.revision=6 on mcp and rest), and the failure is the missing "
-                            "rejection. scope=per-transport because each transport enforces (or "
-                            "fails to enforce) independently, so each must xpass on its own when "
-                            "#1607 lands."
-                        ),
-                        strict=True,
-                    )
-                )
-            elif "INVALID_REQUEST" in _row_outcome:
+            if "INVALID_REQUEST" in _row_outcome:
                 item.add_marker(
                     pytest.mark.xfail(
                         reason=(
