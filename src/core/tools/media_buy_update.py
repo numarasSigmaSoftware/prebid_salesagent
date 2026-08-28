@@ -401,6 +401,25 @@ def _update_media_buy_impl(
             # Verify principal owns this media buy
             _verify_principal(media_buy_id_to_use, identity, uow.media_buys, context=req.context)
 
+            # AdCP optimistic concurrency. The pinned update-media-buy-request.json says
+            # that when ``revision`` is provided, sellers MUST reject the update with
+            # CONFLICT if the media buy's current revision does not match, and MUST
+            # enforce that comparison atomically with the write.
+            #
+            # This runs BEFORE the terminal-state gate deliberately. A buyer holding a
+            # stale token against a now-terminal buy has a stale-token problem first:
+            # CONFLICT names both versions and tells it to re-read and retry, whereas
+            # the terminal answer hides the version pair and misdescribes the cause.
+            #
+            # It also cannot be skipped by a missing row -- compare_and_set_revision
+            # raises rather than returning None, so a buy deleted between the ownership
+            # check and here fails now, not after the adapter has been called.
+            #
+            # The row lock this takes is held until the UoW's transaction ends, which is
+            # what makes every write below atomic with the comparison.
+            if req.revision is not None:
+                uow.media_buys.compare_and_set_revision(media_buy_id_to_use, expected_revision=req.revision)
+
             # State-machine precondition: terminal states reject all mutations,
             # and non-terminal states only accept actions in their valid set.
             # ``AdCPGoneError`` carries the spec-mandated ``INVALID_STATE`` code
