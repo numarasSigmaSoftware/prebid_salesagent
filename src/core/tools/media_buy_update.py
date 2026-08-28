@@ -417,8 +417,22 @@ def _update_media_buy_impl(
             #
             # The row lock this takes is held until the UoW's transaction ends, which is
             # what makes every write below atomic with the comparison.
+            #
+            # A dry run compares but does not spend the token. The comparison still has
+            # to happen -- a simulation of an update that would be rejected must report
+            # the rejection -- but the dry-run branch below returns having written
+            # nothing, so advancing the buyer's counter here would be the one persistent
+            # side effect of a request that promises none. This is also why testing_ctx
+            # is read HERE rather than at its old site further down: the flag has to be
+            # known before the comparison, not after it.
+            testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
+
             if req.revision is not None:
-                uow.media_buys.compare_and_set_revision(media_buy_id_to_use, expected_revision=req.revision)
+                uow.media_buys.compare_and_set_revision(
+                    media_buy_id_to_use,
+                    expected_revision=req.revision,
+                    advance=not testing_ctx.dry_run,
+                )
 
             # State-machine precondition: terminal states reject all mutations,
             # and non-terminal states only accept actions in their valid set.
@@ -450,9 +464,6 @@ def _update_media_buy_impl(
                         field="media_buy_id",
                         suggestion=(f"Valid actions for status '{_current_status}': {sorted(_allowed) or '[]'}."),
                     )
-
-            # Extract testing context early (needed for dry_run check)
-            testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
 
             # Create or get persistent context and workflow step
             # (ctx_manager + step were hoisted before the try block so the

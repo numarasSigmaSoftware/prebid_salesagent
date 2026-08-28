@@ -53,8 +53,8 @@ class MediaBuyRepository:
         tenant_id: Tenant scope for all queries.
     """
 
-    # "revision" and "confirmed_at" are repository-managed — "revision" is bumped on
-    # every successful mutation (see _bump_revision) and "confirmed_at" is stamped
+    # "revision" and "confirmed_at" are repository-managed — "revision" advances once
+    # per successful mutation (see _bump_revision) and "confirmed_at" is stamped
     # write-once the first time the buy reaches a committed status (see
     # _stamp_confirmation_if_needed). Callers may never write either directly:
     # letting update_fields set confirmed_at would walk straight through the
@@ -67,6 +67,11 @@ class MediaBuyRepository:
     def __init__(self, session: Session, tenant_id: str) -> None:
         self._session = session
         self._tenant_id = tenant_id
+        #: ``{media_buy_id: revision}`` — the value ``compare_and_set_revision`` advanced
+        #: a buy TO in this unit of work. The next write to that buy spends the advance
+        #: instead of taking its own, but only while the row still carries the recorded
+        #: value — see ``_bump_revision``.
+        self._prepaid_revision_advance: dict[str, int] = {}
 
     @property
     def tenant_id(self) -> str:
@@ -466,9 +471,38 @@ class MediaBuyRepository:
         self._session.flush()
         return media_buy
 
-    @staticmethod
-    def _bump_revision(media_buy: MediaBuy) -> None:
-        """Increment the persisted monotonic revision counter by 1.
+    def _bump_revision(self, media_buy: MediaBuy) -> None:
+        """Advance the persisted monotonic revision counter by one.
+
+        Unless ``compare_and_set_revision`` already paid for this one. Honouring a
+        buyer's optimistic-concurrency token must not cost the buyer an extra advance:
+        the pinned update-media-buy-response.json calls the value it reports "Revision
+        number after this update" — singular — and a buy at 7 updated with token 7 was
+        answering 9, because the compare-and-set advanced it and then the field write
+        advanced it again. The buyer's next token was two ahead of the single increment
+        the response described.
+
+        So the compare-and-set PREPAYS one advance (it must: it returns the new value,
+        and its own caller may write nothing at all), and the next write to that buy in
+        the same unit of work draws on the prepayment rather than taking a second
+        advance. The resulting invariant is that supplying a token does not change how
+        many times a request advances the revision — a request with N writes advances N
+        times either way.
+
+        The prepayment records the VALUE it advanced to, and is honoured only while the
+        row still carries that value. A bare "already advanced" flag would be wrong,
+        because the prepayment can be undone underneath us: the update flow's nested
+        ``get_db_session()`` blocks share the scoped session and CLOSE it mid-request,
+        which rolls the compare-and-set's UPDATE back unless one of them committed first.
+        Measured on two consecutive updates in one process, that goes both ways. Against
+        a flag, the second one declined to advance for a prepayment that no longer
+        existed and the buyer's token stood still; checking the value means a lost
+        prepayment is simply re-taken.
+
+        The credit is scoped to THIS repository, which is the unit of work: ``MediaBuyUoW``
+        builds a fresh repository on every ``__enter__``, and every other construction
+        site builds one inside a single ``with get_db_session()`` block. It is consumed
+        by the first write either way, so two sequential writes still advance twice.
 
         Assigning a SQL expression rather than doing a Python read-modify-write is
         deliberate: it emits ``UPDATE ... SET revision = revision + 1``, so the
@@ -494,6 +528,14 @@ class MediaBuyRepository:
         no guard here because the window is closed by construction rather than detected
         — but if a future caller stops flushing, nothing will raise.
         """
+        # Popped whether or not it is honoured: a prepayment pays for one write, and one
+        # that turns out to have been rolled back is spent rather than carried forward.
+        # ``isinstance`` guards the case this method itself creates -- an unflushed bump
+        # leaves ``revision`` holding a SQL expression, and comparing one to an int
+        # builds a further expression instead of answering.
+        prepaid = self._prepaid_revision_advance.pop(media_buy.media_buy_id, None)
+        if prepaid is not None and isinstance(media_buy.revision, int) and media_buy.revision == prepaid:
+            return
         media_buy.revision = MediaBuy.revision + 1
 
     @staticmethod
@@ -629,7 +671,12 @@ class MediaBuyRepository:
             raise AdCPRevisionConflictError.unobserved(media_buy_id=media_buy_id, expected=expected_revision) from exc
 
     def compare_and_set_revision(
-        self, media_buy_id: str, *, expected_revision: int, seller_committed: bool = False
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int,
+        seller_committed: bool = False,
+        advance: bool = True,
     ) -> MediaBuy:
         """Enforce the buyer's expected ``revision`` atomically with this transaction's write.
 
@@ -641,10 +688,16 @@ class MediaBuyRepository:
         writes that follow in the same unit of work. That is why a caller may -- and
         the update flow does -- run this before it knows which fields it will write.
 
-        The bump is taken here rather than deferred, so the buyer's token is spent the
-        moment it is honoured. A caller that goes on to write fields will bump again;
-        ``revision`` is a monotonic concurrency token, not a count of API calls, and
-        the update flow already bumps a variable number of times per request.
+        The advance is taken here rather than deferred, so the buyer's token is spent the
+        moment it is honoured, and so this method can return the new value to a caller
+        that may go on to write nothing at all. It is a PREPAYMENT: the next write to
+        this buy in the same unit of work draws on it instead of advancing again, so
+        honouring a token costs the buyer no extra revisions. See ``_bump_revision``.
+
+        ``advance=False`` compares and locks WITHOUT spending the token, for a caller
+        that will not write at all. The dry-run branch of the update flow is the one
+        such caller: it must still answer CONFLICT on a stale token, because it is
+        simulating the real update, but it must leave the row exactly as it found it.
 
         Raises:
             AdCPRevisionConflictError: the current revision differs from
@@ -665,6 +718,11 @@ class MediaBuyRepository:
                 expected=expected_revision,
                 current=media_buy.revision,
             )
+        if not advance:
+            # Compare-only: the row is locked and the token matched, and nothing is
+            # written. Returning before the stamp matters as much as returning before
+            # the bump -- confirmed_at is persisted state too.
+            return media_buy
         # Same ordering rule as update_status/update_fields: stamp (which reads
         # attributes) before the bump (which replaces one with a SQL expression).
         self._stamp_confirmation_if_needed(media_buy, seller_committed=seller_committed)
@@ -675,6 +733,9 @@ class MediaBuyRepository:
         # it back to the buyer), so unlike the other write paths this one cannot leave
         # the window open -- refresh it into a real int before returning.
         self._session.refresh(media_buy, ["revision"])
+        # Recorded AFTER the refresh, so the prepayment names a real int rather than the
+        # expression, and so a later write can tell a surviving advance from a lost one.
+        self._prepaid_revision_advance[media_buy_id] = media_buy.revision
         return media_buy
 
     def update_fields(self, media_buy_id: str, *, seller_committed: bool = False, **kwargs: Any) -> MediaBuy | None:
