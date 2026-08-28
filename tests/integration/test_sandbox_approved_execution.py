@@ -155,7 +155,7 @@ def _run_executor(*, tenant_id: str, sandbox: bool):
     from src.core.tools.media_buy_create import execute_approved_media_buy
 
     adapter = MagicMock()
-    adapter.create_media_buy.return_value = CreateMediaBuySuccess.sync_success(media_buy_id="gam_order_1", packages=[])
+    adapter.create_media_buy.return_value = CreateMediaBuySuccess.carrier(media_buy_id="gam_order_1", packages=[])
     adapter.creatives_manager.add_creative_assets.return_value = []
     adapter.orders_manager.approve_order.return_value = True
 
@@ -172,19 +172,19 @@ def _run_executor(*, tenant_id: str, sandbox: bool):
             patch(f"{_MODULE}.get_adapter", return_value=adapter) as mock_module_binding,
             patch(f"{_HELPERS}.get_adapter", return_value=adapter) as mock_lazy_binding,
         ):
-            success, error = execute_approved_media_buy(buy.media_buy_id, tenant_id)
+            approval = execute_approved_media_buy(buy.media_buy_id, tenant_id)
 
     # Reachability, asserted rather than printed: every branch whose adapter selection this
     # test claims to grade must actually have run.
     assert adapter.create_media_buy.called, (
-        f"never reached the adapter's create_media_buy (success={success}, error={error})"
+        f"never reached the adapter's create_media_buy (outcome={approval.outcome}, error={approval.error_msg})"
     )
     assert adapter.creatives_manager.add_creative_assets.called, (
-        f"never reached the creative-upload branch (success={success}, error={error}); "
+        f"never reached the creative-upload branch (outcome={approval.outcome}, error={approval.error_msg}); "
         "its adapter selection would be ungraded"
     )
     assert adapter.orders_manager.approve_order.called, (
-        f"never reached the final order-approval branch (success={success}, error={error}); "
+        f"never reached the final order-approval branch (outcome={approval.outcome}, error={approval.error_msg}); "
         "its adapter selection would be ungraded"
     )
     assert mock_module_binding.call_args_list, "module-global get_adapter was never used"
