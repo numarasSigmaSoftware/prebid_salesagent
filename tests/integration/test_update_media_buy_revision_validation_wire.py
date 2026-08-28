@@ -1,4 +1,7 @@
-"""The `revision` value contract, graded on the real wire of all three transports.
+"""The `revision` contract, graded on the real wire of all three transports.
+
+Both directions are protocol contracts, so both are read off the actual wire rather
+than off a re-serialized model: what each transport ACCEPTS, and what each EMITS.
 
 One rule decides what a `revision` value may be, so MCP, REST and A2A must reject
 and accept exactly the same inputs. The pinned update-media-buy-request.json types
@@ -123,3 +126,79 @@ class TestRevisionValueContractOnEveryWire:
             f"{transport} rejected an update that supplied no revision at all: "
             f"{result.wire_error_envelope or result.error!r}"
         )
+
+
+#: How each transport renders a JSON number on the wire.
+#:
+#: A2A carries its payload through a protobuf Struct, whose only numeric type is
+#: `double` -- so it emits 2.0 where MCP and REST emit 2. BOTH ARE CONFORMANT: draft-07
+#: `integer` admits any number with a zero fractional part, and the pinned
+#: error-details/conflict.json types the version fields as ["number", "string"].
+#:
+#: This table exists so the difference is PINNED rather than invisible. `2 == 2.0` is
+#: True in Python, so an equality-only assertion cannot see a transport start or stop
+#: forking. Do NOT "fix" A2A to emit an int to make this table uniform -- normalising a
+#: schema-valid representation is a separate decision, not a bug fix.
+WIRE_NUMBER_TYPE = {Transport.MCP: int, Transport.REST: int, Transport.A2A: float}
+
+
+def assert_wire_number(value, expected: int, transport: Transport, *, what: str) -> None:
+    """Assert *value* is `expected` AND is rendered in *transport*'s documented form."""
+    assert value == expected, f"{transport} emitted {what}={value!r}, expected {expected}"
+    assert type(value) is WIRE_NUMBER_TYPE[transport], (
+        f"{transport} emitted {what} as {type(value).__name__} ({value!r}); "
+        f"this transport is documented to render numbers as "
+        f"{WIRE_NUMBER_TYPE[transport].__name__}. If the change is deliberate, update "
+        f"WIRE_NUMBER_TYPE and say why -- do not delete the type check, which is the "
+        f"only thing that can see this (2 == 2.0)."
+    )
+
+
+@pytest.mark.parametrize("transport", WIRE_TRANSPORTS)
+class TestRevisionEmittedOnEveryWire:
+    """The response side is a protocol contract and is graded on the wire bytes."""
+
+    def test_successful_update_emits_the_advanced_revision(self, integration_db, transport):
+        """The buyer's next token comes off this field, so it must be the NEW revision.
+
+        Read from the real serialized body (wire_response), not from re-serializing
+        the response model -- a model that serializes correctly in-process proves
+        nothing about what crossed the wire.
+        """
+        with MediaBuyDualEnv() as env:
+            _seed(env)
+            result = _update(env, transport, revision=1)
+
+        assert not result.is_error, result.wire_error_envelope
+        wire = result.wire_response
+        assert wire is not None, f"{transport} captured no success wire body to grade"
+        assert "revision" in wire, (
+            f"{transport} omitted `revision` from the success body; the buyer has no token "
+            f"to send with its next update. Got keys: {sorted(wire)}"
+        )
+        # Seeded at 1, honoured once by the compare-and-set -> 2.
+        assert_wire_number(wire["revision"], 2, transport, what="revision")
+
+    def test_conflict_emits_both_versions_in_details(self, integration_db, transport):
+        """The CONFLICT must name the pair, on every transport -- not just at the impl.
+
+        Without both versions the buyer is told only that it lost, not what to send
+        next, which is the whole point of the conflict details shape.
+        """
+        with MediaBuyDualEnv() as env:
+            _seed(env)
+            # Move the revision to 2 so a token of 99 is unambiguously stale.
+            _update(env, transport, revision=1)
+            result = _update(env, transport, revision=99)
+
+        assert result.is_error, f"{transport} accepted a stale revision token"
+        result.assert_wire_error("CONFLICT", recovery="transient")
+
+        envelope = result.wire_error_envelope
+        # The two-layer envelope must carry details in BOTH layers, not just one.
+        for layer, payload in (("adcp_error", envelope["adcp_error"]), ("errors[0]", envelope["errors"][0])):
+            details = payload.get("details")
+            assert details is not None, f"{transport} {layer} carried no details"
+            assert details["resource_id"] == _MEDIA_BUY_ID
+            assert_wire_number(details["expected_version"], 99, transport, what=f"{layer}.expected_version")
+            assert_wire_number(details["current_version"], 2, transport, what=f"{layer}.current_version")
