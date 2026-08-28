@@ -992,10 +992,16 @@ class ContextManager(DatabaseManager):
 
                     def _log_task_result(t: asyncio.Task) -> None:
                         try:
-                            t.result()
-                            console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
+                            sent = t.result()
                         except Exception as exc:
                             console.print(f"[red]❌ Webhook failed for {safe_url}: {type(exc).__name__}[/red]")
+                            return
+                        if sent:
+                            console.print(f"[green]✅ Webhook sent successfully for {safe_url}[/green]")
+                        else:
+                            console.print(
+                                f"[red]❌ Webhook not delivered for {safe_url} (send_notification returned False)[/red]"
+                            )
 
                     pin_task(task, on_done=_log_task_result)
                     # A running event loop cannot be synchronously joined. The

@@ -535,7 +535,7 @@ class TestGetAdcpCapabilitiesA2AIntegration:
 
 # ===========================================================================
 # Channel mapping and adapter integration tests
-# Reference: beads salesagent-7xc7
+# Reference: beads
 # ===========================================================================
 
 

@@ -89,7 +89,15 @@ def upgrade() -> None:
             "ON push_notification_configs (tenant_id, principal_id, media_buy_id)"
         )
 
-    op.add_column("media_buys", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
+    # IF NOT EXISTS, not a plain add_column: this migration's other parent
+    # chain (merged at 8632cb568d0b) also adds media_buys.revision, in
+    # 1497aa06013c. A full upgrade-to-head applies both parents before the
+    # merge point, so a plain add_column here would collide with whichever
+    # parent's chain ran first. Idempotent either way: this branch's own
+    # isolated history (e.g. tests upgrading only to this revision, which
+    # predates the merge and never touches 1497aa06013c) still gets the
+    # column; the merged-history path is a no-op here.
+    op.execute("ALTER TABLE media_buys ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1")
     op.add_column("workflow_steps", sa.Column("processing_started_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("workflow_steps", sa.Column("notifications_published_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("workflow_steps", sa.Column("notification_claimed_at", sa.DateTime(timezone=True), nullable=True))
@@ -235,7 +243,10 @@ def downgrade() -> None:
     op.drop_constraint("uq_contexts_tenant_context", "contexts", type_="unique")
     op.drop_column("workflow_steps", "notification_sequence")
     op.drop_column("workflow_steps", "processing_started_at")
-    op.drop_column("media_buys", "revision")
+    # IF EXISTS, mirroring the idempotent add above: this branch's own
+    # downgrade must not assume it owns the column when the other parent
+    # chain (1497aa06013c) may have added it instead.
+    op.execute("ALTER TABLE media_buys DROP COLUMN IF EXISTS revision")
 
     # Mirror upgrade()'s grouping: both DROP INDEX CONCURRENTLY statements
     # together in one autocommit_block(), since CONCURRENTLY cannot run

@@ -7,12 +7,14 @@ from typing import Any
 from flask import Blueprint, request
 from sqlalchemy import select
 
-from src.admin.utils import require_auth, require_tenant_access
+from src.admin.utils import approve_media_buy_through_writer, require_auth, require_tenant_access
 from src.admin.utils.media_buy_approval import build_approved_media_buy_result
 from src.core.context_manager import publish_workflow_notifications
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.exceptions import AdCPAdapterError, AdCPMediaBuyRejectedError, build_two_layer_error_envelope
+from src.core.tools.media_buy_create import ApprovalOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -364,102 +366,49 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 )
                 attributes.flag_modified(step, "comments")
 
+                # Commit the step BEFORE calling the writer. The callee opens nested
+                # sessions, and get_db_session()'s exit closes the shared thread-scoped
+                # session without committing — which discards whatever this route still
+                # had pending. The step's approval and its audit comment must not depend
+                # on what the adapter does next: a successful approval that leaves the
+                # step reading 'requires_approval' is what the operator sees.
+                db_session.commit()
+
                 if media_buy and media_buy.status == "pending_approval":
-                    # Check if all creatives are approved before moving to scheduled
-                    from src.core.database.models import Creative, CreativeAssignment
+                    # approve_media_buy_through_writer is the single shared writer (also
+                    # used by workflows.py and the creative-unblock paths): it runs the
+                    # creative gate, executes the adapter, and resolves/persists the
+                    # flight-window status and revision bump in one write. This route
+                    # must not re-derive any of that locally or it would call the
+                    # adapter a second time for the same approval.
+                    approval = approve_media_buy_through_writer(media_buy_id, tenant_id, approved_by=user_email)
 
-                    stmt_assignments = select(CreativeAssignment).filter_by(
-                        tenant_id=tenant_id, media_buy_id=media_buy_id
-                    )
-                    assignments = db_session.scalars(stmt_assignments).all()
-
-                    all_creatives_approved = True
-                    if assignments:
-                        creative_ids = [a.creative_id for a in assignments]
-                        stmt_creatives = select(Creative).filter(
-                            Creative.tenant_id == tenant_id, Creative.creative_id.in_(creative_ids)
-                        )
-                        creatives = db_session.scalars(stmt_creatives).all()
-
-                        # Check if any creatives are not approved
-                        for creative in creatives:
-                            if creative.status != "approved":
-                                all_creatives_approved = False
-                                break
-                    else:
-                        # No creatives assigned yet
-                        all_creatives_approved = False
-
-                    # Update status based on creative approval state
-                    if all_creatives_approved:
-                        if media_buy.start_time and media_buy.end_time:
-                            # Compute flight window
-                            if media_buy.start_time:
-                                start_time = (
-                                    media_buy.start_time.astimezone(UTC)
-                                    if media_buy.start_time.tzinfo
-                                    else media_buy.start_time.replace(tzinfo=UTC)
-                                )
-
-                            if media_buy.end_time:
-                                end_time = (
-                                    media_buy.end_time.astimezone(UTC)
-                                    if media_buy.end_time.tzinfo
-                                    else media_buy.end_time.replace(tzinfo=UTC)
-                                )
-
-                            now = datetime.now(UTC)
-                            if now < start_time:
-                                media_buy.status = "scheduled"
-                            elif now > end_time:
-                                media_buy.status = "completed"
-                            else:
-                                media_buy.status = "active"
-                        else:
-                            # No start or end time - set to active
-                            media_buy.status = "active"
-                    else:
-                        # Keep it in a state that shows it needs creative approval
-                        # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
-                        media_buy.status = "draft"
-
-                    media_buy.approved_at = datetime.now(UTC)
-                    media_buy.approved_by = user_email
-                    db_session.commit()
-
-                    # Execute adapter creation for approved media buy
-                    # This creates the order/line items in GAM (or other adapter)
-                    # Uses the same logic as auto-approved media buys
-                    from src.core.tools.media_buy_create import execute_approved_media_buy
-
-                    logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
-                    success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
-
-                    if not success:
-                        # Adapter creation failed - update status and show error
-                        with get_db_session() as error_session:
-                            error_repo = MediaBuyRepository(error_session, tenant_id)
-                            error_buy = error_repo.update_status(media_buy_id, "failed")
-                            if error_buy:
-                                error_session.commit()
-
-                        workflow_repo.update_status(
-                            step.step_id,
-                            status="failed",
-                            error_message=error_msg,
-                            response_data=build_two_layer_error_envelope(
-                                AdCPAdapterError(error_msg or "Adapter creation failed")
-                            ),
-                        )
-                        db_session.commit()
-                        publish_workflow_notifications(step.step_id, "failed", tenant_id)
-                        flash(f"Media buy approved but adapter creation failed: {error_msg}", "error")
+                    if approval.outcome is ApprovalOutcome.HELD_PENDING_CREATIVES or not approval.ok:
+                        if not approval.ok and approval.outcome is not ApprovalOutcome.HELD_PENDING_CREATIVES:
+                            # Genuine adapter failure (not just a creative-approval hold):
+                            # terminalize the workflow step so pollers see FAILED, and
+                            # deliver the failure to the buyer through the durable,
+                            # claim-based notification path (never a second, ad-hoc send).
+                            workflow_repo.update_status(
+                                step.step_id,
+                                status="failed",
+                                error_message=approval.error_msg,
+                                response_data=build_two_layer_error_envelope(
+                                    AdCPAdapterError(approval.error_msg or "Adapter creation failed")
+                                ),
+                            )
+                            db_session.commit()
+                            publish_workflow_notifications(step.step_id, "failed", tenant_id)
                         return redirect(
                             url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
                         )
 
                     logger.info(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}")
 
+                    # No post-execute read here: approve_media_buy_through_writer already
+                    # resolved the flight window and committed it in the same write that
+                    # bumped the revision, so the ApprovalResult is what gets echoed to the
+                    # buyer, not a re-read of a row that may already be detached.
                     approve_repo = MediaBuyRepository(db_session, tenant_id)
                     create_media_buy_approved_result = build_approved_media_buy_result(
                         approve_repo,
@@ -472,6 +421,10 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         response_data=create_media_buy_approved_result.model_dump(mode="json"),
                     )
                     db_session.commit()
+                    # Delivers the buyer-facing webhook through the durable, claim-based
+                    # notification path (context_manager.publish_workflow_notifications ->
+                    # _send_push_notifications) rather than an ad-hoc synchronous send here
+                    # — the response_data stashed above is exactly what that path delivers.
                     publish_workflow_notifications(step.step_id, "completed", tenant_id)
 
                     flash("Media buy approved and order created successfully", "success")
@@ -515,9 +468,16 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 attributes.flag_modified(step, "comments")
 
                 if media_buy and media_buy.status == "pending_approval":
-                    media_buy.status = "rejected"
+                    # approve_repo is constructed before the action split, so it is the
+                    # repository in scope here too — rejection moves the buy's revision
+                    # like any other status change.
+                    approve_repo.update_status(media_buy_id, PersistedMediaBuyStatus.REJECTED)
 
                 db_session.commit()
+                # rejection_response (the two-layer AdCPMediaBuyRejectedError envelope) was
+                # already stashed as response_data on the transition above, so the durable,
+                # claim-based notification path delivers it to the buyer — no separate
+                # ad-hoc webhook send needed here.
                 publish_workflow_notifications(step.step_id, "rejected", tenant_id)
 
                 flash("Media buy rejected", "info")

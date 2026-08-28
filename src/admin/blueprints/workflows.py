@@ -2,12 +2,11 @@
 
 import json
 import logging
-from datetime import UTC, datetime
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import select
 
-from src.admin.utils import require_tenant_access
+from src.admin.utils import approve_media_buy_through_writer, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.admin.utils.media_buy_approval import build_approved_media_buy_result
 from src.core.context_manager import publish_workflow_notifications
@@ -17,6 +16,7 @@ from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.exceptions import AdCPAdapterError, AdCPPolicyViolationError, build_two_layer_error_envelope
+from src.core.tools.media_buy_create import ApprovalOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -205,63 +205,31 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 )
 
                 if media_buy and media_buy.status == "pending_approval":
-                    # Check if all required creatives are approved before executing adapter creation
-                    from src.core.database.models import Creative as CreativeModel
-                    from src.core.database.models import CreativeAssignment
+                    approval = approve_media_buy_through_writer(media_buy_id, tenant_id, approved_by=user_email)
 
-                    stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
-                    assignments = db.scalars(stmt_assignments).all()
+                    if approval.outcome is ApprovalOutcome.HELD_PENDING_CREATIVES:
+                        return jsonify({"success": True}), 200
 
-                    if assignments:
-                        creative_ids = [a.creative_id for a in assignments]
-                        stmt_creatives = select(CreativeModel).filter(CreativeModel.creative_id.in_(creative_ids))
-                        creatives = db.scalars(stmt_creatives).all()
-
-                        unapproved_creatives = [
-                            c.creative_id for c in creatives if c.status not in ["approved", "active"]
-                        ]
-
-                        if unapproved_creatives:
-                            logger.warning(
-                                f"[APPROVAL] Cannot execute adapter creation yet - "
-                                f"{len(unapproved_creatives)} creatives not approved: {unapproved_creatives}"
-                            )
-                            flash(
-                                f"Media buy approved! Waiting for {len(unapproved_creatives)} creative(s) to be approved before creating in GAM.",
-                                "info",
-                            )
-                            media_buy.status = "pending_creatives"
-                            workflow_repo.update_status(step_id, status="input-required")
-                            db.commit()
-                            publish_workflow_notifications(step_id, "input-required", tenant_id)
-                            return jsonify({"success": True}), 200
-
-                    # Execute adapter creation
-                    from src.core.tools.media_buy_create import execute_approved_media_buy
-
-                    logger.info(f"[APPROVAL] Executing adapter creation for approved media buy {media_buy_id}")
-                    success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
-
-                    if not success:
-                        logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
+                    # approve_media_buy_through_writer already ran the creative gate,
+                    # executed the adapter, and resolved/persisted the flight-window
+                    # status and revision bump in one write — this route must not
+                    # re-derive any of that or re-execute the adapter.
+                    if not approval.ok:
+                        logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {approval.error_msg}")
                         failure = build_two_layer_error_envelope(
-                            AdCPAdapterError(error_msg or "Adapter creation failed")
+                            AdCPAdapterError(approval.error_msg or "Adapter creation failed")
                         )
                         workflow_repo.update_status(
                             step_id,
                             status="failed",
                             response_data=failure,
-                            error_message=error_msg,
+                            error_message=approval.error_msg,
                         )
                         db.commit()
                         publish_workflow_notifications(step_id, "failed", tenant_id)
-                        flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
-                        return jsonify({"success": False, "error": error_msg}), 500
+                        flash(f"Workflow approved but media buy creation failed: {approval.error_msg}", "error")
+                        return jsonify({"success": False, "error": approval.error_msg}), 500
 
-                    # Update media buy status
-                    media_buy.status = "scheduled"
-                    media_buy.approved_at = datetime.now(UTC)
-                    media_buy.approved_by = user_email
                     result = build_approved_media_buy_result(
                         media_buy_repo,
                         media_buy_id,

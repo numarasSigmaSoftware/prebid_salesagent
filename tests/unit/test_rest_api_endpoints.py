@@ -5,7 +5,6 @@ Validates that each REST transport endpoint:
 - Returns 200 with valid mock data
 - Auth-optional endpoints work without auth
 
-beads: salesagent-b61l.15
 """
 
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -335,7 +334,12 @@ class TestCreateMediaBuyEndpoint:
             "/api/v1/media-buys",
             json={
                 "brand": {"domain": "testbrand.com"},
-                "packages": [],
+                # A real (not empty) package: packages now has min_length=1 when
+                # supplied (#1941), so an empty list would fail request construction
+                # before the paused=True check ever runs — a minimal-but-valid
+                # package is what isolates the pause-on-create rejection from that
+                # unrelated packages-shape failure.
+                "packages": [{"product_id": "prod_1", "budget": 1000, "pricing_option_id": "cpm_usd_fixed"}],
                 "start_time": "2026-01-01T00:00:00Z",
                 "end_time": "2026-02-01T00:00:00Z",
                 "idempotency_key": "pause-create-rest-0001",

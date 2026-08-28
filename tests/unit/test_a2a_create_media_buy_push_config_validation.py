@@ -14,7 +14,6 @@ The MCP wrapper and ``create_media_buy_raw`` both construct CreateMediaBuyReques
 WITHOUT push_notification_config and forward it as a separate argument. The A2A
 skill handler must behave identically.
 
-beads: salesagent-18h.3
 """
 
 from unittest.mock import AsyncMock, patch
@@ -77,7 +76,14 @@ async def test_short_webhook_credentials_do_not_block_create_media_buy():
     }
 
     submitted_result = CreateMediaBuyResult(
-        response={"media_buy_id": "mb_test", "packages": []},
+        # confirmed_at/revision are schema-required and carry no model default:
+        # the response reports the persisted row, so a construction must state them.
+        response={
+            "media_buy_id": "mb_test",
+            "packages": [],
+            "confirmed_at": "2026-03-15T12:00:00Z",
+            "revision": 1,
+        },
         status="submitted",
     )
 
@@ -136,7 +142,14 @@ async def test_no_auth_push_config_still_works():
     params["push_notification_config"] = {"url": "http://localhost:9999/webhook"}
 
     submitted_result = CreateMediaBuyResult(
-        response={"media_buy_id": "mb_test", "packages": []},
+        # confirmed_at/revision are schema-required and carry no model default:
+        # the response reports the persisted row, so a construction must state them.
+        response={
+            "media_buy_id": "mb_test",
+            "packages": [],
+            "confirmed_at": "2026-03-15T12:00:00Z",
+            "revision": 1,
+        },
         status="submitted",
     )
 

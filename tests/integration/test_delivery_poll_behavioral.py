@@ -101,7 +101,8 @@ class TestWebhookNotificationTypeFinal:
             assert dumped["notification_type"] == "final", [
                 delivery["status"] for delivery in dumped["media_buy_deliveries"]
             ]
-            assert dumped["next_expected_at"] is None
+            # The pin omits next_expected_at on final notifications; it is never null.
+            assert "next_expected_at" not in dumped
 
 
 @pytest.mark.requires_db
@@ -147,7 +148,8 @@ class TestSimulationReachesFinalThroughRealHook:
             dumped = response.model_dump(mode="json")
             assert dumped["media_buy_deliveries"][0]["status"] == "completed"
             assert dumped["notification_type"] == "final"
-            assert dumped["next_expected_at"] is None
+            # The pin omits next_expected_at on final notifications; it is never null.
+            assert "next_expected_at" not in dumped
 
     def test_mock_time_in_flight_reports_active_and_scheduled(self, integration_db):
         """The in-flight companion: simulated clock inside the window -> active/scheduled."""
@@ -709,7 +711,7 @@ class TestNoIdentifiersReturnAll:
                     tenant=tenant,
                     principal=principal,
                     media_buy_id=mb_id,
-                    # Serving buy: persisted status is authoritative (salesagent-18h.1).
+                    # Serving buy: persisted status is authoritative .
                     # The flight window alone no longer implies "active".
                     status="active",
                     start_date=today - timedelta(days=30),
@@ -755,7 +757,7 @@ class TestNoIdentifiersReturnAll:
                     tenant=tenant,
                     principal=principal,
                     media_buy_id=mb_id,
-                    # Serving buy: persisted status is authoritative (salesagent-18h.1).
+                    # Serving buy: persisted status is authoritative .
                     status="active",
                     start_date=today - timedelta(days=30),
                     end_date=today + timedelta(days=30),
@@ -1075,7 +1077,7 @@ class TestPackageDeliveryStatus:
                 media_buy_id="mb_past",
                 # Buy that WAS serving (active) and whose flight has ended →
                 # persisted "active" is date-refined to "completed"
-                # (salesagent-18h.1). A pending_approval buy never served.
+                # . A pending_approval buy never served.
                 status="active",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 12, 31),
@@ -1603,7 +1605,7 @@ class TestUnpopulatedFieldsGraceful:
             completion_rate=None,
         )
         assert not hasattr(totals, "effective_rate") or "effective_rate" not in DeliveryTotals.model_fields
-        # viewability is now present on DeliveryTotals (salesagent-2s79)
+        # viewability is now present on DeliveryTotals
         assert "viewability" in DeliveryTotals.model_fields
         assert totals.impressions == 5000.0
         assert totals.spend == 250.0
@@ -1660,7 +1662,7 @@ class TestUnpopulatedFieldsGraceful:
             # Gap G44: effective_rate not on local DeliveryTotals
             assert "effective_rate" not in DeliveryTotals.model_fields
 
-            # viewability is now present on DeliveryTotals (salesagent-2s79)
+            # viewability is now present on DeliveryTotals
             assert "viewability" in DeliveryTotals.model_fields
 
             # Gap G42: creative_level_breakdowns (by_creative) not on PackageDelivery
@@ -1684,7 +1686,7 @@ class TestUnpopulatedFieldsGraceful:
 class TestPricingOptionStringLookup:
     """Verify pricing_option_id string field is used for lookup, not integer PK.
 
-    Bug: salesagent-mq3n -- string-to-integer comparison silently drops pricing
+    Bug: -- string-to-integer comparison silently drops pricing
     context, resulting in silent data loss (no clicks calculated for CPC buys).
 
     Covers: UC-004-MAIN-14

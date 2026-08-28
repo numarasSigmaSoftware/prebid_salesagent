@@ -400,7 +400,7 @@ def _webhook_log_modules() -> list["Path"]:  # noqa: F821 - Path imported by cal
 _PREEXISTING_RAW_CHANNELS: dict[str, int] = {
     "_sync.py": 2,
     "logging_config.py": 2,
-    "media_buy_create.py": 35,
+    "media_buy_create.py": 27,
     "order_approval_service.py": 8,
 }
 

@@ -18,6 +18,7 @@ from adcp.types.generated_poc.media_buy.get_media_buy_delivery_response import (
 )  # TODO: no stable alias — response-level NotificationType differs from top-level
 
 from src.core.database.database_session import get_db_session, get_independent_db_session
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
 from src.core.database.repositories import MediaBuyRepository, ProductRepository
 from src.core.database.repositories.webhook_delivery_log import WebhookDeliveryLogRepository
@@ -229,7 +230,14 @@ class DeliveryWebhookScheduler:
                 # Find all active media buys (cross-tenant scheduler query)
                 media_buys = MediaBuyRepository.get_all_by_statuses(
                     session,
-                    ["active", "approved", "completed", "canceled", "rejected", "failed"],
+                    {
+                        PersistedMediaBuyStatus.ACTIVE,
+                        PersistedMediaBuyStatus.APPROVED,
+                        PersistedMediaBuyStatus.COMPLETED,
+                        PersistedMediaBuyStatus.CANCELED,
+                        PersistedMediaBuyStatus.REJECTED,
+                        PersistedMediaBuyStatus.FAILED,
+                    },
                 )
                 report_jobs: list[tuple[Any, dict[str, Any]]] = []
                 for media_buy in media_buys:

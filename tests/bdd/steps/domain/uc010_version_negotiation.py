@@ -283,12 +283,21 @@ def then_response_is_version_unsupported(ctx: dict) -> None:
 # ── Then: details payload ────────────────────────────────────────────
 
 
-@then("the error details should include supported_versions as a non-empty array")
+@then("the error details should carry a non-empty supported_versions array")
 def then_details_supported_versions_nonempty(ctx: dict) -> None:
     """supported_versions is REQUIRED with minItems 1 (version-unsupported.json).
 
     Asserted element-wise: the wire array must be exactly the seller's
     configured release set from the Given step (which is non-empty).
+
+    Renamed from "the error details should include supported_versions as a
+    non-empty array" (#1941): that exact text was ALSO matched by the generic
+    ``the error details should include {key} {value}`` parser in
+    ``tests/bdd/steps/generic/then_error.py``, which would have compared the
+    wire array against the literal string "as a non-empty array" — a
+    tests_architecture_bdd_no_shadowed_steps.py::test_no_domain_exact_text_shadows_generic_parser
+    violation (two fixtures for one sentence, one silently dead per pytest-bdd's
+    registration-order resolution).
     """
     versions = _supported_versions(ctx)
     expected = list(ctx["seller_versions"])

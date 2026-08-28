@@ -29,7 +29,11 @@ async def test_mcp_pause_on_create_rejects_before_reservation() -> None:
     ):
         await with_error_logging(create_media_buy)(
             brand={"domain": "testbrand.com"},
-            packages=[],
+            # None, not []: packages now has min_length=1 when supplied (#1941), so an
+            # empty list would fail request construction before the paused=True check
+            # in _create_media_buy_impl ever runs — omission is what isolates the
+            # pause-on-create rejection from that unrelated packages-shape failure.
+            packages=None,
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-02-01T00:00:00Z",
             idempotency_key="pause-create-mcp-0001",

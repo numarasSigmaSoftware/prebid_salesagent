@@ -39,7 +39,7 @@ def _principal() -> Principal:
 
 def _result(*, media_buy_id: str = "mb-1", replayed: bool = False) -> UpdateMediaBuyResult:
     return UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id=media_buy_id, affected_packages=[]),
+        response=UpdateMediaBuySuccess.carrier(media_buy_id=media_buy_id, affected_packages=[]),
         status="completed",
         replayed=replayed,
     )
@@ -97,7 +97,7 @@ def test_wire_retry_replays_without_executing_update(orchestration: _Orchestrati
     decoded = args.kwargs["decode"](
         {
             "status": "completed",
-            "response": UpdateMediaBuySuccess(
+            "response": UpdateMediaBuySuccess.carrier(
                 media_buy_id="mb-1",
                 affected_packages=[],
                 context={"correlation_id": "original"},

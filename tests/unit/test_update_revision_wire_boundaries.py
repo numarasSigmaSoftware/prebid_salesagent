@@ -29,7 +29,7 @@ _VALID_REQUEST = {
 
 def _success_result() -> UpdateMediaBuyResult:
     return UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id="mb-revision-boundary", affected_packages=[]),
+        response=UpdateMediaBuySuccess.carrier(media_buy_id="mb-revision-boundary", affected_packages=[]),
         status="completed",
     )
 

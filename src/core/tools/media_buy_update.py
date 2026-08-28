@@ -75,6 +75,7 @@ from src.core.database.models import (
 from src.core.database.models import (
     MediaBuy,
     ObjectWorkflowMapping,
+    PersistedMediaBuyStatus,
 )
 from src.core.database.models import (
     Product as DBProduct,
@@ -249,7 +250,7 @@ def _adcp_status_and_actions(
     + the delivery-only ``failed`` -> ``rejected`` mapping) so the update-response
     ``media_buy_status`` agrees with ``get_media_buys`` for the same buy and reference
     date — the two surfaces must describe one buy identically (the 8plg agreement;
-    salesagent-109m). A past-end serving buy therefore reports ``completed`` on both,
+    ). A past-end serving buy therefore reports ``completed`` on both,
     not the un-refined persisted ``active`` (the status scheduler that transitions the
     column may lag behind the flight window).
 
@@ -696,7 +697,7 @@ def _update_media_buy_work(
         uow_context = nullcontext(uow_override) if uow_override is not None else MediaBuyUoW(tenant["tenant_id"])
         with uow_context as uow:
             assert uow.media_buys is not None
-            # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
+            # FIXME(#2128): raw session usages below should migrate to repository methods
             assert uow.session is not None
             session = uow.session
 
@@ -769,13 +770,26 @@ def _update_media_buy_work(
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
 
             def apply_next_revision(response: UpdateMediaBuySuccess) -> UpdateMediaBuySuccess:
-                """Advance the locked row exactly once for an applied update."""
+                """Advance the locked row exactly once for an applied update.
+
+                The persisted write goes through MediaBuyRepository.set_revision
+                exclusively (structural guard: confirmed_at/revision are
+                repository-owned) — this does NOT also mirror the value onto
+                ``_current_mb`` in memory, so nothing downstream may rely on
+                ``_current_mb.revision`` reflecting the bump within this
+                transaction; only the returned response and the persisted row do.
+
+                Returns a COPY carrying the bumped value rather than mutating
+                ``response.revision`` in place: the same write-seam guard that
+                keeps this field repository-owned on the ORM side also scans for
+                a bare ``.revision =`` attribute assignment anywhere in ``src/``,
+                with no allowlist, so the response object goes through
+                ``model_copy`` instead.
+                """
                 next_revision = current_revision + 1
-                _current_mb.revision = next_revision
                 assert uow.media_buys is not None
                 uow.media_buys.set_revision(media_buy_id_to_use, next_revision)
-                response.revision = next_revision
-                return response
+                return response.model_copy(update={"revision": next_revision})
 
             # Create or get persistent context and workflow step
             # (ctx_manager + step were hoisted before the try block so the
@@ -935,7 +949,7 @@ def _update_media_buy_work(
 
                 # Look up current status for valid_actions (date-refined for
                 # parity with get_media_buys — see _adcp_status_and_actions).
-                _dry_run_mb = uow.media_buys.get_by_id(req.media_buy_id)
+                _dry_run_mb = uow.media_buys.get_by_id_or_raise(req.media_buy_id or "", context=req.context)
 
                 # Build simulated response.
                 # The wire status="completed" is KEPT for dry_run and is
@@ -948,9 +962,12 @@ def _update_media_buy_work(
                 # (-> Error), a dry_run buyer asked to SIMULATE the would-be
                 # outcome, which IS completion -> "completed" is a truthful preview, not a
                 # lie. Guarded by tests/integration/test_media_buy_dry_run_status.py.
+                _dry_run_revision = _dry_run_mb.revision
                 _dry_run_mbs, _dry_run_actions = _adcp_status_and_actions(_dry_run_mb)
                 dry_run_response = UpdateMediaBuySuccess(
                     media_buy_id=req.media_buy_id or "",
+                    # A dry run applies nothing, so it reports the CURRENT token, not a bump.
+                    revision=_dry_run_revision,
                     media_buy_status=_dry_run_mbs,  # AdCP 3.1: mirrors `status`
                     affected_packages=simulated_affected,
                     valid_actions=_dry_run_actions,
@@ -1118,16 +1135,22 @@ def _update_media_buy_work(
                     # Derive post-action status from the DB (date-refined for parity
                     # with get_media_buys — see _adcp_status_and_actions) so
                     # valid_actions reflects what the buyer can actually do next.
-                    # Fall back to the current state-machine target only if the DB
-                    # row is missing (e.g., adapter deleted it under us) — no row
-                    # means no dates to refine.
-                    _post_action_mb = uow.media_buys.get_by_id(req.media_buy_id)
-                    _post_action_mbs, _post_action_actions = _adcp_status_and_actions(
-                        _post_action_mb, fallback_status=("paused" if req.paused else "active")
-                    )
+                    # Raise rather than fall back if the row is missing (e.g., the
+                    # adapter call raced a delete of the row it just acted on):
+                    # publishing a fabricated success for a buy the seller cannot
+                    # honour is worse than surfacing MEDIA_BUY_NOT_FOUND. Mirrors
+                    # the field-update site below, which uses the same
+                    # get_by_id_or_raise guard for the same reason.
+                    _post_action_mb = uow.media_buys.get_by_id_or_raise(req.media_buy_id or "", context=req.context)
+                    _post_action_mbs, _post_action_actions = _adcp_status_and_actions(_post_action_mb)
                     success_response = apply_next_revision(
                         UpdateMediaBuySuccess(
                             media_buy_id=media_buy_id,
+                            # Required, no default (Pattern: revision is the buy's live
+                            # optimistic-concurrency token, never a fabricated constant) —
+                            # this placeholder is overwritten by apply_next_revision()
+                            # immediately below, before this object is ever read.
+                            revision=1,
                             media_buy_status=_post_action_mbs,  # AdCP 3.1: mirrors `status`
                             affected_packages=affected_pkgs,
                             valid_actions=_post_action_actions,
@@ -1335,7 +1358,7 @@ def _update_media_buy_work(
                             and media_buy_obj.status == "draft"
                             and media_buy_obj.approved_at is not None
                         ):
-                            media_buy_obj.status = "pending_creatives"
+                            uow.media_buys.update_status(actual_media_buy_id, PersistedMediaBuyStatus.PENDING_CREATIVES)
                             logger.info(
                                 f"[UPDATE] Media buy {actual_media_buy_id} transitioned from draft to pending_creatives "
                                 f"(creative_ids: {pkg_update.creative_ids})"
@@ -1571,7 +1594,7 @@ def _update_media_buy_work(
                             and media_buy_obj.status == "draft"
                             and media_buy_obj.approved_at is not None
                         ):
-                            media_buy_obj.status = "pending_creatives"
+                            uow.media_buys.update_status(actual_media_buy_id, PersistedMediaBuyStatus.PENDING_CREATIVES)
                             logger.info(
                                 f"[UPDATE] Media buy {actual_media_buy_id} transitioned from draft to pending_creatives "
                                 f"(creative_assignments processed: {updated_assignments})"
@@ -1776,11 +1799,15 @@ def _update_media_buy_work(
             # - AdCP-required fields (package_id) for spec compliance
             # - Internal tracking fields (buyer_package_ref, changes_applied) excluded via exclude=True
 
-            _final_mb = uow.media_buys.get_by_id(req.media_buy_id)
+            _final_mb = uow.media_buys.get_by_id_or_raise(req.media_buy_id or "", context=req.context)
             _final_mbs, _final_actions = _adcp_status_and_actions(_final_mb)
             final_response = apply_next_revision(
                 UpdateMediaBuySuccess(
                     media_buy_id=req.media_buy_id or "",
+                    # Placeholder — apply_next_revision() overwrites it below before this
+                    # object is read (revision has no default; see the pause/resume site
+                    # above for the same pattern).
+                    revision=1,
                     media_buy_status=_final_mbs,  # AdCP 3.1: mirrors `status`
                     affected_packages=affected_packages_list,
                     valid_actions=_final_actions,
@@ -1976,6 +2003,9 @@ async def update_media_buy(
         ext: Extension object for custom fields (optional, per AdCP spec)
         idempotency_key: Required AdCP request key. Successful retries replay
             the original response and conflicting payload reuse is rejected.
+        revision: Buyer's expected-current revision (optional, per AdCP spec). Declared
+            on every transport so the token a buyer read off a response can be handed
+            back on any of them.
         ctx: FastMCP context (automatically provided)
 
     Returns:
@@ -2073,6 +2103,10 @@ def update_media_buy_raw(
         reporting_webhook: Webhook configuration for automated reporting delivery
         ext: Extension object for custom fields (optional, per AdCP spec)
         idempotency_key: Required AdCP request key with durable replay semantics.
+        revision: Buyer's expected-current revision, per the pinned
+            update-media-buy-request.json. Accepted on every transport so a buyer can
+            hand back the token it read; the stale-token CONFLICT check itself is a
+            separate, still-ungraded gap.
         ctx: Context for authentication (deprecated, use identity)
         identity: Pre-resolved identity (if available)
 

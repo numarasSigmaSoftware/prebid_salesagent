@@ -971,7 +971,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent calls get_adcp_capabilities MCP tool with adcp_version "4.0"
     Then the response should be a VERSION_UNSUPPORTED error
     And the error code should be "VERSION_UNSUPPORTED"
-    And the error details should include supported_versions as a non-empty array
+    And the error details should carry a non-empty supported_versions array
     And each supported_versions entry should match pattern "^\\d+\\.\\d+(-[a-zA-Z0-9.-]+)?$"
     And the error details may include supported_majors as a deprecated array of integers
     And the error details may include build_version as an advisory semver string

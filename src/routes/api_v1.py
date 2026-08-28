@@ -374,6 +374,18 @@ class UpdateMediaBuyBody(_VersionedBody):
     # Keep every supplied raw value (including JSON null) for the shared fail-loud
     # guard.  The default factory preserves omission as a distinct singleton while
     # OpenAPI continues to advertise an optional integer >= 1, never null.
+    #
+    # The buyer's expected-current optimistic-concurrency token. Declared because the
+    # pinned update-media-buy-request.json defines it ("Expected current revision for
+    # optimistic concurrency ... Obtain from get_media_buys or the most recent
+    # create/update response") and this model is extra="forbid" — so omitting it did
+    # not make the field optional over REST, it made a spec-legal request a hard
+    # INVALID_REQUEST. A buyer that read the token off a create/update response and
+    # handed it back, exactly as the spec instructs, was rejected for doing so.
+    #
+    # The seller does not yet ACT on it — the stale-token CONFLICT check is a separate,
+    # still-xfailed gap (BR-RULE-215 partitions). Accepting it is transport parity, not
+    # a claim that concurrency is enforced.
     revision: RawUnsupportedRevision = Field(default_factory=media_buy_update_module.revision_omitted_default)
 
 

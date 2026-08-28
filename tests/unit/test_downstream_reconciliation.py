@@ -164,7 +164,7 @@ def test_fresh_claim_is_marked_invoked_then_applied() -> None:
     uow = MagicMock(downstream_mutation_claims=repo)
     uow.__enter__.return_value = uow
     adapter = MagicMock()
-    result = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    result = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     work = MagicMock(return_value=result)
 
     with patch("src.services.downstream_reconciliation.DownstreamMutationClaimRepository", return_value=repo):
@@ -193,7 +193,7 @@ def test_definitive_adapter_error_is_recorded_not_applied_for_retry() -> None:
         result_metadata=None,
     )
     adapter = MagicMock(adapter_name="mock")
-    result = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    result = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
 
     with patch("src.services.downstream_reconciliation.DownstreamMutationClaimRepository", return_value=repo):
         assert _call(adapter, MagicMock(return_value=result), is_applied=lambda _result: False) is result
@@ -222,7 +222,7 @@ def test_definitive_not_applied_prior_outcome_resumes_once() -> None:
     uow.__enter__.return_value = uow
     adapter = MagicMock(adapter_name="mock")
     adapter.reconcile_media_buy_update.return_value = ReconciliationResult(ReconciliationOutcome.NOT_APPLIED)
-    expected = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    expected = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     work = MagicMock(return_value=expected)
 
     with patch("src.services.downstream_reconciliation.DownstreamMutationClaimRepository", return_value=repo):
@@ -275,7 +275,7 @@ def test_existing_planned_claim_is_known_not_invoked_and_executes_once() -> None
     uow = MagicMock(downstream_mutation_claims=repo)
     uow.__enter__.return_value = uow
     adapter = MagicMock(adapter_name="mock", supports_media_buy_update_reconciliation=True)
-    expected = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    expected = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     work = MagicMock(return_value=expected)
 
     with patch("src.services.downstream_reconciliation.DownstreamMutationClaimRepository", return_value=repo):
@@ -291,7 +291,7 @@ def test_retry_reuses_first_claim_implementation_date_across_midnight() -> None:
 
     first_date = datetime(2026, 7, 25, tzinfo=UTC)
     retry_date = datetime(2026, 7, 26, tzinfo=UTC)
-    expected = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    expected = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     repo = MagicMock()
     repo.get.return_value = MagicMock(
         claim_id="claim-midnight",
@@ -334,7 +334,7 @@ def test_ambiguous_claim_obeys_provider_reconciliation(
 ) -> None:
     from src.core.idempotency_canonical import canonical_payload_hash
 
-    expected = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    expected = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     repo = MagicMock()
     repo.get.return_value = MagicMock(
         claim_id="claim-1",
@@ -435,7 +435,7 @@ def test_applied_create_replay_restores_provider_and_local_continuation_metadata
     )
     repo.get.return_value = None
     repo.create_from_values.return_value = fresh
-    response = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    response = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     object.__setattr__(response, "_platform_line_item_ids", {"pkg-original": "provider-42"})
     work = MagicMock(return_value=response)
     adapter = MagicMock(adapter_name="mock", supports_media_buy_create_reconciliation=True)
@@ -484,7 +484,7 @@ def test_ambiguous_create_reconciliation_persists_local_continuation_metadata() 
         request_hash=request_hash,
         result_metadata=None,
     )
-    response = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+    response = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
     object.__setattr__(response, "_platform_line_item_ids", {"pkg-original": "provider-42"})
     adapter = MagicMock(adapter_name="mock", supports_media_buy_create_reconciliation=True)
     adapter.reconcile_media_buy_create.return_value = ReconciliationResult(
@@ -568,7 +568,7 @@ def test_concurrent_reconciliation_progresses_when_domain_pool_is_saturated() ->
         with domain_connection():  # caller-owned domain transaction
             barrier.wait(timeout=1)
             adapter = MagicMock(adapter_name="mock", supports_media_buy_update_reconciliation=True)
-            expected = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[])
+            expected = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[])
             return _call(adapter, MagicMock(return_value=expected))
 
     from src.core.idempotency_canonical import canonical_payload_hash

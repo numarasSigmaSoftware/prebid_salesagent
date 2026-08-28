@@ -26,7 +26,7 @@ Feature: BR-UC-010 Version Negotiation (hand-authored companion)
     Given the seller speaks adcp release-precision versions "3.0", "3.1"
     When the Buyer Agent calls get_adcp_capabilities with adcp_version "<pin>"
     Then the response should be a VERSION_UNSUPPORTED error
-    And the error details should include supported_versions as a non-empty array
+    And the error details should carry a non-empty supported_versions array
     And the Buyer Agent must select the next adcp_version from supported_versions
     # Versioning & Governance, "Server resolves": a different major returns
     # VERSION_UNSUPPORTED with authoritative supported_versions in error data.
@@ -41,7 +41,7 @@ Feature: BR-UC-010 Version Negotiation (hand-authored companion)
     Given the seller speaks adcp release-precision versions "3.1", "3.2"
     When the Buyer Agent calls get_adcp_capabilities with adcp_version "3.0"
     Then the response should be a VERSION_UNSUPPORTED error
-    And the error details should include supported_versions as a non-empty array
+    And the error details should carry a non-empty supported_versions array
     And the Buyer Agent must select the next adcp_version from supported_versions
     # Versioning & Governance, "Server resolves": when no server release is less
     # than or equal to the buyer's same-major pin, the pin is a sub-min failure.
@@ -51,7 +51,7 @@ Feature: BR-UC-010 Version Negotiation (hand-authored companion)
     Given the seller speaks adcp release-precision versions "3.0", "3.1"
     When the Buyer Agent calls get_adcp_capabilities with adcp_version "3.1-beta"
     Then the response should be a VERSION_UNSUPPORTED error
-    And the error details should include supported_versions as a non-empty array
+    And the error details should carry a non-empty supported_versions array
     And the Buyer Agent must select the next adcp_version from supported_versions
     # Versioning & Governance, "Pre-release pins": prereleases match exactly and
     # MUST NOT downshift to a stable release when the prerelease is not advertised.

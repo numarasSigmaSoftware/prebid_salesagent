@@ -85,7 +85,7 @@ def test_update_media_buy_accepts_valid_revision_before_core_call(revision: int 
     from src.core.schemas import UpdateMediaBuyRequest, UpdateMediaBuyResult, UpdateMediaBuySuccess
 
     success = UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[]),
+        response=UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[]),
         status="completed",
     )
     with (

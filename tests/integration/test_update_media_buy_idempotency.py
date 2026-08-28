@@ -52,7 +52,7 @@ def _principal() -> Principal:
 
 def _success() -> UpdateMediaBuyResult:
     return UpdateMediaBuyResult(
-        response=UpdateMediaBuySuccess(media_buy_id="mb-idem-1", affected_packages=[]),
+        response=UpdateMediaBuySuccess.carrier(media_buy_id="mb-idem-1", affected_packages=[]),
         status="completed",
     )
 

@@ -11,7 +11,7 @@ deleted, the happy-path _impl tests would still pass green.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,6 +19,14 @@ from tests.harness.media_buy_create import MediaBuyCreateEnv
 from tests.helpers import seed_principal
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
+
+# Frozen once at import, not recomputed per call: _make_request is called
+# MULTIPLE times per test (once to seed a payload_hash, once as the actual
+# retry) and the two calls must canonicalize to the IDENTICAL hash for a
+# replay match -- a per-call datetime.now() would drift between calls and
+# silently break every seed/retry pair in this file.
+_REQUEST_START_TIME = datetime.now(UTC) + timedelta(days=1)
+_REQUEST_END_TIME = _REQUEST_START_TIME + timedelta(days=29)
 
 
 def _seed_success(tenant_id, principal_id, idempotency_key, *, payload_hash, media_buy_id="mb_seeded"):
@@ -44,9 +52,9 @@ def _make_request(idempotency_key, *, po_number="REPLAY-1"):
 
     return CreateMediaBuyRequest(
         brand={"domain": "replay-test.example.com"},
-        packages=[],
-        start_time=datetime(2026, 6, 1, tzinfo=UTC),
-        end_time=datetime(2026, 6, 30, tzinfo=UTC),
+        packages=[{"product_id": "prod_1", "budget": 1000, "pricing_option_id": "po_1"}],
+        start_time=_REQUEST_START_TIME,
+        end_time=_REQUEST_END_TIME,
         po_number=po_number,
         idempotency_key=idempotency_key,
     )
@@ -152,19 +160,20 @@ class TestImplReplaysCachedSuccess:
             await _create_media_buy_impl(req=_make_request(idem_key), identity=_identity(tenant_id, principal_id))
 
         # A MISS means the probe RE-EXECUTED, so the request must fail the way a
-        # fresh un-cached call fails: on the downstream setup this bare request
-        # never satisfies. Pinning that specific code is what distinguishes a
-        # miss from the fail-closed post-race path, which raises
-        # SERVICE_UNAVAILABLE for this same input shape.
+        # fresh un-cached call fails: `product_id="prod_1"` was never seeded in
+        # this tenant, so a real execution fails product lookup. Pinning that
+        # specific code is what distinguishes a miss from the fail-closed
+        # post-race path, which raises SERVICE_UNAVAILABLE for this same input
+        # shape.
         #
         # The previous pair of assertions could not fail. `pytest.raises(AdCPError)`
         # already excludes PydanticValidationError (it is not in AdCPError's MRO),
         # and SERVICE_UNAVAILABLE satisfies "!= IDEMPOTENCY_CONFLICT" — so
         # inverting production from `return None` (miss) to a fail-closed raise
         # left this test, and all 42 in the replay/wire-matrix/race trio, green.
-        assert exc_info.value.error_code == "BUDGET_TOO_LOW", (
+        assert exc_info.value.error_code == "PRODUCT_NOT_FOUND", (
             "a drifted cache row must be treated as a MISS and re-execute — the bare request then "
-            "fails downstream in budget validation, which is the proof it ran. Got "
+            "fails downstream on product lookup, which is the proof it ran. Got "
             f"{exc_info.value.error_code!r}: the probe took a different branch "
             "(SERVICE_UNAVAILABLE would mean it fail-closed instead of re-executing)"
         )

@@ -181,7 +181,7 @@ def test_deeply_nested_context_on_a_flattened_wrapper_response_survives_intact()
     a top-level ``context`` field would silently fail to protect this shape.
     """
     raw = _nested_context(3000)
-    success = CreateMediaBuySuccess(media_buy_id="mb-1", packages=[], context=ContextObject.model_validate(raw))
+    success = CreateMediaBuySuccess.carrier(media_buy_id="mb-1", packages=[], context=ContextObject.model_validate(raw))
     result = CreateMediaBuyResult(response=success, status="completed")
 
     assert dump_adcp_response(result)["context"] == raw

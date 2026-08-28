@@ -133,11 +133,12 @@ def recover_stale_creative_unblock_workflows() -> CreativeUnblockRecoveryResult:
             success, error_message = True, None
         elif media_status in _RETRYABLE_LOCAL_STATUSES:
             try:
-                success, error_message = execute_approved_media_buy(
+                approval = execute_approved_media_buy(
                     lease.media_buy_id,
                     lease.tenant_id,
                     raise_retryable=True,
                 )
+                success, error_message = approval.ok, approval.error_msg
             except AdCPServiceUnavailableError:
                 logger.warning(
                     "Creative-unblock recovery remains ambiguous for %s/%s; lease will retry",

@@ -218,7 +218,7 @@ async def _call_webhook_for_creative_status(
 
             # step_tool_name is untrusted (workflow_steps DB column). Validate a
             # COPY for the SDK payload; keep the original label for metadata
-            # (salesagent-yi3s, salesagent-yk7o).
+            # .
             wire_task_type = validate_webhook_task_type(step_tool_name or "sync_creatives")
 
             payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
@@ -621,15 +621,10 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     continue
 
                 if media_buy.status in {"pending_creatives", "draft"}:
-                    # Get all creative assignments for this media buy
-                    all_assignments = uow.assignments.get_by_media_buy(media_buy_id)
-
-                    creative_ids = [a.creative_id for a in all_assignments]
-                    all_creatives = uow.creatives.admin_get_by_ids(creative_ids)
-
-                    unapproved_creatives = [
-                        c.creative_id for c in all_creatives if c.status not in ["approved", "active"]
-                    ]
+                    # The same gate the writer applies, asked once. Open-coding it here
+                    # meant the route evaluated it, decided to call execute, and the
+                    # callee then evaluated it again in the same request.
+                    unapproved_creatives = uow.assignments.unapproved_creative_ids(media_buy_id)
 
                     logger.info(
                         f"[CREATIVE APPROVAL] Media buy {media_buy_id} has {len(unapproved_creatives)} unapproved creatives remaining"
@@ -691,11 +686,14 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                 success, error_msg = True, None
             else:
                 try:
-                    success, error_msg = execute_approved_media_buy(
+                    approval = execute_approved_media_buy(
                         action["media_buy_id"],
                         tenant_id,
+                        approved_by="system",
+                        approved_at=datetime.now(UTC),
                         raise_retryable=True,
                     )
+                    success, error_msg = approval.ok, approval.error_msg
                 except AdCPServiceUnavailableError:
                     logger.warning(
                         "[CREATIVE APPROVAL] Provider outcome remains ambiguous for %s; retaining processing lease",
@@ -715,6 +713,11 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     error_message=error_msg,
                 )
             elif success:
+                # No post-execute read or write here. The callee (when it actually ran)
+                # resolved the flight window and committed it in the same write that
+                # bumped the revision; this route only reports what it was told. This
+                # branch is reached only for provider_already_applied/no-lease cases,
+                # so the row still needs its local status/approval fields set here.
                 with AdminCreativeUoW(tenant_id) as uow2:
                     assert uow2.media_buys is not None
                     media_buy = uow2.media_buys.get_by_id(action["media_buy_id"])

@@ -16,7 +16,7 @@ _RETRY = {"correlation_id": "retry"}
 
 
 def test_create_replay_echoes_retry_context() -> None:
-    cached = CreateMediaBuySuccess(media_buy_id="mb-1", packages=[], context=_ORIGINAL)
+    cached = CreateMediaBuySuccess.carrier(media_buy_id="mb-1", packages=[], context=_ORIGINAL)
 
     replay = _replay_cached_success(
         {"status": "completed", "response": cached.model_dump(mode="json")},
@@ -29,7 +29,7 @@ def test_create_replay_echoes_retry_context() -> None:
 
 
 def test_update_replay_echoes_retry_context() -> None:
-    cached = UpdateMediaBuySuccess(media_buy_id="mb-1", affected_packages=[], context=_ORIGINAL)
+    cached = UpdateMediaBuySuccess.carrier(media_buy_id="mb-1", affected_packages=[], context=_ORIGINAL)
 
     replay = _decode_update_media_buy_replay(
         {"status": "completed", "response": cached.model_dump(mode="json")},

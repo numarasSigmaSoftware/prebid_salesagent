@@ -9,7 +9,6 @@ These tests verify the HTTP boundary shape for all A2A skills:
 They use TestClient (in-process ASGI) with mocked _impl functions.
 No Docker required. This is the regression gate between every Phase 2 step.
 
-beads: salesagent-b61l.17
 """
 
 import json
@@ -361,7 +360,12 @@ class TestA2AResponseShape:
                 "create_media_buy",
                 {
                     "brand": {"domain": "testbrand.com"},
-                    "packages": [],
+                    # A real (not empty) package: packages now has min_length=1 when
+                    # supplied (#1941), so an empty list would fail request
+                    # construction before the paused=True check ever runs — a
+                    # minimal-but-valid package isolates the pause-on-create
+                    # rejection from that unrelated packages-shape failure.
+                    "packages": [{"product_id": "prod_1", "budget": 1000, "pricing_option_id": "cpm_usd_fixed"}],
                     "start_time": "2026-01-01T00:00:00Z",
                     "end_time": "2026-02-01T00:00:00Z",
                     "idempotency_key": "pause-create-a2a-0001",

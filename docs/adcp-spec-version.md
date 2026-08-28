@@ -43,12 +43,10 @@ this document.
 
 ## Behavior target and historical migration note
 
-The SDK pin and the behavior target are both AdCP 3.1.1 GA. There is no current
-deliberate divergence between this seller's media-buy status wire shape, the
-SDK 6.6.0 types, and the 3.1.1 graded behavior.
-
-The following history explains the regression guards retained in this
-repository; it is not a present compatibility exception:
+The SDK **pin** (`adcp==6.6.0`, spec **3.1.1**) fixes the request/response
+*type shapes* we build against. It does **not** always fix the graded
+*behavior*. One field diverges deliberately: the `media_buy_status` dual-emit
+on create-/update-media-buy responses.
 
 - **beta.3 storyboard** (`dist/compliance/3.1.0-beta.3/.../pending_creatives_to_start.yaml`,
   ~L131-134) grades the body `status` as `field_value_or_absent` that MUST equal
