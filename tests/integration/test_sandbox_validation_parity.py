@@ -7,12 +7,12 @@ sandbox buy read its supported-pricing answer off the simulator and accepted ``c
 tenant whose real ad server rejects it.
 
 AdCP 3.1.1 ``dist/docs/3.1.1/media-buy/advanced-topics/sandbox.mdx``, §Seller
-implementation (:231):
+implementation:
 
     - **MUST** validate inputs the same way as production (reject invalid budgets, bad
       dates, etc.)
 
-and §Protocol compliance (:243): "Apply normal input validation (sandbox does not bypass
+and §Protocol compliance: "Apply normal input validation (sandbox does not bypass
 validation)."
 
 So: execution goes to the mock, constraints come from the adapter the tenant DECLARED.
