@@ -264,6 +264,7 @@ class AdCPError(Exception):
         retry_after: int | None = None,
         context: ContextObject | dict[str, Any] | None = None,
         _wire_safe_message: bool = False,
+        scrub_safe_details: dict[str, Any] | None = None,
     ) -> None:
         # ``error_code`` and ``status_code`` kwargs are only used by the
         # sanctioned ``synthesize()`` classmethod for boundary fallback paths
@@ -272,6 +273,16 @@ class AdCPError(Exception):
         super().__init__(message)
         self.message = message
         self.details = details
+        # ``scrub_safe_details`` is a NARROW, explicitly-audited structured payload that
+        # survives internal-code scrubbing (SERVICE_UNAVAILABLE / CONFIGURATION_ERROR),
+        # unlike ``message`` and raw ``details``, which are always scrubbed there because
+        # a raise site can interpolate a secret into either. Populate it ONLY with values
+        # traceable to THIS buyer's request — the buyer's own ``media_buy_id`` echoed so
+        # they can identify the offending row — never adapter/DB internals or another
+        # principal's data. ``safe_adcp_error`` forwards it into the scrubbed error's
+        # ``details``; it is the structured-id analogue of ``field`` (a schema path that
+        # already survives the scrub), NOT a way to reopen the raw-``details`` channel.
+        self.scrub_safe_details = scrub_safe_details
         self.field = field
         self.suggestion = suggestion if suggestion is not None else type(self)._default_suggestion
         self.retry_after = retry_after
@@ -305,6 +316,7 @@ class AdCPError(Exception):
         field: str | None = None,
         suggestion: str | None = None,
         context: ContextObject | dict[str, Any] | None = None,
+        scrub_safe_details: dict[str, Any] | None = None,
     ) -> AdCPError:
         """Sanctioned entry point for synthesizing an AdCPError with overridden code/status.
 
@@ -330,6 +342,7 @@ class AdCPError(Exception):
             field=field,
             suggestion=suggestion,
             context=context,
+            scrub_safe_details=scrub_safe_details,
         )
 
     @classmethod
@@ -705,11 +718,9 @@ class AdCPPersistedStateError(AdCPConfigurationError):
     Raised wherever a persisted value cannot be published or stored: the ``status``
     write door refuses a value that would enter the column, the ``status`` read door
     refuses a value already in it, and the ``revision`` read door refuses an integer
-    below the pinned minimum. The last is a bound rather than a vocabulary, and it
-    reaches the buyer in both envelope layers — the pinned ``CONFIGURATION_ERROR``
-    metadata permits that payload, so the contract is wider than "two doors of
-    status" and this docstring says so rather than describing the narrower case it
-    was written for.
+    below the pinned minimum. The last is a bound rather than a vocabulary, so the
+    contract is wider than "two doors of status" and this docstring says so rather
+    than describing the narrower case it was written for.
     All are SELLER-side store defects — the buyer neither supplied the value nor can
     correct it — so this inherits ``CONFIGURATION_ERROR`` / ``terminal`` from
     ``AdCPConfigurationError`` rather than restating them. That is also what the
@@ -718,15 +729,19 @@ class AdCPPersistedStateError(AdCPConfigurationError):
     the buyer cannot act on for data it does not own, and an invitation to retry a
     call that will fail identically.
 
-    The message names the buy, the column and the legal member set, because that is
-    what makes the defect actionable for the seller's operator, who is the only party
-    who can fix it.
+    The raised ``message`` names the buy, the column and the legal member set, because
+    that is what makes the defect actionable for the seller's operator, who is the only
+    party who can fix it — and that operator-facing string is what reaches the audit log
+    and the server-side raise.
 
-    It does NOT say the buyer never sees it — this docstring said that twelve lines
-    above its own statement that the message reaches the buyer in both envelope
-    layers. Both are true of the same string: it is written for the operator and it is
-    delivered to the buyer, which is exactly why it names a column rather than a
-    stack frame.
+    At the BUYER wire boundary the message is SCRUBBED: ``CONFIGURATION_ERROR`` is an
+    internal wire code (``INTERNAL_WIRE_CODES``), and ``safe_adcp_error`` replaces the
+    message — which quotes the raw persisted value — with the generic internal text on
+    both envelope layers. The one datum the buyer still needs, the offending
+    ``media_buy_id``, is the buyer's OWN request-scoped id, so the raise sites pass it
+    through ``scrub_safe_details``; ``safe_adcp_error`` forwards that narrow structured
+    payload into the scrubbed error's ``details``, and the buyer can identify the
+    defective row without the operator message ever reaching the wire.
     """
 
 
@@ -1575,23 +1590,33 @@ def _scrubbed_error(
     status_code: int,
     context: ContextObject | dict[str, Any] | None,
     field: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> AdCPError:
     """A wire-safe ``AdCPError`` carrying the given code/recovery but a SANITIZED, secret-free
     message + suggestion selected by the BUYER-FACING ``wire_code`` (so the human text matches the
-    machine code), with ``details`` dropped. A caller may preserve a field path derived from a
-    structured validator; raw messages and input values are never retained. The single scrub
-    constructor for ``safe_adcp_error`` so message replacement can't drift between call sites.
-    Codes without a category entry fall back to the generic internal message + a
-    recovery-matched suggestion."""
+    machine code). The raise site's raw ``message`` and raw ``details`` are DROPPED — either can
+    embed a secret. A caller may preserve a field path derived from a structured validator, and
+    may pass ``details`` HERE only when it is an explicitly-audited, request-traceable payload
+    (the buyer's own ``media_buy_id``) — never the raise site's raw ``details``. Raw messages and
+    input values are never retained. The single scrub constructor for ``safe_adcp_error`` so
+    message replacement can't drift between call sites. Codes without a category entry fall back
+    to the generic internal message + a recovery-matched suggestion."""
     message, suggestion = _sanitized_text_for(wire_code, recovery)
     return AdCPError.synthesize(
         message,
         error_code=error_code,
         status_code=status_code,
         recovery=recovery,
+        details=details,
         field=field,
         suggestion=suggestion,
         context=context,
+        # Carry the narrow payload into BOTH channels so scrubbing is idempotent: a
+        # second ``safe_adcp_error`` pass over this already-scrubbed error (the A2A
+        # boundary scrubs once in the skill seam and again when building the failed-Task
+        # artifact) drops ``details`` as raw, then re-forwards ``scrub_safe_details`` —
+        # a fixed point that keeps the buyer's id through any number of re-scrubs.
+        scrub_safe_details=details,
     )
 
 
@@ -1669,6 +1694,12 @@ def safe_adcp_error(exc: Exception) -> AdCPError:
             recovery=_canonical_recovery_for(wire_code),
             status_code=normalized.status_code,
             context=normalized.context,
+            # ``scrub_safe_details`` — NOT ``normalized.details``. The raw ``details``
+            # shares provenance with the (scrubbed) message and stays dropped; this
+            # forwards only the explicitly-audited, request-traceable payload a raise
+            # site opted in (the buyer's own media_buy_id), so a defective-row refusal
+            # names the row without leaking the raise site's message internals.
+            details=normalized.scrub_safe_details,
         )
     if wire_code not in WIRE_STANDARD_CODES:
         # An internal-only code the wire doesn't model: coerce to SERVICE_UNAVAILABLE + scrub.

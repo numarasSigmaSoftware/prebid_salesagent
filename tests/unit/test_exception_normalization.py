@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from src.core.exceptions import (
     VALIDATION_ERROR_SUGGESTION,
     AdCPInvalidRequestError,
+    AdCPPersistedStateError,
     AdCPValidationError,
     build_two_layer_error_envelope,
     normalize_to_adcp_error,
@@ -327,6 +328,65 @@ def test_wire_safe_opt_in_governs_details_and_message_together():
     assert "details" not in scrubbed["errors"][0]
     assert "details" not in scrubbed["adcp_error"]
     assert scrubbed["errors"][0]["message"] != "Budget must be positive."
+
+
+def test_internal_code_scrub_keeps_scrub_safe_details_but_drops_raw_details_and_message():
+    """A CONFIGURATION_ERROR refusal names the buyer's row without leaking its message.
+
+    ``AdCPPersistedStateError`` inherits ``CONFIGURATION_ERROR`` — an internal wire code
+    whose message is scrubbed regardless of provenance (its sibling decryption raise sites
+    can interpolate a connection string). The raise site's raw ``message`` AND raw
+    ``details`` are therefore both dropped. The ONE datum the buyer still needs — their own
+    ``media_buy_id``, so they can identify the defective row — rides ``scrub_safe_details``,
+    an explicitly-audited request-traceable channel that survives the scrub. This is the
+    structured-id analogue of ``field``, NOT a reopening of the raw-``details`` channel:
+    raw ``details`` (which shares provenance with the scrubbed message) stays dropped.
+    """
+    error = AdCPPersistedStateError(
+        # Message quotes the raw persisted value AND embeds a secret to prove the scrub fires.
+        f"media buy 'mb-001' carries persisted status 'weird'; {SECRET_BEARING_MESSAGE}",
+        field="status",
+        details={"raw_row_dump": SECRET_BEARING_MESSAGE},
+        scrub_safe_details={"media_buy_id": "mb-001"},
+    )
+
+    envelope = build_two_layer_error_envelope(safe_adcp_error(error))
+
+    for layer in (envelope["errors"][0], envelope["adcp_error"]):
+        # The audited buyer id survives on both layers so the refusal names the row.
+        assert layer["details"] == {"media_buy_id": "mb-001"}
+        # The scrubbed message carries none of the raw prose (secret or persisted value).
+        assert "mb-001" not in layer["message"]
+        assert "weird" not in layer["message"]
+    # Neither the raw message nor the raw details payload reaches the wire.
+    assert_no_secret_leak(envelope)
+
+
+def test_internal_code_scrub_is_idempotent_for_scrub_safe_details():
+    """Re-scrubbing an already-scrubbed error keeps the buyer's id.
+
+    The A2A boundary scrubs twice — once in the skill seam, again when building the
+    failed-Task artifact's envelope. The first pass moves the id from
+    ``scrub_safe_details`` into the scrubbed error's ``details``; a second pass sees that
+    ``details`` as raw and drops it. ``_scrubbed_error`` therefore also re-stamps
+    ``scrub_safe_details`` on its output, making the scrub a fixed point: the id survives
+    any number of re-scrubs. Without this the A2A refusal (and only A2A) loses the id.
+    """
+    error = AdCPPersistedStateError(
+        f"media buy 'mb-001' carries persisted revision -1; {SECRET_BEARING_MESSAGE}",
+        field="revision",
+        scrub_safe_details={"media_buy_id": "mb-001"},
+    )
+
+    once = safe_adcp_error(error)
+    twice = safe_adcp_error(once)
+    thrice = safe_adcp_error(twice)
+
+    for scrubbed in (once, twice, thrice):
+        envelope = build_two_layer_error_envelope(scrubbed)
+        assert envelope["errors"][0]["details"] == {"media_buy_id": "mb-001"}
+        assert "mb-001" not in envelope["errors"][0]["message"]
+        assert_no_secret_leak(envelope)
 
 
 # A URL/token-shaped string standing in for "the buyer's own submitted value" in the four

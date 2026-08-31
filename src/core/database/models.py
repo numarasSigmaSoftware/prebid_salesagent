@@ -982,6 +982,10 @@ class PersistedMediaBuyStatus(StrEnum):
                 f"the media_buys.status vocabulary; expected one of "
                 f"{sorted(m.value for m in cls)}",
                 field="status",
+                # The buyer's own id, echoed structurally so the refusal names the
+                # defective row on the wire even though the message (which quotes the
+                # raw persisted value) is scrubbed as a CONFIGURATION_ERROR internal code.
+                scrub_safe_details={"media_buy_id": media_buy_id} if media_buy_id else None,
             )
         return member
 

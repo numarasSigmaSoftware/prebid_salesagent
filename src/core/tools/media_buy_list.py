@@ -738,6 +738,10 @@ def _persisted_revision(buy) -> int:
             f"media buy {buy.media_buy_id!r} carries persisted revision {revision!r}, below the "
             f"pinned minimum of {minimum}; the optimistic-concurrency token cannot be published",
             field="revision",
+            # The buyer's own id, echoed structurally so a defective-row refusal names
+            # the row on the wire even though the message is scrubbed as a
+            # CONFIGURATION_ERROR internal code. See AdCPError.scrub_safe_details.
+            scrub_safe_details={"media_buy_id": buy.media_buy_id} if buy.media_buy_id else None,
         )
     return revision
 
