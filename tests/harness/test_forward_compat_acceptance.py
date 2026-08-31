@@ -46,7 +46,21 @@ CURRENT_SPEC_GET_PRODUCTS = {
 FUTURE_TOP_LEVEL_FIELD = {
     "brief": "video ads",
     "brand": {"domain": "acme.com"},
-    "experimental_capability": "v5",  # New spec field, not in our signature
+    # Envelope field the seller now DELIBERATELY accepts (GH #1512) — but ONLY
+    # for a SUPPORTED major (currently 3, per adcp-spec-version.md's 3.1.1
+    # pin): the middleware validates adcp_major_version and rejects an
+    # UNSUPPORTED one with VERSION_UNSUPPORTED regardless of environment (see
+    # the module-level NOTE above), so an unsupported value here would make
+    # production correctly reject this payload, defeating this test's
+    # forward-compat-acceptance purpose. It stays in this payload so
+    # production-tolerance keeps covering it — but it can no longer carry the
+    # dev-rejects case, because a field we accept on purpose is not an
+    # unknown one.
+    "adcp_major_version": 3,
+    # The genuinely-undefined field. This is what the dev-rejects assertion is
+    # actually about: a name no pinned schema declares, which must be refused in
+    # development and stripped in production.
+    "future_unknown_field": "not in any pinned schema",
 }
 
 # Future spec — extra nested field inside brand
@@ -198,13 +212,20 @@ class TestMcpForwardCompat:
 
         from src.core.main import mcp
 
-        # Only test payloads that have top-level unknowns (not normalized deprecations)
+        # Only test payloads that have top-level unknowns (not normalized deprecations).
+        # This set is "names the seller KNOWS", not "names the signature declares" —
+        # a field the seller deliberately accepts is not an unknown one, so listing
+        # it here is what keeps this guard honest rather than what weakens it.
         has_top_level_unknown = any(
             k
             not in {
                 "brief",
                 "brand",
                 "adcp_version",
+                # Accepted on purpose since GH #1512, alongside adcp_version. Its
+                # absence here is what made this guard flag a field the seller
+                # had deliberately started accepting.
+                "adcp_major_version",
                 "filters",
                 "property_list",
                 "push_notification_config",

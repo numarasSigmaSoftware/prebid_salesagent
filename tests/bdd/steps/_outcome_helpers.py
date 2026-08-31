@@ -60,45 +60,97 @@ def wire_dict(ctx: dict) -> dict:
     return wire if wire is not None else _require_response(ctx).model_dump(mode="json")
 
 
-def wire_error_envelope(ctx: dict) -> dict | None:
-    """Return the captured error-path wire envelope, or ``None`` when none exists.
+def _real_wire_error_envelope(ctx: dict) -> dict | None:
+    """Read ``TransportResult.wire_error_envelope`` — the ONE attribute-access site.
 
-    The error-path analogue of :func:`wire_dict` / :func:`wire_field`. Callers
-    of this helper are already inside an error-assertion Then step, so
-    ``ctx["error"]`` is established — an operation failed. Every real-wire
-    dispatcher (REST/A2A/MCP) stashes ``TransportResult.wire_error_envelope``
-    whenever the dispatched operation errors, so ``ctx["result"]`` being
-    present with no envelope on a real-wire transport is not "no wire yet" —
-    it is the dispatcher failing to stash it, a bug this loud guard exists to
-    catch instead of silently masking it behind the lossy reconstructed
-    exception.
-
-    Three cases legitimately return ``None`` and are left to the caller to
-    fall back on ``ctx["error"]``: IMPL (no wire by definition); ``ctx["result"]``
-    itself absent (the rejection was raised before dispatch ever reached a
-    transport, independent of which one is parametrized); and
-    ``result.wire_capture_unavailable`` — A2A's documented "direct raw"
-    dispatch mode (e.g. ``CreativeSyncEnv``, which calls a ``*_raw()`` wrapper
-    directly, with no Task/Artifact framing to ever reconstruct wire from) has
-    no wire to capture BY DESIGN, permanently, not as a transient miss; a
-    dispatch mode that never promised captured wire cannot be the "dispatcher
-    regression" this guard exists to catch.
+    Every reader of this field, anywhere in ``tests/bdd/steps/``, must go
+    through this module (:func:`wire_error_envelope_or_none` or
+    :func:`wire_error_dict`) rather than hand-rolling
+    ``getattr(result, "wire_error_envelope", None)`` — enforced by
+    ``test_architecture_bdd_wire_discipline.py``'s access-pattern check.
     """
     result = ctx.get("result")
+    return getattr(result, "wire_error_envelope", None) if result is not None else None
+
+
+def _wire_capture_unavailable(ctx: dict) -> bool:
+    """True when this dispatch mode never promised captured wire (by design).
+
+    A2A's documented "direct raw" dispatch mode (e.g. ``CreativeSyncEnv``,
+    which calls a ``*_raw()`` wrapper directly, with no Task/Artifact framing
+    to ever reconstruct wire from) has no wire to capture BY DESIGN,
+    permanently, not as a transient miss — a dispatch mode that never
+    promised captured wire cannot be the "dispatcher regression" the loud
+    guard in :func:`wire_error_dict` exists to catch.
+    """
+    result = ctx.get("result")
+    return getattr(result, "wire_capture_unavailable", False) if result is not None else False
+
+
+def wire_error_envelope_or_none(ctx: dict) -> dict | None:
+    """Return the REAL wire error envelope (REST/A2A/MCP) captured for this dispatch, or ``None``.
+
+    No loud guard, no IMPL-synthesized fallback — the strict counterpart to
+    :func:`wire_error_dict`. Use this when a caller must distinguish "a real
+    wire envelope was captured" from "only the IMPL-synthesized one exists"
+    before delegating to ``TransportResult.assert_wire_error``, which reads
+    ``wire_error_envelope`` specifically and raises its own (misleading)
+    error if handed a synthesized-only result (``then_error_recovery``'s
+    reason for using this instead of ``wire_error_dict``). Returns ``None``
+    on IMPL and on any scenario where no wire envelope was captured —
+    callers fall back to the reconstructed ``ctx['error']``.
+    """
+    return _real_wire_error_envelope(ctx)
+
+
+def wire_error_dict(ctx: dict) -> dict:
+    """Return the full error-path wire envelope as the buyer sees it on the wire.
+
+    The error-path analogue of :func:`wire_dict` — the single guarded accessor
+    for ``TransportResult.wire_error_envelope``, which its own docstring names
+    "the canonical field for error verification" (``tests/CLAUDE.md`` § Error
+    Verification Policy) and whose ``assert_wire_error`` calls "the single
+    harness-provided way to verify an error on the wire — step definitions
+    must not hand-roll envelope parsing." Callers that only need to read a
+    field off the envelope (e.g. ``context.correlation_id`` echo checks) call
+    this directly; callers verifying the error SHAPE should prefer
+    ``result.assert_wire_error(...)``, the single shape authority.
+
+    Shares the same loud guard as ``wire_dict``: a real-wire transport
+    (REST/A2A/MCP) that DISPATCHED and captured no error envelope raises
+    instead of silently asserting nothing — that combination is a test bug
+    (the operation should have failed through the wire), not a legitimate
+    no-wire case. Three cases fall back to ``synthesized_error_envelope``
+    (what the boundary translator WOULD emit against the caught error)
+    instead of raising the dispatcher-stashing message: IMPL (no wire by
+    definition), consistent with ``wire_dict``'s IMPL fallback to the
+    serialized typed payload; :func:`_wire_capture_unavailable` dispatch
+    modes (no wire by design, permanently — e.g. A2A's direct-raw
+    ``CreativeSyncEnv``); and ``ctx["result"]`` itself absent (the rejection
+    was raised before dispatch ever reached a transport, independent of which
+    one is parametrized) — the loud "dispatcher failed to stash it" guard
+    only fires once a real dispatch actually happened, so a pre-dispatch
+    rejection instead surfaces via the fallback assertion below (there is
+    nothing — real or synthesized — to return either).
+    """
+    result = ctx.get("result")
+    envelope = _real_wire_error_envelope(ctx)
     transport = ctx.get("transport")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
-    wire_capture_unavailable = getattr(result, "wire_capture_unavailable", False) if result is not None else False
     if (
         result is not None
         and envelope is None
         and transport not in (None, Transport.IMPL)
-        and not wire_capture_unavailable
+        and not _wire_capture_unavailable(ctx)
     ):
-        raise AssertionError(
-            f"{transport}: wire_error_envelope missing — env does not stash the error-path wire "
-            "envelope despite the dispatched operation failing"
-        )
-    return envelope
+        raise AssertionError(f"{transport}: wire_error_envelope missing — env does not stash the wire error envelope")
+    if envelope is not None:
+        return envelope
+    synthesized = getattr(result, "synthesized_error_envelope", None) if result is not None else None
+    assert synthesized is not None, (
+        f"No wire_error_envelope or synthesized_error_envelope available (result={result!r}) — "
+        "expected an error dispatch"
+    )
+    return synthesized
 
 
 def _require(ctx: dict, key: str, *, hint: str | None = None) -> object:

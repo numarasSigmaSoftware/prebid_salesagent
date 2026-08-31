@@ -593,7 +593,17 @@ def _parse_protocols_query(raw: list[str] | None) -> list[str] | None:
     return parsed
 
 
-@router.get("/capabilities", dependencies=[Depends(_version_after_resolve)])
+@router.get(
+    "/capabilities",
+    dependencies=[Depends(_version_after_resolve)],
+    # The handler is named get_capabilities (REST-boundary naming), but it
+    # implements the get_adcp_capabilities AdCP tool — the one REST route whose
+    # Python function name diverges from its tool identity. Declaring
+    # operation_id lets tests/harness/address_table.py resolve this route by
+    # tool name against the real route table, without a hand-maintained alias
+    # entry (see that module's docstring + TestRestAliasesAndAbsence).
+    operation_id="get_adcp_capabilities",
+)
 async def get_capabilities(
     identity: ResolvedIdentity | None = resolve_auth,
     context: str | None = None,

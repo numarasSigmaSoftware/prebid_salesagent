@@ -69,8 +69,16 @@ def _runner_all_suites() -> set[str]:
 
 
 def _host_runner_collect_suites() -> set[str]:
-    m = re.search(r"for name in ([a-z][a-z0-9 ]+?); do", _HOST_RUNNER.read_text())
-    assert m, "run_all_tests_host.sh collect_reports loop not found"
+    """The host runner's suite list, read from its ``_REPORT_SUITES`` constant.
+
+    Was a regex over the ``for name in unit integration ...; do`` loop literal.
+    That list is now named once and read by BOTH the pre-run purge and the copy
+    loop, so the constant IS the file's single source and is what this must
+    read. The contract is unchanged — the host runner's suites must match tox's
+    ``env_list`` — only the spelling moved.
+    """
+    m = re.search(r'^_REPORT_SUITES="([^"]+)"', _HOST_RUNNER.read_text(), re.MULTILINE)
+    assert m, "run_all_tests_host.sh has no _REPORT_SUITES"
     return set(m.group(1).split())
 
 
@@ -159,6 +167,13 @@ def test_in_network_report_collection_is_a_plain_host_copy():
     any report could be copied. The volume is gone (#1868): ``.tox`` is a plain
     host directory, so the copy is a plain ``cp`` and neither the container nor
     the bind mount that broke may come back.
+
+    The copy is per-suite (``cp ".tox/${suite}.json" ...`` inside a loop over
+    ``$SUITES``), never a wholesale ``cp .tox/*.json``: ``.tox`` being an
+    ordinary bind-mounted directory now means it PERSISTS between runs (the
+    destroyed-every-run named volume is gone), so a wholesale copy would pick
+    up a stale report left over from a suite this invocation never ran — the
+    named-volume-era pattern is exactly the wholesale form to guard against.
     """
     runner_text = _RUNNER.read_text()
     collection = _shell_function("collect_json_reports")
@@ -166,9 +181,10 @@ def test_in_network_report_collection_is_a_plain_host_copy():
     assert "$(pwd)/${RESULTS_DIR}:/out" not in runner_text, "the host bind mount that broke on macOS is back"
     assert "${COMPOSE_PROJECT_NAME}_tox_data" not in runner_text, "the removed named volume is mounted again"
     assert "docker create" not in runner_text, "the throwaway extraction container is back"
-    assert 'cp .tox/*.json "$RESULTS_DIR/"' in collection
-    assert 'if [ ! -f "$RESULTS_DIR/$suite.json" ]' in collection
-    assert collection.index('mkdir -p "$RESULTS_DIR"') < collection.index("cp .tox/*.json")
+    assert "cp .tox/*.json" not in collection, "a wholesale copy is back -- it would pick up stale reports"
+    assert 'cp ".tox/${suite}.json" "$RESULTS_DIR/"' in collection
+    assert 'if [ -f ".tox/${suite}.json" ]' in collection
+    assert collection.index('mkdir -p "$RESULTS_DIR"') < collection.index('cp ".tox/${suite}.json"')
 
 
 @pytest.mark.parametrize(

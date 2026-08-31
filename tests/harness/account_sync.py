@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 from src.core.schemas.account import SyncAccountsRequest, SyncAccountsResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness._idempotency import ensure_idempotency_key
+from tests.harness.transport import DeliverResult
 
 
 def make_sync_accounts_request(**kwargs: Any) -> SyncAccountsRequest:
@@ -53,6 +54,11 @@ class AccountSyncEnv(IntegrationEnv):
     Constructor accepts ``supported_billing`` to configure billing policy
     on the identity (BR-RULE-059).
     """
+
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "sync_accounts"
+    A2A_SKILL = "sync_accounts"
+    RESPONSE_MODEL = SyncAccountsResponse
 
     EXTERNAL_PATCHES = {
         "audit_logger": "src.core.tools.accounts.get_audit_logger",
@@ -173,17 +179,24 @@ class AccountSyncEnv(IntegrationEnv):
         """
         return asyncio.run(self.call_impl_async(**kwargs))
 
-    def call_a2a(self, **kwargs: Any) -> SyncAccountsResponse:
+    # JUSTIFIED OVERRIDE (tests/unit/test_architecture_harness_single_dispatch.py
+    # _KNOWN_DELIVER_OVERRIDES): supplies a fresh idempotency_key default before
+    # dispatch when the caller passed flat kwargs (no typed ``req``) — mirrors
+    # build_rest_body below, which needs the identical pre-processing for REST.
+    # Delegates to the base's declarative MCP_TOOL/A2A_SKILL dispatch for the
+    # actual DELIVER, so this stays a thin kwargs-shaping wrapper, not a second
+    # dispatch implementation.
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
         """Call sync_accounts via real AdCPRequestHandler — full A2A pipeline."""
         if "req" not in kwargs:
             kwargs = ensure_idempotency_key(kwargs)
-        return self._run_a2a_handler("sync_accounts", SyncAccountsResponse, **kwargs)
+        return super().deliver_a2a(**kwargs)
 
-    def call_mcp(self, **kwargs: Any) -> SyncAccountsResponse:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
         """Call sync_accounts via Client(mcp) — full pipeline dispatch."""
         if "req" not in kwargs:
             kwargs = ensure_idempotency_key(kwargs)
-        return self._run_mcp_client("sync_accounts", SyncAccountsResponse, **kwargs)
+        return super().deliver_mcp(**kwargs)
 
     REST_ENDPOINT = "/api/v1/accounts/sync"
 

@@ -1901,7 +1901,7 @@ def then_error_references_missing_field(ctx: dict, field: str) -> None:
     envelope carries, so injecting a wrong ``field`` into the shared factory
     reddened the three siblings and left this one green.
 
-    Routes through ``wire_error_envelope`` (single source of truth, shared
+    Routes through ``wire_error_dict`` (single source of truth, shared
     with the other wire-first Then steps in this module) rather than a local
     ``result.wire_error_envelope is not None`` check: that local check could
     not distinguish "IMPL/pre-dispatch, legitimately no wire" from "a real
@@ -1909,10 +1909,10 @@ def then_error_references_missing_field(ctx: dict, field: str) -> None:
     reconstructed exception in both cases — the second case is a dispatcher
     regression that must fail loud, not pass against a lossy reconstruction.
     """
-    from tests.bdd.steps._outcome_helpers import wire_error_envelope
+    from tests.bdd.steps._outcome_helpers import wire_error_dict
 
     result = ctx.get("result")
-    envelope = wire_error_envelope(ctx)
+    envelope = wire_error_dict(ctx)
     assert envelope is not None, (
         f"No wire error envelope was captured for missing required field {field!r}; "
         "required-field obligations must fail loud when transport capture regresses."
@@ -1928,6 +1928,8 @@ def then_error_references_missing_field(ctx: dict, field: str) -> None:
 @then(parsers.parse('the error should reference idempotency_key constraint "{violation}"'))
 def then_error_references_idempotency_key_constraint(ctx: dict, violation: str) -> None:
     """Grade the exact idempotency constraint on the buyer-visible wire."""
+    from tests.bdd.steps._outcome_helpers import wire_error_dict
+
     result = ctx.get("result")
     assert result is not None, "No TransportResult captured for idempotency_key validation"
     result.assert_wire_error(
@@ -1938,7 +1940,7 @@ def then_error_references_idempotency_key_constraint(ctx: dict, violation: str) 
         field="idempotency_key",
     )
 
-    envelope = result.wire_error_envelope
+    envelope = wire_error_dict(ctx)
     assert isinstance(envelope, dict), "No canonical wire error envelope captured"
     error = envelope["errors"][0]
 

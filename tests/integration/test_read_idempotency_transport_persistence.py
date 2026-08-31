@@ -20,7 +20,7 @@ from tests.harness.creative_list import CreativeListEnv
 from tests.harness.delivery_poll import DeliveryPollEnv
 from tests.harness.media_buy_list import MediaBuyListEnv
 from tests.harness.product import ProductEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import DeliverResult, Transport
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -35,7 +35,7 @@ class _TaskListResponse(SalesAgentBaseModel):
 
 
 class _TaskListEnv(IntegrationEnv):
-    def call_mcp(self, **kwargs: Any) -> _TaskListResponse:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
         return self._run_mcp_client("list_tasks", _TaskListResponse, **kwargs)
 
 
@@ -249,10 +249,10 @@ class _CrossToolReadEnv(IntegrationEnv):
     def _response_type(self) -> type[SalesAgentBaseModel]:
         return GetProductsResponse if self._skill == "get_products" else ListCreativesResponse
 
-    def call_mcp(self, **kwargs: Any) -> SalesAgentBaseModel:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
         return self._run_mcp_client(self._skill, self._response_type, **kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> SalesAgentBaseModel:
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
         return self._run_a2a_handler(self._skill, self._response_type, **kwargs)
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:

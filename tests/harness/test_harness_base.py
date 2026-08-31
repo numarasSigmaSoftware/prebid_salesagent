@@ -339,19 +339,21 @@ class TestBaseClassContract:
         assert isinstance(result.error, NotImplementedError)
 
     def test_call_via_mcp_routes_through_call_mcp(self):
-        """call_via(Transport.MCP) dispatches through McpDispatcher → call_mcp."""
+        """call_via(Transport.MCP) dispatches through McpDispatcher → deliver_mcp."""
 
         from pydantic import BaseModel
 
         from tests.harness._base import BaseTestEnv
-        from tests.harness.transport import Transport
+        from tests.harness.transport import DeliverResult, Transport
 
         class _Resp(BaseModel):
             ok: bool = True
 
         class _TestEnv(BaseTestEnv):
-            def call_mcp(self, **kwargs):
-                return _Resp()
+            # Test double: overrides the DELIVER point, which is what the
+            # dispatchers call.
+            def deliver_mcp(self, **kwargs):
+                return DeliverResult(payload=_Resp(), wire_response=None)
 
         env = _TestEnv()
         result = env.call_via(Transport.MCP)
@@ -365,18 +367,24 @@ class TestBaseClassContract:
         The A2A dispatcher mirrors ``McpDispatcher``: real wire lives on
         ``wire_error_envelope`` and is present ONLY when the env stashes it
         (``_run_a2a_handler`` path, via ``_envelope_to_adcp_error``). Envs whose
-        ``call_a2a`` uses the direct ``*_raw`` path (no Task framing, e.g.
+        ``deliver_a2a`` uses the direct ``*_raw`` path (no Task framing, e.g.
         CreativeSyncEnv) never stash — so ``wire_error_envelope`` is ``None`` and
         the envelope production WOULD emit is exposed on
         ``synthesized_error_envelope``. This keeps the wire field honest: raw-path
         synthesis can no longer masquerade as captured wire.
+
+        Overrides ``deliver_a2a`` (not the legacy ``call_a2a``, deleted by the
+        #1858 single-dispatch rework — see
+        ``tests/unit/test_architecture_harness_single_dispatch.py``): the
+        dispatcher calls ``env.deliver_a2a(**kwargs)`` directly, so a
+        ``call_a2a`` override here would simply never run.
         """
         from src.core.exceptions import AdCPValidationError
         from tests.harness._base import BaseTestEnv
         from tests.harness.transport import Transport
 
         class _RawPathEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
+            def deliver_a2a(self, **kwargs):
                 raise AdCPValidationError("invalid")
 
         result = _RawPathEnv().call_via(Transport.A2A)
@@ -386,14 +394,14 @@ class TestBaseClassContract:
         assert result.synthesized_error_envelope["adcp_error"]["code"] == "VALIDATION_ERROR"
         # The raw path never had the opportunity to stash wire — a permanent,
         # by-design None, not a transient dispatcher miss. See
-        # tests/bdd/steps/_outcome_helpers.wire_error_envelope, which relies on
+        # tests/bdd/steps/_outcome_helpers.wire_error_dict, which relies on
         # this flag to avoid misclassifying this env as a regression.
         assert result.wire_capture_unavailable is True
 
         sentinel = {"adcp_error": {"code": "VALIDATION_ERROR", "message": "real-wire-sentinel"}}
 
         class _StashedEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
+            def deliver_a2a(self, **kwargs):
                 exc = AdCPValidationError("invalid")
                 exc._wire_error_envelope = sentinel  # what _envelope_to_adcp_error stashes
                 raise exc

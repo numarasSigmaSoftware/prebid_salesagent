@@ -29,6 +29,12 @@ class CapabilitiesEnv(IntegrationEnv):
     No external services to mock — capabilities is a pure discovery read.
     """
 
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "get_adcp_capabilities"
+    A2A_SKILL = "get_adcp_capabilities"
+    RESPONSE_MODEL = GetAdcpCapabilitiesResponse
+
+    EXTERNAL_PATCHES: dict[str, str] = {}
     REST_ENDPOINT = "/api/v1/capabilities"
     REST_METHOD = "get"
 
@@ -160,13 +166,8 @@ class CapabilitiesEnv(IntegrationEnv):
         kwargs.setdefault("req", None)
         return _get_adcp_capabilities_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call get_adcp_capabilities via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call get_adcp_capabilities via Client(mcp) — full pipeline dispatch."""
-        return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
+    # No call_a2a/call_mcp override needed: MCP_TOOL/A2A_SKILL (declared above)
+    # let BaseTestEnv's declarative dispatch handle both.
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """GET /capabilities has no body — flat kwargs become the query string.
@@ -175,7 +176,10 @@ class CapabilitiesEnv(IntegrationEnv):
         payload on a GET), which is exactly what the api_v1 router dependency
         validates. The AdCP ``context`` object has no scalar query representation,
         so it is JSON-encoded into a single ``context`` query param — the encode
-        convention the api_v1 GET handler decodes (json.loads).
+        convention the api_v1 GET handler decodes (json.loads). ``REST_METHOD =
+        "get"`` (declared above) is what makes ``BaseTestEnv._run_rest_request``
+        send this dict as ``params=`` rather than a JSON body — no
+        ``_run_rest_request`` override needed here.
         """
         import json
 

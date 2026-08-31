@@ -54,6 +54,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.core.schemas import SyncCreativesResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness._idempotency import ensure_idempotency_key
+from tests.harness.transport import DeliverResult
 
 
 class CreativeSyncEnv(IntegrationEnv):
@@ -191,28 +192,40 @@ class CreativeSyncEnv(IntegrationEnv):
 
         return _sync_creatives_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> SyncCreativesResponse:
-        """Call sync_creatives_raw (A2A wrapper) with real DB.
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch sync_creatives through the REAL A2A pipeline.
 
-        Note: uses the _raw() path instead of _run_a2a_handler. Routing through the real
-        A2A handler surfaces a genuine, broad divergence between the A2A boundary and the
-        shared impl — the handler constructs CreativeAsset UPFRONT (whole-request
-        VALIDATION_ERROR with spec-formatted messages), whereas the impl validates
-        per-creative (lenient, raw pydantic messages), and the generative build/preview
-        wire round-trip diverges (build_creative not invoked; the no-url/no-preview path
-        yields 'created' instead of 'failed'). Reconciling those is out of scope here and
-        is reported as a follow-up (#1546); the raw path keeps A2A behaviorally aligned
-        with the impl in the meantime.
+        This used to call ``sync_creatives_raw`` directly, routing AROUND
+        ``on_message_send``. The consequence (per tests/CLAUDE.md's own table:
+        A2A ``wire_response`` is populated ONLY when the env routes through
+        ``_run_a2a_handler``) was that the A2A leg produced no wire at all — so
+        every storyboard Then on this transport had nothing transport-observable
+        to assert and fell back to reading an in-memory object. That is the
+        defect this module exists to remove, so the bypass is replaced rather than
+        worked around. (A prior version of this docstring flagged a genuine A2A
+        handler/impl validation divergence as a reason to keep the raw bypass,
+        tracked as a follow-up (#1546); that follow-up covers the divergence
+        itself, not this wire-visibility fix, and is unaffected by routing
+        through the real handler.)
+
+        kwargs are JSON-normalized through ``build_rest_body`` — the SAME
+        normalizer the REST leg uses, not a second hand-rolled one — because
+        they now travel via ``create_a2a_message_with_skill`` -> ``_dict_to_value``
+        (protobuf), which cannot carry Pydantic models or enums the raw wrapper
+        accepted as live Python objects (account, push_notification_config,
+        validation_mode). ``build_rest_body`` also injects the idempotency-key
+        default (via ``ensure_idempotency_key``), so this method does not need
+        its own separate call.
         """
-        from src.core.tools.creatives.sync_wrappers import sync_creatives_raw
-
-        kwargs = ensure_idempotency_key(kwargs)
         self._commit_factory_data()
         kwargs.setdefault("identity", self.identity)
         kwargs.setdefault("creatives", [])
-        return sync_creatives_raw(**kwargs)
+        identity = kwargs.pop("identity")
+        return self._run_a2a_handler(
+            "sync_creatives", SyncCreativesResponse, identity=identity, **self.build_rest_body(**kwargs)
+        )
 
-    def call_mcp(self, **kwargs: Any) -> SyncCreativesResponse:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
         """Call sync_creatives via Client(mcp) — full pipeline dispatch.
 
         No enum coercion needed — FastMCP's TypeAdapter handles it automatically.
@@ -243,14 +256,19 @@ class CreativeSyncEnv(IntegrationEnv):
         if "account" in kwargs and kwargs["account"] is not None:
             account = kwargs["account"]
             body["account"] = account.model_dump(mode="json") if hasattr(account, "model_dump") else account
-        if "idempotency_key" in kwargs:
-            body["idempotency_key"] = kwargs["idempotency_key"]
         if "push_notification_config" in kwargs and kwargs["push_notification_config"] is not None:
             pnc = kwargs["push_notification_config"]
             body["push_notification_config"] = pnc.model_dump(mode="json") if hasattr(pnc, "model_dump") else pnc
         if "context" in kwargs:
             context = kwargs["context"]
             body["context"] = context.model_dump(mode="json") if hasattr(context, "model_dump") else context
+        if "idempotency_key" in kwargs and kwargs["idempotency_key"] is not None:
+            # Schema-REQUIRED on sync_creatives (pinned_request_schema_fields
+            # reports it in the required set). It is carried by the acceptance
+            # seam rather than declared on SyncCreativesBody, so it must ride the
+            # REST body for the REST leg to grade idempotency at all — omitting it
+            # here would make every REST idempotency assertion vacuous.
+            body["idempotency_key"] = kwargs["idempotency_key"]
         return body
 
     def parse_rest_response(self, data: dict[str, Any]) -> SyncCreativesResponse:
@@ -267,7 +285,7 @@ class CreativeSyncIdempotencyWireEnv(CreativeSyncEnv):
     capture the failed-Task artifact envelope.
     """
 
-    def call_a2a(self, **kwargs: Any) -> SyncCreativesResponse:
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
         kwargs = ensure_idempotency_key(kwargs)
         kwargs.setdefault("creatives", [])
         return self._run_a2a_handler("sync_creatives", SyncCreativesResponse, **kwargs)
