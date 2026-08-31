@@ -670,13 +670,48 @@ class MediaBuyRepository:
                 raise
             raise AdCPRevisionConflictError.unobserved(media_buy_id=media_buy_id, expected=expected_revision) from exc
 
+    def assert_revision_matches(self, media_buy_id: str, *, expected_revision: int) -> MediaBuy:
+        """Compare the buyer's expected ``revision`` WITHOUT locking or advancing.
+
+        This is the fail-fast half of the two-phase enforcement the pinned
+        update-media-buy-request.json needs. It answers CONFLICT on a token that is
+        already stale when the request arrives, which is what keeps a stale token from
+        reaching the adapter at all: ``compare_and_set_revision`` cannot be used here
+        because the lock it takes would not survive to the write (the update flow runs
+        nested ``get_db_session()`` blocks in between, and they end this transaction),
+        so taking it early would buy a guarantee that has expired by the time it is
+        needed while still costing every caller a row lock.
+
+        It is deliberately NOT sufficient on its own: a mutation landing after this
+        returns is invisible to it. ``compare_and_set_revision``, run in the same
+        transaction as the write, is what actually enforces the spec's "atomically"
+        clause. See ``_update_media_buy_impl``.
+
+        Raises:
+            AdCPRevisionConflictError: the current revision differs from
+                ``expected_revision``.
+            AdCPInvariantViolationError: the row is gone.
+        """
+        media_buy = self.get_by_id(media_buy_id)
+        if media_buy is None:
+            raise AdCPInvariantViolationError(
+                f"media buy {media_buy_id} (tenant {self._tenant_id}) disappeared between the "
+                f"ownership check and the revision comparison"
+            )
+        if media_buy.revision != expected_revision:
+            raise AdCPRevisionConflictError.mismatch(
+                media_buy_id=media_buy_id,
+                expected=expected_revision,
+                current=media_buy.revision,
+            )
+        return media_buy
+
     def compare_and_set_revision(
         self,
         media_buy_id: str,
         *,
         expected_revision: int,
         seller_committed: bool = False,
-        advance: bool = True,
     ) -> MediaBuy:
         """Enforce the buyer's expected ``revision`` atomically with this transaction's write.
 
@@ -685,19 +720,20 @@ class MediaBuyRepository:
         be enforced ATOMICALLY with the write. Locking the row is what supplies the
         second half: a Postgres row lock is held until the transaction ends, so once
         this returns, no other transaction can move the revision out from under the
-        writes that follow in the same unit of work. That is why a caller may -- and
-        the update flow does -- run this before it knows which fields it will write.
+        writes that follow in the same transaction.
+
+        That last phrase is the whole constraint on WHERE this may be called. A caller
+        that runs a nested ``get_db_session()`` block after this returns has ended the
+        transaction and dropped the lock, and the comparison no longer covers anything.
+        The update flow therefore calls this as LATE as it can -- after the adapter, at
+        the last point before its first persistent write -- and uses
+        ``assert_revision_matches`` for the early rejection instead.
 
         The advance is taken here rather than deferred, so the buyer's token is spent the
         moment it is honoured, and so this method can return the new value to a caller
         that may go on to write nothing at all. It is a PREPAYMENT: the next write to
         this buy in the same unit of work draws on it instead of advancing again, so
         honouring a token costs the buyer no extra revisions. See ``_bump_revision``.
-
-        ``advance=False`` compares and locks WITHOUT spending the token, for a caller
-        that will not write at all. The dry-run branch of the update flow is the one
-        such caller: it must still answer CONFLICT on a stale token, because it is
-        simulating the real update, but it must leave the row exactly as it found it.
 
         Raises:
             AdCPRevisionConflictError: the current revision differs from
@@ -718,11 +754,6 @@ class MediaBuyRepository:
                 expected=expected_revision,
                 current=media_buy.revision,
             )
-        if not advance:
-            # Compare-only: the row is locked and the token matched, and nothing is
-            # written. Returning before the stamp matters as much as returning before
-            # the bump -- confirmed_at is persisted state too.
-            return media_buy
         # Same ordering rule as update_status/update_fields: stamp (which reads
         # attributes) before the bump (which replaces one with a SQL expression).
         self._stamp_confirmation_if_needed(media_buy, seller_committed=seller_committed)

@@ -18,6 +18,9 @@ each transport accepts, and the conflict shape -- live in
 test_update_media_buy_revision_validation_wire.py.
 """
 
+import threading
+from unittest import mock
+
 import pytest
 
 from src.core.config_loader import set_current_tenant
@@ -25,6 +28,7 @@ from src.core.database.repositories import MediaBuyUoW
 from src.core.exceptions import AdCPGoneError, AdCPRevisionConflictError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import UpdateMediaBuyRequest
+from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
 from tests.harness.media_buy_dual import MediaBuyDualEnv
@@ -309,6 +313,63 @@ class TestRevisionEnforcedByUpdateFlow:
                 req=UpdateMediaBuyRequest(media_buy_id="mb_rev_terminal_ok", paused=True, revision=current),
                 identity=_identity(),
             )
+
+    def test_a_row_moved_after_the_early_check_still_draws_conflict(self, seed_media_buy):
+        """The comparison the spec calls "atomic with the write" is the LATE one.
+
+        The early comparison cannot be the enforcing one: it takes no lock, and it
+        could not keep one if it did, because ``resolve_principal_or_raise`` and
+        ``get_adapter`` each open a nested ``get_db_session()`` that ends this
+        request's transaction. Everything committed by anyone else in that window is
+        invisible to it.
+
+        So this test opens exactly that window. It moves the row from a SECOND
+        connection -- a separate thread, which the thread-scoped session factory gives
+        its own session and therefore its own transaction -- at a point AFTER the
+        early comparison has passed and BEFORE any write. A seller that only compared
+        early would go on to overwrite the other writer's update with the buyer's
+        stale-by-now request. The locking compare-and-set adjacent to the write is what
+        turns that into CONFLICT, and is the only thing here that can.
+        """
+        seed_media_buy("mb_rev_window")
+        before = read_revision("mb_rev_window")
+        moved: list[int] = []
+
+        real_resolve_principal_or_raise = media_buy_update.resolve_principal_or_raise
+
+        def move_the_row_then_resolve(*args, **kwargs):
+            principal = real_resolve_principal_or_raise(*args, **kwargs)
+            if not moved:
+                mover = threading.Thread(target=move_revision_on, args=("mb_rev_window",))
+                mover.start()
+                mover.join(timeout=30)
+                assert not mover.is_alive(), "the second connection never finished its write"
+                moved.append(read_revision("mb_rev_window"))
+            return principal
+
+        with mock.patch.object(media_buy_update, "resolve_principal_or_raise", move_the_row_then_resolve):
+            with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                _update_media_buy_impl(
+                    req=UpdateMediaBuyRequest(media_buy_id="mb_rev_window", budget=9000.0, revision=before),
+                    identity=_identity(),
+                )
+
+        assert moved == [before + 1], (
+            "the window was never opened -- the other writer has to land between the "
+            f"early comparison and the write for this test to grade anything (saw {moved})"
+        )
+        assert exc_info.value.wire_error_code == "CONFLICT"
+        assert exc_info.value.details == {
+            "resource_id": "mb_rev_window",
+            "expected_version": before,
+            "current_version": before + 1,
+        }
+        # And the rejected request wrote nothing: the other writer's revision stands,
+        # and the budget the stale request carried was never applied.
+        with MediaBuyUoW(TENANT_ID) as uow:
+            survivor = uow.media_buys.get_by_id_or_raise("mb_rev_window")
+            assert survivor.revision == before + 1
+            assert float(survivor.budget or 0) != 9000.0
 
 
 #: A distinctive seed, so the assertion below discriminates the three wrong answers
