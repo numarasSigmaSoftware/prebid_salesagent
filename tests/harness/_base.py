@@ -1226,7 +1226,13 @@ class BaseTestEnv:
         if req is not None and isinstance(req, PydanticBaseModel):
             return req.model_dump(mode="json", exclude_none=True)
         if req is None:
-            return {}
+            # Forward the caller's flat kwargs instead of silently returning {}.
+            # By this point _prepare_rest_request has already popped identity and the
+            # presented-auth seams, so what remains IS the request's parameters.
+            # Returning {} regardless dropped every flat parameter on the floor, which
+            # is the same suppressed-REST-coverage failure a stale always-{} override
+            # caused: the leg looks green while exercising an empty request.
+            return {key: value for key, value in kwargs.items() if key != "req"}
         raise NotImplementedError(
             f"{type(self).__name__}.build_rest_body() received non-Pydantic 'req': {type(req)}. "
             "Override build_rest_body() to handle this type."

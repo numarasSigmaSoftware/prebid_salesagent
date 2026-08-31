@@ -685,6 +685,7 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=("activating",),
             target_status="activation_unknown",
+            expected_updated_at=expected_updated_at,
             # Preserves the currently graded behaviour. Unlike the other four this one
             # is NOT re-derived here: whether an ambiguous outcome closes the event
             # (and so owes the bump) is a question about the failure path, not about
