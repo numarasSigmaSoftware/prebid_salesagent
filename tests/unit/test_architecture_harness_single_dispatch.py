@@ -95,6 +95,12 @@ _KNOWN_DELIVER_OVERRIDES: set[tuple[str, str, str]] = {
     # the setup above, not because of a bypass that no longer exists; an allowlist
     # whose recorded reasons drift false cannot be audited.)
     ("tests/harness/creative_sync.py", "CreativeSyncEnv", "deliver_a2a"),
+    # Resolves the flat-kwargs idempotency key before delegating to the base:
+    # OMIT_IDEMPOTENCY_KEY is a bare object() only ensure_idempotency_key can
+    # pop, so unresolved it kills the MCP leg in json.dumps client-side and is
+    # stringified by A2A into a MALFORMED key — grading the wrong rejection.
+    ("tests/harness/account_sync.py", "AccountSyncEnv", "deliver_mcp"),
+    ("tests/harness/account_sync.py", "AccountSyncEnv", "deliver_a2a"),
     # Uses the legacy _run_mcp_wrapper mechanism (mock Context -> async wrapper),
     # not _run_mcp_client, and observes no structured_content wire.
     ("tests/harness/media_buy_list.py", "MediaBuyListEnv", "deliver_mcp"),

@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 from src.core.schemas.account import SyncAccountsRequest, SyncAccountsResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness._idempotency import ensure_idempotency_key
+from tests.harness.transport import DeliverResult
 
 
 def make_sync_accounts_request(**kwargs: Any) -> SyncAccountsRequest:
@@ -178,18 +179,46 @@ class AccountSyncEnv(IntegrationEnv):
         """
         return asyncio.run(self.call_impl_async(**kwargs))
 
-    # call_mcp/call_a2a are NOT overridden here — MCP_TOOL/A2A_SKILL/RESPONSE_MODEL
-    # give the base its client-core delegation for both transports. Flat-kwargs
-    # dispatches get their spec-required idempotency_key from make_sync_accounts_request
-    # (call_impl) and build_rest_body (REST); A2A/MCP callers pass a ``req=`` that
-    # already carries one.
     REST_ENDPOINT = "/api/v1/accounts/sync"
+
+    @staticmethod
+    def _apply_idempotency_key(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the flat-kwargs idempotency key for one dispatch.
+
+        A ``req=`` already carries its own key (``make_sync_accounts_request``
+        put it there), so it is left untouched — applying the helper on top
+        would put a second, unrelated key beside the request object.
+        """
+        if "req" in kwargs:
+            return kwargs
+        return ensure_idempotency_key(kwargs)
+
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
+        """Resolve the flat-kwargs key, then delegate to the one client core.
+
+        Without this seam ``OMIT_IDEMPOTENCY_KEY`` — a bare ``object()`` that
+        only ``ensure_idempotency_key`` knows how to pop — reaches the MCP
+        client as a live kwarg and dies in ``json.dumps`` before any transport
+        is touched, so the omission scenario never reaches the server it means
+        to grade.
+        """
+        return super().deliver_mcp(**self._apply_idempotency_key(kwargs))
+
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        """Resolve the flat-kwargs key, then delegate to the one client core.
+
+        Without this seam the sentinel is stringified into
+        ``"<object object at 0x...>"`` — a MALFORMED key, not an absent one.
+        That still yields VALIDATION_ERROR, so the omission scenario passed on
+        this transport for the wrong reason.
+        """
+        return super().deliver_a2a(**self._apply_idempotency_key(kwargs))
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Serialize a typed request or add the ordinary-request key to flat kwargs."""
         if "req" in kwargs:
             return super().build_rest_body(**kwargs)
-        return ensure_idempotency_key(kwargs)
+        return self._apply_idempotency_key(kwargs)
 
     def parse_rest_response(self, data: dict[str, Any]) -> SyncAccountsResponse:
         """Parse REST JSON into SyncAccountsResponse."""
