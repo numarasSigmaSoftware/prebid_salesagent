@@ -759,9 +759,7 @@ class MediaBuyRepository:
         if expected_updated_at is not None:
             statement = statement.where(MediaBuy.updated_at == expected_updated_at)
         updated_id = self._session.execute(
-            statement.values(**values)
-            .returning(MediaBuy.media_buy_id)
-            .execution_options(synchronize_session="fetch")
+            statement.values(**values).returning(MediaBuy.media_buy_id).execution_options(synchronize_session="fetch")
         ).scalar_one_or_none()
         return updated_id is not None
 
