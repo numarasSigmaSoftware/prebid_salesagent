@@ -70,7 +70,7 @@ def _call_via(
         result = env.call_via(t, **kwargs)
         # Keep the complete transport result, matching the universal
         # dispatch_request helper. Shared wire assertions delegate to
-        # TransportResult.wire_dict() so they can reject missing real-wire
+        # TransportResult.require_wire() so they can reject missing real-wire
         # capture instead of falling back to lossy model re-serialization.
         record_transport_result(ctx, result)
     except Exception as exc:

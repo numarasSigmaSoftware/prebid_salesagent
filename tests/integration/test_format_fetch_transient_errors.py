@@ -1,7 +1,7 @@
 """mpo1 repro: typed transient creative-agent errors must stay transient on the wire.
 
 Split from test_creative_sync_behavioral.py so the (intentionally red, pre-fix)
-repro ships with the salesagent-mpo1 fix commit, not before it.
+repro ships with the fix commit, not before it.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class TestFormatFetchTransientErrors:
     """Typed transient errors from the creative-agent registry must stay
     transient across transport boundaries for sync_creatives.
 
-    salesagent-mpo1: _validation.py catches bare Exception around the format
+    : _validation.py catches bare Exception around the format
     fetch and rewraps typed AdCPRateLimitError/AdCPServiceUnavailableError into
     AdCPAdapterError; the per-item handler in _sync.py then swallows even that
     into a terminal-looking action='failed' entry — the buyer is told to fix

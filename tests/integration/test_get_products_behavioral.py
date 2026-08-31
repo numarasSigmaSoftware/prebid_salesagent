@@ -854,7 +854,7 @@ class TestProductConversionNegativeCardinality:
 
 
 # ---------------------------------------------------------------------------
-# Search criteria validation (salesagent-k13e)
+# Search criteria validation
 # ---------------------------------------------------------------------------
 
 

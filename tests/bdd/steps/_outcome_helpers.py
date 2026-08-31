@@ -12,21 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
-def wire_dict(ctx: dict) -> dict:
-    """Return the full success-path wire body as the buyer sees it on the wire.
-
-    Delegates to ``TransportResult.wire_dict()`` (``tests/harness/transport.py``)
-    — the single home for the anti-tautology guard, so this helper and the
-    integration-test callers of ``result.wire_dict()`` share one rule instead of
-    each hand-rolling it (a hand-rolled copy is exactly how one of them can
-    silently drift looser than the other). A real-wire transport (a2a/mcp/rest/
-    e2e_rest) that did not stash ``wire_response`` raises there instead of
-    silently falling through to a re-serialized ``model_dump``. IMPL legitimately
-    has no wire.
-    """
-    result = _require(ctx, "result", hint="dispatch_request must run before a wire assertion.")
-    return result.wire_dict()
+from tests.harness.transport import Transport
 
 
 def wire_field(ctx: dict, field: str) -> Any:
@@ -35,6 +21,35 @@ def wire_field(ctx: dict, field: str) -> Any:
     The single-field analogue of :func:`wire_dict` — same delegation, same guard.
     """
     return wire_dict(ctx)[field]
+
+
+def wire_dict(ctx: dict) -> dict:
+    """Return the full success-path wire body as the buyer sees it on the wire.
+
+    The dict analogue of :func:`wire_field` — use when an oracle must test key
+    PRESENCE/ABSENCE (e.g. an optional field) rather than read one known field.
+    Shares the same loud guard: a real-wire transport (REST/A2A/MCP) that did not
+    stash ``wire_response`` raises instead of silently asserting nothing. IMPL (and
+    the non-parametrized ``None`` default) serialize the typed payload through the
+    production serializer.
+    """
+    result = ctx.get("result")
+    transport = ctx.get("transport")
+    if transport not in (None, Transport.IMPL):
+        # A real-wire transport: the guarded read lives on TransportResult, which is
+        # the object that holds the wire. One implementation, so a step definition
+        # cannot drift from an integration test asserting the same thing.
+        if result is not None:
+            return result.require_wire()
+        wire = ctx.get("wire_response")
+        if wire is None:
+            raise AssertionError(f"{transport}: wire_response missing — env does not stash success-path wire")
+        return wire
+    # IMPL has no wire — serialize the typed payload through the production
+    # serializer. _require_response preserves the diagnostic if a (reused) sibling
+    # scenario hit an error path, instead of a bare ctx["response"] KeyError.
+    wire = ctx.get("wire_response")
+    return wire if wire is not None else _require_response(ctx).model_dump(mode="json")
 
 
 def _require(ctx: dict, key: str, *, hint: str | None = None) -> object:

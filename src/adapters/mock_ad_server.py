@@ -575,7 +575,7 @@ class MockAdServer(AdServerAdapter):
                 # For question-asking scenario, return success with pending media_buy_id
                 # The media buy hasn't been created yet - we need input first
                 # The workflow_step_id will track this pending operation
-                return CreateMediaBuySuccess.sync_success(
+                return CreateMediaBuySuccess.carrier(
                     media_buy_id="pending",  # Placeholder for pending manual approval
                     creative_deadline=None,
                     packages=[],  # No packages yet - operation not complete
@@ -696,7 +696,7 @@ class MockAdServer(AdServerAdapter):
         # The media buy hasn't been created yet - it's being processed asynchronously
         # The workflow_step_id (from step['step_id']) will track this pending operation
         # Client can poll the step or wait for webhook notification when complete
-        return CreateMediaBuySuccess.sync_success(
+        return CreateMediaBuySuccess.carrier(
             media_buy_id="pending",  # Placeholder for async processing in progress
             creative_deadline=None,
             packages=[],  # No packages yet - operation not complete
@@ -1480,7 +1480,7 @@ class MockAdServer(AdServerAdapter):
                 else:
                     logger.warning(f"[MockAdapter] Package {package_id} not found for media buy {media_buy_id}")
 
-        return UpdateMediaBuySuccess(
+        return UpdateMediaBuySuccess.carrier(
             media_buy_id=media_buy_id,
             affected_packages=[],
             implementation_date=today,

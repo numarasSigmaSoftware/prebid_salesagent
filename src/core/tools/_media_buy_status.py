@@ -55,6 +55,8 @@ from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
+from src.core.database.models import PersistedMediaBuyStatus
+
 logger = logging.getLogger(__name__)
 
 # NOTE: ``buy`` is typed ``Any`` rather than a structural Protocol because the
@@ -110,22 +112,26 @@ NO_MORE_DATA_STATUSES: frozenset[str] = TERMINAL_STATUSES - {"paused"}
 #     The literal reading of pending_start ("ready") slightly overstates an
 #     awaiting-approval buy; the spec offers no better pre-serving bucket. If a
 #     future spec adds an approval-queue status, revisit this row.
-PERSISTED_STATUS_TO_CANONICAL: dict[str, str] = {
-    "active": "active",
-    "approved": "active",
-    "ready": "active",
-    "scheduled": "active",
-    "pending_activation": "pending_start",
-    "paused": "paused",
-    "completed": "completed",
-    "rejected": "rejected",
-    "canceled": "canceled",
-    "failed": "failed",
-    "draft": "pending_creatives",
-    "pending": "pending_start",
-    "pending_approval": "pending_start",
-    "pending_creatives": "pending_creatives",
-    "pending_start": "pending_start",
+# Keyed by the vocabulary TYPE rather than by bare strings, so a member with no
+# projection row is a missing key here rather than a value nobody notices. The
+# keys are members and StrEnum members ARE their values, so every existing
+# ``.get(status_string)`` lookup keeps working unchanged.
+PERSISTED_STATUS_TO_CANONICAL: dict[PersistedMediaBuyStatus, str] = {
+    PersistedMediaBuyStatus.ACTIVE: "active",
+    PersistedMediaBuyStatus.APPROVED: "active",
+    PersistedMediaBuyStatus.READY: "active",
+    PersistedMediaBuyStatus.SCHEDULED: "active",
+    PersistedMediaBuyStatus.PENDING_ACTIVATION: "pending_start",
+    PersistedMediaBuyStatus.PAUSED: "paused",
+    PersistedMediaBuyStatus.COMPLETED: "completed",
+    PersistedMediaBuyStatus.REJECTED: "rejected",
+    PersistedMediaBuyStatus.CANCELED: "canceled",
+    PersistedMediaBuyStatus.FAILED: "failed",
+    PersistedMediaBuyStatus.DRAFT: "pending_creatives",
+    PersistedMediaBuyStatus.PENDING: "pending_start",
+    PersistedMediaBuyStatus.PENDING_APPROVAL: "pending_start",
+    PersistedMediaBuyStatus.PENDING_CREATIVES: "pending_creatives",
+    PersistedMediaBuyStatus.PENDING_START: "pending_start",
 }
 
 # The complete set of values ``resolve_canonical_status`` may return, derived

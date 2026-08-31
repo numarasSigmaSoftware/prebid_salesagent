@@ -2,14 +2,13 @@
 
 UC-026 scenarios use both create and update flows within the same test:
 Given steps create a media buy (create path), then When steps update it
-(update path). UC-003 (salesagent-8hu9) drives the update path directly against
+(update path). UC-003 drives the update path directly against
 a pre-seeded media buy to grade the manual-approval UpdateMediaBuySubmitted
 envelope cross-transport. This env extends MediaBuyCreateEnv with update-module
 patches and delegates update requests to the appropriate production code —
 A2A/MCP go through the real on_message_send / FastMCP Client pipelines so the
 serialized wire (and the A2A submitted reconstruction) are genuinely exercised.
 
-beads: salesagent-a3xo, salesagent-8hu9
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from unittest.mock import MagicMock, patch
 from src.core.schemas import UpdateMediaBuyRequest
 from tests.harness._mixins import make_adapter_update_side_effect
 from tests.harness.media_buy_create import MediaBuyCreateEnv
-from tests.harness.media_buy_update import _WRAPPER_UNSUPPORTED_FIELDS
 
 _UPDATE_MODULE = "src.core.tools.media_buy_update"
 
@@ -32,8 +30,24 @@ _UPDATE_PATCHES = {
 
 
 def _is_update_request(kwargs: dict[str, Any]) -> bool:
+    """Route to the update wrappers for a typed request OR a RAW flat update body.
+
+    ``req=UpdateMediaBuyRequest(...)`` is the typed dispatch every UC-003/UC-026
+    scenario uses. The RAW form (flat kwargs, no ``req``) exists for scenarios
+    whose payload the LOCAL ``UpdateMediaBuyRequest`` must reject: constructing
+    the model in the test process would raise inside the step, so the rejection
+    would never reach a wire and could not be graded as an envelope. Dispatching
+    the flat body sends it through the real route + production Pydantic instead,
+    mirroring the create side's ``dispatch_mode="create_raw"``.
+
+    ``media_buy_id`` is the discriminator: it identifies the buy being updated and
+    is absent from every create request (the seller assigns it), so a flat body
+    carrying it is unambiguously an update.
+    """
     req = kwargs.get("req")
-    return isinstance(req, UpdateMediaBuyRequest)
+    if isinstance(req, UpdateMediaBuyRequest):
+        return True
+    return req is None and "media_buy_id" in kwargs
 
 
 class MediaBuyDualEnv(MediaBuyCreateEnv):
@@ -179,8 +193,6 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         if req is None:
             return dict(kwargs)
         flat = req.model_dump(mode="json", exclude_none=True)
-        for key in _WRAPPER_UNSUPPORTED_FIELDS:
-            flat.pop(key, None)
         flat.update(kwargs)
         return flat
 
@@ -261,5 +273,8 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         if data.get("status") == "submitted":
             return UpdateMediaBuySubmitted(**data)
         if "media_buy_id" in data:
+            # Bare construction on purpose, not carrier(): this reconstructs a response
+            # FROM THE WIRE, so a missing spec-required `revision` must raise here rather
+            # than be filled in with a placeholder that hides the gap.
             return UpdateMediaBuySuccess(**data)
         return UpdateMediaBuyError(**data)

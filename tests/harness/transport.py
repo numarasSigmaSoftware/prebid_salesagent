@@ -145,27 +145,28 @@ class TransportResult:
     def is_error(self) -> bool:
         return self.error is not None
 
-    def wire_dict(self) -> dict[str, Any]:
-        """Return the full success-path wire body as the buyer would see it.
+    def require_wire(self) -> dict[str, Any]:
+        """The success-path body the buyer actually received, or a loud failure.
 
-        Single source of truth for the anti-tautology guard: BDD's
-        ``wire_dict(ctx)`` (``tests/bdd/steps/_outcome_helpers.py``) delegates
-        here rather than re-implementing the rule, so an integration test and a
-        BDD scenario asserting the same wire shape share one guard instead of
-        two copies that can silently drift. A real-wire transport (a2a/mcp/rest/
-        e2e_rest) that failed to stash ``wire_response`` raises instead of
-        falling through to a re-serialized ``model_dump`` — which would
-        normalize away the exact wire-shape regression these oracles exist to
-        catch (e.g. an MCP explicit-null leak). Only IMPL legitimately
-        has no wire.
+        The success-side counterpart of :meth:`assert_wire_error`, and for the same
+        reason: the guarded read belongs on the object that HOLDS the wire, so every
+        caller gets the same guard instead of re-deriving it. Three copies of this
+        check had grown across the suite, and a fourth partial one — each free to
+        drift, and each a place where a missing ``wire_response`` could fall through
+        to a harness-side reconstruction and assert nothing.
+
+        Two failures are distinguished because they mean different things: an error
+        result was never going to have a success body, while a success result with no
+        stashed body means the dispatch bypassed the real pipeline — the silent
+        tautology this guard exists to make loud.
         """
-        transport = self.envelope.get("transport")
-        if self.wire_response is None and transport != "impl":
-            raise AssertionError(f"{transport}: wire_response missing — result has no stashed wire body")
-        if self.wire_response is not None:
-            return self.wire_response
-        assert self.payload is not None, "no payload to serialize — dispatch did not succeed"
-        return self.payload.model_dump(mode="json")
+        assert self.is_success, f"expected a success wire body, got error {self.error!r}"
+        assert self.wire_response is not None, (
+            "no wire body was stashed for a successful call — the dispatch bypassed the "
+            "real pipeline, so any assertion on it would grade a harness reconstruction "
+            "rather than what the buyer received"
+        )
+        return self.wire_response
 
     def assert_wire_error(
         self,

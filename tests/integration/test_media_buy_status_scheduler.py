@@ -896,3 +896,73 @@ async def test_sweep_summary_is_logged_even_when_nothing_changed(integration_db)
         # schedulers cannot drift on WHETHER the selection total is checked, and a
         # second inline assertion here is that drift starting again.
         assert_summary_reports_against_its_selection(lines, "Status sweep:", selected=1)
+
+
+@pytest.mark.requires_db
+def test_sweep_does_not_count_a_write_the_repository_declined(integration_db, caplog):
+    """A ``None`` from ``update_status`` must be reported, not counted.
+
+    ``MediaBuyRepository.update_status`` returns ``None`` when the row is not
+    found within the repository's tenant. The sweep is cross-tenant while the
+    repository is tenant-scoped, so the sweep MUST read that return: counting the
+    row anyway would make the run report ``Updated 1 media buy status(es)`` for a
+    row whose status never moved — a sweep silently lying about its own work.
+    """
+    tenant_id = _create_test_tenant("tenant_declined_write")
+    principal_id = _create_test_principal(tenant_id)
+
+    # A row the sweep WOULD transition: scheduled, start_time already passed.
+    past_start = datetime.now(UTC) - timedelta(hours=1)
+    future_end = datetime.now(UTC) + timedelta(days=7)
+
+    media_buy_id = _create_media_buy(
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        media_buy_id="mb_declined_write",
+        status="scheduled",
+        start_time=past_start,
+        end_time=future_end,
+    )
+
+    before = read_media_buy_state(tenant_id, media_buy_id)
+    assert before.status == "scheduled"
+
+    scheduler = MediaBuyStatusScheduler()
+
+    with (
+        patch.object(MediaBuyRepository, "update_status", return_value=None) as mock_update,
+        caplog.at_level(logging.INFO, logger="src.services.media_buy_status_scheduler"),
+    ):
+        scheduler._update_statuses()
+
+    # The sweep did reach the write — otherwise the rest of this test is vacuous.
+    # seller_committed=True is asserted, not tolerated: the pin forbids a null
+    # confirmed_at on an "active" item, so a sweep that activated a row WITHOUT
+    # claiming the commitment could put a schema-invalid document on the wire.
+    mock_update.assert_called_once_with(media_buy_id, PersistedMediaBuyStatus.ACTIVE, seller_committed=True)
+
+    messages = [record.getMessage() for record in caplog.records]
+
+    # (a) The declined write is not counted: neither the per-row transition line
+    #     nor the run total may claim an update happened.
+    assert not [m for m in messages if m.startswith(f"Updated media buy {media_buy_id} status:")], (
+        f"sweep logged a transition for a write the repository declined: {messages}"
+    )
+    assert not [m for m in messages if re.fullmatch(r"Updated \d+ media buy status\(es\)", m)], (
+        f"sweep reported a non-zero updated count for a write the repository declined: {messages}"
+    )
+
+    # (b) It is reported rather than swallowed.
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.ERROR and "vanished from its own tenant" in record.getMessage()
+    ]
+    assert len(errors) == 1, f"expected exactly one 'vanished from its own tenant' ERROR, got: {messages}"
+    assert media_buy_id in errors[0] and repr(tenant_id) in errors[0], (
+        f"the error must name the row and the tenant it was scoped to, got: {errors[0]}"
+    )
+
+    # (c) The row itself is untouched — status, and the bookkeeping a real move carries.
+    after = read_media_buy_state(tenant_id, media_buy_id)
+    assert after == before, f"a declined write must leave the row exactly as it was: {before} -> {after}"

@@ -703,31 +703,37 @@ class TestCreativeDeliveryResponseStr:
 
 
 class TestNextExpectedAtSerialization:
-    """model_dump() OMITS next_expected_at whenever it is unset — final included.
+    """next_expected_at is omitted when unset — never emitted as null.
 
-    Spec: next_expected_at is a non-nullable date-time "only present in
-    webhook deliveries when notification_type is not 'final'"
-    (get-media-buy-delivery-response.json @ v3.1-04f59d2d5;
-    optimization-reporting.mdx: "omitted for final notifications"). A final
-    webhook carrying an explicit ``"next_expected_at": null`` fails a strict
-    buyer's schema validation, so the base model's exclude-None behavior is
-    the correct wire shape. (A previous model_dump override injected the
-    null, citing a spec requirement the spec does not contain.)
+    AdCP 3.1 types the field `{"type": "string"}` and never lists it in `required`,
+    in all five places it is declared. A null fails buyer-side validation whatever
+    the notification_type, and `final` is singled out for omission by both the
+    response schema ("only present ... when notification_type is not 'final'") and
+    the webhook result schema ("Omitted on final notifications").
+
+    These tests previously asserted the inverse — that any notification_type forced
+    `next_expected_at: null` — and production carried a `_should_always_include`
+    override to satisfy them. The graded BDD contract
+    (@T-UC-004-webhook-notification-type, BR-RULE-029 INV-2) always had the correct
+    rule; see docs/test-obligations/UC-004-deliver-media-buy-metrics.md.
 
     Covers: UC-004-SERIAL-01
     """
 
     def test_final_notification_omits_next_expected_at(self):
-        """notification_type='final' with next_expected_at unset omits the field.
+        """'final' is the case both pinned schemas single out for omission.
 
         Covers: UC-004-SERIAL-01
         """
         resp = _make_media_buy_delivery_response(0, notification_type="final")
         dumped = resp.model_dump(mode="json")
-        assert_next_expected_at_shape(dumped, present=False, context="final notification dump")
+        assert "next_expected_at" not in dumped, (
+            f"A final report carrying next_expected_at tells the buyer to expect another "
+            f"one. Got {dumped.get('next_expected_at')!r}"
+        )
 
-    def test_scheduled_notification_serializes_concrete_next_expected_at(self):
-        """A non-final notification carries its concrete timestamp as a string.
+    def test_scheduled_notification_omits_unset_next_expected_at(self):
+        """'scheduled' may carry the field, but an unset value is omitted, not nulled.
 
         Covers: UC-004-SERIAL-01
         """
