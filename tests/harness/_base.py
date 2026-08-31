@@ -800,7 +800,11 @@ class BaseTestEnv:
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
         from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
-        from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
+        from tests.utils.a2a_helpers import (
+            create_a2a_message_with_skill,
+            extract_data_from_artifact,
+            make_nl_send_message_request,
+        )
 
         self._commit_factory_data()
 
