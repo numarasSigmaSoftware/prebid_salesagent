@@ -13,19 +13,21 @@ creation failed: " with an empty message) or steals a slot package reconstructio
 
 Per-site mutation matrix (each site mutated ALONE — a blanket mutation of all sites only
 proves the first assertion fires, which is how an earlier version of this test overstated
-its reach):
+its reach). Every site is named by its enclosing function in ``media_buy_create.py``, line
+number second: line numbers move with each merge, so a bare number goes silently wrong,
+while an anchor carrying the symbol degrades into "search this function" instead.
 
-    media_buy_create.py:583   helper's own get_adapter      CAUGHT
-    media_buy_create.py:1080  executor -> helper forwarding CAUGHT
-    media_buy_create.py:1201  creative upload               CAUGHT
-    media_buy_create.py:1258  final order approval          CAUGHT
+    _execute_adapter_media_buy_creation  helper's own get_adapter      (:583)   CAUGHT
+    execute_approved_media_buy           executor -> helper forwarding (:1175)  CAUGHT
+    execute_approved_media_buy           creative upload               (:1302)  CAUGHT
+    execute_approved_media_buy           final order approval          (:1361)  CAUGHT
 
 An earlier version read the last two as "branch not reached". That was wrong: they were
 reached, but ``execute_approved_media_buy`` re-imports ``get_adapter`` from
-``adapter_helpers`` at call time (media_buy_create.py:1120), so those selections went to an
-unpatched binding the test could not see. Both bindings are patched now, and reachability
-is asserted rather than assumed — add_creative_assets and approve_order must have been
-called, and both mocks must be non-empty.
+``adapter_helpers`` at call time (in that same function, media_buy_create.py:1226), so
+those selections went to an unpatched binding the test could not see. Both bindings are
+patched now, and reachability is asserted rather than assumed — add_creative_assets and
+approve_order must have been called, and both mocks must be non-empty.
 
 AdCP 3.1.1 ``dist/docs/3.1.1/media-buy/advanced-topics/sandbox.mdx`` §Seller
 implementation: sandbox requests MUST NOT make real ad platform API calls.
@@ -141,8 +143,9 @@ def _run_executor(*, tenant_id: str, sandbox: bool):
     - ``mock_module_binding`` — ``media_buy_create.get_adapter`` (module-global import).
       Records the media-buy creation selection.
     - ``mock_lazy_binding`` — ``adapter_helpers.get_adapter``, which the executor re-imports
-      at call time (media_buy_create.py:1120). Records the creative-upload and
-      final-approval selections, which the module-global patch cannot observe at all.
+      at call time (inside ``execute_approved_media_buy``, media_buy_create.py:1226).
+      Records the creative-upload and final-approval selections, which the module-global
+      patch cannot observe at all.
 
     Callers assert over both. Asserting over either alone leaves half the sites ungraded —
     which is precisely how an earlier version of this test mis-read two live call sites as
@@ -164,10 +167,11 @@ def _run_executor(*, tenant_id: str, sandbox: bool):
         env._commit_factory_data()
 
         # execute_approved_media_buy re-imports get_adapter from adapter_helpers at call
-        # time (media_buy_create.py:1120), so the creative-upload and approval selections
-        # bypass the module-global binding entirely. Patch BOTH or those two sites are
-        # invisible — which is exactly why an earlier matrix read them as "branch not
-        # reached" when they were in fact reached through an unpatched adapter.
+        # time (inside that function, media_buy_create.py:1226), so the creative-upload
+        # and approval selections bypass the module-global binding entirely. Patch BOTH or
+        # those two sites are invisible — which is exactly why an earlier matrix read them
+        # as "branch not reached" when they were in fact reached through an unpatched
+        # adapter.
         with (
             patch(f"{_MODULE}.get_adapter", return_value=adapter) as mock_module_binding,
             patch(f"{_HELPERS}.get_adapter", return_value=adapter) as mock_lazy_binding,
