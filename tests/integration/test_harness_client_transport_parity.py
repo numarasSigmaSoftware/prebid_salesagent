@@ -23,7 +23,6 @@ from tests.harness._base import BareIntegrationEnv
 from tests.harness.client import AdCPTestClient
 from tests.harness.transport import NO_IDENTITY_OVERRIDE, E2EConfig, Transport
 
-
 # Every unauthenticated dispatch below passes identity=None — an EXPLICIT
 # credential-less request — so the wire code is AUTH_MISSING, not the legacy
 # combined AUTH_REQUIRED. AdCP 3.1.1's enums/error-code.json splits the two:
