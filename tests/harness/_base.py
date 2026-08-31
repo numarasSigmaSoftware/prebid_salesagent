@@ -1029,17 +1029,25 @@ class BaseTestEnv:
         """
         from src.app import app
         from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
-        from tests.harness.transport import WireAuth
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, WireAuth
 
         # Snapshot the process-global dependency overrides BEFORE
         # _prepare_rest_request/_configure_rest_auth_override mutate them, and
         # restore after the request even when it raises — ``app`` is
         # process-global across tests, and the WireAuth path pops the overrides
         # entirely so the real middleware/deps consume the raw headers.
+        #
+        # The shared NO_IDENTITY_OVERRIDE doubles as the "no override was
+        # installed" marker rather than a second local object(): the harness
+        # keeps ONE omission sentinel, and the two meanings cannot collide —
+        # the only values ever stored under these keys are the lambdas built in
+        # _configure_rest_auth_override, and _prepare_rest_request has already
+        # resolved NO_IDENTITY_OVERRIDE to a real identity before any override
+        # is installed.
         auth_dependencies = (_require_auth_dep, _resolve_auth_dep)
-        missing_override = object()
         previous_overrides = {
-            dependency: app.dependency_overrides.get(dependency, missing_override) for dependency in auth_dependencies
+            dependency: app.dependency_overrides.get(dependency, NO_IDENTITY_OVERRIDE)
+            for dependency in auth_dependencies
         }
 
         client, identity = self._prepare_rest_request(kwargs)
@@ -1055,7 +1063,7 @@ class BaseTestEnv:
             return client.post(endpoint, json=body, headers=request_headers)
         finally:
             for dependency, previous in previous_overrides.items():
-                if previous is missing_override:
+                if previous is NO_IDENTITY_OVERRIDE:
                     app.dependency_overrides.pop(dependency, None)
                 else:
                     app.dependency_overrides[dependency] = previous
