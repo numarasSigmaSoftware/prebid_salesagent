@@ -329,7 +329,15 @@ _XFAIL_TAGS: dict[str, str] = {
     # ext-g: _validate_creatives_before_adapter_call raises INVALID_CREATIVES without suggestion
     # ext-h: plain string format_id caught by Pydantic, not structured AdCPError
     "T-UC-002-ext-h": "plain string format_id produces Pydantic error, not AdCPError with suggestion",
-    "T-UC-002-ext-h-agent": "unregistered agent_url validation not wired — _validate_and_convert_format_ids is dead code",
+    # Graduated (PR #1547): the unregistered-agent validator is wired and reached on
+    # every wire transport. _validate_format_agent_registration raises
+    # AdCPInvalidRequestError("Creative agent is not registered.", suggestion=...), so the
+    # scenario's three asserts (fail / message "not registered" / suggestion present) hold
+    # on a2a, mcp, AND rest. Evidence: on upstream/main this xfails genuinely on all three
+    # (BDD_ALL_TRANSPORTS -> 3 xfailed); on this branch all three xpass (3 failed under
+    # strict). The MCP-only rfc8785 crash that _MCP_SELECTIVE_XFAIL tracked is also gone —
+    # that list is now empty. Was: "unregistered agent_url validation not wired —
+    # _validate_and_convert_format_ids is dead code".
     # FIXME: auth error lacks suggestion field
     # AdCPAuthenticationError("Principal ID not found...") has no details["suggestion"].
     # Spec requires suggestion for buyer remediation (POST-F3).
@@ -500,21 +508,14 @@ _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
 # disclosure *filter* gap (_impl does not filter by disclosure) is all-transport,
 # handled by _UC005_PARTIAL_TAGS / _XFAIL_TAGS.
 #
-# ONE MCP-specific entry remains below, T-UC-002-ext-h-agent, whose cause is
-# genuinely MCP-only (rfc8785 canonicalization of a structured FormatId carried in
-# raw_wire_payload — A2A/REST never reach that path).
+# Graduated (PR #1547): the last entry, T-UC-002-ext-h-agent, is gone. It tracked an
+# MCP-only rfc8785 crash (a structured FormatId in raw_wire_payload that canonicalization
+# could not serialize, crashing idempotency hashing before the format-agent validator ran,
+# #1768). MCP now reaches the validator and the scenario xpasses on MCP like a2a/rest — see
+# the graduation note in _XFAIL_TAGS above. The list stays (empty) so a future MCP-only
+# xfail has a home rather than being invented ad hoc.
 # (tag, example_substrings, reason, strict)
-_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = [
-    (
-        "T-UC-002-ext-h-agent",
-        set(),
-        "MCP-only: raw_wire_payload carries a structured FormatId, which "
-        "rfc8785 canonicalization cannot serialize, crashing idempotency "
-        "hashing before the format-agent validator this scenario targets "
-        "ever runs. A2A/REST don't hit this path. prebid/salesagent#1768.",
-        True,
-    ),
-]
+_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = []
 
 # NOTE: the former _REST_XFAIL_TAGS set was retired once the stale
 # CreativeFormatsEnv.build_rest_body override (which returned {}) was removed.
