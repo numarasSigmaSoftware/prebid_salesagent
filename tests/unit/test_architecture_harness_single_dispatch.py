@@ -118,6 +118,14 @@ _KNOWN_DELIVER_OVERRIDES: set[tuple[str, str, str]] = {
     ("tests/harness/creative_formats.py", "CreativeFormatsEnv", "deliver_a2a"),
     # Test doubles, not real envs: they exist to prove the dispatch contract.
     ("tests/harness/test_harness_base.py", "_TestEnv", "deliver_mcp"),
+    # Same doubles, A2A side. Not a new hand-rolled override: these were
+    # `call_a2a` overrides that the legacy-dispatch guard forbids outright, so
+    # they were renamed to the deliver_* seam returning a DeliverResult — the
+    # conversion that guard's own message prescribes. One of them had been
+    # passing vacuously: with call_a2a no longer the dispatch seam, the base
+    # deliver_a2a raised NotImplementedError, which happened to satisfy the
+    # test's "no envelope" assertions without ever running its own exception.
+    ("tests/harness/test_harness_base.py", "_TestEnv", "deliver_a2a"),
     # Contrasts CreativeSyncEnv's bypass by dispatching sync_creatives through
     # the REAL A2A handler — the divergence IS the point of that test.
     ("tests/integration/test_request_validation_suggestion_parity.py", "_RealA2AWireCreativeSyncEnv", "deliver_a2a"),

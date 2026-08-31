@@ -648,6 +648,10 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=execution_source_statuses_for(trigger),
             target_status="activating",
+            # Intermediate: taking the claim opens the approval, it does not close it.
+            # execute_approved_media_buy's update_status is the sole post-adapter
+            # writer and owns this event's single bump.
+            bumps_revision=False,
         )
 
     def reject_pending_execution(self, media_buy_id: str) -> bool:
@@ -664,6 +668,10 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=APPROVED_EXECUTION_SOURCE_STATUSES,
             target_status="rejected",
+            # This CAS IS the whole logical event: the admin reject route touches
+            # nothing after it, so without a bump here the buy moves to "rejected"
+            # while the buyer's token stands still.
+            bumps_revision=True,
         )
 
     def mark_approved_execution_unknown(
@@ -677,7 +685,11 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=("activating",),
             target_status="activation_unknown",
-            expected_updated_at=expected_updated_at,
+            # Preserves the currently graded behaviour. Unlike the other four this one
+            # is NOT re-derived here: whether an ambiguous outcome closes the event
+            # (and so owes the bump) is a question about the failure path, not about
+            # this merge, and no test currently pins it either way.
+            bumps_revision=False,
         )
 
     def renew_approved_execution_lease(self, media_buy_id: str) -> bool:
@@ -686,6 +698,10 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=("activating",),
             target_status="activating",
+            # A lease renewal writes the same status it read: no state move, so no
+            # token movement. Bumping here would advance the buyer's revision for an
+            # event they cannot observe.
+            bumps_revision=False,
         )
 
     def complete_approved_execution(self, media_buy_id: str) -> bool:
@@ -694,6 +710,10 @@ class MediaBuyRepository:
             media_buy_id,
             source_statuses=("activating",),
             target_status="active",
+            # Intermediate: this releases the claim and is immediately followed by
+            # update_status in the same UoW (media_buy_create), which resolves the
+            # flight-window status and owns the event's single bump.
+            bumps_revision=False,
         )
 
     def _transition_approved_execution(
@@ -702,9 +722,34 @@ class MediaBuyRepository:
         *,
         source_statuses: tuple[str, ...],
         target_status: str,
+        bumps_revision: bool,
         expected_updated_at: datetime.datetime | None = None,
     ) -> bool:
-        """Shared tenant-scoped CAS for the approval execution lifecycle."""
+        """Shared tenant-scoped CAS for the approval execution lifecycle.
+
+        ``bumps_revision`` is REQUIRED and has no default, because neither value is
+        safe to assume. ``revision`` is the buyer's optimistic-concurrency token, and
+        the two ways to get it wrong fail in opposite directions:
+
+        * Omitting a bump this transition owed freezes the token while the persisted
+          status moves — silent, and buyer-visible only as a conflict much later.
+        * Adding one this transition did not owe breaks the single-writer property:
+          one logical event would advance the token by more than 1, so a buyer polling
+          on ``revision`` sees a value skipped.
+
+        So the answer is per call site: pass True when this CAS *is* the whole logical
+        event (nothing writes after it), and False when it is an intermediate step and
+        a later writer in the same event owns the single bump.
+        """
+        values: dict[str, Any] = {
+            "status": target_status,
+            "updated_at": datetime.datetime.now(datetime.UTC),
+        }
+        if bumps_revision:
+            # SQL expression, not a Python read-modify-write, for the reason
+            # _bump_revision documents: the database serializes concurrent bumps, so
+            # two mutations landing in one clock tick cannot write the same value.
+            values["revision"] = MediaBuy.revision + 1
         statement = update(MediaBuy).where(
             MediaBuy.tenant_id == self._tenant_id,
             MediaBuy.media_buy_id == media_buy_id,
@@ -713,7 +758,7 @@ class MediaBuyRepository:
         if expected_updated_at is not None:
             statement = statement.where(MediaBuy.updated_at == expected_updated_at)
         updated_id = self._session.execute(
-            statement.values(status=target_status, updated_at=datetime.datetime.now(datetime.UTC))
+            statement.values(**values)
             .returning(MediaBuy.media_buy_id)
             .execution_options(synchronize_session="fetch")
         ).scalar_one_or_none()

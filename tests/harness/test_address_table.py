@@ -75,18 +75,25 @@ class TestAddressTableAgainstLiveProduction:
         assert mcp_addr.name == e2e_mcp_addr.name
         assert e2e_mcp_addr.transport == Transport.E2E_MCP
 
-    def test_no_address_for_transport_on_a2a_only_skill(self):
-        """approve_creative is A2A-only. The live A2A-only set drifts over time —
-        confirmed directly against ADDRESS_TABLE.all_tools() at write time rather
-        than trusted from a hand-copied example list (see NoAddressForTransport's
-        docstring for why this file deliberately avoids repeating one)."""
+    def test_no_address_for_registered_but_unadvertised_skill(self):
+        """approve_creative is registered in the A2A handler map but deliberately
+        NOT advertised on the agent card: its handler unconditionally raises
+        UNSUPPORTED_FEATURE, so advertising it would promise a capability the agent
+        does not provide (see create_agent_card's note; the SKILL_METADATA oracle in
+        test_a2a_transport_contract marks it advertised: False, and a bijection test
+        there pins that against the production registry).
+
+        Addresses are derived from LIVE registration, so an unadvertised skill
+        resolves on no transport at all — A2A included. It stays reachable by name
+        and answers with a structured UNSUPPORTED_FEATURE failed Task; it is simply
+        not offered. This asserts the negative that actually holds rather than a
+        positive A2A-only case: the live A2A-only set is now empty, because all
+        three former members are unadvertised for this same reason.
+        """
         table = AddressTable()
-        with pytest.raises(NoAddressForTransport):
-            table.resolve("approve_creative", Transport.MCP)
-        with pytest.raises(NoAddressForTransport):
-            table.resolve("approve_creative", Transport.REST)
-        # But it DOES resolve on the transport it actually exists on:
-        assert table.resolve("approve_creative", Transport.A2A).name == "approve_creative"
+        for transport in (Transport.MCP, Transport.REST, Transport.A2A):
+            with pytest.raises(NoAddressForTransport):
+                table.resolve("approve_creative", transport)
 
     def test_no_address_for_unknown_tool(self):
         table = AddressTable()

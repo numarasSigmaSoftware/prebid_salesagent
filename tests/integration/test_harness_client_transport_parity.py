@@ -24,6 +24,16 @@ from tests.harness.client import AdCPTestClient
 from tests.harness.transport import NO_IDENTITY_OVERRIDE, E2EConfig, Transport
 
 
+# Every unauthenticated dispatch below passes identity=None — an EXPLICIT
+# credential-less request — so the wire code is AUTH_MISSING, not the legacy
+# combined AUTH_REQUIRED. AdCP 3.1.1's enums/error-code.json splits the two:
+# AUTH_MISSING ("provide credentials via the auth header and retry", correctable)
+# for a request that presents no credential, AUTH_INVALID (terminal) for one whose
+# credential was rejected. Named once here rather than repeated at each call site,
+# so the code and its rationale move together.
+_UNAUTHENTICATED_WIRE_CODE = "AUTH_MISSING"
+
+
 def _assert_success_equivalent(via, client_result) -> None:
     """Shared success-path equivalence assertion ``env.call_via`` and ``AdCPTestClient(env).call`` must agree on
     success, transport tag, and the exact wire-visible response body.
@@ -262,7 +272,7 @@ class TestClientCrossTransportConsistency:
             result = client.call("list_accounts", {}, Transport.REST, identity=None)
 
         assert result.is_error
-        result.assert_wire_error("AUTH_REQUIRED")
+        result.assert_wire_error(_UNAUTHENTICATED_WIRE_CODE)
 
 
 @pytest.mark.integration
@@ -307,7 +317,7 @@ class TestEnvVsClientEquivalence:
             via = env.call_via(Transport.MCP, identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.MCP, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)
 
     def test_a2a_success_and_error_equivalence(self, integration_db):
         from tests.factories import PricingOptionFactory, PrincipalFactory, ProductFactory, TenantFactory
@@ -329,7 +339,7 @@ class TestEnvVsClientEquivalence:
             via = env.call_via(Transport.A2A, identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.A2A, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)
 
     def test_rest_success_and_error_equivalence(self, integration_db):
         from tests.factories import PricingOptionFactory, PrincipalFactory, ProductFactory, TenantFactory
@@ -351,7 +361,7 @@ class TestEnvVsClientEquivalence:
             via = env.call_via(Transport.REST, identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.REST, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)
 
 
 @pytest.mark.integration
@@ -509,7 +519,7 @@ class TestEnvVsClientEquivalenceE2E:
             via = env.call_via(Transport.E2E_REST, identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.E2E_REST, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)
 
     def test_e2e_mcp_success_and_error_equivalence(self, integration_db, e2e_live_config):
         import uuid
@@ -534,7 +544,7 @@ class TestEnvVsClientEquivalenceE2E:
             via = env.call_via(Transport.E2E_MCP, tool_name="list_accounts", identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.E2E_MCP, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)
 
     def test_e2e_a2a_success_and_error_equivalence(self, integration_db, e2e_live_config):
         import uuid
@@ -559,4 +569,4 @@ class TestEnvVsClientEquivalenceE2E:
             via = env.call_via(Transport.E2E_A2A, tool_name="list_accounts", identity=None)
             client_result = AdCPTestClient(env).call("list_accounts", {}, Transport.E2E_A2A, identity=None)
 
-        _assert_error_equivalent(via, client_result, "AUTH_REQUIRED")
+        _assert_error_equivalent(via, client_result, _UNAUTHENTICATED_WIRE_CODE)

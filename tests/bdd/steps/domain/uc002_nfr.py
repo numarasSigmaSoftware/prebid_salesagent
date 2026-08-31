@@ -163,11 +163,13 @@ def then_auth_before_business_logic(ctx: dict) -> None:
     auth_ctx: dict = {k: ctx[k] for k in ("env", "transport", "e2e_config") if k in ctx}
     dispatch_request(auth_ctx, req=req, presented_auth_token="expired-bdd-auth-token")
 
+    from tests.bdd.steps._outcome_helpers import wire_error_envelope_or_none
     from tests.helpers.auth_contract import assert_two_layer_auth_contract
 
     result = auth_ctx.get("result")
     assert result is not None, "dispatch_request did not produce a TransportResult for the invalid-token request"
-    assert_two_layer_auth_contract(result.wire_error_envelope, ctx["transport"], "invalid")
+    # auth_ctx, not ctx: dispatch_request wrote the TransportResult there.
+    assert_two_layer_auth_contract(wire_error_envelope_or_none(auth_ctx), ctx["transport"], "invalid")
 
     # Verify no business logic side effects occurred
     assert not mock_adapter.create_media_buy.called, (

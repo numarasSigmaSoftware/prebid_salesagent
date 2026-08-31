@@ -1145,6 +1145,7 @@ class BaseTestEnv:
         """
         from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
 
+        presented_auth_token, presented_auth_headers = self._pop_presented_auth(kwargs)
         identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
         if identity is NO_IDENTITY_OVERRIDE:
             identity = self.identity_for(Transport.REST)

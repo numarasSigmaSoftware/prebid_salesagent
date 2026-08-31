@@ -363,7 +363,7 @@ class TestBaseClassContract:
         from tests.harness.transport import Transport
 
         class _TestEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
+            def deliver_a2a(self, **kwargs):
                 raise AdCPServiceUnavailableError("agent unreachable")
 
         result = _TestEnv().call_via(Transport.A2A)
@@ -394,7 +394,7 @@ class TestBaseClassContract:
         }
 
         class _TestEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
+            def deliver_a2a(self, **kwargs):
                 error = AdCPServiceUnavailableError("reconstructed")
                 error.__dict__["_wire_error_envelope"] = envelope
                 raise error
@@ -426,7 +426,7 @@ class TestBaseClassContract:
         }
 
         class _TestEnv(BaseTestEnv):
-            def call_mcp(self, **kwargs):
+            def deliver_mcp(self, **kwargs):
                 error = AdCPServiceUnavailableError("reconstructed")
                 error.__dict__["_wire_error_envelope"] = envelope
                 raise error
@@ -442,8 +442,12 @@ class TestBaseClassContract:
         from tests.harness.transport import Transport
 
         class _TestEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
-                return kwargs
+            def deliver_a2a(self, **kwargs):
+                # deliver_a2a is THE dispatch seam; call_a2a is a never-override
+                # accessor over it, so the double returns a DeliverResult.
+                from tests.harness.transport import DeliverResult
+
+                return DeliverResult(payload=kwargs)
 
         env = _TestEnv()
         result = env.call_via(Transport.A2A, presented_auth_token="rejected-token")
@@ -483,8 +487,12 @@ class TestBaseClassContract:
         from tests.harness.transport import Transport
 
         class _TestEnv(BaseTestEnv):
-            def call_a2a(self, **kwargs):
-                return kwargs
+            def deliver_a2a(self, **kwargs):
+                # deliver_a2a is THE dispatch seam; call_a2a is a never-override
+                # accessor over it, so the double returns a DeliverResult.
+                from tests.harness.transport import DeliverResult
+
+                return DeliverResult(payload=kwargs)
 
         env = _TestEnv()
         result = env.call_via(Transport.A2A, presented_legacy_auth_token="rejected-token")

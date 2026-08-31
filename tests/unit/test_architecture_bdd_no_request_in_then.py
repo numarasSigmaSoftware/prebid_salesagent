@@ -78,9 +78,9 @@ _DISPATCH_IN_THEN_ALLOWLIST: set[str] = {
     # the parametrized transport on the wire (#1417). Rate limiting and
     # payload size remain spec-production gaps.
     "bdd/steps/domain/uc002_nfr.py:125 then_auth_before_business_logic",
-    "bdd/steps/domain/uc002_nfr.py:179 then_rate_limiting_enforced",
-    "bdd/steps/domain/uc002_nfr.py:226 then_payload_size_limits",
-    "bdd/steps/domain/uc002_nfr.py:402 then_budget_validated_against_min_order",
+    "bdd/steps/domain/uc002_nfr.py:181 then_rate_limiting_enforced",
+    "bdd/steps/domain/uc002_nfr.py:228 then_payload_size_limits",
+    "bdd/steps/domain/uc002_nfr.py:404 then_budget_validated_against_min_order",
 }
 
 _ASSERT_ON_REQUEST_ALLOWLIST: set[str] = set()

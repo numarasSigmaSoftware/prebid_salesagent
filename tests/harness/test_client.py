@@ -45,7 +45,7 @@ class TestClientMcpDispatchNoDb:
         product_ids = [p.product_id for p in result.payload.products]
         assert product_ids == ["prod_001"]
 
-    def test_unauthenticated_dispatch_surfaces_auth_required(self):
+    def test_unauthenticated_dispatch_surfaces_auth_missing(self):
         """identity=None (EXPLICIT) reaches the server unauthenticated — the same
         convention env._run_mcp_client already gives identity=None (design doc §3
         table). Proves the client's _NO_IDENTITY_OVERRIDE sentinel correctly
@@ -59,7 +59,12 @@ class TestClientMcpDispatchNoDb:
             result = client.call("list_accounts", {}, Transport.MCP, identity=None)
 
         assert result.is_error
-        result.assert_wire_error("AUTH_REQUIRED")
+        # AUTH_MISSING, not the legacy combined AUTH_REQUIRED: AdCP 3.1.1's
+        # enums/error-code.json carries AUTH_MISSING ("provide credentials via the
+        # auth header and retry", correctable) for a credential-less request and
+        # AUTH_INVALID (terminal) for a rejected one. This dispatch presents no
+        # credential at all, so AUTH_MISSING is the precise code.
+        result.assert_wire_error("AUTH_MISSING")
 
 
 class TestClientA2ADispatchNoDb:
@@ -840,7 +845,7 @@ class TestClientE2eA2aDelivery:
         ``wire_error_envelope``. B4 makes A2A match — parse the body first,
         then let the existing ``"error" in body`` branch reconstruct through
         ``_envelope_to_adcp_error``, which stashes the real envelope on the
-        exception for ``_wire_envelope_from_exception`` to pick up.
+        exception for ``unwrap_a2a_error`` to read back as the real wire.
 
         Lives here beside the other ``_deliver_e2e_a2a`` graders (same mocked
         -httpx convention, same ``TestClientE2eA2aDelivery`` fixtures) because

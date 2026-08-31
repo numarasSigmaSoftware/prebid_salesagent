@@ -66,7 +66,6 @@ from tests.harness.transport import (
     TransportResult,
     _envelope_from_adcp_error,
     _envelope_from_mcp_error,
-    _wire_envelope_from_exception,
     derive_error_status,
     strip_a2a_protocol_fields,
 )
@@ -216,9 +215,17 @@ def _rest_request_kwargs(method: str, body: dict[str, Any], **extra: Any) -> dic
 
 def _deliver_rest(env: BaseTestEnv, address: ToolAddress, wrapped: dict[str, Any], identity: Any) -> Any:
     kwargs = _with_identity({}, identity)
-    client, _resolved_identity = env._prepare_rest_request(kwargs)
+    client, _resolved_identity, auth_headers = env._prepare_rest_request(kwargs)
     method = address.method or "post"
-    return getattr(client, method)(wrapped["url"], **_rest_request_kwargs(method, wrapped["body"]))
+    # Forward the presented-token headers _prepare_rest_request builds: that seam
+    # selects the real production auth dependency and is carried ONLY by these
+    # headers, so dropping them would silently dispatch unauthenticated and grade
+    # the wrong path.
+    # Only pass `headers` when a presented-token seam actually produced some: an
+    # empty dict is not inert, it adds a kwarg the bodiless-GET contract asserts
+    # against (test_get_dispatch_does_not_pass_json_kwarg pins the exact kwargs).
+    extra = {"headers": auth_headers} if auth_headers else {}
+    return getattr(client, method)(wrapped["url"], **_rest_request_kwargs(method, wrapped["body"], **extra))
 
 
 def e2e_identity_headers(identity: Any) -> dict[str, str]:
@@ -768,9 +775,14 @@ def unwrap_mcp_error(exc: Exception, transport: Transport = Transport.MCP) -> Tr
         # rather than a fault that produced no envelope at all.
         envelope={"transport": transport.value, "status": derive_error_status(wire)},
         wire_error_envelope=wire,
-        # What production WOULD emit for the same exception — never a substitute
-        # for the wire field.
-        synthesized_error_envelope=_envelope_from_adcp_error(exc),
+        # What production WOULD emit for the same exception — and ONLY when no
+        # real wire was captured. Populating both puts a synthesized competitor
+        # beside real wire bytes, which is what `_envelope_from_adcp_error`
+        # reserves for IMPL ("wire_error_envelope is reserved for real wire bytes
+        # captured by REST/MCP/A2A") and what the A2A sibling already does by
+        # never synthesizing. Pinned by test_creative_sync_transport's
+        # per-transport rule: non-IMPL asserts synthesized is None.
+        synthesized_error_envelope=_envelope_from_adcp_error(exc) if wire is None else None,
     )
 
 
@@ -779,11 +791,19 @@ def unwrap_a2a_error(exc: Exception, transport: Transport = Transport.A2A) -> Tr
 
     ``_run_a2a_handler`` already reconstructs ``AdCPError`` with
     ``_wire_error_envelope`` stashed (via ``_envelope_to_adcp_error``) before
-    raising, so ``_wire_envelope_from_exception``'s getattr fast-path covers it.
+    raising, so reading ``_wire_error_envelope`` off the exception covers it.
     See :func:`unwrap_mcp_error` for why this is one function rather than a copy
     per dispatch path.
     """
-    wire = _wire_envelope_from_exception(exc)
+    # REAL wire only. This used to fall back to the SYNTHESIZED envelope when no
+    # artifact was captured, which put a harness-built envelope in the field that
+    # means "real wire bytes" — so a raw-wrapper exception (no failed Task, no
+    # DataPart) was indistinguishable from genuine A2A wire coverage. The MCP
+    # sibling had the same shape. `_envelope_from_adcp_error` reserves the
+    # synthesized envelope for IMPL, which has no wire by definition.
+    wire = getattr(exc, "_wire_error_envelope", None)
+    if not isinstance(wire, dict):
+        wire = None
     return TransportResult(
         error=exc,
         # Derived per-transport status: the A2A evidence is whether

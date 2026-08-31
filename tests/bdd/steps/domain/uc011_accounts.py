@@ -16,7 +16,7 @@ from typing import Any
 
 from pytest_bdd import given, parsers, then, when
 
-from tests.bdd.steps._outcome_helpers import _require_response
+from tests.bdd.steps._outcome_helpers import _require_response, wire_error_envelope_or_none
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.factories.account import AccountFactory, AgentAccountAccessFactory
 from tests.helpers import assert_envelope_shape
@@ -2260,8 +2260,7 @@ def then_empty_accounts_error(ctx: dict) -> None:
     """
     from src.core.exceptions import AdCPValidationError
 
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     if envelope:
         from tests.helpers import assert_envelope_shape
         from tests.helpers.secret_scrub import assert_no_secret_leak

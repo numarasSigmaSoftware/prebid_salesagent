@@ -15,7 +15,6 @@ import re
 from pytest_bdd import parsers, then
 
 from tests.bdd.steps._outcome_helpers import wire_error_envelope_or_none
-
 from tests.helpers.auth_contract import (
     CredentialState,
     assert_two_layer_auth_contract,
@@ -311,7 +310,7 @@ def _assert_transport_auth_contract(ctx: dict, credential_state: CredentialState
 
     result = ctx.get("result")
     assert result is not None, "Auth wire-contract assertion requires a TransportResult"
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     assert envelope is not None, "Auth wire-contract assertion requires the serialized two-layer error envelope"
     assert_two_layer_auth_contract(envelope, transport, credential_state)
 
@@ -331,8 +330,7 @@ def then_invalid_auth_contract(ctx: dict) -> None:
 @then("the authentication error should disclose no account resolution information")
 def then_auth_error_discloses_no_account_resolution(ctx: dict) -> None:
     """Reject account identifiers, natural keys, ambiguity, and match details."""
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     assert envelope is not None, "Non-disclosure assertion requires the serialized wire envelope"
 
     # STRUCTURE first. A guessed-literal denylist only catches phrasings someone imagined:
@@ -423,8 +421,7 @@ def then_error_message_sanitized_without_disclosing(ctx: dict, text: str) -> Non
     literal containment check — a scenario asserting non-disclosure must name
     that explicitly rather than relying on a containment step to double as one.
     """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     assert envelope is not None, "Sanitization assertion requires a captured wire error envelope"
 
     from src.core.exceptions import _SANITIZED_BY_WIRE_CODE
