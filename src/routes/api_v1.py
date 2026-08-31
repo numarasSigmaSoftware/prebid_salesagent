@@ -527,8 +527,14 @@ async def get_products(
     return apply_version_compat("get_products", response, served_version)
 
 
-# Module-level FastAPI marker singleton (B008: never call Query() in an argument
+# Module-level FastAPI marker singletons (B008: never call Query() in an argument
 # default). Mirrors the ``resolve_auth = Depends(...)`` pattern used across this router.
+#
+# The bare ``@router.get("/capabilities")`` handler these sit in place of is
+# superseded by ``get_capabilities`` below — a strict superset of it (the same
+# auth-optional discovery call, plus the context / protocols / idempotency_key
+# query params and the negotiated-version dependency). Declaring both would be a
+# duplicate route on the same path.
 _protocols_query: Any = Query(default=None)
 _idempotency_key_query: Any = Query(default=None)
 
@@ -561,7 +567,16 @@ def _parse_protocols_query(raw: list[str] | None) -> list[str] | None:
     return parsed
 
 
-@router.get("/capabilities", dependencies=[Depends(_version_after_resolve)])
+# operation_id declares this route's AdCP tool identity, because the handler
+# name diverges from it (the path reads /capabilities, the tool is
+# get_adcp_capabilities). The harness address table indexes REST routes by tool
+# name and prefers a self-declared operation_id over the handler name, so
+# without this the route is unaddressable and the whole table fails to build.
+@router.get(
+    "/capabilities",
+    operation_id="get_adcp_capabilities",
+    dependencies=[Depends(_version_after_resolve)],
+)
 async def get_capabilities(
     identity: ResolvedIdentity | None = resolve_auth,
     context: str | None = None,

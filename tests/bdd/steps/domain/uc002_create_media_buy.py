@@ -19,7 +19,7 @@ from unittest.mock import ANY
 from pytest_bdd import given, parsers, then, when
 
 from tests.bdd.steps._harness_db import db_session as _db_session
-from tests.bdd.steps._outcome_helpers import _get_response_field
+from tests.bdd.steps._outcome_helpers import _get_response_field, wire_error_dict, wire_error_envelope_or_none
 from tests.bdd.steps.generic._create_request import build_create_request_kwargs
 from tests.factories.account import AccountFactory, AgentAccountAccessFactory
 from tests.harness._idempotency import fresh_idempotency_key
@@ -1329,8 +1329,9 @@ def _assert_error_outcome(ctx: dict, outcome: str) -> None:
 
     # Suggestion-only: "error with suggestion"
     if remainder.startswith("with suggestion"):
-        if result is not None and result.wire_error_envelope is not None:
-            code = result.wire_error_envelope.get("adcp_error", {}).get("code")
+        wire_envelope = wire_error_envelope_or_none(ctx)
+        if wire_envelope is not None:
+            code = wire_envelope.get("adcp_error", {}).get("code")
             result.assert_wire_error(code, require_suggestion=True)
             return
         assert isinstance(error, AdCPError), (
@@ -1362,7 +1363,7 @@ def _assert_error_outcome(ctx: dict, outcome: str) -> None:
         recovery = parts[1] if len(parts) >= 2 and parts[1] in ("terminal", "correctable", "transient") else None
         require_suggestion = "with suggestion" in outcome.lower()
 
-        if result is not None and result.wire_error_envelope is not None:
+        if wire_error_envelope_or_none(ctx) is not None:
             # Wire-first: assert the AdCP two-layer envelope the buyer receives.
             result.assert_wire_error(expected_code, recovery=recovery, require_suggestion=require_suggestion)
             return
@@ -1900,18 +1901,25 @@ def then_error_references_missing_field(ctx: dict, field: str) -> None:
     envelope carries, so injecting a wrong ``field`` into the shared factory
     reddened the three siblings and left this one green.
 
-    Routes through ``wire_error_envelope`` (single source of truth, shared
-    with the other wire-first Then steps in this module) rather than a local
-    ``result.wire_error_envelope is not None`` check: that local check could
-    not distinguish "IMPL/pre-dispatch, legitimately no wire" from "a real
-    transport failed to stash the wire" and silently fell back to the
-    reconstructed exception in both cases — the second case is a dispatcher
-    regression that must fail loud, not pass against a lossy reconstruction.
+    Routes through the guarded accessors in ``_outcome_helpers`` (the single
+    source of truth, shared with the other wire-first Then steps in this
+    module) rather than a local ``result.wire_error_envelope is not None``
+    check: that local check could not distinguish "IMPL/pre-dispatch,
+    legitimately no wire" from "a real transport failed to stash the wire" and
+    silently fell back to the reconstructed exception in both cases — the
+    second case is a dispatcher regression that must fail loud, not pass
+    against a lossy reconstruction. ``wire_error_dict`` supplies that loud
+    guard; ``wire_error_envelope_or_none`` then supplies the REAL-vs-synthesized
+    distinction ``assert_wire_error`` needs.
     """
-    from tests.bdd.steps._outcome_helpers import wire_error_envelope
-
     result = ctx.get("result")
-    envelope = wire_error_envelope(ctx)
+    # Loud guard first: a real-wire transport that captured no error envelope is
+    # a dispatcher regression, and must raise rather than quietly fall through to
+    # the reconstructed exception below. Called for that guard alone — the value
+    # it returns may be the IMPL-synthesized envelope, which
+    # ``assert_wire_error`` cannot consume.
+    wire_error_dict(ctx)
+    envelope = wire_error_envelope_or_none(ctx)
     if envelope is not None:
         result.assert_wire_error(
             "VALIDATION_ERROR",
@@ -1955,7 +1963,10 @@ def then_error_references_idempotency_key_constraint(ctx: dict, violation: str) 
         field="idempotency_key",
     )
 
-    envelope = result.wire_error_envelope
+    # The single guarded accessor, not a raw attribute read: it RAISES when a
+    # real-wire transport captured no envelope (a dispatcher regression, which a
+    # raw read would silently turn into the weaker isinstance assertion below).
+    envelope = wire_error_dict(ctx)
     assert isinstance(envelope, dict), "No canonical wire error envelope captured"
     error = envelope["errors"][0]
 

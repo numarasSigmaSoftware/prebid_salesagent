@@ -30,6 +30,12 @@ class CapabilitiesEnv(IntegrationEnv):
     No external services to mock — capabilities is a pure discovery read.
     """
 
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "get_adcp_capabilities"
+    A2A_SKILL = "get_adcp_capabilities"
+    RESPONSE_MODEL = GetAdcpCapabilitiesResponse
+
+    EXTERNAL_PATCHES: dict[str, str] = {}
     REST_ENDPOINT = "/api/v1/capabilities"
     REST_METHOD = "get"
 
@@ -161,13 +167,8 @@ class CapabilitiesEnv(IntegrationEnv):
         kwargs.setdefault("req", None)
         return _get_adcp_capabilities_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call get_adcp_capabilities via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call get_adcp_capabilities via Client(mcp) — full pipeline dispatch."""
-        return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
+    # call_mcp/call_a2a are NOT overridden here — MCP_TOOL/A2A_SKILL/RESPONSE_MODEL
+    # above give the base its client-core delegation for both transports.
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """GET /capabilities has no body — flat kwargs become the query string.
@@ -189,6 +190,11 @@ class CapabilitiesEnv(IntegrationEnv):
         if "context" in params and not isinstance(params["context"], str):
             params["context"] = json.dumps(params["context"])
         return params
+
+    # _run_rest_request is NOT overridden: BaseTestEnv's already dispatches
+    # REST_METHOD == "get" as client.get(endpoint, params=build_rest_body(...)),
+    # so the negotiation pin reaches the api_v1 GET dependency. A local override
+    # that GETs with no params would silently drop the whole query string.
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetAdcpCapabilitiesResponse:
         """Parse REST JSON into GetAdcpCapabilitiesResponse."""

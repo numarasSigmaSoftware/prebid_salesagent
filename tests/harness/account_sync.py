@@ -54,6 +54,11 @@ class AccountSyncEnv(IntegrationEnv):
     on the identity (BR-RULE-059).
     """
 
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "sync_accounts"
+    A2A_SKILL = "sync_accounts"
+    RESPONSE_MODEL = SyncAccountsResponse
+
     EXTERNAL_PATCHES = {
         "audit_logger": "src.core.tools.accounts.get_audit_logger",
     }
@@ -173,18 +178,11 @@ class AccountSyncEnv(IntegrationEnv):
         """
         return asyncio.run(self.call_impl_async(**kwargs))
 
-    def call_a2a(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts via real AdCPRequestHandler — full A2A pipeline."""
-        if "req" not in kwargs:
-            kwargs = ensure_idempotency_key(kwargs)
-        return self._run_a2a_handler("sync_accounts", SyncAccountsResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts via Client(mcp) — full pipeline dispatch."""
-        if "req" not in kwargs:
-            kwargs = ensure_idempotency_key(kwargs)
-        return self._run_mcp_client("sync_accounts", SyncAccountsResponse, **kwargs)
-
+    # call_mcp/call_a2a are NOT overridden here — MCP_TOOL/A2A_SKILL/RESPONSE_MODEL
+    # give the base its client-core delegation for both transports. Flat-kwargs
+    # dispatches get their spec-required idempotency_key from make_sync_accounts_request
+    # (call_impl) and build_rest_body (REST); A2A/MCP callers pass a ``req=`` that
+    # already carries one.
     REST_ENDPOINT = "/api/v1/accounts/sync"
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:

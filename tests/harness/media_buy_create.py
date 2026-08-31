@@ -22,12 +22,20 @@ from src.core.schemas._base import (
     CreateMediaBuySuccess,
 )
 from tests.harness._base import IntegrationEnv
+
+# The sentinel and the defaulting helper live in tests.harness._idempotency —
+# one home shared with the other mutating-request envs (sync_creatives,
+# sync_accounts), re-exported here for the existing importers of this module.
+# Deliberately NOT tests.harness.transport.NO_IDENTITY_OVERRIDE: a different
+# sentinel for a different field (idempotency_key, not identity); that "one
+# sentinel" consolidation is scoped to the identity-argument omission disease.
 from tests.harness._idempotency import (
     OMIT_IDEMPOTENCY_KEY as OMIT_IDEMPOTENCY_KEY,
 )
 from tests.harness._idempotency import (
     ensure_idempotency_key as _ensure_idempotency_key,
 )
+from tests.harness.transport import DeliverResult
 
 
 def _restore_creative_ids(req: CreateMediaBuyRequest, flat: dict[str, Any]) -> None:
@@ -352,7 +360,7 @@ class MediaBuyCreateEnv(IntegrationEnv):
         flat.update(kwargs)
         return flat
 
-    def call_a2a(self, **kwargs: Any) -> CreateMediaBuyResult:
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
         """Dispatch create_media_buy through the real A2A ``on_message_send`` pipeline.
 
         Delegates to the base ``_run_a2a_handler`` (drives ``on_message_send`` →
@@ -366,7 +374,7 @@ class MediaBuyCreateEnv(IntegrationEnv):
             "create_media_buy", lambda **data: self.parse_rest_response(data), **self._flatten_request(kwargs)
         )
 
-    def call_mcp(self, **kwargs: Any) -> CreateMediaBuyResult:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
         """Dispatch create_media_buy through the real FastMCP ``Client`` pipeline.
 
         Delegates to the base ``_run_mcp_client`` (in-memory FastMCP transport →

@@ -25,27 +25,28 @@ before handing it to ``jsonschema``/``referencing``. ``file://`` is a real
 scheme that ``referencing``'s ``urljoin``-based resolution handles natively,
 and it maps back to a path with no invented naming convention in between.
 
-Two surfaces, matching the two distinct things callers need:
+The pure resolution primitives (``schema_root``, ``normalize_ref``, ``load``,
+``PinnedSchemaError``, and their private helpers) live in
+``tests/helpers/adcp_pinned_schema.py`` — a stdlib-only module test code
+(``src/core/version_compat.py``) also imports, so there is exactly ONE
+resolution implementation shared by prod and tests, never a test-only copy
+duplicated into src/. This module re-exports every one of those names and
+adds only the jsonschema-validation-specific pieces on top:
 
 - ``validator_for(ref)`` — a ready-to-use ``Draft7Validator`` with full
   ``$ref`` resolution wired, for validating a payload against a schema
   (``validate_against_pinned_schema`` is the convenience wrapper most
   callers want).
-- ``load(ref)`` — a single schema's raw dict, ``$ref``s left as-is, for
-  callers that WALK the schema tree themselves (the alignment suite's
-  synthetic-example generator) rather than validating a concrete payload.
-  Callers that want to follow the refs they find should use
-  ``load_canonicalized``, which rewrites them into the root-relative form
-  ``load`` itself accepts.
-
-A missing schema (the SDK layout changed, or a ``$ref`` is outside the
-resolvable tree) is a HARD FAILURE — ``PinnedSchemaError``, never a silent
-skip.
+- ``load(ref)`` — re-exported from ``tests/helpers/adcp_pinned_schema`` — a
+  single schema's raw dict, ``$ref``s left as-is, for callers that WALK the
+  schema tree themselves (the alignment suite's synthetic-example
+  generator) rather than validating a concrete payload. Callers that want
+  to follow the refs they find should use ``load_canonicalized``, which
+  rewrites them into the root-relative form ``load`` itself accepts.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -55,136 +56,32 @@ import referencing
 from jsonschema.validators import Draft7Validator
 from referencing.jsonschema import DRAFT7
 
-# The SDK's bundled/ subtree pre-inlines a partial (8-of-16-category) mirror
-# of the plain tree under the same filenames — searching it too would make
-# every mirrored bare filename ambiguous (e.g. "list-creatives-response.json"
-# exists at both creative/list-creatives-response.json and
-# bundled/creative/list-creatives-response.json). Bare-filename lookups are
-# scoped to the plain tree only; bundled/ is never read by this module.
-_EXCLUDED_TOP_LEVEL_DIR = "bundled"
+from tests.helpers.adcp_pinned_schema import (
+    PinnedSchemaError,
+    _contained_path,
+    _load_with_id,
+    _resolve_and_load,
+    load,
+    normalize_ref,
+    schema_root,
+)
+from tests.helpers.adcp_pinned_schema import (
+    # Re-exported for tests.unit.test_pinned_schema_single_source, which reads
+    # this module's own private resolution helper directly. Not used in this
+    # file's body — the `as` self-alias is the standard re-export idiom that
+    # tells the linter this import is intentional, not dead.
+    _resolve_filename as _resolve_filename,
+)
 
-
-class PinnedSchemaError(Exception):
-    """A pinned schema could not be resolved or loaded.
-
-    One type for every "the instrument is broken or the ref is unresolvable"
-    failure in this module, so callers can catch resolution failure without
-    also catching an assertion (which in a test process means "a payload
-    violated the contract" — a completely different outcome).
-    """
-
-
-def schema_root() -> Path:
-    """The installed adcp SDK's schema tree for the pinned spec version.
-
-    The SDK stores schemas under ``adcp/_schemas/<major.minor>/`` (e.g. the
-    3.1.1 spec lives in ``_schemas/3.1/``; its ``index.json`` carries the full
-    ``adcp_version``).
-    """
-    import adcp
-
-    spec_version = adcp.get_adcp_spec_version()
-    major_minor = ".".join(spec_version.split(".")[:2])
-    root = Path(adcp.__file__).parent / "_schemas" / major_minor
-    if not root.is_dir():
-        raise PinnedSchemaError(
-            f"Installed adcp SDK (spec {spec_version}) has no schema tree at {root} — "
-            "the SDK layout changed; update schema_root()."
-        )
-    return root
-
-
-def normalize_ref(ref: str) -> str:
-    """The one place a caller-supplied schema ref becomes a resolvable one.
-
-    The single accepted form is the one the SDK index itself uses: a
-    category-qualified path relative to the version root
-    (``media-buy/get-products-request.json``), optionally with a ``#fragment``,
-    which is stripped. Everything else — an absolute URL, a site-rooted
-    ``/schemas/…`` path, a traversal — is a ``PinnedSchemaError``.
-
-    Two implementations of this used to exist with DIFFERENT rules, and fed
-    the version-free form the repo uses internally they disagreed: one ate the
-    category segment as if it were a version and survived only because the
-    fallback rglob happened to find the file anyway. Rejecting rather than
-    rewriting is the point — a ref naming a version or a live registry means
-    the caller believes it is validating against something other than the pin,
-    and quietly redirecting it hides that the version it named was ignored.
-    """
-    stripped = ref.split("#", 1)[0]
-    if not stripped or "://" in stripped or stripped.startswith(("/", "..")):
-        raise PinnedSchemaError(f"Cannot resolve schema reference {ref!r} against the pinned SDK schema tree")
-    return stripped
-
-
-def _contained_path(candidate: Path, *, what: str) -> Path:
-    """Resolve *candidate* and assert it stays inside the pinned schema tree.
-
-    The single containment check for this module. A ref can embed traversal
-    (``"media-buy/../../../../etc/hosts"``), and probing an UNRESOLVED path
-    lets the OS follow the ``..`` segments — so resolution and the check have
-    to happen together, here, once, rather than at each of the call sites that
-    used to spell it out in three different shapes with three different
-    messages.
-    """
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(schema_root().resolve()):
-        raise PinnedSchemaError(f"{what} escapes the pinned SDK schema tree: {resolved}")
-    return resolved
-
-
-def _resolve_filename(filename: str) -> Path:
-    """Resolve a bare or category-qualified schema filename to its path.
-
-    A bare filename (``"list-creatives-response.json"``) is searched across
-    the plain schema tree (``bundled/`` excluded — see module docstring). If
-    that search is still ambiguous (a true same-basename collision within
-    the plain tree itself, e.g. ``core/error.json`` vs
-    ``trusted-match/error.json``), this raises rather than silently picking
-    one — pass a category-qualified ref (``"core/error.json"``) instead.
-    """
-    root = schema_root()
-    if "/" in filename:
-        path = _contained_path(root / filename, what=f"Schema ref {filename!r}")
-        if not path.exists():
-            raise PinnedSchemaError(f"Pinned schema not found: {filename} -> {path}")
-        return path
-
-    matches = sorted(p for p in root.rglob(filename) if _EXCLUDED_TOP_LEVEL_DIR not in p.relative_to(root).parts)
-    if not matches:
-        raise PinnedSchemaError(f"Pinned schema {filename!r} not found under {root}.")
-    if len(matches) > 1:
-        rels = [str(m.relative_to(root)) for m in matches]
-        raise PinnedSchemaError(
-            f"Pinned schema filename {filename!r} is ambiguous ({rels}) — pass a "
-            f"category-qualified ref (e.g. {rels[0]!r}) instead of a bare filename."
-        )
-    return matches[0]
-
-
-def _load_with_id(path: Path) -> dict[str, Any]:
-    """Load a schema file, stamping its own ``file://`` URI as ``$id`` so its
-    relative ``$ref``s (and any ``$ref``s INTO it from a sibling schema)
-    resolve deterministically."""
-    schema = json.loads(path.read_text())
-    return {**schema, "$id": path.as_uri()}
-
-
-def _resolve_and_load(ref: str) -> tuple[Path, dict[str, Any]]:
-    """Resolve ref to its path and load it (with its ``$id``) in one call."""
-    path = _resolve_filename(ref)
-    return path, _load_with_id(path)
-
-
-def load(ref: str) -> dict[str, Any]:
-    """Load one schema's raw dict (bare or category-qualified filename).
-
-    $refs inside the returned dict are left as-is (relative, e.g.
-    ``"../core/duration.json"``) — this is for callers that walk the schema
-    tree themselves. Use ``load_canonicalized`` if you intend to follow them.
-    """
-    _, schema = _resolve_and_load(ref)
-    return schema
+__all__ = [
+    "PinnedSchemaError",
+    "load",
+    "load_canonicalized",
+    "normalize_ref",
+    "schema_root",
+    "validate_against_pinned_schema",
+    "validator_for",
+]
 
 
 def _canonicalize_refs(node: Any, *, file_dir: Path, root: Path) -> Any:

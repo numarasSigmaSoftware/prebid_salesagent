@@ -42,6 +42,15 @@ _DOCKER_STUB = """#!/usr/bin/env bash
 # Records every invocation of this fake `docker` (argv, space-joined) to
 # $DOCKER_STUB_LOG, then reports success unconditionally so run_all_tests.sh's
 # control flow proceeds exactly as it would against a real, healthy stack.
+#
+# "As it would against a healthy stack" includes WRITING THE REPORTS. tox runs
+# inside the container, so its `.tox/<suite>.json` never reaches the host when
+# `docker` is stubbed -- and the runner's missing-report arm correctly fails a
+# run that produced none ("a suite that produced none was not measured"). A stub
+# that swallows the tox call without leaving reports behind is simulating a
+# stack where every suite died, not a healthy one. Emit a minimal report per
+# suite on the tox invocation so the simulation is faithful; the shape is what
+# scripts/check_truncated_reports.py reads (collected/total/deselected).
 printf '%s\\n' "$*" >> "$DOCKER_STUB_LOG"
 
 # Exiting 0 is not, on its own, what a healthy stack looks like: the suite run
