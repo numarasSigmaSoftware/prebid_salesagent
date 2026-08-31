@@ -260,7 +260,7 @@ async def get_products(
 
 
 @router.get("/capabilities")
-async def get_capabilities(
+async def get_adcp_capabilities(
     identity: ResolvedIdentity | None = REST_AUTH_OPTIONAL_DEPENDENCIES["get_adcp_capabilities"],
 ):
     """Get AdCP capabilities (auth-optional discovery skill)."""

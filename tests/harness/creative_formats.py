@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.core.schemas import ListCreativeFormatsResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness._realize import E2EUnsupportedSetup, realize_e2e
+from tests.harness.transport import DeliverResult
 
 
 def _format_id_key(fmt: Any) -> str:
@@ -79,6 +80,26 @@ class CreativeFormatsEnv(IntegrationEnv):
     Mocks creative agent registry (external service) and audit logger.
     The format processing logic runs for real.
     """
+
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    RESPONSE_MODEL = ListCreativeFormatsResponse
+
+    # JUSTIFIED OVERRIDE — does NOT declare MCP_TOOL/A2A_SKILL, so it does not
+    # take the base's client-core delegation. AdCPTestClient's UNWRAP parses the
+    # wire into spec_response_model("list_creative_formats") — the PINNED
+    # ListCreativeFormatsResponse — and our real format-registry wire does not
+    # satisfy it (measured: 2520 errors, e.g. formats.N.assets.M.max_count /
+    # .assets required by the pinned Assets variants but absent from ours).
+    # That is a list_creative_formats-vs-pinned-schema conformance gap, NOT a
+    # dispatch defect, so it is recorded and graded elsewhere rather than being
+    # hidden by making the core's parse swallow ValidationError.
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch list_creative_formats via the real FastMCP Client pipeline."""
+        return self._run_mcp_client("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
+
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch list_creative_formats via the real A2A handler pipeline."""
+        return self._run_a2a_handler("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
 
     EXTERNAL_PATCHES = {
         "registry": "src.core.creative_agent_registry.get_creative_agent_registry",
@@ -139,20 +160,12 @@ class CreativeFormatsEnv(IntegrationEnv):
         kwargs.setdefault("req", None)
         return _list_creative_formats_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> ListCreativeFormatsResponse:
-        """Call list_creative_formats via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> ListCreativeFormatsResponse:
-        """Call list_creative_formats via Client(mcp) — full pipeline dispatch."""
-        return self._run_mcp_client("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Forward flat creative-format parameters to the REST request body."""
-        req = kwargs.pop("req", None)
-        if req is not None:
-            return req.model_dump(mode="json", exclude_none=True)
-        return {key: value for key, value in kwargs.items() if value is not None}
+    # build_rest_body is inherited from IntegrationEnv: it serializes the Pydantic
+    # ``req`` via model_dump(mode="json", exclude_none=True). ListCreativeFormatsBody
+    # (src/routes/api_v1.py) declares format_ids + every other filter and the route
+    # maps them into ListCreativeFormatsRequest, so REST filters for real — there is
+    # no need to drop kwargs. (A prior override returned {} behind a stale docstring
+    # claiming the body had no parameters; that suppressed REST filter coverage.)
 
     def parse_rest_response(self, data: dict[str, Any]) -> ListCreativeFormatsResponse:
         """Parse REST JSON into ListCreativeFormatsResponse."""

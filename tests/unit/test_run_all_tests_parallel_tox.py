@@ -36,12 +36,31 @@ from scripts.check_truncated_reports import truncation_report
 from tests.unit.test_run_all_tests_contract import _REPO_ROOT, _RUNNER
 
 _CREATIVE_AGENT_STACK = _REPO_ROOT / "scripts" / "creative-agent-stack.sh"
+_CHECK_TRUNCATED = _REPO_ROOT / "scripts" / "check_truncated_reports.py"
 
 _DOCKER_STUB = """#!/usr/bin/env bash
 # Records every invocation of this fake `docker` (argv, space-joined) to
 # $DOCKER_STUB_LOG, then reports success unconditionally so run_all_tests.sh's
 # control flow proceeds exactly as it would against a real, healthy stack.
+#
+# "As it would against a healthy stack" includes WRITING THE REPORTS. tox runs
+# inside the container, so its `.tox/<suite>.json` never reaches the host when
+# `docker` is stubbed -- and the runner's missing-report arm correctly fails a
+# run that produced none ("a suite that produced none was not measured"). A stub
+# that swallows the tox call without leaving reports behind is simulating a
+# stack where every suite died, not a healthy one. Emit a minimal report per
+# suite on the tox invocation so the simulation is faithful; the shape is what
+# scripts/check_truncated_reports.py reads (collected/total/deselected).
 printf '%s\\n' "$*" >> "$DOCKER_STUB_LOG"
+case "$*" in
+  *tox*)
+    mkdir -p .tox
+    for _s in unit integration bdd bdd_inprocess bdd_e2e admin e2e ui storyboard; do
+      printf '%s' '{"summary": {"collected": 1, "total": 1, "passed": 1, "deselected": 0}, "exitcode": 0}' \\
+        > ".tox/${_s}.json"
+    done
+    ;;
+esac
 exit 0
 """
 
@@ -56,6 +75,9 @@ def _run_with_stubbed_docker(tmp_path: Path) -> tuple[subprocess.CompletedProces
     (workdir / "scripts").mkdir(parents=True)
     shutil.copy2(_RUNNER, workdir / "run_all_tests.sh")
     shutil.copy2(_CREATIVE_AGENT_STACK, workdir / "scripts" / "creative-agent-stack.sh")
+    # The runner shells out to this after collecting reports (main, PR #2091):
+    # a truncated suite must not be mistakable for a green one.
+    shutil.copy2(_CHECK_TRUNCATED, workdir / "scripts" / "check_truncated_reports.py")
 
     stub_bin = tmp_path / "stub_bin"
     stub_bin.mkdir()

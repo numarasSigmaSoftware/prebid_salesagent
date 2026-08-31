@@ -15,7 +15,7 @@ from fastapi.params import Depends
 from src.core.auth_policy import AUTH_OPTIONAL_SKILLS
 
 _REST_HANDLER_BY_SKILL = {
-    "get_adcp_capabilities": "get_capabilities",
+    "get_adcp_capabilities": "get_adcp_capabilities",
     "get_products": "get_products",
     "list_authorized_properties": "list_authorized_properties",
     "list_creative_formats": "list_creative_formats",
@@ -98,8 +98,8 @@ class TestRouteSignaturesUseDependsForIdentity:
         assert isinstance(param.default, Depends), "identity should use Depends"
 
     def test_get_capabilities_has_identity_param(self):
-        param = self._get_identity_param("get_capabilities")
-        assert param is not None, "get_capabilities should have an 'identity' parameter"
+        param = self._get_identity_param("get_adcp_capabilities")
+        assert param is not None, "get_adcp_capabilities should have an 'identity' parameter"
         assert isinstance(param.default, Depends), "identity should use Depends"
 
     def test_list_creative_formats_has_identity_param(self):
