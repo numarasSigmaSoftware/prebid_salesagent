@@ -73,7 +73,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # POST-S8: Buyer knows extension namespaces
     # POST-S10: Buyer knows pricing models
     # POST-S18: Buyer knows reporting delivery methods
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-main-rest @main-flow @a2a @post-s1 @post-s2 @post-s3 @post-s4 @post-s5 @post-s6 @post-s7 @post-s8 @post-s10 @post-s18
   Scenario: Discover complete capabilities via A2A
@@ -94,7 +94,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And the response should include media_buy.portfolio with primary_channels "display", "social", "ctv"
     And the response should include last_updated as a valid timestamp
     # POST-S1 through POST-S8, POST-S10, POST-S18 verified (same as MCP path)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-main-readonly @main-flow @post-f1
   Scenario: Capabilities discovery is read-only — no state change
@@ -206,7 +206,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # @bva capabilities_degradation: tenant absent
     # POST-S1: Buyer knows AdCP v3.1 version envelope (supported_versions + deprecated major_versions) (minimal)
     # POST-S2: Buyer knows media_buy protocol (minimal)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-ext-a-a2a @extension @ext-a @degradation @a2a @partition
   Scenario: no_tenant — minimal capabilities via A2A
@@ -311,7 +311,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # POST-F2: Buyer knows what failed and the error code
     # POST-F1: No state change (read-only)
     # POST-F3: Suggestion included when possible (A2A ServerError may not support it)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-ext-c-mcp @extension @ext-c @auth @mcp @degradation
   Scenario: MCP request with invalid auth token — silently ignored
@@ -511,7 +511,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And media_buy.execution.targeting should include geo_proximity section
     # POST-S5: Buyer knows execution capabilities
     # POST-S5: Targeting capabilities verified (v3.1 removed device_platform, device_type, audience_include, audience_exclude)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-targeting-partitions @partition @boundary @targeting @post-s5
   Scenario Outline: Targeting capability configurations - <partition>
@@ -581,7 +581,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # v3.1: adcp.supported_versions (release-precision strings like "3.0", "3.1", "3.1-beta")
     # v3.1: adcp.major_versions remains for 3.x backwards compatibility (removed in 4.0)
     # POST-S16: Buyer knows release-precision AdCP versions for pinning
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-build-version @v31 @main-flow @post-s17 @boundary
   Scenario: build-version — optional advisory build_version is semver and not used for negotiation
@@ -592,7 +592,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And buyers should not use adcp.build_version for version negotiation
     # v3.1: adcp.build_version is advisory only; buyers MUST NOT use for negotiation
     # POST-S17: build_version surfaced for incident triage
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-idempotency-supported @v31 @main-flow @post-s15 @partition @boundary
   Scenario Outline: idempotency-supported — IdempotencySupported discriminated union shape
@@ -603,7 +603,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And the response should include the discriminator-required fields for <posture>
     # v3.1: adcp.idempotency is REQUIRED (no default; sellers without it are non-compliant)
     # @bva idempotency: supported=true / supported=false / replay_ttl_seconds boundary
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                                | posture                                            | supported |
@@ -621,7 +621,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And adcp.idempotency.supported should be a boolean discriminator
     # v3.1: Sellers without idempotency declaration are non-compliant and unsafe for retries
     # POST-S15: Buyer knows the idempotency posture (required for safe retry on mutating requests)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-idempotency-in-flight-bound @v31 @invariant @boundary
   Scenario: idempotency-in-flight-bound — in_flight_max_seconds must not exceed replay_ttl_seconds
@@ -630,7 +630,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent calls get_adcp_capabilities MCP tool
     Then adcp.idempotency.in_flight_max_seconds should be less than or equal to adcp.idempotency.replay_ttl_seconds
     # v3.1 PRE-BIZ7: in_flight_max_seconds <= replay_ttl_seconds (validators enforce cross-field)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-supported-protocols-extended @v31 @main-flow @post-s2 @partition @boundary
   Scenario: supported-protocols-extended — v3.1 enum extends supported_protocols to seven values
@@ -639,7 +639,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent calls get_adcp_capabilities MCP tool
     Then each value in supported_protocols should be one of "media_buy", "signals", "governance", "sponsored_intelligence", "creative", "brand", "measurement"
     # v3.1: enum adds "brand" and "measurement"
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-supports-proposals @v31 @main-flow @post-s18 @partition @boundary
   Scenario Outline: supports-proposals — proposal lifecycle commitment flag (v3.1)
@@ -649,7 +649,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then media_buy.supports_proposals should equal <expected>
     # v3.1: media_buy.supports_proposals — when true, seller is graded against proposal-lifecycle storyboards
     # POST-S18: Buyer knows proposal-lifecycle support + reporting_delivery_methods / offline_delivery_protocols
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                          | supports_proposals_state            | expected |
@@ -665,7 +665,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then media_buy.reporting_delivery_methods should equal <methods>
     And media_buy.offline_delivery_protocols should reflect <protocols>
     # v3.1: media_buy.reporting_delivery_methods enum [webhook, offline]; offline_delivery_protocols only meaningful when "offline" present
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                            | methods              | protocols             |
@@ -685,7 +685,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And media_buy.content_standards should include supports_webhook_delivery as a boolean
     # v3.1: media_buy.content_standards block (supports_local_evaluation, supported_channels, supports_webhook_delivery)
     # POST-S19: Buyer knows content_standards capability surface
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-trusted-match-surfaces @v31 @main-flow @post-s20 @partition @boundary
   Scenario Outline: trusted-match-surfaces — TMP surfaces declaration (v3.1)
@@ -696,7 +696,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And each surface should be one of "website", "mobile_app", "ctv_app", "desktop_app", "dooh", "podcast", "radio", "streaming_audio", "ai_assistant"
     # v3.1: media_buy.execution.trusted_match.surfaces (experimental); axe_integrations DEPRECATED
     # POST-S20: Buyer knows the trusted_match TMP surfaces (and deprecated axe_integrations)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                      | surfaces                                       |
@@ -715,7 +715,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And media_buy.execution.axe_integrations is treated as deprecated in v3.1
     # v3.1 BR-15: axe_integrations is DEPRECATED; sellers SHOULD declare TMP via trusted_match.surfaces instead
     # @known-gap: axe_integrations remains schema-valid through 3.x; new integrations use trusted_match
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-creative-specs @v31 @main-flow @post-s21
   Scenario: creative-specs — VAST/MRAID/VPAID/SIMID creative specification support
@@ -728,7 +728,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And media_buy.execution.creative_specs.simid should be a boolean
     # v3.1: media_buy.execution.creative_specs (vast_versions, mraid_versions, vpaid, simid)
     # POST-S21: Buyer knows creative specification capabilities
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-brand-block @v31 @main-flow @post-s22 @partition @boundary
   Scenario: brand-block — brand protocol capabilities (experimental in v3.1)
@@ -742,7 +742,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And brand.generation_providers should be an array of provider names
     # v3.1: brand top-level block (rights, right_types, available_uses, generation_providers, description)
     # POST-S22: Buyer knows brand protocol capabilities
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-request-signing-posture @v31 @main-flow @post-s23 @partition @boundary
   Scenario Outline: request-signing-posture — RFC 9421 request signing declaration
@@ -753,7 +753,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And request_signing.covers_content_digest should be one of "required", "forbidden", "either"
     # v3.1: request_signing top-level block (supported, covers_content_digest, required_for, warn_for, supported_for, protocol_methods_*)
     # POST-S23: Buyer knows the request_signing posture (RFC 9421 covers_content_digest + tool/method namespaces)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                                  | posture                                                       | supported |
@@ -772,7 +772,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # v3.1 BR-12: required_for / warn_for / supported_for carry AdCP tool names only;
     # JSON-RPC method names (containing "/") belong in protocol_methods_*
     # BR-12: Namespaces MUST NOT be conflated
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-request-signing-subset @v31 @invariant @boundary
   Scenario: request-signing-subset — required_for and warn_for must be subset of supported_for
@@ -783,7 +783,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And request_signing.warn_for should be a subset of request_signing.supported_for
     And request_signing.warn_for should be disjoint from request_signing.required_for
     # v3.1 PRE-BIZ6: x-adcp-validation enforces required_for ⊆ supported_for AND warn_for ⊆ supported_for AND warn_for ∩ required_for = ∅
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-webhook-signing @v31 @main-flow @post-s24 @partition @boundary
   Scenario Outline: webhook-signing — RFC 9421 webhook signing posture
@@ -795,7 +795,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And each algorithm should be one of "ed25519", "ecdsa-p256-sha256"
     # v3.1: webhook_signing top-level block (supported, profile, algorithms, legacy_hmac_fallback)
     # POST-S24: Buyer knows the webhook_signing posture for outbound webhook signature verification
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                                | posture                                                                       | supported |
@@ -812,7 +812,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then webhook_signing.supported should equal <required>
     # v3.1 PRE-BIZ4: webhook_signing.supported MUST be true when reporting_delivery_methods contains "webhook"
     # OR content_standards.supports_webhook_delivery is true
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                       | emission_state                                                                    | required |
@@ -831,7 +831,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # v3.1 PRE-BIZ5: identity.brand_json_url REQUIRED when any signing posture declared (storyboard 3.x; schema-required 4.0)
     # v3.1 BR-13: identity.brand_json_url is DISTINCT from sponsored_intelligence.brand_url (rendering pointer)
     # POST-S25: Trust-root pointer for signing-key discovery
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-identity-key-origins @v31 @main-flow @post-s25 @partition
   Scenario Outline: identity-key-origins — JWKS origin separation per signing purpose
@@ -841,7 +841,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then identity.key_origins.<purpose> should equal <origin>
     And the purpose should have a corresponding signing posture declared elsewhere
     # v3.1: identity.key_origins maps purpose → origin (governance_signing, request_signing, webhook_signing, tmp_signing)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                       | purpose             | origin                              |
@@ -858,7 +858,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then identity.compromise_notification.emits should be a boolean
     And identity.compromise_notification.accepts should be a boolean
     # v3.1: identity.compromise_notification {emits, accepts} for identity.compromise_notification webhook subscription
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-identity-required-when-signing @v31 @invariant @boundary @post-s25
   Scenario Outline: identity-required-when-signing — signing posture without brand_json_url is rejected
@@ -868,7 +868,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then the response should be <verdict>
     # BR-RULE-234 INV-5: signing posture declared but identity absent or empty {} → response rejected as missing brand_json_url
     # BR-RULE-234 INV-2: no signing posture → identity MAY be absent
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                                  | signing_posture                                  | identity_state | verdict                                     |
@@ -890,7 +890,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And each entry may include methodology_version as a version string
     # v3.1: measurement.metrics[] (metric_id, standard_reference, accreditations, unit, methodology_url, methodology_version)
     # POST-S26: Buyer knows measurement vendor metric catalog
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-measurement-accreditations @v31 @main-flow @post-s26 @partition @boundary
   Scenario Outline: measurement-accreditations — third-party accreditation entries on metrics
@@ -900,7 +900,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then the metric accreditation should include accrediting_body
     And the accreditation may include certification_id, valid_until, and evidence_url
     # v3.1: measurement.metrics[].accreditations[] has accrediting_body (required), certification_id, valid_until, evidence_url
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | partition_boundary                                              | accreditation                                                                                          |
@@ -917,7 +917,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And each scenario should be one of "force_creative_status", "force_account_status", "force_media_buy_status", "force_session_status", "simulate_delivery", "simulate_budget_spend"
     # v3.1: compliance_testing.scenarios enum (force_creative_status, force_account_status, force_media_buy_status, force_session_status, simulate_delivery, simulate_budget_spend)
     # POST-S27: Buyer knows compliance testing scenarios
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-specialisms @v31 @main-flow @post-s28
   Scenario: specialisms — kebab-case specialism claims graded by AAO compliance runner
@@ -928,7 +928,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And each specialism should roll up to a protocol in supported_protocols
     # v3.1: specialisms[] (kebab-case enum IDs; each must map to a parent protocol in supported_protocols)
     # POST-S28: Buyer knows the seller's specialisms and experimental_features conformance surface
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-experimental-features @v31 @main-flow @post-s28
   Scenario: experimental-features — dot-separated ids of implemented experimental surfaces
@@ -938,7 +938,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then experimental_features should be a unique array of dot-separated ids
     And each id should match pattern "^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$"
     # v3.1: experimental_features[] (pattern: ^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-advisory-errors @v31 @main-flow @post-s29
   Scenario: advisory-errors — top-level errors[] is advisory and does not fail discovery
@@ -950,7 +950,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And the response should still be a valid capabilities response
     # v3.1: errors top-level (advisory; does not signify discovery failure)
     # POST-S29: Advisory errors do not fail capabilities discovery
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-creative-extended @v31 @main-flow @post-s14
   Scenario: creative-extended — creative protocol exposes library / generation / transformation in v3.1
@@ -981,7 +981,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # PRE-BIZ11 / BR-19: supported_versions REQUIRED with minItems:1; supported_majors DEPRECATED; build_version advisory only
     # POST-F2: Buyer knows the specific error code
     # POST-F4: Buyer can re-pin and retry without another discovery round-trip
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-version-unsupported-major-fallback @v31 @extension @ext-f @error @post-f4 @partition
   Scenario: version-unsupported-major-fallback — major-version negotiation falls back to supported_versions
@@ -994,7 +994,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     And the error should include "suggestion" field advising re-pin to a supported_versions entry
     # v3.1 Phase 1.5 wave A: when buyer pins adcp_major_version, details still carries supported_versions
     # POST-F4: supported_versions is authoritative even for major-version pins
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
   @T-UC-010-v31-version-unsupported-build-version-advisory @v31 @extension @ext-f @error @post-f4 @boundary
   Scenario: version-unsupported-build-version-advisory — build_version is advisory and MUST NOT drive negotiation
@@ -1019,7 +1019,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then the request_signing posture sets should be <expected> against the monotonicity invariant
     # signing_posture_monotonicity.yaml: required_for/warn_for ⊆ supported_for; warn_for ∩ required_for = ∅;
     # protocol_methods_required_for ⊆ protocol_methods_supported_for (namespace-split buckets)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | boundary_point                                                                      | expected |
@@ -1038,7 +1038,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then the idempotency posture should be <expected> against the replay-ttl bounds
     # capabilities_idempotency_posture.yaml: replay_ttl_seconds in [3600, 604800];
     # in_flight_max_seconds <= replay_ttl_seconds (cross-field PRE-BIZ7)
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | boundary_point                              | expected |
@@ -1054,7 +1054,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent calls get_adcp_capabilities MCP tool
     Then the capabilities response should be <expected> for the sandbox flag
     # sandbox_response_semantics.yaml: account.sandbox on get_adcp_capabilities response
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | boundary_point                                          | expected |
@@ -1070,7 +1070,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent inspects the error details
     Then the VERSION_UNSUPPORTED error details should be <expected>
     # version_unsupported_details.yaml: supported_versions REQUIRED minItems:1; build_version advisory only
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | boundary_point                          | expected |
@@ -1085,7 +1085,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     When the Buyer Agent calls get_adcp_capabilities MCP tool
     Then the capabilities response should be <expected> for the trust-root pointer
     # signing_trust_root.yaml: brand_json_url REQUIRED when any signing posture signal is declared
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/protocol/get-adcp-capabilities-response.json
 
     Examples:
       | boundary_point                                                              | expected |
@@ -1102,7 +1102,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     Then the webhook_signing posture should be <expected>
     # webhook_signing_posture.yaml: supported MUST be true when mutating webhooks emitted;
     # algorithms ⊆ {ed25519, ecdsa-p256-sha256}
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/core/agent-signing-key.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/core/agent-signing-key.json
 
     Examples:
       | boundary_point                                          | expected |
@@ -1124,7 +1124,7 @@ Feature: BR-UC-010 Discover Seller Capabilities
     # adagents.json resolved via identity.brand_json_url (never the agent domain); when revoked_at
     # is present, a signature is verifiable only if its signing epoch is strictly before revoked_at.
     # Verification is performed by the buyer-side verifier (external system) — no seller-emitted error code.
-    # @source repo=adcp ref=v3.1-04f59d2d5 commit=04f59d2d5 path=static/schemas/source/core/agent-encryption-key.json
+    # @source repo=adcp ref=v3.1.1 commit=467fd93d7 path=static/schemas/source/core/agent-encryption-key.json
 
     Examples:
       | boundary_point                                                      | expected |

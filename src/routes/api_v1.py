@@ -261,7 +261,7 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
 
 
 @router.get("/capabilities")
-async def get_capabilities(identity: ResolvedIdentity | None = resolve_auth):
+async def get_adcp_capabilities(identity: ResolvedIdentity | None = resolve_auth):
     """Get AdCP capabilities (auth-optional discovery skill)."""
     response = await capabilities_module.get_adcp_capabilities_raw(identity=identity)
     return response.model_dump(mode="json")

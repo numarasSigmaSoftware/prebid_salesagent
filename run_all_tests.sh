@@ -252,21 +252,26 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 3
 done
 [ "$pg" = true ] || { echo "Postgres never became ready"; dc logs postgres; exit 1; }
-# The same guard for the SERVER, which was missing: $srv was computed and printed
-# and then never checked, so a stack whose app never came up proceeded silently
-# into the suites. Measured cost of that omission on 2026-08-24: the wait spun its
-# full 360s, said only "Postgres ready", and then bdd + e2e + ui produced 2537
-# errors -- "live E2E stack is unreachable", "Server not ready after 60s",
-# "TargetClosedError" -- none of which names the actual cause. One precondition
-# failure, reported once, replaces all of it.
+# $srv gets the SAME fail-fast treatment as $pg. It used to be computed, printed
+# on success, and then never checked -- so a stack whose server never became
+# healthy within the 360s deadline proceeded silently into every server-dependent
+# suite. That is not a smaller failure than a dead Postgres, it is a louder one:
+# bdd_e2e/e2e/ui then emit thousands of "live E2E stack is unreachable" /
+# "Server not ready after 60s" / TargetClosedError errors, none of which names
+# the actual cause. Measured on 2026-08-24: the wait spun its full 360s, said
+# only "Postgres ready", and the suites then produced 2537 errors -- one root
+# cause, zero of them a real defect. Infrastructure death must present as ONE
+# infrastructure failure, reported once.
 #
 # Unconditional because THIS path just started the stack a few lines above: if we
 # brought the server up and it never became healthy, that is a failure for every
 # caller, not a caller-specific one. Symmetric with the Postgres guard by design;
 # an asymmetry here is what hid the problem.
 [ "$srv" = true ] || {
-    echo "Server never became healthy (waited 360s for http://localhost:8080/health inside adcp-server)"
-    dc logs --tail=120 adcp-server
+    echo "ERROR: adcp-server never became healthy within the 360s deadline — aborting" >&2
+    echo "       (waited on http://localhost:8080/health inside adcp-server; every" >&2
+    echo "        server-dependent suite would otherwise error en masse)" >&2
+    dc logs --tail=120 adcp-server >&2
     exit 1
 }
 
@@ -337,14 +342,36 @@ if [ "${E2E_WORKERS:-0}" -gt 0 ] 2>/dev/null; then
             -e DATABASE_URL="$_admin/adcp_gw$i?sslmode=disable" adcp-server >/dev/null
     done
     echo "  waiting for $N per-worker servers to become healthy..."
+    # Same fail-fast reasoning as the template-migration check above: a worker
+    # whose server never came up cannot run a single e2e_rest scenario, so
+    # "(continuing)" only converts one infrastructure fault into a flood of
+    # scenario errors attributed to the wrong layer. Collect all of them first
+    # (one pass, so the operator sees every unhealthy worker rather than just
+    # the first) and then abort with the count.
+    _unhealthy=""
     for i in $(seq 0 $((N - 1))); do
         wd=$(( $(date +%s) + 120 )); ok=false
         while [ "$(date +%s)" -lt "$wd" ]; do
             docker exec "${COMPOSE_PROJECT_NAME}-server-gw$i" curl -sf http://localhost:8080/health >/dev/null 2>&1 && ok=true && break
             sleep 2
         done
-        [ "$ok" = true ] && echo "    server-gw$i ready" || echo "    server-gw$i NOT ready (continuing)"
+        if [ "$ok" = true ]; then
+            echo "    server-gw$i ready"
+        else
+            echo "    server-gw$i NOT ready"
+            _unhealthy="$_unhealthy gw$i"
+        fi
     done
+    if [ -n "$_unhealthy" ]; then
+        echo "ERROR: per-worker e2e server(s) never became healthy:$_unhealthy" >&2
+        echo "       aborting — these workers' scenarios would error en masse and" >&2
+        echo "       be misread as test failures rather than a stack failure." >&2
+        for i in $_unhealthy; do
+            echo "--- logs: ${COMPOSE_PROJECT_NAME}-server-$i ---" >&2
+            docker logs --tail 40 "${COMPOSE_PROJECT_NAME}-server-$i" >&2 2>&1 || true
+        done
+        exit 1
+    fi
     # COMPOSE_PROJECT_NAME must reach pytest so conftest e2e_stack builds the FULL
     # server name "<project>-server-gwN" (short "server-gwN" doesn't resolve).
     E2E_ENV_ARGS="-e E2E_PER_WORKER=1 -e BDD_E2E_XDIST_N=$N -e COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
@@ -380,15 +407,26 @@ RC=0
 chmod -R g+w . 2>/dev/null || true
 chmod -R go-w .git 2>/dev/null || true
 
-# Delete last run's reports BEFORE this run writes its own. The copy below is a
-# blanket `cp .tox/*.json`, so without this it publishes reports from envs THIS
-# run never executed, stamped into a fresh results dir as if they were current.
-# That is not hypothetical: `bdd` is swapped out for `bdd_inprocess,bdd_e2e`
-# whenever E2E_WORKERS>0 (see above), so a stale bdd.json from whenever
-# `tox -e bdd` last ran kept being republished -- one was a full DAY older than
-# its directory-mates and reported 6 failures against code that no longer
-# existed, which read as a live regression. It cuts the other way too: a suite
-# that silently stops running keeps publishing its last PASS forever.
+# Delete every previous run's report BEFORE this run writes its own, and do it in
+# exactly ONE place. `.tox/` is an ordinary persistent bind-mounted directory now
+# (see the extraction note below), so a report left there outlives the run that
+# wrote it. The copy below is per-suite -- it copies only the envs named in
+# $SUITES -- which already stops an env this run never executed from being
+# republished. What the copy cannot do is tell a report THIS run wrote from one a
+# prior run left behind for a suite that DID run and died before writing its own.
+# Purging first makes a stale report unrepresentable rather than merely
+# detectable: after this line, a report exists only if this run produced it, so a
+# suite that died reaches the missing-report arm below instead of quietly
+# republishing its last PASS forever.
+#
+# Blanket (`.tox/*.json`), not a $SUITES-scoped loop: a scoped loop leaves exactly
+# the not-run envs' reports sitting in `.tox/`, which is the class of staleness
+# documented at the copy below (`storyboard.json` republished for three runs). It
+# also bit `bdd`, which is swapped out for `bdd_inprocess,bdd_e2e` whenever
+# E2E_WORKERS>0 (see above): a stale bdd.json from whenever `tox -e bdd` last ran
+# kept being republished -- one was a full DAY older than its directory-mates and
+# reported 6 failures against code that no longer existed, read as a live
+# regression. Purging wholesale plus copying per-suite closes both directions.
 rm -f .tox/*.json
 
 dc run --rm --use-aliases $E2E_ENV_ARGS tests tox -p -e "$SUITES" || RC=$?
@@ -409,10 +447,49 @@ echo "Collecting JSON reports..."
 # insurance against $RESULTS_DIR having been removed or never created for
 # any reason) and let a real failure actually say something instead of
 # vanishing 23 minutes of work without a trace.
+#
+# Copy ONLY the suites THIS invocation ran, never `.tox/*.json` wholesale.
+# `.tox` used to be the tox_data NAMED VOLUME, destroyed by the cleanup trap's
+# `down -v` every run, so a wholesale copy could not pick up anything stale.
+# Removing that volume (so the non-root runner could write `.tox/<env>`) made
+# `.tox` an ordinary bind-mounted directory that PERSISTS between runs -- and
+# silently turned the same wholesale copy into a stale-report generator: a suite
+# this run never executed still contributes its last report, and downstream
+# tooling renders it as freshly measured.
+#
+# That is not hypothetical. `storyboard` is an opt-in env (not in tox's
+# env_list), so a bare `./run_all_tests.sh` never runs it -- yet three
+# consecutive runs published a storyboard.json from hours earlier, and the
+# numbers were read as this run's until an SDK version inside the report
+# contradicted the SDK that was actually installed.
+#
+# A missing report for a suite that DID run is an error, not an omission: it
+# means the suite died before writing one, which is exactly when its absence
+# most needs to be loud.
 mkdir -p "$RESULTS_DIR"
-if ! cp .tox/*.json "$RESULTS_DIR/"; then
-    echo "WARNING: failed to copy JSON reports into $RESULTS_DIR/ -- see error above." >&2
-    echo "         Reports are still in .tox/*.json inside $(pwd) if you need them by hand." >&2
+# Record WHICH suites this invocation ran, next to their reports. Consumers
+# cannot infer it: report timestamps do not separate "stale" from "ran early in
+# a long serial run" (measured: a genuine unit report was 16 min behind the
+# newest, a stale storyboard one 28 min — overlapping bands, so any threshold
+# misfires both ways). An explicit manifest is exact.
+printf '%s\n' "$SUITES" > "$RESULTS_DIR/.suites"
+_missing_reports=""
+for _suite in ${SUITES//,/ }; do
+    if [ -f ".tox/${_suite}.json" ]; then
+        cp ".tox/${_suite}.json" "$RESULTS_DIR/" || _missing_reports="$_missing_reports $_suite(copy-failed)"
+    else
+        _missing_reports="$_missing_reports $_suite"
+    fi
+done
+if [ -n "$_missing_reports" ]; then
+    echo "ERROR: no JSON report for suite(s):$_missing_reports" >&2
+    echo "       The suite ran but produced no report -- it died before writing one." >&2
+    echo "       Reports are how this run is graded; a suite that produced none was not measured." >&2
+    # The comment above already calls this "an error, not an omission". The code
+    # said RC=${RC:-0}, which leaves the exit code untouched — so a dead suite
+    # produced a GREEN run, and the file that publishes the numbers disagreed
+    # with its own docstring.
+    [ "$RC" -eq 0 ] && RC=1
 fi
 echo "Reports: $RESULTS_DIR/"
 ls -1 "$RESULTS_DIR"/*.json 2>/dev/null || echo "  (no JSON reports extracted)"

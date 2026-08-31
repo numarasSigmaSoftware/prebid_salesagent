@@ -35,6 +35,7 @@ from typing import Any
 
 from pytest_bdd import given, parsers, then, when
 
+from tests.bdd.steps._outcome_helpers import wire_error_envelope_or_none
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.helpers import assert_envelope_shape
 
@@ -141,7 +142,7 @@ def then_refused_on_wire(ctx: dict, code: str, recovery: str, field: str) -> Non
     assert result is not None, f"no dispatch recorded; ctx error: {ctx.get('error')!r}"
     assert result.is_error, f"the request was ACCEPTED — expected a {code} refusal. Payload: {result.payload!r}"
 
-    envelope = result.wire_error_envelope
+    envelope = wire_error_envelope_or_none(ctx)
     assert envelope is not None, (
         f"{ctx.get('transport')}: no wire error envelope — the refusal never reached a "
         f"transport boundary, so the buyer never sees it. Reconstructed error: {ctx.get('error')!r}"

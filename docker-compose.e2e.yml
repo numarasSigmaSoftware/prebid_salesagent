@@ -44,13 +44,45 @@ services:
 
   adcp-server:
     build: .
+    # NO `user:` directive, deliberately -- and this one is worth spelling out,
+    # because it used to carry the OPPOSITE fix.
+    #
+    # The problem it was solving is real: adcp-server and `tests` bind-mount the
+    # same /app, and whichever creates a path first owns it. The launcher created
+    # logs/audit.log as its own uid; adcp-server (image uid 1001) then could not
+    # open it; and because src/core/audit_logger.py:33 builds that FileHandler at
+    # MODULE IMPORT time, the server died before serving one request, surfacing
+    # as thousands of "Server not ready" errors instead of one permission error
+    # (reproduced twice on this worktree).
+    #
+    # The fix attempted here was to pin BOTH services to the same
+    # "${TEST_UID:-0}:${TEST_GID:-0}". That works on a ROOTFUL daemon, which is
+    # what its reasoning assumed ("no userns-remap on these hosts, so container
+    # root IS host root"). The run boxes are ROOTLESS, where it is wrong in both
+    # directions: with TEST_UID exported the container runs as that uid INSIDE
+    # the container and rootless maps it to a host SUBUID (~100000+uid), so /app
+    # collects files the run cannot write; without it -- a bare `docker compose
+    # up`, or cassini's supervisor invoking the stack -- the `:-0` default hits.
+    #
+    # Under rootless, container root ALREADY maps to the invoking user. Both
+    # services unset therefore land on ONE identity, which is what "make both
+    # sides one uid" was reaching for, without any uid plumbing to get wrong.
+    # cassini deleted the identical workaround on its own side for the same
+    # reason (cassini/identity.py: "a workaround for a root daemon, and there is
+    # no longer a root daemon").
+    #
+    # HOME: /tmp below is kept: harmless once the baked uid 1001 (which does have
+    # a passwd entry) is back, and removing it is a separate change.
     environment:
+      # A raw numeric uid has no /etc/passwd entry, so HOME would default to "/"
+      # (unwritable). Same reason the `tests` service sets this.
+      HOME: /tmp
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       # Pin strict schema validation (extra="forbid") for the e2e_rest boundary so
       # the live server rejects spec-invalid input the same way the dev/test
       # transports do. is_production() defaults to "development" already, but make
       # it explicit so a future Dockerfile/env change can't silently flip the
-      # boundary to production's lenient extra="ignore". (salesagent-hm9q)
+      # boundary to production's lenient extra="ignore".
       ENVIRONMENT: development
       SKIP_NGINX: "true"
       SKIP_CRON: "true"
@@ -89,7 +121,7 @@ services:
       # create flows resolve format specs server-side, and references carry the
       # PUBLIC canonical agent_url — without this, the registry's connection
       # alias has nothing to route to and the server calls the LIVE public host,
-      # which rate-limits under CI load (salesagent-9qe2). The runner service
+      # which rate-limits under CI load. The runner service
       # already sets the same value for the direct integration tests.
       CREATIVE_AGENT_URL: http://creative-agent:8080/api/creative-agent
       CREATE_DEMO_TENANT: "true"
@@ -105,8 +137,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
       # BLACKHOLE the live public creative agent: tests must NEVER depend on it
-      # (its catalog drifts and it rate-limits under CI load — salesagent-9qe2,
-      # salesagent-kczg). The registry aliases this host to the pinned in-network
+      # (its catalog drifts and it rate-limits under CI load,
+      #). The registry aliases this host to the pinned in-network
       # agent; if any code path regresses and connects to it verbatim, this makes
       # it fail INSTANTLY (connection refused) instead of flaking on a 429.
       - "creative.adcontextprotocol.org:127.0.0.1"
@@ -178,17 +210,6 @@ services:
       context: .
       dockerfile: Dockerfile.test
     environment:
-      # Unbuffered stdout/stderr for the tox process that actually runs the
-      # suite. cassini sets PYTHONUNBUFFERED on its supervisor's own subprocess
-      # env, but the work runs HERE -- a separate container started by
-      # `docker compose run tests` -- and this environment: block is a curated
-      # allowlist with no host passthrough, so it never arrived. Verified live
-      # by `docker exec ... env | grep PYTHONUNBUFFERED` returning nothing.
-      # Consequence: output sat in the buffer, so cassini's RunState.quiet_for
-      # climbed monotonically (0m34s -> 12m+) on a genuinely busy run at 1082%
-      # CPU that finished exit=0, crossing the 5-minute false-red threshold
-      # (reproduced end-to-end on a full in-network run).
-      PYTHONUNBUFFERED: "${PYTHONUNBUFFERED:-1}"
       # Written for the `user:` pin removed above, and RETAINED. Under that pin
       # a raw numeric UID had no /etc/passwd entry, so HOME defaulted to "/"
       # and Dockerfile.test's baked UV_CACHE_DIR=/cache/uv (root:root 755, no
@@ -199,6 +220,16 @@ services:
       # throwaway per-run cache, no reason to fight over its ownership too).
       HOME: /tmp
       UV_CACHE_DIR: /tmp/uv-cache
+      # Unbuffered stdout so the CI supervisor sees output as it is produced.
+      # This service is started by `docker compose run tests` — a SEPARATE
+      # container from the supervisor's own process — so setting
+      # PYTHONUNBUFFERED on the supervisor's env does not reach tox here, and
+      # this block is curated (no blanket host-env passthrough). Without it the
+      # supervisor's liveness heuristic sees no output on a genuinely busy run
+      # and reports a false stall: quiet_for climbed monotonically 0m34s -> 12m+
+      # past the 5-minute false-red threshold on a run at 1082% CPU that exited
+      # 0. Matches the ${VAR:-default} pattern used by BDD_E2E_ENABLED below.
+      PYTHONUNBUFFERED: "${PYTHONUNBUFFERED:-1}"
       # Fixed in-network DB address — never a host port, never collides. This is
       # the SUITE database used by unit(skip)/integration/bdd/admin.
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp_test?sslmode=disable
@@ -345,7 +376,7 @@ services:
   # (run_all_tests.sh for the in-network path; tests/e2e/conftest.py for the
   # host-side standalone path). NOT profile-gated: the SERVER resolves format
   # specs against this agent (CREATIVE_AGENT_URL) and the live public host is
-  # blackholed, so every e2e `up` needs it (salesagent-9qe2).
+  # blackholed, so every e2e `up` needs it.
   creative-pg:
     image: postgres:17-alpine
     environment:

@@ -93,8 +93,20 @@ A spec version bump is a deliberate change with downstream impact:
 3. Run `uv lock --upgrade-package adcp`.
 4. Update `EXPECTED_SPEC_VERSION` in `tests/unit/test_adcp_spec_version.py`.
 5. Update this document.
-6. Run `make quality` and address Pydantic field/type changes.
-7. Re-verify integration and BDD test coverage.
+6. Refresh the two storyboard artifacts that are pin-coupled but do not move
+   themselves:
+   - `tests/fixtures/adcp_storyboards_pinned/index.json` — run its
+     `_refresh.py` against a fresh `~/projects/adcp` clone at the new pin.
+     `tests/unit/test_architecture_storyboard_binding.py`'s
+     `test_fixture_index_version_matches_the_pin` fails until this is done.
+   - `tests/storyboard/runner/package.json`'s `@adcp/sdk` dependency — bump to
+     a release whose own `adcp_version` targets the new spec version (`npm
+     view @adcp/sdk@<v> adcp_version`), then `npm ci` in
+     `tests/storyboard/runner/`. `tests/storyboard/test_runner_sdk_pin.py`'s
+     `test_runner_sdk_targets_the_pinned_adcp_version` fails until this is
+     done.
+7. Run `make quality` and address Pydantic field/type changes.
+8. Re-verify integration and BDD test coverage.
 
 ## Pinned schema sources
 
@@ -153,4 +165,6 @@ spec bump must consider it separately from the schema-shape pin above.
 - `tests/unit/test_pinned_schema_single_source.py` — pins that `pinned_schema.py` tracks the SDK's own version, not an independently vendored one
 - `tests/helpers/adcp_schema_validator.py` — e2e request/response validation, delegates to `pinned_schema.py`
 - `tests/fixtures/adcp_schemas_pinned/` — vendored error-code `enumMetadata` `suggestion` text, sole remaining consumer `test_architecture_error_suggestion_enum_conformance.py` (independent pin, error-code reconciliation epic only — NOT a general schema-shape source)
+- `tests/fixtures/adcp_storyboards_pinned/index.json` — vendored, offline snapshot of the pinned compliance tree's storyboard structure (paths, phases, gates); pin-coupled, refreshed via its `_refresh.py`. Guarded by `tests/unit/test_architecture_storyboard_binding.py`'s `test_fixture_index_version_matches_the_pin`
+- `tests/storyboard/runner/package.json` — the TS conformance runner's `@adcp/sdk` pin; pin-coupled, independently of the Python SDK pin above. Guarded by `tests/storyboard/test_runner_sdk_pin.py`
 - `docs/adcp-spec-version.md` — this document
