@@ -126,11 +126,11 @@ def _scan_bdd_steps() -> set[XfailSite]:
 # ---------------------------------------------------------------------------
 # The pin. Allowlists can only SHRINK — never add a new triple, fix it instead.
 # ---------------------------------------------------------------------------
-# FIXME(#1858): 101 pre-existing inline-xfail sites (135 calls across 10 files)
+# FIXME(#1858): 100 pre-existing inline-xfail sites (134 calls across 10 files)
 # predate that Core Invariant. They are PINNED here, not swept: each must
 # migrate to a ledger tag (tests/bdd/conftest.py's *_XFAIL_TAGS maps, or
 # tests/bdd/e2e_rest_known_failures.txt) as its use case is next touched.
-# One reference for the whole set — deliberately NOT 101 annotated call sites.
+# One reference for the whole set — deliberately NOT 100 annotated call sites.
 #
 # tests/bdd/steps/domain/uc006_storyboard_creative_sync.py must appear ZERO
 # times: any triple bearing that path is a NEW violation, not an allowlisted one.
@@ -144,7 +144,6 @@ _ALLOWLIST: set[XfailSite] = {
     ("domain/uc004_delivery.py", "then_attribution_default", 1),
     ("domain/uc004_delivery.py", "then_geo_system", 1),
     ("domain/uc004_delivery.py", "then_packages_include_breakdown", 1),
-    ("domain/uc004_delivery.py", "then_single_probe", 1),
     ("domain/uc006_sync_creatives.py", "_assert_generative_build", 1),
     ("domain/uc006_sync_creatives.py", "_assert_per_creative_failure", 3),
     ("domain/uc006_sync_creatives.py", "_assert_standard_processing", 1),
