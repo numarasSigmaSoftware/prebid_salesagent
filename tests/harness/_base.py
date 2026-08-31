@@ -811,7 +811,15 @@ class BaseTestEnv:
 
         # Pop identity — used for the handler mock, not sent as a skill parameter.
         identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
-        a2a_identity = self.identity_for(Transport.A2A) if identity is NO_IDENTITY_OVERRIDE else identity
+        if presented_auth_token is not None:
+            # A presented token means the boundary under test must resolve the
+            # credential itself, so no pre-resolved identity is injected. Without this
+            # the harness sends a VALID identity alongside the token the scenario
+            # deliberately presented, and a rejected-credential scenario silently
+            # authenticates — the same defeat the REST update path had.
+            a2a_identity = None
+        else:
+            a2a_identity = self.identity_for(Transport.A2A) if identity is NO_IDENTITY_OVERRIDE else identity
 
         # The real A2A handler writes audit logs which require the tenant to exist
         # in the DB. Ensure the tenant record exists (idempotent) so audit logging

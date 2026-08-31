@@ -254,7 +254,12 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         client, identity, auth_headers = self._prepare_rest_request(kwargs)
 
         headers: dict[str, str] = dict(auth_headers)
-        if identity is not None:
+        # Identity-derived headers ONLY when no presented-token seam is in play.
+        # _prepare_rest_request still resolves an identity in presented-auth mode, so
+        # injecting its token here overwrote the credential the test deliberately
+        # presented — a scenario dispatching a REJECTED token silently sent a VALID
+        # one and succeeded, which is the opposite of what it was grading.
+        if not auth_headers and identity is not None:
             auth_token = identity.auth_token
             if auth_token:
                 headers["x-adcp-auth"] = auth_token
