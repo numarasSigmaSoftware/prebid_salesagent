@@ -300,7 +300,15 @@ class TestSyncAccountsA2ASuggestionParity:
         with AccountSyncEnv() as env:
             env.setup_default_data()
 
-            result = env.call_via(Transport.A2A, accounts=[{"operator": "no-brand.example"}])
+            # A flat-kwargs A2A dispatch does not get the spec-required key from the
+            # harness (only call_impl and build_rest_body supply one), so pass it
+            # explicitly: without it the request is rejected for the MISSING KEY and
+            # never reaches the missing-brand suggestion path this test grades.
+            result = env.call_via(
+                Transport.A2A,
+                accounts=[{"operator": "no-brand.example"}],
+                idempotency_key=fresh_idempotency_key("sync-accounts-suggestion-parity"),
+            )
 
             assert result.is_error, (
                 "An account entry missing brand must be rejected on the A2A wire, "
