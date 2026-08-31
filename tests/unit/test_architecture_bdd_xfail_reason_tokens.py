@@ -63,6 +63,17 @@ def _parser():
     return parse_xfail_reason, XfailReasonError
 
 
+def _conftest_under_grade() -> Path:
+    """The file the parser actually came from, asked of the imported module.
+
+    Not ``_CONFTEST``: that is this guard's own idea of where to look, and the
+    scan below is checked against where the parser really lives.
+    """
+    import tests.bdd.conftest as bdd_conftest
+
+    return Path(bdd_conftest.__file__).resolve()
+
+
 # The live #1607 reason, restated here rather than imported from the marker site: a
 # grader that reads its input out of the thing it grades moves with it and cannot
 # fail. This is the reason as it stands, tokens AND the prose sentence that made
@@ -116,6 +127,25 @@ def _xfail_reasons(path: Path) -> list[tuple[int, str]]:
             if kw.arg == "reason":
                 hits.append((node.lineno, "".join(_string_parts(kw.value))))
     return hits
+
+
+def _typed_reason_literals(path: Path) -> list[int]:
+    """Line numbers of every string literal in ``path`` that OPENS a typed reason.
+
+    A second, independent census of the same thing ``_xfail_reasons`` + the
+    ``cause=`` filter measure — deliberately not routed through ``_is_xfail_call``
+    or the ``reason=`` keyword lookup, so neutralising either of those makes the
+    two counts disagree instead of both going quietly to zero.
+
+    Reads string CONSTANTS rather than raw text: comments are not constants, and
+    conftest's own prose mentions ``"cause=`` three times while declaring one
+    typed reason. A ``grep`` would have counted four.
+    """
+    return [
+        node.lineno
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("cause=")
+    ]
 
 
 class TestTheTypedReasonParse:
@@ -233,7 +263,11 @@ class TestEveryTypedReasonInTheTreeParses:
         parse_xfail_reason, XfailReasonError = _parser()
         violations: list[str] = []
         typed_seen = 0
+        declared = 0
+        scanned: list[Path] = []
         for path in sorted(_BDD_DIR.rglob("*.py")):
+            scanned.append(path.resolve())
+            declared += len(_typed_reason_literals(path))
             for lineno, reason in _xfail_reasons(path):
                 if not reason.lstrip().startswith("cause="):
                     continue
@@ -244,9 +278,25 @@ class TestEveryTypedReasonInTheTreeParses:
                     rel = path.relative_to(_BDD_DIR.parents[1])
                     violations.append(f"{rel}:{lineno}: {exc}")
 
-        assert typed_seen >= 3, (
-            f"only {typed_seen} typed xfail reasons found under tests/bdd/; the tree had 3 when this "
-            f"guard was written, so the scan is no longer finding them and passes vacuously"
+        # Anti-vacuity, part 1: the walk reached the module whose parser is under
+        # grade. Derived from that module's own __file__, so a walk pointed at the
+        # wrong or an empty directory reddens here rather than reporting zero
+        # violations over zero files.
+        assert _conftest_under_grade() in scanned, (
+            f"the scan walked {len(scanned)} file(s) under {_BDD_DIR} and none of them was "
+            f"{_conftest_under_grade()}, the conftest this guard imports the parser from — "
+            f"the scan is looking somewhere else, so its verdict covers nothing"
+        )
+        # Anti-vacuity, part 2: two independent censuses of the same tree agree.
+        # Deliberately NOT a floor. Typed reasons are meant to graduate, and a
+        # hardcoded minimum turns the last graduation into a guard failure; what
+        # must never happen is the xfail-call walk losing sight of a typed reason
+        # the tree still holds. When the last one graduates both counts read 0 and
+        # this passes, which is the correct answer.
+        assert typed_seen == declared, (
+            f"the xfail-call walk found {typed_seen} typed reason(s) under tests/bdd/ but the tree "
+            f"holds {declared} literal(s) beginning 'cause=' — the two disagree, so the walk is no "
+            f"longer reaching every typed reason and anything it skipped goes ungraded"
         )
         assert not violations, "typed xfail reasons that do not parse:\n" + "\n".join(violations)
 
