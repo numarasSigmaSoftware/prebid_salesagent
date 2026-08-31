@@ -531,7 +531,7 @@ async def get_products(
 # default). Mirrors the ``resolve_auth = Depends(...)`` pattern used across this router.
 #
 # The bare ``@router.get("/capabilities")`` handler these sit in place of is
-# superseded by ``get_capabilities`` below — a strict superset of it (the same
+# superseded by ``get_adcp_capabilities`` below — a strict superset of it (the same
 # auth-optional discovery call, plus the context / protocols / idempotency_key
 # query params and the negotiated-version dependency). Declaring both would be a
 # duplicate route on the same path.
@@ -567,17 +567,18 @@ def _parse_protocols_query(raw: list[str] | None) -> list[str] | None:
     return parsed
 
 
-# operation_id declares this route's AdCP tool identity, because the handler
-# name diverges from it (the path reads /capabilities, the tool is
-# get_adcp_capabilities). The harness address table indexes REST routes by tool
-# name and prefers a self-declared operation_id over the handler name, so
-# without this the route is unaddressable and the whole table fails to build.
+# The handler is named after the AdCP tool it implements, not after its path
+# (which reads /capabilities) — the convention every other handler in this
+# router follows, and what the harness address table indexes REST routes by.
+# operation_id states the same identity explicitly: the table prefers a
+# self-declared operation_id over the handler name, so the route stays
+# addressable even if the path or the function is later renamed.
 @router.get(
     "/capabilities",
     operation_id="get_adcp_capabilities",
     dependencies=[Depends(_version_after_resolve)],
 )
-async def get_capabilities(
+async def get_adcp_capabilities(
     identity: ResolvedIdentity | None = resolve_auth,
     context: str | None = None,
     protocols: list[str] | None = _protocols_query,
