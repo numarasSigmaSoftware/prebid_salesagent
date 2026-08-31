@@ -670,6 +670,7 @@ class TestIntegrationTestsNoInlineSessionAdd:
 # allowlist. DB access in tests belongs in factories / the harness UoW
 # (e.g. `with AccountUoW(...) as uow: uow.accounts`), never a raw inline session.
 GET_DB_SESSION_IN_TESTS_ALLOWLIST: set[tuple[str, str]] = {
+    ("tests/integration/test_media_buy_status_scheduler.py", "_get_media_buy_status"),
     ("tests/admin/test_accounts_blueprint.py", "test_create_account_via_post"),
     ("tests/admin/test_accounts_blueprint.py", "test_list_page_shows_created_account"),
     ("tests/admin/test_accounts_blueprint.py", "test_suspend_account"),

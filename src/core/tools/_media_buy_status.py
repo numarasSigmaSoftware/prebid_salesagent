@@ -152,7 +152,7 @@ CANONICAL_STATUSES: frozenset[str] = frozenset(PERSISTED_STATUS_TO_CANONICAL.val
 # The schedulers previously hardcoded partial copies and stranded
 # legacy "ready" rows — reported active by get_media_buy_delivery but never
 # sent delivery webhooks and never migrated.
-SERVING_PERSISTED_STATUSES: frozenset[str] = frozenset(
+SERVING_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == CANONICAL_SERVING
 )
 
@@ -166,7 +166,7 @@ SERVING_PERSISTED_STATUSES: frozenset[str] = frozenset(
 # onto — so renaming the modern spelling in the map moves the scheduler's writes
 # with it instead of stranding a literal in a branch. Membership pinned in
 # test_media_buy_status_consistency.py.
-_IDENTITY_PERSISTED_STATUSES: dict[str, str] = {
+_IDENTITY_PERSISTED_STATUSES: dict[str, PersistedMediaBuyStatus] = {
     canonical: persisted for persisted, canonical in PERSISTED_STATUS_TO_CANONICAL.items() if persisted == canonical
 }
 SERVING_PERSISTED_WRITE_TARGET: str = _IDENTITY_PERSISTED_STATUSES[CANONICAL_SERVING]
@@ -177,7 +177,9 @@ COMPLETED_PERSISTED_WRITE_TARGET: str = _IDENTITY_PERSISTED_STATUSES[CANONICAL_C
 # purely date-gated (already approved), no creative check. Lives here beside the
 # set it derives from so the scheduler can't drift a partial copy;
 # membership pinned in test_media_buy_status_consistency.py.
-LEGACY_SERVING_ALIASES: frozenset[str] = SERVING_PERSISTED_STATUSES - {"active"}
+LEGACY_SERVING_ALIASES: frozenset[PersistedMediaBuyStatus] = SERVING_PERSISTED_STATUSES - {
+    PersistedMediaBuyStatus.ACTIVE
+}
 
 # Persisted pre-serving states the STATUS SCHEDULER may auto-promote to "active"
 # once the flight starts (and creatives are approved). Derived from the map (all
@@ -187,9 +189,9 @@ LEGACY_SERVING_ALIASES: frozenset[str] = SERVING_PERSISTED_STATUSES - {"active"}
 # subtraction is business taxonomy the map cannot encode on its own, so it is
 # spelled out here (and pinned in test_media_buy_status_consistency.py) rather
 # than hardcoded as a partial copy that could silently drift.
-PENDING_PERSISTED_STATUSES: frozenset[str] = frozenset(
+PENDING_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v == "pending_start"
-) - {"pending", "pending_approval"}
+) - {PersistedMediaBuyStatus.PENDING, PersistedMediaBuyStatus.PENDING_APPROVAL}
 
 # The canonical statuses the delivery impl reports on — a serving buy plus the
 # one terminal state that still carries delivery data. Used both as the delivery
@@ -200,7 +202,7 @@ PENDING_PERSISTED_STATUSES: frozenset[str] = frozenset(
 REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_SERVING, CANONICAL_COMPLETED})
 
 # Persisted counterpart of the polling delivery tool's reportable vocabulary.
-REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
+REPORTABLE_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in REPORTABLE_CANONICAL_STATUSES
 )
 # The completion-only subset of REPORTABLE: persisted statuses that map to canonical
@@ -210,7 +212,9 @@ REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
 # consumer so a change to the status map moves both together; the reader is the e2e
 # final-webhook helper (tests/e2e/utils.py), which needs the single deterministic
 # status a completing buy lands on.
-COMPLETED_PERSISTED_STATUSES: frozenset[str] = REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
+COMPLETED_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = (
+    REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
+)
 
 # Reporting webhooks are persistent channels, so "no more data will ever
 # arrive" is a broader question than the spec's completion-only "final". The
@@ -232,10 +236,12 @@ WEBHOOK_TERMINAL_CANONICAL_STATUSES: frozenset[str] = frozenset({CANONICAL_COMPL
 WEBHOOK_REPORTABLE_CANONICAL_STATUSES: frozenset[str] = frozenset(
     {CANONICAL_SERVING, *WEBHOOK_TERMINAL_CANONICAL_STATUSES}
 )
-WEBHOOK_REPORTABLE_PERSISTED_STATUSES: frozenset[str] = frozenset(
+WEBHOOK_REPORTABLE_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = frozenset(
     k for k, v in PERSISTED_STATUS_TO_CANONICAL.items() if v in WEBHOOK_REPORTABLE_CANONICAL_STATUSES
 )
-WEBHOOK_TERMINAL_PERSISTED_STATUSES: frozenset[str] = WEBHOOK_REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
+WEBHOOK_TERMINAL_PERSISTED_STATUSES: frozenset[PersistedMediaBuyStatus] = (
+    WEBHOOK_REPORTABLE_PERSISTED_STATUSES - SERVING_PERSISTED_STATUSES
+)
 
 # The FIVE webhook-only response fields — every field whose schema description
 # says "only present in webhook deliveries"
@@ -325,13 +331,17 @@ def resolve_canonical_status(buy: Any, reference_date: date, *, simulate: bool =
     Returns:
         One of ``CANONICAL_STATUSES``.
     """
-    persisted = (buy.status or "").lower()
-    if persisted and persisted not in PERSISTED_STATUS_TO_CANONICAL:
+    # Casing is normalized by the ONE coercion (PersistedMediaBuyStatus.parse_or_none),
+    # not lowered by hand here. The non-raising half is the right door for this caller:
+    # an unmapped value must still be DESCRIBED, not refused — refusing it is what once
+    # made fetch-by-ID report MEDIA_BUY_NOT_FOUND for a buy that plainly exists.
+    member = PersistedMediaBuyStatus.parse_or_none(buy.status)
+    if buy.status and member not in PERSISTED_STATUS_TO_CANONICAL:
         # Not a failure (the buy is still described, date-refined as serving), but
         # a writer has introduced a persisted value this map doesn't know about —
         # surface it so the map can be updated rather than silently guessing.
-        logger.warning("Unmapped persisted media-buy status %r; treating as serving state", persisted)
-    canonical = PERSISTED_STATUS_TO_CANONICAL.get(persisted, CANONICAL_SERVING)
+        logger.warning("Unmapped persisted media-buy status %r; treating as serving state", buy.status)
+    canonical = CANONICAL_SERVING if member is None else PERSISTED_STATUS_TO_CANONICAL.get(member, CANONICAL_SERVING)
 
     should_refine = canonical == CANONICAL_SERVING or (simulate and canonical not in TERMINAL_STATUSES)
     if not should_refine:

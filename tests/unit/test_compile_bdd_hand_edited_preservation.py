@@ -54,6 +54,8 @@ def _hand_edited_tag_lines(text: str) -> list[str]:
 # removed, because the raw and parsed counts fall together.
 _EXPECTED_HAND_EDITED: set[tuple[str, str]] = {
     ("BR-UC-004-deliver-media-buy-metrics.feature", "T-UC-004-poll-omits-webhook-fields"),
+    ("BR-UC-019-query-media-buys.feature", "T-UC-019-confirmed-at-null-survives-exclude-none"),
+    ("BR-UC-019-query-media-buys.feature", "T-UC-019-listing-omits-unrenderable-row"),
 }
 
 

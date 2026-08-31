@@ -170,7 +170,6 @@ _XFAIL_TAGS: dict[str, str] = {
     "T-UC-003-main": "implementation_date, budget, sandbox not populated in update response — spec-production gap",
     "T-UC-003-alt-timing": "implementation_date not populated in update response — spec-production gap",
     # FIXME: UC-003 pause — sandbox flag not populated in update response
-    "T-UC-003-alt-pause": "sandbox not populated in pause response — spec-production gap",
     # FIXME: UC-003 optimization_goals — affected_packages empty in response
     "T-UC-003-alt-optimization-goals": "affected_packages not populated for optimization_goals changes — spec-production gap",
     # FIXME: UC-003 ext-t — invoice_recipient authorization (BR-RULE-214) not implemented;
@@ -312,7 +311,6 @@ _XFAIL_TAGS: dict[str, str] = {
     # Schema-level validate_pricing_option() enforces XOR but _validate_pricing_model_selection()
     # works at ORM level (is_fixed + rate + price_guidance) and doesn't check for both/neither.
     "T-UC-002-inv-006-3": "pricing XOR invariant (both set) not validated in create flow — spec-production gap",
-    "T-UC-002-inv-006-4": "pricing XOR invariant (neither set) error lacks suggestion field — spec-production gap",
     # RESOLVED: budget positivity validation now works — removed stale xfail T-UC-002-inv-008-2
     # FIXME: ASAP case sensitivity error code mismatch
     # Production: Pydantic rejects "ASAP" → ValidationError, spec expects INVALID_REQUEST.

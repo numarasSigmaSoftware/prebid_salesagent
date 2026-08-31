@@ -382,7 +382,16 @@ class WebhookURLValidator:
         target (e.g. an arbitrary 192.168.x.x) is still rejected even
         under testing -- see test_validate_for_testing_blocks_private_networks.
         """
-        hostname = (urlparse(url).hostname or "").lower()
+        try:
+            hostname = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            # A URL malformed enough to break the parser (e.g. an unterminated
+            # IPv6 bracket) is not a trusted test host. Returning False rather
+            # than propagating matters: this runs INSIDE the SSRF gate, and an
+            # exception here escapes the gate instead of rejecting the URL —
+            # a security check that fails open. Graded by
+            # test_the_ssrf_gate_returns_rejected_rather_than_raising.
+            return False
         if hostname in {"localhost", "127.0.0.1"}:
             return True
         configured_host = os.environ.get("ADCP_WEBHOOK_HOST", "").lower()

@@ -275,6 +275,8 @@ class MediaBuyStatusScheduler:
         except Exception as e:
             logger.error("Failed to update media buy statuses: %s", e, exc_info=True)
 
+        return summary
+
     def _compute_new_status(self, media_buy: MediaBuy, now: datetime, session) -> PersistedMediaBuyStatus | None:
         """The status this sweep should write, or ``None`` to leave the row alone.
 

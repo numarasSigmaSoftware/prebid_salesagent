@@ -51,11 +51,13 @@ export COMPOSE_PROJECT_NAME="$(printf '%s' "${COMPOSE_PROJECT_NAME:-adcp-innet-$
 # plumbing at all. Exporting `id -u` here actively broke that -- rootless maps a
 # non-zero container uid to a host SUBUID, which is what left /app/logs
 # unwritable and killed adcp-server at import.
-# The delivery-webhook scheduler runs on the SERVER (adcp-server), gated by this
-# interval. docker-compose.e2e.yml defaults it empty (scheduler off); the host
-# e2e path sets it to 5 via conftest. Mirror that so test_daily_delivery_webhook
-# gets a report. Compose interpolates this into the adcp-server service env.
-export DELIVERY_WEBHOOK_INTERVAL="${DELIVERY_WEBHOOK_INTERVAL:-5}"
+# NOTE: DELIVERY_WEBHOOK_INTERVAL is deliberately NOT exported here. An
+# unconditional export defeats the per-suite scoping below, which starts the
+# server-side scheduler ONLY for suites that grade its tick. Exporting it for
+# every invocation put a 5s scheduler under bdd_e2e, whose per-scenario TRUNCATE
+# takes its locks in the opposite order to the scheduler's selection query --
+# a real PostgreSQL deadlock that failed roughly half of in-network runs.
+# Graded by tests/unit/test_run_all_tests_contract.py.
 
 # Parallelism defaults, sized against DOCKER'S memory rather than the host's.
 #
