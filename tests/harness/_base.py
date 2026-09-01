@@ -1145,7 +1145,13 @@ class BaseTestEnv:
             # request so every transport grades the same raw envelope.
             return {**req_fields, **kwargs}
         if req is None:
-            return {}
+            # Not {} unconditionally: a read tool dispatched with req=None still
+            # carries explicit boundary kwargs (notably idempotency_key) that MUST
+            # reach the REST body — identity is already popped by
+            # _prepare_rest_request, so what remains here is body-relevant. Returning
+            # {} silently dropped the key list_creative_formats' idempotency tests
+            # send, letting REST grade a request that never carried it.
+            return {key: value for key, value in kwargs.items() if value is not None}
         raise NotImplementedError(
             f"{type(self).__name__}.build_rest_body() received non-Pydantic 'req': {type(req)}. "
             "Override build_rest_body() to handle this type."

@@ -39,6 +39,10 @@ def when_update_media_buy_with_unknown_id(ctx: dict) -> None:
     payload = {
         "media_buy_id": ctx["fabricated_media_buy_id"],
         "paused": True,
+        # AdCP 3.1.1 requires idempotency_key on every mutating request, validated
+        # before the media-buy lookup. This scenario grades the not-found path, so
+        # it must carry a (fresh) key to get past the required-key gate.
+        "idempotency_key": str(uuid4()),
         "context": {"correlation_id": correlation_id},
     }
     dispatch_via_client(ctx, "update_media_buy", payload)
@@ -70,6 +74,9 @@ def when_update_media_buy_recancel(ctx: dict) -> None:
     payload = {
         "media_buy_id": media_buy.media_buy_id,
         "canceled": True,
+        # Required on every mutating request (AdCP 3.1.1); this scenario grades
+        # re-cancel behavior, not the required-key gate, so carry a fresh key.
+        "idempotency_key": str(uuid4()),
         "context": {"correlation_id": correlation_id},
     }
     dispatch_via_client(ctx, "update_media_buy", payload)

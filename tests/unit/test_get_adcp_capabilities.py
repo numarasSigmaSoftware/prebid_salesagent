@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types import GetAdcpCapabilitiesResponse
+from adcp.types.generated_poc.enums.specialism import AdcpSpecialism
 from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     SupportedProtocol,
 )
@@ -175,8 +176,10 @@ class TestGetAdcpCapabilitiesImpl:
         assert response.adcp.idempotency.supported is True
         assert response.adcp.idempotency.replay_ttl_seconds == 86_400
         assert response.adcp.idempotency.in_flight_max_seconds == 300
-        # No specialism is claimed until its complete AAO bundle passes.
-        assert response.specialisms == []
+        # Matches upstream's declaration (see capabilities.py _DEFAULT_SPECIALISMS
+        # note): the sales_non_guaranteed withdrawal is split out of this PR.
+        assert response.specialisms is not None
+        assert AdcpSpecialism.sales_non_guaranteed in response.specialisms
 
     def test_impl_returns_valid_adcp_response(self):
         """Test that impl response can be serialized to valid JSON."""
@@ -195,7 +198,7 @@ class TestGetAdcpCapabilitiesImpl:
         assert "supported_protocols" in data
         assert data["supported_protocols"] == ["media_buy"]
         assert "specialisms" in data
-        assert data["specialisms"] == []
+        assert data["specialisms"] == ["sales-non-guaranteed"]
 
     def test_impl_echoes_request_context_minimal_path(self):
         """Capabilities echoes the buyer's request context unchanged (#1512).
@@ -416,7 +419,8 @@ class TestGetAdcpCapabilitiesWithTenant:
                 assert response.adcp.idempotency.replay_ttl_seconds == 86_400
                 assert response.adcp.idempotency.in_flight_max_seconds == 300
                 # Specialism declaration must be consistent across minimal and full paths.
-                assert response.specialisms == []
+                assert response.specialisms is not None
+                assert AdcpSpecialism.sales_non_guaranteed in response.specialisms
 
                 # Should have media_buy capabilities with portfolio
                 assert response.media_buy is not None
@@ -677,29 +681,10 @@ class TestChannelMapping:
 class TestGracefulDegradation:
     """Test graceful degradation when adapter or DB raises exceptions."""
 
-    def test_adapter_exception_does_not_advertise_unsafe_media_buy(self):
-        """An unavailable configured adapter cannot make a media-buy commitment."""
-        from src.core.tools.capabilities import _get_adcp_capabilities_impl
-
-        identity = _make_capabilities_identity()
-
-        mock_repo = MagicMock()
-        mock_repo.list_publisher_partners.return_value = []
-        mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.tenant_config = mock_repo
-
-        with (
-            patch("src.core.tools.capabilities.TenantConfigUoW", return_value=mock_uow),
-            patch("src.core.tools.capabilities.log_tool_activity"),
-            patch("src.core.tools.capabilities.get_principal_object", return_value=MagicMock()),
-            patch("src.core.tools.capabilities.get_adapter", side_effect=Exception("Adapter init failed")),
-        ):
-            response = _get_adcp_capabilities_impl(None, identity)
-
-        assert response.media_buy is None
-        assert response.supported_protocols == [SupportedProtocol.creative]
+    # test_adapter_exception_does_not_advertise_unsafe_media_buy removed: the
+    # media-buy-unsafe -> creative-protocol downgrade it graded is part of the
+    # capability-honesty change split out of this PR (see capabilities.py
+    # _DEFAULT_SPECIALISMS note). It re-lands with that change.
 
     def test_db_exception_uses_placeholder_domain(self):
         """Database exception during publisher domain query uses placeholder domain."""

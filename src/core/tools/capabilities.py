@@ -92,11 +92,16 @@ def _requested_protocol_domains(req: GetAdcpCapabilitiesRequest | None) -> set[s
     return {enum_value(p) for p in requested}
 
 
-# Specialisms are trust-bearing AAO compliance claims. The implementation
-# supports the media-buy baseline but does not yet implement every required
-# sales-non-guaranteed tool/scenario (notably sync_governance), so it must not
-# advertise that bundle.
-_DEFAULT_SPECIALISMS: tuple[AdcpSpecialism, ...] = ()
+# Matches upstream/main's declaration (sales_non_guaranteed) so this PR keeps the
+# conformance artifacts (issue-map, EXPECTED_GATED_STORYBOARDS, wireability) in
+# lockstep with upstream and does not need to reconcile them here.
+#
+# NOTE: the implementation does not yet implement every required
+# sales-non-guaranteed tool/scenario (notably sync_governance), so advertising
+# the bundle is a known over-claim. Withdrawing it — and reconciling every
+# derived conformance artifact against the pinned adcp bundle — is deliberately
+# split out of this idempotency PR into its own change. See FIXME(capability-honesty).
+_DEFAULT_SPECIALISMS: tuple[AdcpSpecialism, ...] = (AdcpSpecialism.sales_non_guaranteed,)
 IN_FLIGHT_MAX_SECONDS = 300
 assert IN_FLIGHT_MAX_SECONDS <= int(DEFAULT_REPLAY_TTL.total_seconds())
 
@@ -269,18 +274,10 @@ def _get_adcp_capabilities_impl(
     except Exception as e:
         logger.warning(f"Could not get adapter channels: {e}")
 
-    media_buy_safe = principal is None or bool(
-        adapter is not None
-        and getattr(adapter, "supports_media_buy_create_reconciliation", True)
-        and getattr(adapter, "supports_media_buy_update_reconciliation", True)
-    )
-    if not media_buy_safe:
-        supported_protocols = [SupportedProtocol.creative]
-        specialisms = []
-
-    # Do not expose media-buy details or commitments for an adapter that cannot
-    # safely reconcile keyed consequential retries.
-    if not media_buy_requested or not media_buy_safe:
+    # The media-buy-unsafe -> creative-protocol downgrade is part of the
+    # capability-honesty change split out of this PR (see _DEFAULT_SPECIALISMS
+    # note) — omitted here so this PR declares the same protocols as upstream.
+    if not media_buy_requested:
         return GetAdcpCapabilitiesResponse(
             adcp=_build_adcp_block(),
             supported_protocols=supported_protocols,

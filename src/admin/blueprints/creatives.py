@@ -591,7 +591,14 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     "media_buy",
                     media_buy_id,
                     tool_name="create_media_buy",
-                    statuses={"input-required"},
+                    # The PERSISTED status of a create_media_buy step held pending
+                    # creatives is "requires_approval" (media_buy_create.py,
+                    # context_manager.create_workflow_step). "input-required" is only
+                    # its WIRE rendering (context_manager: wire_status = "input-required"
+                    # if new_status == "requires_approval"), so querying that here never
+                    # matched a real step — the lease-claim path silently never fired,
+                    # and unblock only executed via the no-mapping fallback below.
+                    statuses={"requires_approval"},
                     recover_processing_before=datetime.now(UTC) - timedelta(minutes=5),
                 )
 

@@ -243,15 +243,13 @@ _XFAIL_TAGS: dict[str, str] = {
         "NOT_CANCELLABLE for a refused cancel specifically — a code-specialization gap, "
         "not a missing terminal-state guard (that guard is media_buy_update.py:411)"
     ),
-    # GH #1075 -- idempotency_key support on update_media_buy and sync_creatives.
-    "T-UC-006-idempotency-replay": (
-        "sync_creatives re-executes the write on a repeated idempotency_key; no replay "
-        "record exists in production — GH #1075"
-    ),
-    "T-UC-006-idempotency-conflict": (
-        "sync_creatives does not detect a materially different payload under a reused "
-        "idempotency_key; no payload hash is stored — GH #1075"
-    ),
+    # GH #1075 GRADUATED (this PR): sync_creatives now stores an idempotency
+    # attempt, replays a cached success on a repeated key, and conflicts on a
+    # materially different payload via canonical_payload_hash (src/core/tools/
+    # creatives/_sync.py: canonical_payload_hash / mark_idempotent_replay /
+    # _decode_sync_creatives_replay). T-UC-006-idempotency-replay and
+    # T-UC-006-idempotency-conflict xpass on the real wire, so their xfail
+    # entries are removed.
     # FIXME: UC-003 main/alt-timing — production doesn't populate these fields
     # Steps have hard assertions now; xfail at scenario level until production catches up.
     "T-UC-003-main": "implementation_date, budget, sandbox not populated in update response — spec-production gap",
@@ -862,43 +860,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             # `params["outcome"]` returns None and every row falls through unrouted.
             _row = (getattr(item, "callspec", None) and item.callspec.params.get("_pytest_bdd_example")) or {}
             _row_outcome = str(_row.get("outcome") or "")
-            if "CONFLICT" in _row_outcome and is_a2a:
-                # a2a fails EARLIER than the others and for a different reason, so it
-                # does not carry #1607's label. Measured: a probe in _update_media_buy_impl
-                # reads `req.revision=None` on a2a and `6` on mcp/rest, because
-                # _handle_update_media_buy_skill rebuilds the request from five hand-listed
-                # fields and forwards another hand-listed subset — `revision` is in neither.
-                # Implementing CONFLICT would NOT xpass this row; the token never arrives.
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=(
-                            "cause=transport-drops-parameter scope=per-transport ref=#1885 — the "
-                            "a2a skill handler discards `revision` before it reaches the tool, so "
-                            "this row cannot grade CONFLICT enforcement on a2a at all. NOT #1607: "
-                            "enforcing the check would leave this row red. #1885 is the remedy — "
-                            "route the handler through media_buy_update._build_update_request, which "
-                            "already forwards every field — so closing it makes this row gradeable. "
-                            "#1259 owns the separate question of why no guard sees the drop."
-                        ),
-                        strict=True,
-                    )
-                )
-            elif "CONFLICT" in _row_outcome:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=(
-                            "cause=production-gap scope=per-transport ref=#1607 — update_media_buy "
-                            "accepts a stale or ahead revision and returns success; the spec MUST "
-                            "reject it with CONFLICT. Steps execute, the token arrives (probed: "
-                            "req.revision=6 on mcp and rest), and the failure is the missing "
-                            "rejection. scope=per-transport because each transport enforces (or "
-                            "fails to enforce) independently, so each must xpass on its own when "
-                            "#1607 lands."
-                        ),
-                        strict=True,
-                    )
-                )
-            elif "INVALID_REQUEST" in _row_outcome:
+            # Graduated (this PR): the CONFLICT rows are no longer xfailed. Both
+            # gaps closed — the a2a skill handler now forwards `revision` (#1885, via
+            # media_buy_update._build_update_request) AND _update_media_buy_impl now
+            # rejects a stale/ahead revision with CONFLICT (#1607). Verified all
+            # transports XPASS(strict): production emits AdCPConflictError -> CONFLICT
+            # on the wire for a2a/mcp/rest. Only the INVALID_REQUEST branch below
+            # (revision 0 rejected by ge=1 at request construction, before the wire)
+            # remains a genuine harness limitation and stays xfailed.
+            if "INVALID_REQUEST" in _row_outcome:
                 item.add_marker(
                     pytest.mark.xfail(
                         reason=(

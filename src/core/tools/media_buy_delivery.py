@@ -257,7 +257,7 @@ def _get_media_buy_delivery_impl(
 
         reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
 
-        # Diff requested IDs vs found IDs to report missing ones (salesagent-mexj)
+        # Diff requested IDs vs found IDs to report missing ones
         not_found_errors: list[Error] = []
         # Per-buy adapter failures degrade (UC-004): record an advisory error and continue
         # with the other buys instead of aborting the whole multi-buy request.
