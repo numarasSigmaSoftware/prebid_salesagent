@@ -71,6 +71,10 @@ class GetProductsBody(SalesAgentBaseModel):
     brand: dict[str, Any] | str | None = None
     filters: dict[str, Any] | None = None
     account: dict[str, Any] | None = None  # AccountReference; resolved at the transport boundary
+    # Top-level property of get-products-request.json at AdCP 3.1.1. Omitting it
+    # made the field MCP+A2A-only, which is a protocol gap rather than a REST
+    # limitation.
+    property_list: dict[str, Any] | None = None
     adcp_version: str = "1.0.0"
 
 
@@ -254,6 +258,7 @@ async def get_products(body: GetProductsBody, identity: ResolvedIdentity | None 
             brand=body.brand,
             filters=body.filters,
             account=account_ref,
+            property_list=body.property_list,
         )
     response = await products_module._get_products_impl(req, identity)
     result = response.model_dump(mode="json")
