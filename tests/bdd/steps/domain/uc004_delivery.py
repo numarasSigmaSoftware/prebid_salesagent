@@ -1155,6 +1155,37 @@ def when_validate_webhook_config(ctx: dict) -> None:
     pricing_option = ctx.get("default_pricing_option")
     if product is not None:
         kwargs["packages"][0]["product_id"] = product.product_id
+        # This scenario grades the credential-length boundary (32-char accept),
+        # which sits DOWNSTREAM of create_media_buy's reporting-webhook capability
+        # gate (_validate_reporting_webhook_products): the daily reporting_webhook
+        # below is rejected with UNSUPPORTED_FEATURE unless the selected product
+        # declares it supports webhooks at that frequency. The default factory
+        # product leaves reporting_capabilities NULL, so grant the capability here
+        # — otherwise the request never reaches the credential oracle.
+        from sqlalchemy import select as _select
+
+        from src.core.database.models import Product as _Product
+
+        env = ctx["env"]
+        session = env._session
+        row = session.scalars(
+            _select(_Product).filter_by(tenant_id=env._tenant_id, product_id=product.product_id)
+        ).first()
+        if row is not None:
+            # Complete ProductReportingCapabilities shape (core/product.json
+            # requires every field), with supports_webhooks=True + "daily" so the
+            # daily reporting_webhook below clears the capability gate. Mirrors the
+            # validated default in src/core/schemas/product.py, flipping
+            # supports_webhooks on.
+            row.reporting_capabilities = {
+                "available_reporting_frequencies": ["daily", "hourly", "monthly"],
+                "expected_delay_minutes": 1440,
+                "timezone": "UTC",
+                "supports_webhooks": True,
+                "available_metrics": ["impressions"],
+                "date_range_support": "date_range",
+            }
+            session.commit()
     if pricing_option is not None:
         kwargs["packages"][0]["pricing_option_id"] = pricing_option_id(pricing_option)
     kwargs["reporting_webhook"] = {
