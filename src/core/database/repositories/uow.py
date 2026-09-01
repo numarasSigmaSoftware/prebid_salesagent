@@ -42,7 +42,6 @@ from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.workflow import WorkflowRepository
-from src.core.helpers.account_helpers import sandbox_mode_for_buy
 
 if TYPE_CHECKING:
     from src.core.database.models import MediaBuy
@@ -160,6 +159,14 @@ class BuyKeyedSandboxMixin:
         ``AdCPAccountNotFoundError`` rather than silently defaulting to live.
         """
         assert self.accounts is not None
+        # Function-local: importing from the src.core.helpers PACKAGE runs its __init__,
+        # which eagerly pulls the full adapter graph (adapter_helpers -> src.adapters).
+        # A module-level import here closes a load cycle once a service in the adapter
+        # graph reaches this repository (webhook_delivery_service -> webhook_conclusion
+        # -> repositories.delivery, added in #1802). Resolving at call time defers that
+        # until the graph is fully loaded; the source-module patch strategy still works.
+        from src.core.helpers.account_helpers import sandbox_mode_for_buy
+
         return sandbox_mode_for_buy(self.accounts, media_buy)
 
     def sandbox_mode_by_id(self, media_buy_id: str) -> bool:

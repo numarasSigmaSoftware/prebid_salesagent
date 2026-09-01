@@ -346,7 +346,7 @@ class AdServerAdapter(ABC):
     # default is CPM only.
     supported_pricing_models: frozenset[str] = frozenset({"cpm"})
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, **kwargs: object) -> None:
         """Derive the reported capability from the executed one.
 
         ``AdapterCapabilities.supported_pricing_models`` is the capabilities surface's set;

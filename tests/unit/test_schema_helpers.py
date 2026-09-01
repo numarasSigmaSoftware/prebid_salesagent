@@ -39,6 +39,7 @@ from pydantic import BaseModel
 from src.core import schema_helpers
 from src.core.exceptions import AdCPValidationError
 from src.core.schema_helpers import (
+    require_push_notification_config,
     to_account_reference,
     to_context_object,
     to_property_list_reference,
@@ -152,7 +153,11 @@ def test_every_coercing_converter_is_classified() -> None:
                 fn(probe)  # a dict reaches the delegate on every coercing helper
 
     classified = {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS} | {
-        "to_account_reference"  # strict: rejects non-dict (tested above)
+        "to_account_reference",  # strict: rejects non-dict (tested above)
+        # Non-optional wrapper over the degrading ``to_push_notification_config``: a
+        # non-dict degrades to None inside the delegate, then the require-guard raises
+        # rather than returning None. Rejects (never returns None) — pinned below.
+        "require_push_notification_config",
     }
     assert delegating == classified, (
         "a helper delegating to _coerce_wire_object is unclassified — decide whether it "
@@ -166,6 +171,18 @@ def test_to_account_reference_rejects_unexpected_type(value: object) -> None:
     with pytest.raises(AdCPValidationError) as excinfo:
         to_account_reference(value)  # type: ignore[arg-type]
     assert excinfo.value.suggestion, "typed rejection must carry a top-level suggestion"
+
+
+@pytest.mark.parametrize("value", _UNEXPECTED_TYPES)
+def test_require_push_notification_config_rejects_unexpected_type(value: object) -> None:
+    """A non-dict config raises rather than resolving to ``None`` (require-contract).
+
+    The optional ``to_push_notification_config`` degrades a non-dict to ``None``; the
+    non-optional ``require_`` wrapper turns that ``None`` into a named ValueError so a
+    caller annotated as never receiving ``None`` cannot silently be handed one.
+    """
+    with pytest.raises(ValueError, match="resolved to None"):
+        require_push_notification_config(value)  # type: ignore[arg-type]
 
 
 def test_to_account_reference_rejection_matches_malformed_dict_shape() -> None:
