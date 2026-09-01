@@ -13,12 +13,13 @@ serialized wire (and the A2A submitted reconstruction) are genuinely exercised.
 
 from __future__ import annotations
 
-from typing import Any, Self
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
 from src.core.schemas import UpdateMediaBuyRequest
 from tests.harness._mixins import make_adapter_update_side_effect
 from tests.harness.media_buy_create import MediaBuyCreateEnv
+from tests.harness.transport import DeliverResult
 
 _UPDATE_MODULE = "src.core.tools.media_buy_update"
 
@@ -60,24 +61,16 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
 
     _seeded_media_buy_id: str = "NOT_SEEDED"
 
-    def __enter__(self) -> Self:
-        result = super().__enter__()
-        self._update_patchers: list = []
-        for name, target in _UPDATE_PATCHES.items():
-            patcher = patch(target)
-            self.mock[name] = patcher.start()
-            self._update_patchers.append(patcher)
-        self._configure_update_mocks()
-        return result
+    # The update patches ride the base's own patch loop rather than a second
+    # registry of their own — the sibling precedent is
+    # ``MediaBuyCreateEnv.EXTERNAL_PATCHES``. The base starts them, registers
+    # each with ``_guard``, and collects teardown errors instead of swallowing
+    # them, so no hook is needed here at all.
+    EXTERNAL_PATCHES = {**MediaBuyCreateEnv.EXTERNAL_PATCHES, **_UPDATE_PATCHES}
 
-    def __exit__(self, *exc: object) -> bool:
-        for patcher in reversed(self._update_patchers):
-            try:
-                patcher.stop()
-            except Exception:
-                pass
-        self._update_patchers = []
-        return super().__exit__(*exc)
+    def _configure_mocks(self) -> None:
+        super()._configure_mocks()
+        self._configure_update_mocks()
 
     def _configure_update_mocks(self) -> None:
         mock_adapter = MagicMock()
@@ -104,15 +97,24 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
             return self._call_update_impl(**kwargs)
         return super().call_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> Any:
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        # JUSTIFIED OVERRIDE: this env selects BOTH the tool and the parser from
+        # request CONTENT, so it can declare no single A2A_SKILL.
         if _is_update_request(kwargs):
+            # Returned AS IS: _call_update_a2a drives _run_a2a_handler, which
+            # already yields a DeliverResult carrying the REAL artifact wire.
+            # Re-wrapping it would both double-nest the payload and throw that
+            # wire away.
             return self._call_update_a2a(**kwargs)
-        return super().call_a2a(**kwargs)
+        return super().deliver_a2a(**kwargs)
 
-    def call_mcp(self, **kwargs: Any) -> Any:
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
+        # JUSTIFIED OVERRIDE: see deliver_a2a above.
         if _is_update_request(kwargs):
+            # As in deliver_a2a: _call_update_mcp already returns a DeliverResult
+            # carrying the real structured_content wire.
             return self._call_update_mcp(**kwargs)
-        return super().call_mcp(**kwargs)
+        return super().deliver_mcp(**kwargs)
 
     def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
         # Set the update-vs-create routing flag and leave it set THROUGH the base
@@ -181,13 +183,14 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         return _update_media_buy_impl(req=req, identity=identity)
 
     def _flatten_update_request(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Flatten an ``UpdateMediaBuyRequest`` into flat A2A/MCP skill parameters.
+        """Flatten an ``UpdateMediaBuyRequest`` into flat wire parameters.
 
         The A2A skill and MCP tool accept a flat param dict, not a request model,
         and reject the wrapper-unsupported fields — so pop ``req``, expand it
         (dropping those fields), then overlay any explicit kwargs. ``identity``
         (if present) is passed through; the real handlers pop and apply it.
-        Shared by the A2A and MCP update paths (DRY).
+        Shared by the A2A, MCP and REST update paths (DRY) — REST adapts the
+        result in :meth:`_build_update_rest_body` rather than re-spelling it.
         """
         req = kwargs.pop("req", None)
         if req is None:
@@ -196,7 +199,7 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         flat.update(kwargs)
         return flat
 
-    def _call_update_a2a(self, **kwargs: Any) -> Any:
+    def _call_update_a2a(self, **kwargs: Any) -> DeliverResult:
         # Drive the REAL on_message_send → _serialize_for_a2a → Task/Artifact
         # pipeline (mirrors MediaBuyCreateEnv.call_a2a), so _run_a2a_handler stashes
         # the true artifact DataPart as the wire_response and the submitted
@@ -212,7 +215,7 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
             **self._flatten_update_request(kwargs),
         )
 
-    def _call_update_mcp(self, **kwargs: Any) -> Any:
+    def _call_update_mcp(self, **kwargs: Any) -> DeliverResult:
         # Drive the REAL FastMCP Client pipeline (mirrors MediaBuyCreateEnv.call_mcp) so the
         # structured_content — the real MCP wire body — is stashed as wire_response and the
         # full middleware/auth chain runs, including the production with_error_logging
@@ -228,14 +231,28 @@ class MediaBuyDualEnv(MediaBuyCreateEnv):
         )
 
     def _build_update_rest_body(self, **kwargs: Any) -> dict[str, Any]:
+        """The REST body, built by the SAME flatten the A2A and MCP paths use.
+
+        Three REST-specific differences, and only three: ``identity`` is resolved
+        by ``_prepare_rest_request`` rather than travelling in the body,
+        ``media_buy_id`` rides the URL, and the response is parsed from HTTP.
+
+        The wrapper-unsupported pop is NOT a fourth: ``UpdateMediaBuyBody``
+        forbids the same field set for the same reason the flat A2A/MCP params
+        do — both mirror ``update_media_buy_raw``'s signature — so dropping them
+        here is equivalent, not a REST-specific liberty.
+
+        This used to be a second, non-overlaying spelling of the same flatten:
+        with a ``req`` present it returned early and silently discarded every
+        remaining kwarg, so a step passing ``req=`` plus an explicit field sent
+        an EMPTY body and graded production's answer to the empty request. The
+        When step's own docstring already named ``_flatten_update_request`` as
+        the one owner of that overlay; now it is.
+        """
         kwargs.pop("identity", None)
-        req = kwargs.pop("req", None)
-        if req is not None:
-            body = req.model_dump(mode="json", exclude_none=True)
-            body.pop("media_buy_id", None)
-            return body
-        kwargs.pop("media_buy_id", None)
-        return kwargs
+        body = self._flatten_update_request(kwargs)
+        body.pop("media_buy_id", None)
+        return body
 
     def _run_update_rest_request(self, **kwargs: Any) -> Any:
         # Shared preamble (identity resolution + commit + client + auth-dep

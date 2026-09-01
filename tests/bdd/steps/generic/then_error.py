@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pytest_bdd import parsers, then
 
+from tests.bdd.steps._outcome_helpers import payload_or_none, wire_error_envelope_or_none
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -19,14 +21,16 @@ def _wire_code(ctx: dict) -> str | None:
 
     ``dispatch_request`` stores the normalized ``TransportResult`` on
     ``ctx['result']`` and exposes the real two-layer envelope on
-    ``wire_error_envelope`` (REST/A2A/MCP). The wire code is the buyer-facing
-    contract; prefer it over the lossy reconstructed ``ctx['error']`` (which
-    collapses distinct wire codes onto one exception class — e.g. yields
-    ``RuntimeError`` for an unmapped code). Returns ``None`` on IMPL / no-wire
-    scenarios so callers fall back to the reconstructed exception (#1417).
+    ``wire_error_envelope`` (REST/A2A/MCP), read through the single guarded
+    accessor ``wire_error_envelope_or_none`` (``_outcome_helpers.py`` — no
+    hand-rolled ``getattr``). The wire code is the
+    buyer-facing contract; prefer it over the lossy reconstructed
+    ``ctx['error']`` (which collapses distinct wire codes onto one exception
+    class — e.g. yields ``RuntimeError`` for an unmapped code). Returns
+    ``None`` on IMPL / no-wire scenarios so callers fall back to the
+    reconstructed exception (#1417).
     """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     if not envelope:
         return None
     return (envelope.get("adcp_error") or {}).get("code")
@@ -37,19 +41,19 @@ def _wire_suggestion(ctx: dict) -> str | None:
 
     Mirrors ``_wire_code``: when the scenario dispatched through a wire transport
     (REST/A2A/MCP), the ``suggestion`` is the buyer-facing contract and must be
-    read from the real envelope, not the lossy reconstructed ``ctx['error']``.
-    STRICT error.json conformance: only the top-level ``suggestion`` on the
-    error object (``errors[0]`` or ``adcp_error`` layer) counts — a suggestion
-    buried in ``details`` is a conformance bug the harness surfaces, not masks
-    (#1417). Same canonical lookup as
+    read from the real envelope (via ``wire_error_envelope_or_none``, not a
+    hand-rolled ``getattr``), not the lossy reconstructed
+    ``ctx['error']``. STRICT error.json conformance: only the top-level
+    ``suggestion`` on the error object (``errors[0]`` or ``adcp_error`` layer)
+    counts — a suggestion buried in ``details`` is a conformance bug the
+    harness surfaces, not masks (#1417). Same canonical lookup as
     ``TransportResult.assert_wire_error``. Returns ``None`` on IMPL / no-wire
     scenarios so callers fall back to the reconstructed exception
     (#1417).
     """
     from tests.harness.transport import extract_wire_suggestion
 
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     return extract_wire_suggestion(envelope)
 
 
@@ -58,13 +62,14 @@ def _wire_error_object(ctx: dict) -> dict | None:
 
     Mirrors ``_wire_code`` / ``_wire_suggestion``: when the scenario dispatched
     through a wire transport (REST/A2A/MCP), field-presence checks must read the
-    real envelope's error object, not the lossy reconstructed ``ctx['error']``.
-    Prefers the ``errors[0]`` layer (per-error fields like ``field``) and falls
-    back to the envelope-level ``adcp_error``. Returns ``None`` on IMPL / no-wire
-    scenarios so callers fall back to the reconstructed exception (#1417).
+    real envelope's error object (via ``wire_error_envelope_or_none``, not a
+    hand-rolled ``getattr``), not the lossy reconstructed
+    ``ctx['error']``. Prefers the ``errors[0]`` layer (per-error fields like
+    ``field``) and falls back to the envelope-level ``adcp_error``. Returns
+    ``None`` on IMPL / no-wire scenarios so callers fall back to the
+    reconstructed exception (#1417).
     """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     if not envelope:
         return None
     errors = envelope.get("errors") or []
@@ -193,7 +198,7 @@ def then_operation_fails(ctx: dict) -> None:
     if error is not None:
         _assert_meaningful_error(error)
         return
-    resp = ctx.get("response")
+    resp = payload_or_none(ctx)
     if resp is not None and hasattr(resp, "errors") and resp.errors:
         # Promote the first response error to ctx["error"] so downstream
         # Then steps (error_code, error_message) can find it.
@@ -204,7 +209,7 @@ def then_operation_fails(ctx: dict) -> None:
         return
     raise AssertionError(
         "Expected the operation to fail but no error was recorded. "
-        f"ctx keys: {list(ctx.keys())}, response: {ctx.get('response')!r}"
+        f"ctx keys: {list(ctx.keys())}, response: {payload_or_none(ctx)!r}"
     )
 
 
@@ -225,7 +230,7 @@ def then_entire_sync_operation_fails(ctx: dict) -> None:
     """
     # ── Resolve the error object ────────────────────────────────────
     error = ctx.get("error")
-    resp = ctx.get("response")
+    resp = payload_or_none(ctx)
 
     # Promote response.errors if no top-level error was captured
     if error is None and resp is not None and hasattr(resp, "errors") and resp.errors:
@@ -418,12 +423,11 @@ def then_error_recovery(ctx: dict, recovery: str) -> None:
     ``assert_wire_error`` (the buyer-facing contract); IMPL/no-wire scenarios
     fall back to the reconstructed ``ctx['error']``.
     """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     if envelope is not None:
         wire_code = _wire_code(ctx)
         assert wire_code, f"Expected wire error code when asserting recovery={recovery!r}: {envelope}"
-        result.assert_wire_error(wire_code, recovery=recovery)
+        ctx["result"].assert_wire_error(wire_code, recovery=recovery)
         return
     error = ctx.get("error")
     assert error is not None, "No error recorded in ctx"
@@ -858,13 +862,24 @@ def then_terminal_failure(ctx: dict) -> None:
     error = ctx.get("error")
     assert error is not None, (
         "Expected a terminal failure but no error was recorded. "
-        f"ctx keys: {list(ctx.keys())}, response: {ctx.get('response')!r}"
+        f"ctx keys: {list(ctx.keys())}, response: {payload_or_none(ctx)!r}"
     )
     _assert_meaningful_error(error)
     from src.core.exceptions import AdCPError
 
     if isinstance(error, AdCPError):
-        assert error.recovery == "terminal", f"Expected terminal recovery, got '{error.recovery}'"
+        # Read the WIRE where there is one. ``error`` is the harness's
+        # RECONSTRUCTION, and its ``.recovery`` is now derived from its own class —
+        # so asserting on it compares the derivation against itself and would pass
+        # under any value the wire actually carried. On IMPL there is no wire by
+        # design, and the reconstruction is the real raised exception, so the
+        # class check is all that level can offer and is kept as the fallback.
+        wire = _wire_error_object(ctx)
+        if wire is not None:
+            actual = wire.get("recovery")
+            assert actual == "terminal", f"Expected terminal recovery on the wire, got {actual!r}: {wire}"
+        else:
+            assert error.recovery == "terminal", f"Expected terminal recovery, got '{error.recovery}'"
     elif hasattr(error, "recovery"):
         recovery = error.recovery.value if hasattr(error.recovery, "value") else str(error.recovery)
         assert recovery == "terminal", f"Expected terminal recovery, got '{recovery}'"
@@ -1036,7 +1051,7 @@ def _assert_no_new_media_buy(ctx: dict) -> None:
     3. Fallback: verify the operation errored (no response = no creation).
     """
     env = ctx["env"]
-    resp = ctx.get("response")
+    resp = payload_or_none(ctx)
 
     # Strategy 1: if we got a response with media_buy_id, it should not be in DB
     if resp is not None:

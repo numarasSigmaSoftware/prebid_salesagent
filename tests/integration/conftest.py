@@ -6,6 +6,7 @@ These fixtures are for tests that require database and service integration.
 
 import os
 import uuid
+from contextlib import ExitStack
 from datetime import UTC, date, datetime
 
 import psycopg2
@@ -19,6 +20,9 @@ admin_app = create_app()
 from src.core.database.database_session import get_db_session
 from src.core.database.models import MediaBuy, MediaPackage, Principal, Tenant
 from tests.fixtures import TenantFactory
+from tests.helpers.local_http_origin import run_local_origin
+from tests.helpers.local_mcp_origin import MCPOrigin, run_mcp_origin
+from tests.helpers.test_tls_material import load_gen_test_tls, server_ssl_context
 from tests.integration.migration_helpers import parse_postgres_url
 
 # ---------------------------------------------------------------------------
@@ -71,6 +75,68 @@ def make_package(media_buy_id: str, package_id: str, **kwargs) -> MediaPackage:
         package_id=package_id,
         **defaults,
     )
+
+
+@pytest.fixture
+def local_origin():
+    """A programmable HTTP origin on an ephemeral loopback port.
+
+    Deliberately does NOT depend on ``integration_db``: outbound-egress tests
+    need a real remote to talk to, not a database. Function-scoped and bound to
+    port 0 because the integration suite runs under xdist.
+    """
+    with run_local_origin() as origin:
+        yield origin
+
+
+@pytest.fixture
+def local_origin_tls(monkeypatch):
+    """An https sibling of :func:`local_origin` (#1757).
+
+    Serves real TLS off the same generated CA/leaf every other front in the
+    repo reuses (never a second mechanism) — verification is ON, exactly like
+    a production dial. ``SSL_CERT_FILE`` is set to the COMBINED bundle (system
+    CA + our private CA), not the private CA alone: the bare-CA trap already
+    broke `uv sync` against real pypi.org once (see docker-compose.e2e.yml's
+    own comment on this), and this fixture's monkeypatch is function-scoped so
+    the risk is contained regardless, but there is no reason to reintroduce it.
+    Callers that need a plain-http origin (refusal tests, e.g. verifying a
+    URL is never dialled) keep using :func:`local_origin` unchanged.
+    """
+    gen_test_tls = load_gen_test_tls()
+    gen_test_tls.ensure_test_tls()
+    monkeypatch.setenv("SSL_CERT_FILE", str(gen_test_tls.COMBINED_CERT))
+    with run_local_origin(ssl_context=server_ssl_context(gen_test_tls)) as origin:
+        yield origin
+
+
+@pytest.fixture
+def mcp_origin_tls(monkeypatch):
+    """Start a real MCP origin over TLS, serving the tools a test hands it.
+
+    The MCP sibling of :func:`local_origin_tls`: same generated CA/leaf, same
+    ``SSL_CERT_FILE`` combined-bundle trust, but the origin speaks MCP, so a
+    test can reach past the handshake and grade what a TOOL call does. Yielded
+    as a factory rather than a started origin because the tools are the test's
+    own — a fixture cannot know whether the tool under test succeeds, fails, or
+    fails only the first time.
+    """
+    gen_test_tls = load_gen_test_tls()
+    gen_test_tls.ensure_test_tls()
+    monkeypatch.setenv("SSL_CERT_FILE", str(gen_test_tls.COMBINED_CERT))
+
+    with ExitStack() as stack:
+
+        def start(**tools) -> MCPOrigin:
+            return stack.enter_context(
+                run_mcp_origin(
+                    tools=tools,
+                    certfile=gen_test_tls.SERVER_CERT,
+                    keyfile=gen_test_tls.SERVER_KEY,
+                )
+            )
+
+        yield start
 
 
 @pytest.fixture
@@ -1251,6 +1317,43 @@ def seed_error_test_tenant(
         "principal_id": principal_id,
         "access_token": access_token,
     }
+
+
+@pytest.fixture
+def live_media_buy_env(integration_db):
+    """A ``MediaBuyDualEnv`` holding one ACTIVE, mid-flight media buy.
+
+    Shared by the two honor-side graders
+    (``test_spec_request_fields_accepted.py`` on the MCP path,
+    ``test_raw_wrapper_spec_fields_accepted.py`` on the raw A2A/REST path), so
+    the "a live buy that a cancellation must actually cancel" setup exists
+    once rather than per file.
+
+    Yields ``(env, media_buy)``. Callers that need the transport-generic
+    dispatcher wrap the env in ``AdCPTestClient`` themselves: the env's own
+    update dispatch flattens an ``UpdateMediaBuyRequest`` and pops
+    ``canceled``/``cancellation_reason`` on the way to the wire
+    (``tests/harness/media_buy_update.py`` ``_WRAPPER_UNSUPPORTED_FIELDS``),
+    which is the harness accommodating the very defect under test.
+    """
+    from datetime import timedelta
+
+    from tests.factories import MediaBuyFactory
+    from tests.harness.media_buy_dual import MediaBuyDualEnv
+
+    with MediaBuyDualEnv(tenant_id="honor-cancel", principal_id="test_principal") as env:
+        tenant, principal, _product, _pricing_option = env.setup_media_buy_data()
+        media_buy = MediaBuyFactory(
+            tenant=tenant,
+            principal=principal,
+            status="active",
+            currency="USD",
+            start_time=datetime.now(UTC) - timedelta(days=1),
+            end_time=datetime.now(UTC) + timedelta(days=30),
+        )
+        env._commit_factory_data()
+        env._seeded_media_buy_id = media_buy.media_buy_id
+        yield env, media_buy
 
 
 @pytest.fixture

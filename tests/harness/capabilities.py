@@ -22,6 +22,11 @@ class CapabilitiesEnv(IntegrationEnv):
     gracefully (try/except) around the optional adapter channel lookup.
     """
 
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "get_adcp_capabilities"
+    A2A_SKILL = "get_adcp_capabilities"
+    RESPONSE_MODEL = GetAdcpCapabilitiesResponse
+
     EXTERNAL_PATCHES: dict[str, str] = {}
     REST_ENDPOINT = "/api/v1/capabilities"
 
@@ -36,14 +41,6 @@ class CapabilitiesEnv(IntegrationEnv):
         identity = kwargs.pop("identity", self.identity)
         req = kwargs.pop("req", None)
         return _get_adcp_capabilities_impl(req=req, identity=identity)
-
-    def call_a2a(self, **kwargs: Any) -> Any:
-        """Dispatch get_adcp_capabilities through the REAL A2A pipeline."""
-        return self._run_a2a_handler("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> Any:
-        """Call get_adcp_capabilities via Client(mcp) — full pipeline dispatch."""
-        return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
 
     def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
         """GET /api/v1/capabilities — no request body (unlike the POST discovery routes)."""

@@ -363,43 +363,6 @@ Catches two "No Quiet Failures" violations:
 
 **Current known violations:** 17 `ctx.get("env")` + 22 `hasattr(env, ...)` in `uc004_delivery.py`.
 
-### Obligation Test Quality Guard
-
-**File:** `tests/unit/test_architecture_obligation_test_quality.py`
-
-**What it enforces:** Every test tagged with `Covers: <obligation-id>` must
-actually CALL production code from `src.*`, not just import it.
-
-**Why it matters:** A test with a `Covers:` tag claims to verify a behavioral
-contract. If the test body only imports a function without calling it, it
-inflates coverage metrics without providing assurance. This catches the gaming
-pattern: `from src.core.tools import _impl  # noqa: F401` with no actual call.
-
-#### How it works
-
-The guard scans obligation-tagged test files using AST:
-
-1. Finds all `test_*` functions whose docstring contains `Covers: <id>`
-2. For non-xfail tests: checks for `ast.Call` nodes that invoke production
-   names (imported from `src.*`, `tests.harness.*`, `tests.helpers.*`, or
-   `tests.factories.*`). Transitivity is handled — calling a helper that
-   calls production code counts.
-3. For xfail tests (stubs): weaker check — must at least import from `src.*`
-   to show intent, but doesn't need to call it (the function may not exist yet).
-
-#### Tests
-
-| Test | What It Checks |
-|------|---------------|
-| `test_no_new_sham_tests` | No new obligation-tagged tests that don't call production code |
-| `test_allowlist_entries_still_violations` | Stale allowlist detection |
-| `test_violation_count_tracked` | Allowlist size matches actual violation count |
-
-#### Current known violations
-
-Tracked in `obligation_test_quality_allowlist.json`. Allowlist can only shrink.
-Tracked by `salesagent-9q5g`.
-
 ### Single Migration Head Guard
 
 **File:** `tests/unit/test_architecture_single_migration_head.py`
@@ -474,6 +437,43 @@ response attribute access, roundtrip tests. See `.pre-commit-coverage-map.yml`.
    entry remains
 5. Add FIXME comments at each violation site: `# FIXME(#<gh-issue>): description` (GitHub issue/PR number, never a beads id)
 6. Document the guard in this file
+
+## Symbol subjects and shape subjects
+
+A guard's subject is either a **symbol** — a function, class or constant that
+exists in `src/` or the pinned SDK — or a **shape**: a code pattern with no name
+to import, like "a bare `except` placed ahead of a specific one".
+
+The rule:
+
+> **If the subject is a symbol, BIND it — import or resolve it in the guard
+> module, so a rename fails here. If the subject is a shape, prose is correct;
+> there is nothing to import.**
+
+The sorting question is not "does the constant hold an identifier?" It is:
+
+> **If the subject were renamed, does this guard go SILENT or LOUD?**
+
+Bind the silent ones. A string-matching guard whose subject is renamed keeps
+passing over a codebase that no longer contains what it scans for — it reports
+clean because it finds nothing, which is indistinguishable from finding nothing
+wrong. That is the failure mode binding removes: an unresolvable import cannot
+be green.
+
+Two things worth knowing before writing one:
+
+- A **module-level** import buys a collection failure, but it aborts the whole
+  unit run and masks every other result. For a heavy module, use
+  `importlib.import_module` inside the test — a rename still reddens
+  `make quality`, as a failure rather than a collection error.
+- Prefer **containment over derivation**. Asserting the guard's vocabulary is a
+  subset of production's catches production losing a member. Deriving the
+  vocabulary FROM production makes the guard track whatever production says,
+  which is the opposite of a guard.
+
+This page does not list which guards are which kind. Such a list is prose about
+symbols, which is exactly the artifact that goes stale without anything noticing
+— the reason the rule above exists.
 
 ## Running Guards
 

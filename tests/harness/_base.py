@@ -23,6 +23,8 @@ Multi-transport support (subclasses may also override):
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +35,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # harness-driven tests; setdefault so an explicit override still wins.
 # (src.core.main._background_schedulers_enabled reads this at lifespan runtime.)
 os.environ.setdefault("ADCP_RUN_BACKGROUND_SCHEDULERS", "false")
+
+# Runtime import: DeliverResult is CONSTRUCTED here (the dispatch return contract),
+# not merely annotated, so it cannot live in the TYPE_CHECKING block below.
+from tests.harness.transport import DeliverResult, strip_a2a_protocol_fields
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -80,7 +86,7 @@ def _adcp_error_from_code(
     )
 
     # Read class-level identity from the _default_error_code ClassVar slot
-    # (option-A refactor per ). error_code is an instance
+    # error_code is an instance
     # attribute set in __init__; reading it off the class would return the
     # descriptor, not the wire code string.
     _CODE_TO_CLASS: dict[str, type[AdCPError]] = {
@@ -125,10 +131,16 @@ def _adcp_error_from_code(
         f"INTERNAL code {error_code!r} reached harness reconstruction — production wire leaked an internal-only code"
     )
     exc_cls = _CODE_TO_CLASS.get(error_code, AdCPError)
+    # ``recovery`` is deliberately NOT passed: it is a read-only property derived
+    # from the wire code, so the reconstruction reports the same classification
+    # production does. The value actually observed on the wire is not lost — the
+    # caller stashes the whole real envelope as ``_wire_error_envelope`` (surfaced
+    # as ``result.wire_error_envelope``), which is where a test that wants to grade
+    # the wire's own recovery must read it. Asserting ``.recovery`` on this object
+    # would compare the derivation against itself and pass under any wire value.
     reconstructed = exc_cls(
         message=message,
         details=details,
-        recovery=recovery or "terminal",
         suggestion=suggestion,
         field=field,
     )
@@ -302,6 +314,36 @@ def _unwrap_a2a_server_error(exc: Exception) -> Exception:
     return exc
 
 
+def _a2a_send_message_configuration(spec: dict[str, Any]) -> Any:
+    """Build the A2A ``SendMessageConfiguration`` carrying a protocol-level push config.
+
+    ``message/send`` registers a webhook one level ABOVE the AdCP tool
+    parameters: ``params.configuration.task_push_notification_config``
+    (``src/a2a_server/adcp_a2a_server.py`` — ``on_message_send`` reads it before
+    any skill routing happens). It is therefore not reachable by putting a
+    ``push_notification_config`` in the skill parameters, and it exists on no
+    other transport — MCP and REST have no equivalent protocol envelope.
+
+    *spec* is the plain dict a step writes (``{"url": ..., "authentication":
+    {"scheme": ..., "credentials": ...}}``). Note the SINGULAR ``scheme``: the
+    A2A wire type is the protobuf ``AuthenticationInfo``, not the AdCP
+    ``Authentication`` object with its ``schemes`` array. Absent credentials are
+    sent as the protobuf default (empty string) rather than omitted, because
+    that is what a buyer's client actually puts on the wire for an unset
+    protobuf string — the field cannot be "missing" in proto3.
+    """
+    from a2a.types import AuthenticationInfo, SendMessageConfiguration, TaskPushNotificationConfig
+
+    fields: dict[str, Any] = {"url": spec["url"]}
+    authentication = spec.get("authentication")
+    if authentication is not None:
+        fields["authentication"] = AuthenticationInfo(
+            scheme=authentication.get("scheme") or "",
+            credentials=authentication.get("credentials") or "",
+        )
+    return SendMessageConfiguration(task_push_notification_config=TaskPushNotificationConfig(**fields))
+
+
 class _TestClock:
     """Minimal clock for BDD relative date-token resolution.
 
@@ -373,6 +415,18 @@ class BaseTestEnv:
     ASYNC_PATCHES: set[str] = set()  # Names that need AsyncMock (for async functions)
     MODULE: str = ""  # Convenience for unit envs building patch paths
     REST_ENDPOINT: str = ""  # Override in subclass for REST dispatch
+    # The tool/skill this env dispatches. Declaring these is what lets the base
+    # own call_mcp/call_a2a instead of every env re-implementing the same
+    # one-line delegation. REST_METHOD's de-facto
+    # contract lives at dispatchers.py's getattr(env, "REST_METHOD", "post").
+    MCP_TOOL: str = ""
+    A2A_SKILL: str = ""
+    # The parser the base delegation feeds wire dicts to. Declared per env
+    # because envs parse into their LOCAL response subclass, which is not always
+    # the tool's pinned SDK model — defaulting to the pinned model would quietly
+    # change what call_mcp/call_a2a return for every converted env. Envs that
+    # select a parser from request CONTENT override response_parser() instead.
+    RESPONSE_MODEL: Any = None
     use_real_db: bool = False
 
     def __init__(
@@ -395,16 +449,11 @@ class BaseTestEnv:
         self._e2e_engine: Any = None
         self._tenant_overrides = tenant_overrides
         self.mock: dict[str, MagicMock] = {}
-        self._patchers: list[Any] = []
+        self._enter_cleanups: list[tuple[str, Callable[[], None]]] = []
         self._session: Session | None = None
         self._identity_cache: dict[str, ResolvedIdentity] = {}
         self._rest_client: Any = None  # Lazy-created TestClient
         self.clock = _TestClock()  # BDD steps may use env.clock for date tokens
-        # Real serialized success-path wire, stashed by _run_a2a_handler /
-        # _run_mcp_client (the only paths that capture it) and read by the
-        # A2A/MCP dispatchers. None unless such a path ran — REST builds its
-        # own from the HTTP body; legacy/_raw paths and IMPL leave it None.
-        self._last_wire_response: dict[str, Any] | None = None
         # Raw A2A Task returned by the last _run_a2a_handler call. The submitted
         # (manual-approval) contract lives on the Task itself — state=SUBMITTED
         # with NO artifacts — and the synthesized submitted wire above cannot
@@ -538,9 +587,6 @@ class BaseTestEnv:
         kwargs.setdefault("identity", self.identity_for(transport))
 
         dispatcher = DISPATCHERS[transport]
-        # Reset success-path wire capture; _run_a2a_handler / _run_mcp_client
-        # set it fresh on success so A2A/MCP dispatchers can surface real wire.
-        self._last_wire_response = None
         return dispatcher.dispatch(self, **kwargs)
 
     # -- Per-transport hooks (override in subclass) -------------------------
@@ -560,15 +606,52 @@ class BaseTestEnv:
         """
         raise NotImplementedError
 
-    def call_a2a(self, **kwargs: Any) -> Any:
-        """Call the _raw() A2A wrapper function.
+    def response_parser(self, tool: str) -> Any:
+        """The callable that turns a wire dict into this env's response object.
 
-        Override in subclass. Should call the _raw() function with
-        the same kwargs as call_impl but through the A2A wrapper.
+        An INSTANCE hook rather than a class attribute: two envs select the
+        parser from request CONTENT (create_media_buy / update_media_buy), which
+        a class attribute cannot express because it cannot bind ``self``.
+        Receives ``**data`` — the shape ``_run_a2a_handler`` / ``_run_mcp_client``
+        already call.
+
+        Defaults to the tool's pinned response model. An env whose tool has no
+        pinned model (create_media_buy, update_media_buy, sync_creatives,
+        list_authorized_properties, sync_accounts, update_performance_index)
+        MUST override this, or delivery would return payload=None on a
+        SUCCESSFUL dispatch.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement call_a2a(). Override to enable Transport.A2A dispatch."
-        )
+        from tests.harness.spec_models import spec_response_model
+
+        model = self.RESPONSE_MODEL or spec_response_model(tool)
+        if model is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} dispatches {tool!r}, which has no pinned response model; "
+                "override response_parser() to name the parser explicitly"
+            )
+        return model
+
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch through the real A2A pipeline, returning payload AND wire.
+
+        THE override point for A2A. The dispatchers call this and read both
+        fields off the return value, so an env that needs custom routing,
+        kwargs shaping or parser selection overrides HERE — at the frame that
+        already owns those concerns — rather than re-implementing dispatch.
+        """
+        if not self.A2A_SKILL:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares no A2A_SKILL and does not override deliver_a2a(). "
+                "Set A2A_SKILL to enable Transport.A2A dispatch."
+            )
+        from tests.harness.transport import Transport
+
+        return self._deliver_via_client(Transport.A2A, self.A2A_SKILL, kwargs)
+
+    def call_a2a(self, **kwargs: Any) -> Any:
+        """The parsed A2A payload. Defined ONCE; never override — override
+        :meth:`deliver_a2a` instead, so the wire survives the call."""
+        return self.deliver_a2a(**kwargs).payload
 
     @property
     def last_a2a_task(self) -> Any:
@@ -581,22 +664,65 @@ class BaseTestEnv:
         """
         return self._last_a2a_task
 
-    def call_mcp(self, **kwargs: Any) -> Any:
-        """Call the async MCP wrapper with a mock Context.
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch through the real FastMCP Client pipeline, returning payload AND wire.
 
-        Override in subclass. Should create a mock Context with
-        get_state("identity") returning the MCP identity, call the
-        async MCP wrapper, and extract the payload from ToolResult.structured_content.
+        THE override point for MCP — see :meth:`deliver_a2a`.
 
-        Note on enum coercion: FastMCP auto-coerces string values to enums
-        when calling tools through the MCP protocol. When calling wrappers
-        directly in tests, you must coerce enum parameters yourself before
-        passing them. See CreativeSyncEnv.call_mcp for an example with
-        ValidationMode.
+        Note on enum coercion: FastMCP auto-coerces string values to enums when
+        calling tools through the MCP protocol, so envs dispatching here need no
+        manual coercion.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement call_mcp(). Override to enable Transport.MCP dispatch."
-        )
+        if not self.MCP_TOOL:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares no MCP_TOOL and does not override deliver_mcp(). "
+                "Set MCP_TOOL to enable Transport.MCP dispatch."
+            )
+        from tests.harness.transport import Transport
+
+        return self._deliver_via_client(Transport.MCP, self.MCP_TOOL, kwargs)
+
+    def _deliver_via_client(self, transport: Any, tool: str, kwargs: dict[str, Any]) -> DeliverResult:
+        """Dispatch through THE one client core, then parse with this env's parser.
+
+        This is The harness's single-dispatch invariant, made literal: ``AdCPTestClient`` is the
+        implementation the env dispatch methods DELEGATE TO, not a peer beside
+        them. Routing here means address resolution, request wrapping, delivery
+        and error unwrapping have exactly one implementation for both the client
+        and every env.
+
+        The payload is re-parsed with this env's own ``response_parser`` rather
+        than kept as the core's pinned-model parse: envs return their LOCAL
+        response subclass, and ~34 call sites outside tests/harness depend on
+        that type. The core still owns the DISPATCH; the env owns only how its
+        own wire is typed.
+
+        Errors are re-RAISED rather than returned, because the dispatchers'
+        contract is that deliver_* raises and they translate — the core folds
+        errors into a TransportResult, so unfolding it here keeps the exception
+        (and the wire envelope stashed on it) flowing to the same handler.
+        """
+        from tests.harness.client import _dispatch_core
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, strip_a2a_protocol_fields
+
+        payload = dict(kwargs)
+        identity = payload.pop("identity", NO_IDENTITY_OVERRIDE)
+        result = _dispatch_core(self, transport, tool, payload, identity)
+        if result.error is not None:
+            raise result.error
+        wire = result.wire_response
+        if wire is None:
+            return DeliverResult(payload=result.payload, wire_response=None)
+        # The captured wire is deliberately UNSTRIPPED so envelope assertions can
+        # see message/success; the response model has not declared them, so they
+        # come off before validation.
+        parser = self.response_parser(tool)
+        return DeliverResult(payload=parser(**strip_a2a_protocol_fields(wire)), wire_response=wire)
+
+    def call_mcp(self, **kwargs: Any) -> Any:
+        """The parsed MCP payload. Defined ONCE; never override — override
+        :meth:`deliver_mcp` instead, so the wire survives the call."""
+        return self.deliver_mcp(**kwargs).payload
 
     def _run_a2a_handler(
         self,
@@ -618,7 +744,10 @@ class BaseTestEnv:
             skill_name: A2A skill name (e.g., "get_products").
             response_cls: Pydantic model class to parse artifact data into.
             **kwargs: Skill parameters. ``identity`` is popped and used for
-                the identity mock; remaining kwargs become skill parameters.
+                the identity mock; ``a2a_push_notification_config`` is popped
+                and sent as the protocol-level ``SendMessageConfiguration``
+                (see :func:`_a2a_send_message_configuration`) rather than as a
+                skill parameter; remaining kwargs become skill parameters.
         """
         import asyncio
 
@@ -626,15 +755,18 @@ class BaseTestEnv:
         from a2a.types import SendMessageRequest, Task
 
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-        from tests.harness.transport import Transport
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
         from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
 
         self._commit_factory_data()
 
         # Pop identity — used for the handler mock, not sent as a skill parameter.
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        a2a_identity = self.identity_for(Transport.A2A) if identity is _NO_OVERRIDE else identity
+        identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
+        # Pop the protocol-level push config — it belongs on SendMessageRequest.
+        # configuration, one level above the skill parameters (see
+        # _a2a_send_message_configuration).
+        protocol_push_config = kwargs.pop("a2a_push_notification_config", None)
+        a2a_identity = self.identity_for(Transport.A2A) if identity is NO_IDENTITY_OVERRIDE else identity
 
         # The real A2A handler writes audit logs which require the tenant to exist
         # in the DB. Ensure the tenant record exists (idempotent) so audit logging
@@ -690,7 +822,13 @@ class BaseTestEnv:
             set_current_tenant(a2a_identity.tenant)
 
         message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
-        params = SendMessageRequest(message=message)
+        if protocol_push_config is None:
+            params = SendMessageRequest(message=message)
+        else:
+            params = SendMessageRequest(
+                message=message,
+                configuration=_a2a_send_message_configuration(protocol_push_config),
+            )
 
         async def _call():
             return await handler.on_message_send(params, server_context)
@@ -734,8 +872,7 @@ class BaseTestEnv:
             # (protocol status="submitted" + the task_id the buyer polls) so success-path
             # grading sees the real A2A wire.
             submitted_wire = {"status": "submitted", "task_id": task_result.id}
-            self._last_wire_response = dict(submitted_wire)
-            return response_cls(**submitted_wire)
+            return DeliverResult(payload=response_cls(**submitted_wire), wire_response=dict(submitted_wire))
 
         if not task_result.artifacts:
             raise ValueError(f"Task has no artifacts. Status: {task_result.status}")
@@ -743,15 +880,15 @@ class BaseTestEnv:
         # Surface the full, unstripped artifact DataPart as the real A2A wire for
         # success-path assertions. Captured BEFORE stripping so siblings that need
         # the top-level envelope fields (message/success) still see them.
-        self._last_wire_response = dict(artifact_data)
+        wire_response = dict(artifact_data)
         # Strip protocol fields added by _serialize_for_a2a (message, success).
         # These are populated by the protocol layer per the pin's Protocol
         # Envelope arm (see tests/helpers/adcp_schema_validator.py) — not
         # declared on the Pydantic response model — and cause ValidationError
         # under extra="forbid" in non-production mode.
-        artifact_data.pop("message", None)
-        artifact_data.pop("success", None)
-        return response_cls(**artifact_data)
+        return DeliverResult(
+            payload=response_cls(**strip_a2a_protocol_fields(artifact_data)), wire_response=wire_response
+        )
 
     def _run_mcp_client(
         self,
@@ -785,14 +922,13 @@ class BaseTestEnv:
         from fastmcp import Client
 
         from src.core.main import mcp
-        from tests.harness.transport import Transport
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
 
         self._commit_factory_data()
 
         # Pop identity — used for the auth mock, not sent as a tool argument.
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        mcp_identity = self.identity_for(Transport.MCP) if identity is _NO_OVERRIDE else identity
+        identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
+        mcp_identity = self.identity_for(Transport.MCP) if identity is NO_IDENTITY_OVERRIDE else identity
 
         # Unpack req object into flat arguments if present.
         # MCP tools accept individual params, not a request model.
@@ -830,8 +966,10 @@ class BaseTestEnv:
                         assert patched_th.called or patched_mw.called, (
                             f"Auth chain not exercised for {tool_name} — get_http_headers patches were not called"
                         )
-                        self._last_wire_response = result.structured_content
-                        return response_cls(**result.structured_content)
+                        return DeliverResult(
+                            payload=response_cls(**result.structured_content),
+                            wire_response=result.structured_content,
+                        )
 
         else:
             # Unit mode: inject identity directly.
@@ -842,8 +980,10 @@ class BaseTestEnv:
                 ):
                     async with Client(mcp) as client:
                         result = await client.call_tool(tool_name, arguments)
-                        self._last_wire_response = result.structured_content
-                        return response_cls(**result.structured_content)
+                        return DeliverResult(
+                            payload=response_cls(**result.structured_content),
+                            wire_response=result.structured_content,
+                        )
 
         try:
             return asyncio.run(_call())
@@ -868,13 +1008,12 @@ class BaseTestEnv:
 
         from fastmcp.server.context import Context
 
-        from tests.harness.transport import Transport
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
 
         self._commit_factory_data()
 
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        mcp_identity = self.identity_for(Transport.MCP) if identity is _NO_OVERRIDE else identity
+        identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
+        mcp_identity = self.identity_for(Transport.MCP) if identity is NO_IDENTITY_OVERRIDE else identity
 
         # Unpack req object into flat kwargs — MCP wrappers accept individual
         # parameters, not a request model.
@@ -919,11 +1058,10 @@ class BaseTestEnv:
         Returns ``(client, resolved_identity)``; the caller builds the body from the
         now-identity-free *kwargs* and issues the HTTP verb.
         """
-        from tests.harness.transport import Transport
+        from tests.harness.transport import NO_IDENTITY_OVERRIDE, Transport
 
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        if identity is _NO_OVERRIDE:
+        identity = kwargs.pop("identity", NO_IDENTITY_OVERRIDE)
+        if identity is NO_IDENTITY_OVERRIDE:
             identity = self.identity_for(Transport.REST)
 
         self._commit_factory_data()
@@ -1118,57 +1256,192 @@ class BaseTestEnv:
     # -- Context manager protocol ------------------------------------------
 
     def __enter__(self) -> Self:
-        # 1. Database setup (integration mode only)
+        # The nested-env guard runs BEFORE the try: it must not unwind the OUTER
+        # env's factories. Everything that ACQUIRES anything runs inside.
         if self.use_real_db:
-            from sqlalchemy.orm import Session as SASession
-
-            from src.core.database.database_session import get_engine
             from tests.factories import ALL_FACTORIES
 
-            # Guard against nested envs — session binding is global
             for f in ALL_FACTORIES:
                 assert f._meta.sqlalchemy_session is None, (
                     f"Factory {getattr(f, '__name__', type(f).__name__)} session already bound — "
                     "nested IntegrationEnv contexts are not supported"
                 )
 
-            # E2E mode connects directly to the specified database (the live
-            # server's Postgres via e2e_config.postgres_url) instead of the cached
-            # engine, so factory writes land in the DB the HTTP server reads.
-            if self._database_url:
-                from sqlalchemy import create_engine
+        try:
+            # 0. Subclass setup that must precede the database and the mocks.
+            self._enter_pre()
 
-                from src.core.database.database_session import _pydantic_json_serializer
+            # 1. Database setup (integration mode only). INSIDE the try: the
+            #    engine and the session are resources, and a SASession(bind=...)
+            #    failure used to leak the engine's connection pool.
+            if self.use_real_db:
+                from sqlalchemy.orm import Session as SASession
 
-                self._e2e_engine = create_engine(
-                    self._database_url, echo=False, json_serializer=_pydantic_json_serializer
-                )
-                engine = self._e2e_engine
-            else:
-                engine = get_engine()
-            self._session = SASession(bind=engine)
+                from src.core.database.database_session import get_engine
+                from tests.factories import ALL_FACTORIES
 
-            for f in ALL_FACTORIES:
-                f._meta.sqlalchemy_session = self._session
+                # E2E mode connects directly to the specified database (the live
+                # server's Postgres via e2e_config.postgres_url) instead of the
+                # cached engine, so factory writes land in the DB the HTTP
+                # server reads.
+                if self._database_url:
+                    from sqlalchemy import create_engine
 
-        # 2. Start patches
-        for name, target in self.EXTERNAL_PATCHES.items():
-            if name in self.ASYNC_PATCHES:
-                patcher = patch(target, new_callable=AsyncMock)
-            else:
-                patcher = patch(target)
-            self.mock[name] = patcher.start()
-            self._patchers.append(patcher)
+                    from src.core.database.database_session import _pydantic_json_serializer
 
-        self._configure_mocks()
+                    self._e2e_engine = create_engine(
+                        self._database_url, echo=False, json_serializer=_pydantic_json_serializer
+                    )
+                    self._guard("db_engine", self._dispose_engine)
+                    engine = self._e2e_engine
+                else:
+                    engine = get_engine()
 
-        # 3. E2E discovery-path seeding: the live server authenticates against
-        #    its own DB, so seed tenant/principal even for scenarios that never
-        #    run a tenant-creating Given step. Idempotent; no-op in-process.
-        if self.use_real_db and self.is_e2e:
-            self._seed_e2e_identity()
+                self._session = SASession(bind=engine)
+                self._guard("db_session", self._close_session)
+
+                for f in ALL_FACTORIES:
+                    f._meta.sqlalchemy_session = self._session
+                self._guard("db_factories", self._unbind_factories)
+
+            # 2. Start patches
+            for name, target in self.EXTERNAL_PATCHES.items():
+                if name in self.ASYNC_PATCHES:
+                    patcher = patch(target, new_callable=AsyncMock)
+                else:
+                    patcher = patch(target)
+                self.mock[name] = patcher.start()
+                self._guard(f"patch:{name}", patcher.stop)
+
+            self._configure_mocks()
+
+            # 3. E2E discovery-path seeding: the live server authenticates against
+            #    its own DB, so seed tenant/principal even for scenarios that never
+            #    run a tenant-creating Given step. Idempotent; no-op in-process.
+            if self.use_real_db and self.is_e2e:
+                self._seed_e2e_identity()
+
+            # 4. Subclass setup that needs the entered base and configured mocks.
+            self._enter_post()
+        except BaseException:
+            self._unwind_partial_enter()
+            raise
 
         return self
+
+    # -- Subclass setup hooks ----------------------------------------------
+    #
+    # A subclass extends entry through these, never by overriding __enter__.
+    # The reason is structural, not stylistic: a cooperative
+    # ``super().__enter__()`` chain places a subclass's own setup OUTSIDE this
+    # method's try by construction, whichever side of the super() call it sits
+    # on. Every resource a hook acquires must be registered with :meth:`_guard`
+    # on the line it is acquired.
+    #
+    # ``tests/harness/test_harness_base.py::test_harness_envs_define_no_enter_exit``
+    # enforces that: __enter__/__exit__ (and their async twins) may be defined
+    # only on BaseTestEnv and on AdminAccountEnv, which is not a BaseTestEnv.
+
+    def _enter_pre(self) -> None:
+        """Setup that must run before the database binding and the mocks.
+
+        Overridden by e.g. ``LocalOriginMixin``, whose TLS origin must exist
+        before ``_configure_mocks`` runs — ``CircuitBreakerEnv._configure_mocks``
+        programs ``self.origin``.
+        """
+
+    def _enter_post(self) -> None:
+        """Setup that needs the entered base and the configured mocks.
+
+        Overridden by e.g. ``CircuitBreakerEnv``, which attaches a log handler
+        once the env is otherwise live.
+        """
+
+    # -- The one cleanup registry ------------------------------------------
+
+    def _guard(self, label: str, cleanup: Callable[[], None]) -> None:
+        """Register *cleanup* to run on BOTH release paths, newest first.
+
+        Call it on the line the resource is acquired. Anything acquired without
+        a matching _guard survives a failed __enter__ for the rest of the
+        process: Python does not call __exit__ when __enter__ raises, and the
+        factory binding is GLOBAL. Measured before this registry existed: two
+        real setup failures produced 350 further errors in one bdd_e2e run, and
+        the two causes were indistinguishable in the report.
+        """
+        self._enter_cleanups.append((label, cleanup))
+
+    def _release_entered(self, errors: list[Exception] | None) -> None:
+        """Run every registered cleanup in REVERSE registration order, then clear.
+
+        LIFO is deliberate and is a change from the pre-registry teardown, which
+        released the database BEFORE the patches. Releasing in reverse
+        acquisition order is the property that makes a partially-entered env
+        safe, and no teardown here depends on a patch still being active.
+
+        *errors* collects failures when the caller wants them (``__exit__``,
+        which raises them as a group). ``None`` means best-effort and silent —
+        the partial-enter path, where the caller is already raising and a
+        cleanup detail must not replace the real cause.
+        """
+        for _label, cleanup in reversed(self._enter_cleanups):
+            try:
+                cleanup()
+            except Exception as e:
+                if errors is not None:
+                    errors.append(e)
+        self._enter_cleanups.clear()
+
+    # Three cleanups, not one, and each registered on the line its resource is
+    # acquired. A single "db" cleanup registered after all three acquisitions
+    # left an already-created engine undisposed when SASession(bind=engine)
+    # raised — exactly the pool leak of GH #1430, still open. Splitting also
+    # fixes the second half: each runs in its own _release_entered try, so a
+    # failure is COLLECTED into __exit__'s error list rather than swallowed by a
+    # suppress() that head did not have. Registration order engine -> session ->
+    # factories means LIFO release is factories -> session -> engine, which is
+    # exactly the order the pre-registry __exit__ used.
+
+    def _unbind_factories(self) -> None:
+        from tests.factories import ALL_FACTORIES
+
+        for f in ALL_FACTORIES:
+            f._meta.sqlalchemy_session = None
+
+    def _close_session(self) -> None:
+        if self._session is not None:
+            session, self._session = self._session, None
+            session.close()
+
+    def _dispose_engine(self) -> None:
+        """Closing the session alone leaves its pool's connections open, and
+        ~300 e2e envs per run accumulate toward the server's max_connections
+        (GH #1430)."""
+        if getattr(self, "_e2e_engine", None) is not None:
+            engine, self._e2e_engine = self._e2e_engine, None
+            engine.dispose()
+
+    def _unwind_partial_enter(self) -> None:
+        """Release whatever ``__enter__`` had acquired before it failed.
+
+        Best-effort and SILENT by design, unlike ``__exit__``: the caller is
+        already raising, and an error raised from here would replace the real
+        cause with a cleanup detail. That is why ``_release_entered`` takes
+        ``None`` on this path and an error list on the other.
+
+        The GLOBAL state — the factory session binding — is released
+        unconditionally at the end even if a registered cleanup misbehaved,
+        because a leaked binding fails every later scenario on the worker.
+        """
+        self._release_entered(None)
+        self.mock.clear()
+
+        if self.use_real_db:
+            with suppress(Exception):
+                from tests.factories import ALL_FACTORIES
+
+                for f in ALL_FACTORIES:
+                    f._meta.sqlalchemy_session = None
 
     def __exit__(self, *exc: object) -> bool:
         errors: list[Exception] = []
@@ -1183,41 +1456,10 @@ class BaseTestEnv:
             except Exception as e:
                 errors.append(e)
 
-        # 2. Unbind factories (integration mode only)
-        if self.use_real_db:
-            try:
-                from tests.factories import ALL_FACTORIES
-
-                for f in ALL_FACTORIES:
-                    f._meta.sqlalchemy_session = None
-            except Exception as e:
-                errors.append(e)
-
-            try:
-                if self._session:
-                    self._session.close()
-                    self._session = None
-            except Exception as e:
-                errors.append(e)
-
-            # Dispose the per-scenario e2e engine — closing the session alone
-            # leaves its pool's connections open, and with the ledger retirement
-            # ~300 more scenarios build e2e envs per run, accumulating toward
-            # the server's max_connections (PR #1430 review).
-            try:
-                if self._e2e_engine is not None:
-                    self._e2e_engine.dispose()
-                    self._e2e_engine = None
-            except Exception as e:
-                errors.append(e)
-
-        # 3. Stop patches — each in its own try block
-        for patcher in reversed(self._patchers):
-            try:
-                patcher.stop()
-            except Exception as e:
-                errors.append(e)
-        self._patchers.clear()
+        # 2. Release everything __enter__ registered, newest first. This covers
+        #    the database (factory unbind / session close / engine dispose) and
+        #    every patch, plus whatever the subclass hooks acquired.
+        self._release_entered(errors)
         self.mock.clear()
         self._identity_cache.clear()
 

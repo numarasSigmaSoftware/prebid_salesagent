@@ -42,10 +42,27 @@ from src.core.tools.media_buy_create import _create_media_buy_impl
     echo -e "${GREEN}Imports OK${NC}"; echo ""
 }
 
+# Suite reports this script may publish. Named once so the pre-run purge and the
+# copy below cannot drift apart — a report present in one list and absent from
+# the other is how a stale file survives.
+_REPORT_SUITES="unit integration e2e admin bdd ui"
+
+purge_stale_reports() {
+    # `.tox/` persists between invocations, so a suite that dies before writing
+    # leaves the PREVIOUS run's report there and collect_reports cannot tell it
+    # apart from one this run produced. Deleting first makes a stale report
+    # unrepresentable rather than detectable: afterwards a report exists only if
+    # THIS run wrote it. Same fix as run_all_tests.sh; this script had the
+    # identical defect and no pre-run purge.
+    for name in $_REPORT_SUITES; do
+        rm -f ".tox/${name}.json"
+    done
+}
+
 collect_reports() {
     # Copy JSON reports from .tox/ to results dir
     mkdir -p "$RESULTS_DIR"
-    for name in unit integration e2e admin bdd ui; do
+    for name in $_REPORT_SUITES; do
         [ -f ".tox/${name}.json" ] && cp ".tox/${name}.json" "$RESULTS_DIR/"
     done
     # Explicit return 0 — without this, the function inherits the exit code
@@ -66,6 +83,7 @@ if [ "$MODE" = "quick" ]; then
     set +eo pipefail
     # Redirect to file + stdout via process substitution to avoid tox-uv fd leak
     # that causes pipes (| tee) to hang after tox exits.
+    purge_stale_reports
     tox -e unit,integration -p > >(tee "$RESULTS_DIR/tox.log") 2>&1
     TOX_RC=${PIPESTATUS[0]}
     set -eo pipefail
@@ -90,6 +108,40 @@ elif [ "$MODE" = "ci" ]; then
     # healthy stack across runs); torn down with the Docker stack on EXIT.
     ./scripts/creative-agent-stack.sh up
     export CREATIVE_AGENT_URL="$(./scripts/creative-agent-stack.sh url)"
+
+    # ─── Outbound egress escape hatch — TEST PATH ONLY (#1589, salesagent-e6h0) ──
+    # The line above exports an https://agent.localhost:<port>/... URL
+    # (scripts/creative-agent-stack.sh's own TLS front, salesagent-40qh) at a
+    # reserved loopback address, which src/core/security/outbound_http.py
+    # refuses for the ADDRESS reason. docker-compose.e2e.yml opens the same
+    # hatch for the in-network runner; tox.ini only PASSES it through
+    # (pass_env, not setenv), so on this host path nothing creates it and the
+    # two authoritative run paths would diverge — in-network green, host red,
+    # same commit.
+    #
+    # SSL_CERT_FILE is required too: `uv run pytest`/`tox` below run ON THIS
+    # HOST, not inside the dockerized server (which gets its own SSL_CERT_FILE
+    # from docker-compose.e2e.yml directly) — so the test PROCESS itself needs
+    # to trust the generated CA to dial the same https fronts (creative-agent,
+    # the webhook capture at webhooks.adcp.test — salesagent-amht.3) the
+    # server dials. The COMBINED bundle (system CA + our private CA), never
+    # the private CA alone — that broke `uv sync` against real pypi.org once
+    # already.
+    #
+    # There is no scheme hatch anymore (salesagent-e6h0 deleted it) — every
+    # outbound origin here is TLS-fronted, so there is nothing left to relax.
+    #
+    # Set here and NOT in quick mode or at file scope, deliberately: quick mode
+    # starts no Docker and no creative-agent stack, so it has no loopback fixture
+    # to accommodate, and it is the mode that carries the in-process refusal
+    # grading (set_flags() in tests/integration/test_outbound_http.py, plus the
+    # BDD refusal scenarios). An ambient private-range hatch there would make
+    # the seam accept exactly the addresses it exists to reject.
+    #
+    # Literal "true" — the seam compares the lowercased string.
+    export ADCP_OUTBOUND_ALLOW_PRIVATE="true"
+    export SSL_CERT_FILE="$(pwd)/.test-tls/combined-ca.pem"
+
     trap './scripts/creative-agent-stack.sh down 2>/dev/null || true; ./scripts/test-stack.sh down 2>/dev/null || true' EXIT
 
     if [ -n "$PYTEST_TARGET" ]; then
@@ -106,6 +158,7 @@ elif [ "$MODE" = "ci" ]; then
     else
         echo -e "${BLUE}Running all 6 suites in parallel via tox...${NC}"
         set +eo pipefail
+        purge_stale_reports
         tox -p -o > >(tee "$RESULTS_DIR/tox.log") 2>&1
         TOX_RC=${PIPESTATUS[0]}
         set -eo pipefail

@@ -184,9 +184,13 @@ mkdir -p "$RESULTS_DIR"
 dc() { docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT_NAME" --profile runner "$@"; }
 
 cleanup() {
-    # Per-worker e2e servers are `docker compose run` containers (not `up`), so
-    # `dc down` won't remove them — do it explicitly.
-    docker ps -aq --filter "name=${COMPOSE_PROJECT_NAME}-server-gw" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    # Per-worker e2e servers AND their TLS sidecars are `docker compose run`
+    # containers (not `up`), so `dc down` won't remove them — do it explicitly.
+    # The sidecars MUST be matched too: a leaked `-tls-gwN.adcp.test` container
+    # keeps its dotted DNS name registered and poisons the next run's lookups.
+    for _stray in server-gw tls-gw; do
+        docker ps -aq --filter "name=${COMPOSE_PROJECT_NAME}-${_stray}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    done
     dc down -v >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -200,47 +204,95 @@ scripts/creative-agent-stack.sh build
 echo "Building image + bringing up the app stack in-network (project: $COMPOSE_PROJECT_NAME)..."
 dc build postgres adcp-server proxy tests
 
-# Bring up Postgres + the app server + proxy + the pinned creative-agent (and its
-# own registry Postgres). None publish host ports — all reached by service name.
-# Pre-create logs/ AND the specific files src/core/audit_logger.py opens --
-# audit.log/error.log via FileHandler at IMPORT time (crashes collection
-# immediately on PermissionError), structured.jsonl/security.jsonl lazily via
-# open(path, "a"). setgid + 2775 on the directory only controls the GROUP of
-# NEW files, not their write bit, and it does nothing for files that already
-# exist. Worse: chmod cannot fix a file it doesn't own -- only the owner (or
-# root) may change a file's mode, being in the same group is not enough -- so
-# a stale ci:ci 0644 file left by a prior adcp-server run silently defeats
-# both this and the `chmod -R g+w .` sweep below (EPERM, swallowed by its own
-# `|| true`). Removing and recreating is what actually works: unlink is
-# governed by the DIRECTORY's write bit (which we own), not the file's own
-# owner, so `rm -f` succeeds even on a ci-owned file; the fresh file this
-# process then creates is ours. Verified live: ci:ci 0644 -> sacirunner:ci 0664.
+# Pre-create logs/ group-writable + setgid BEFORE anything else touches the
+# bind mount: adcp-server bind-mounts .:/app and creates logs/audit.log at
+# import time (uid 1001, its own baked umask) -- when that umask strips the
+# group-write bit the tests container (a different uid, 1003 here) can create
+# the dir but not write into it, and every suite dies at collection with
+# `PermissionError: '/app/logs/audit.log'`. Owning it here first means
+# adcp-server writes into an already-correct dir instead of racing to
+# create it (confirmed live: sa-93d37d7c, sa-c9acaf66 both landed
+# drwxr-sr-x -- not group-writable -- and are latent failures until fixed).
+# This must stay ahead of the TLS step below too: that step's fallback runs a
+# `tests` container, which would otherwise be the one to create logs/ first.
 mkdir -p logs
-chmod 2775 logs
-for f in audit.log error.log structured.jsonl security.jsonl; do
-    rm -f "logs/$f" 2>/dev/null || true
-    # Two statements, not `: > "logs/$f" && chmod ...`. errexit exempts every command
-    # in an AND-OR list except the last, so as an &&-list a failed truncate merely
-    # short-circuits: chmod is skipped, the loop continues, and the script still exits
-    # 0. Verified A/B (with a directory planted at logs/audit.log to force the
-    # failure): &&-list -> "REACHED-END", exit 0; split -> exit 1 at the truncate.
-    : > "logs/$f"
-    # 666, not 664. The point of this block is that the adcp-server container can
-    # WRITE these; 664 only achieves that if the container's user shares the file's
-    # group, and it does not. The server runs as the image's `app` (uid/gid 1001,
-    # no supplementary groups), while these files are owned by whoever ran the
-    # script -- and the bind-mount of this directory onto /app SHADOWS the image's
-    # own `chown -R app:app /app`, so host-side permissions are what decide. Group
-    # never matches, so `app` falls through to the OTHER bits: r-- under 664, and
-    # the server dies on PermissionError while opening audit.log at import time,
-    # taking every per-worker server container unhealthy with it.
-    # The setgid bit set on the directory above does not rescue this either: it
-    # controls the GROUP of new files, not their write bit.
-    # These are ephemeral per-run test logs, not durable state.
-    chmod 666 "logs/$f"
+# Guarded, not silent: chmod on a logs/ that already exists owned by ANOTHER
+# uid fails with EPERM, and a bare `chmod` here would abort the whole script
+# under `set -e` -- so tolerate the failure, but do NOT assume it worked. The
+# verification below is what turns a still-broken state into a diagnosable
+# error instead of a collection-time PermissionError 200 lines later.
+chmod 2775 logs 2>/dev/null || true
+# The setgid bit above fixes the GROUP of files created in here, but NOT their
+# write bit -- that comes from the creating process's umask, and adcp-server's
+# yields 0644. So a FRESH logs/ still ends up with `-rw-r--r-- ci:ci`
+# audit.log, and the tests container (a different uid in the same `ci` group)
+# dies at collection with `PermissionError: '/app/logs/audit.log'`. The
+# `chmod -R g+w .` backstop further down cannot repair it either: it runs as
+# the sync user, which does not OWN a ci-created file, so the chmod fails and
+# is swallowed by its `2>/dev/null || true`. Pre-create the files ourselves so
+# the server APPENDS to an already-group-writable file instead of creating one
+# with its own umask. Runs before every `dc up`/`dc run` for the same reason
+# the mkdir does. (Observed live: sa-067cc4a9 failed exactly this way on a
+# fresh run dir, while sa-858f3b3a passed only because it inherited a stale
+# 0664 logs/ from an earlier run -- i.e. this was always latent, and green
+# runs were green by accident.)
+# rm first, then recreate: on a REUSED run directory the existing files are
+# owned by the server's uid, so `touch` (needs write) and `chmod` (needs
+# ownership) both fail on them -- and under `set -e` that would abort the whole
+# script. Unlinking works regardless of file ownership because it is the
+# DIRECTORY's write bit that governs it, and we own the directory. These are
+# per-run scratch logs, so discarding a previous run's copy costs nothing.
+# The list is exactly what src/core/audit_logger.py opens: audit.log (its
+# FileHandler), error.log (its error FileHandler), and the two append-mode
+# sinks structured.jsonl and security.jsonl. security.jsonl only appears on a
+# security event, so it is the one that hides longest before biting.
+for _log in audit.log error.log structured.jsonl security.jsonl; do
+    rm -f "logs/$_log" 2>/dev/null || true
+    : >"logs/$_log" 2>/dev/null || true
+    # 0666, not 0664. Group-write is NOT enough, and assuming it was is what
+    # kept the e2e stack down: `adcp-server` runs as the image's own non-root
+    # user, and that user shares no group with whoever created these files.
+    # Measured on the box: the container is `app` uid=1001 gid=1001 groups=1001,
+    # while the files land `sacirunner:sacirunner` (or `ci`) — so 0664 leaves the
+    # server with OTHER permissions, r--, and it dies opening audit.log:
+    #   PermissionError: [Errno 13] Permission denied: '/app/logs/audit.log'
+    # The whole stack follows it down — nothing binds :8000, so every e2e test
+    # errors "Server not ready after 60s (port 8000)" and every e2e_rest BDD
+    # scenario errors "the live E2E stack is unreachable", with no hint that a
+    # file mode is the cause. chown to 1001 would need root we do not have here;
+    # these are per-run scratch logs, so world-writable is the honest fix.
+    chmod 666 "logs/$_log" 2>/dev/null || true
+    # Verify rather than hope. `-w` would test OUR access; what actually matters
+    # is the OTHER write bit, since the server's uid is outside our groups. find
+    # -perm is used over `stat` because stat's flags differ between the GNU
+    # coreutils on the CI box and the BSD one on a macOS host, and this script
+    # runs on both.
+    if [ -z "$(find "logs/$_log" -perm -o+w 2>/dev/null)" ]; then
+        echo "ERROR: logs/$_log is not writable by other; adcp-server runs as a" >&2
+        echo "       non-root uid outside our groups and will die at startup with" >&2
+        echo "       PermissionError, taking the whole e2e stack with it. State:" >&2
+        ls -la "logs/$_log" logs/ >&2 || true
+        exit 1
+    fi
 done
 
-dc up -d postgres adcp-server proxy creative-pg creative-agent
+# TLS material for the tls-proxy service and the per-worker sidecars below. It
+# must exist before `up`: the service bind-mounts .test-tls/, and an absent
+# directory would materialise empty and nginx would refuse to start. The host
+# wrapper needs a Python with `cryptography`; the in-network CI job has neither
+# uv nor the project venv on the host, so fall back to the runner image (which
+# writes through the same `.:/app` bind mount).
+echo "Ensuring the test stack's TLS material..."
+scripts/dev/ensure-test-tls.sh || dc run --rm --no-deps -T tests python scripts/dev/gen_test_tls.py
+
+# Bring up Postgres + the app server + proxy + the TLS listener + the pinned
+# creative-agent (and its own registry Postgres). None publish host ports —
+# all reached by service name. tls-proxy is in this explicit list
+# deliberately: it is a normal `up` service, and omitting it would leave both
+# https origins it fronts (proxy.adcp.test, creative-agent.adcp.test) pointing
+# at nothing while every scenario that depends on either reported green on the
+# http branch instead (E2E_TLS_BASE_URL / CREATIVE_AGENT_URL, salesagent-amht.2).
+dc up -d postgres adcp-server proxy tls-proxy creative-pg creative-agent
 
 echo "Waiting for Postgres + server health (in-network)..."
 deadline=$(( $(date +%s) + 360 ))
@@ -252,21 +304,26 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 3
 done
 [ "$pg" = true ] || { echo "Postgres never became ready"; dc logs postgres; exit 1; }
-# The same guard for the SERVER, which was missing: $srv was computed and printed
-# and then never checked, so a stack whose app never came up proceeded silently
-# into the suites. Measured cost of that omission on 2026-08-24: the wait spun its
-# full 360s, said only "Postgres ready", and then bdd + e2e + ui produced 2537
-# errors -- "live E2E stack is unreachable", "Server not ready after 60s",
-# "TargetClosedError" -- none of which names the actual cause. One precondition
-# failure, reported once, replaces all of it.
+# $srv gets the SAME fail-fast treatment as $pg. It used to be computed, printed
+# on success, and then never checked -- so a stack whose server never became
+# healthy within the 360s deadline proceeded silently into every server-dependent
+# suite. That is not a smaller failure than a dead Postgres, it is a louder one:
+# bdd_e2e/e2e/ui then emit thousands of "live E2E stack is unreachable" /
+# "Server not ready after 60s" / TargetClosedError errors, none of which names
+# the actual cause. Measured on 2026-08-24: the wait spun its full 360s, said
+# only "Postgres ready", and the suites then produced 2537 errors -- one root
+# cause, zero of them a real defect. Infrastructure death must present as ONE
+# infrastructure failure, reported once.
 #
 # Unconditional because THIS path just started the stack a few lines above: if we
 # brought the server up and it never became healthy, that is a failure for every
 # caller, not a caller-specific one. Symmetric with the Postgres guard by design;
 # an asymmetry here is what hid the problem.
 [ "$srv" = true ] || {
-    echo "Server never became healthy (waited 360s for http://localhost:8080/health inside adcp-server)"
-    dc logs --tail=120 adcp-server
+    echo "ERROR: adcp-server never became healthy within the 360s deadline — aborting" >&2
+    echo "       (waited on http://localhost:8080/health inside adcp-server; every" >&2
+    echo "        server-dependent suite would otherwise error en masse)" >&2
+    dc logs --tail=120 adcp-server >&2
     exit 1
 }
 
@@ -335,15 +392,69 @@ if [ "${E2E_WORKERS:-0}" -gt 0 ] 2>/dev/null; then
         psql_admin "CREATE DATABASE adcp_gw$i TEMPLATE adcp_e2e_template"
         dc run -d --no-deps --name "${COMPOSE_PROJECT_NAME}-server-gw$i" \
             -e DATABASE_URL="$_admin/adcp_gw$i?sslmode=disable" adcp-server >/dev/null
+        # Per-worker TLS sidecar (salesagent-tgzb). The DOTTED CONTAINER NAME is
+        # the entire mechanism: `docker compose run` has no --network-alias, so
+        # the container's own name is the only DNS label we control. Docker's
+        # embedded DNS resolving a dotted container name is OBSERVED behaviour,
+        # not a documented contract — if a future Docker release breaks it, the
+        # handshake probe below is what turns it into a diagnosable failure
+        # instead of a mystery. COMPOSE_PROJECT_NAME never contains a dot, so the
+        # name is exactly one label under the leaf's `*.adcp.test` SAN.
+        dc run -d --no-deps --name "${COMPOSE_PROJECT_NAME}-tls-gw$i.adcp.test" \
+            -e TLS_UPSTREAM="${COMPOSE_PROJECT_NAME}-server-gw$i:8080" tls-proxy >/dev/null
     done
     echo "  waiting for $N per-worker servers to become healthy..."
+    # Same fail-fast reasoning as the template-migration check above: a worker
+    # whose server never came up cannot run a single e2e_rest scenario, so
+    # "(continuing)" only converts one infrastructure fault into a flood of
+    # scenario errors attributed to the wrong layer. Collect all of them first
+    # (one pass, so the operator sees every unhealthy worker rather than just
+    # the first) and then abort with the count.
+    _unhealthy=""
     for i in $(seq 0 $((N - 1))); do
         wd=$(( $(date +%s) + 120 )); ok=false
         while [ "$(date +%s)" -lt "$wd" ]; do
             docker exec "${COMPOSE_PROJECT_NAME}-server-gw$i" curl -sf http://localhost:8080/health >/dev/null 2>&1 && ok=true && break
             sleep 2
         done
-        [ "$ok" = true ] && echo "    server-gw$i ready" || echo "    server-gw$i NOT ready (continuing)"
+        if [ "$ok" = true ]; then
+            echo "    server-gw$i ready"
+        else
+            echo "    server-gw$i NOT ready"
+            _unhealthy="$_unhealthy gw$i"
+        fi
+    done
+    if [ -n "$_unhealthy" ]; then
+        echo "ERROR: per-worker e2e server(s) never became healthy:$_unhealthy" >&2
+        echo "       aborting — these workers' scenarios would error en masse and" >&2
+        echo "       be misread as test failures rather than a stack failure." >&2
+        for i in $_unhealthy; do
+            echo "--- logs: ${COMPOSE_PROJECT_NAME}-server-$i ---" >&2
+            docker logs --tail 40 "${COMPOSE_PROJECT_NAME}-server-$i" >&2 2>&1 || true
+        done
+        exit 1
+    fi
+    # TLS readiness — a REAL handshake at the dotted name, verified against the
+    # generated CA, and a HARD FAILURE on timeout. Deliberately NOT the shape of
+    # the plaintext probe above, which prints "NOT ready (continuing)" and carries
+    # on: a TLS listener that half-starts and is skipped past is precisely the
+    # vacuity salesagent-tgzb exists to remove — every https scenario would then
+    # silently grade the http branch. (Making the plaintext probe fail too is a
+    # separate, deliberate change, not a side effect of this one.)
+    echo "  waiting for $N per-worker TLS sidecars to complete a verified handshake..."
+    for i in $(seq 0 $((N - 1))); do
+        name="${COMPOSE_PROJECT_NAME}-tls-gw$i.adcp.test"
+        wd=$(( $(date +%s) + 120 )); ok=false
+        while [ "$(date +%s)" -lt "$wd" ]; do
+            docker exec "$name" curl -sf --cacert /app/.test-tls/ca.pem "https://$name:8443/health" >/dev/null 2>&1 && ok=true && break
+            sleep 2
+        done
+        if [ "$ok" != true ]; then
+            echo "ERROR: TLS sidecar $name never completed a verified handshake at https://$name:8443/health" >&2
+            docker logs "$name" 2>&1 | tail -30 >&2 || true
+            exit 1
+        fi
+        echo "    tls-gw$i ready ($name)"
     done
     # COMPOSE_PROJECT_NAME must reach pytest so conftest e2e_stack builds the FULL
     # server name "<project>-server-gwN" (short "server-gwN" doesn't resolve).
@@ -380,15 +491,26 @@ RC=0
 chmod -R g+w . 2>/dev/null || true
 chmod -R go-w .git 2>/dev/null || true
 
-# Delete last run's reports BEFORE this run writes its own. The copy below is a
-# blanket `cp .tox/*.json`, so without this it publishes reports from envs THIS
-# run never executed, stamped into a fresh results dir as if they were current.
-# That is not hypothetical: `bdd` is swapped out for `bdd_inprocess,bdd_e2e`
-# whenever E2E_WORKERS>0 (see above), so a stale bdd.json from whenever
-# `tox -e bdd` last ran kept being republished -- one was a full DAY older than
-# its directory-mates and reported 6 failures against code that no longer
-# existed, which read as a live regression. It cuts the other way too: a suite
-# that silently stops running keeps publishing its last PASS forever.
+# Delete every previous run's report BEFORE this run writes its own, and do it in
+# exactly ONE place. `.tox/` is an ordinary persistent bind-mounted directory now
+# (see the extraction note below), so a report left there outlives the run that
+# wrote it. The copy below is per-suite -- it copies only the envs named in
+# $SUITES -- which already stops an env this run never executed from being
+# republished. What the copy cannot do is tell a report THIS run wrote from one a
+# prior run left behind for a suite that DID run and died before writing its own.
+# Purging first makes a stale report unrepresentable rather than merely
+# detectable: after this line, a report exists only if this run produced it, so a
+# suite that died reaches the missing-report arm below instead of quietly
+# republishing its last PASS forever.
+#
+# Blanket (`.tox/*.json`), not a $SUITES-scoped loop: a scoped loop leaves exactly
+# the not-run envs' reports sitting in `.tox/`, which is the class of staleness
+# documented at the copy below (`storyboard.json` republished for three runs). It
+# also bit `bdd`, which is swapped out for `bdd_inprocess,bdd_e2e` whenever
+# E2E_WORKERS>0 (see above): a stale bdd.json from whenever `tox -e bdd` last ran
+# kept being republished -- one was a full DAY older than its directory-mates and
+# reported 6 failures against code that no longer existed, read as a live
+# regression. Purging wholesale plus copying per-suite closes both directions.
 rm -f .tox/*.json
 
 dc run --rm --use-aliases $E2E_ENV_ARGS tests tox -p -e "$SUITES" || RC=$?
@@ -409,12 +531,51 @@ echo "Collecting JSON reports..."
 # insurance against $RESULTS_DIR having been removed or never created for
 # any reason) and let a real failure actually say something instead of
 # vanishing 23 minutes of work without a trace.
+#
+# Copy ONLY the suites THIS invocation ran, never `.tox/*.json` wholesale.
+# `.tox` used to be the tox_data NAMED VOLUME, destroyed by the cleanup trap's
+# `down -v` every run, so a wholesale copy could not pick up anything stale.
+# Removing that volume (so the non-root runner could write `.tox/<env>`) made
+# `.tox` an ordinary bind-mounted directory that PERSISTS between runs -- and
+# silently turned the same wholesale copy into a stale-report generator: a suite
+# this run never executed still contributes its last report, and downstream
+# tooling renders it as freshly measured.
+#
+# That is not hypothetical. `storyboard` is an opt-in env (not in tox's
+# env_list), so a bare `./run_all_tests.sh` never runs it -- yet three
+# consecutive runs published a storyboard.json from hours earlier, and the
+# numbers were read as this run's until an SDK version inside the report
+# contradicted the SDK that was actually installed.
+#
+# A missing report for a suite that DID run is an error, not an omission: it
+# means the suite died before writing one, which is exactly when its absence
+# most needs to be loud.
 mkdir -p "$RESULTS_DIR"
-if ! cp .tox/*.json "$RESULTS_DIR/"; then
-    echo "WARNING: failed to copy JSON reports into $RESULTS_DIR/ -- see error above." >&2
-    echo "         Reports are still in .tox/*.json inside $(pwd) if you need them by hand." >&2
+# Record WHICH suites this invocation ran, next to their reports. Consumers
+# cannot infer it: report timestamps do not separate "stale" from "ran early in
+# a long serial run" (measured: a genuine unit report was 16 min behind the
+# newest, a stale storyboard one 28 min — overlapping bands, so any threshold
+# misfires both ways). An explicit manifest is exact.
+printf '%s\n' "$SUITES" > "$RESULTS_DIR/.suites"
+_missing_reports=""
+for _suite in ${SUITES//,/ }; do
+    if [ -f ".tox/${_suite}.json" ]; then
+        cp ".tox/${_suite}.json" "$RESULTS_DIR/" || _missing_reports="$_missing_reports $_suite(copy-failed)"
+    else
+        _missing_reports="$_missing_reports $_suite"
+    fi
+done
+if [ -n "$_missing_reports" ]; then
+    echo "ERROR: no JSON report for suite(s):$_missing_reports" >&2
+    echo "       The suite ran but produced no report -- it died before writing one." >&2
+    echo "       Reports are how this run is graded; a suite that produced none was not measured." >&2
+    # The comment above already calls this "an error, not an omission". The code
+    # said RC=${RC:-0}, which leaves the exit code untouched — so a dead suite
+    # produced a GREEN run, and the file that publishes the numbers disagreed
+    # with its own docstring.
+    [ "$RC" -eq 0 ] && RC=1
 fi
-echo "Reports: $RESULTS_DIR/"
+echo "Reports: $RESULTS_DIR/  (suites: $SUITES)"
 ls -1 "$RESULTS_DIR"/*.json 2>/dev/null || echo "  (no JSON reports extracted)"
 
 # A truncated suite is a failed suite, and the whole point is that it must not
