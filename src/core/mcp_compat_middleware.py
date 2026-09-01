@@ -17,7 +17,12 @@ from mcp.types import CallToolRequestParams
 from pydantic import ValidationError
 
 from src.core.exceptions import normalize_to_adcp_error
-from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params
+from src.core.request_compat import (
+    ENVELOPE_VERSION_FIELDS,
+    deep_strip_to_schema,
+    normalize_request_params,
+    strip_unknown_params,
+)
 from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
 
 logger = logging.getLogger(__name__)
@@ -26,7 +31,11 @@ logger = logging.getLogger(__name__)
 class RequestCompatMiddleware(Middleware):
     """Normalize, strip, and provide forward-compatible fallback for MCP tools.
 
-    Three-stage pipeline:
+    Four-stage pipeline:
+    0. Strip the AdCP version-envelope fields (adcp_version, adcp_major_version)
+       unconditionally in every environment. Official SDK clients inject these on
+       every request; FastMCP's TypeAdapter (additionalProperties: false) would
+       otherwise reject them before the handler runs.
     1. Translate deprecated field names via normalize_request_params()
     2. Strip fields not in the tool's JSON Schema via strip_unknown_params()
     3. If TypeAdapter rejects the arguments, always translate and record the
@@ -49,8 +58,11 @@ class RequestCompatMiddleware(Middleware):
             return await call_next(context)
 
         tool_name = context.message.name
-        normalized = dict(arguments)
-        modified = False
+        # Step 0: Strip AdCP version-envelope fields (all environments). Official SDK
+        # clients inject these on every request; FastMCP's TypeAdapter rejects them.
+        # Folded into initialization so on_call_tool adds no net statements (PLR0915).
+        normalized = {k: v for k, v in arguments.items() if k not in ENVELOPE_VERSION_FIELDS}
+        modified = bool(ENVELOPE_VERSION_FIELDS & arguments.keys())
 
         # Step 1: Translate deprecated fields
         compat_result = normalize_request_params(tool_name, normalized)

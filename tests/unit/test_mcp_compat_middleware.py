@@ -109,6 +109,68 @@ class TestMiddlewareReplacesContext:
             assert captured_ctx.message.arguments == {"brand": {"domain": "acme.com"}}
 
 
+class TestMiddlewareStripsEnvelopeVersionFields:
+    """AdCP version-envelope fields are stripped unconditionally (all environments)."""
+
+    @pytest.mark.asyncio
+    async def test_envelope_version_fields_removed_in_dev(self, middleware):
+        """adcp_version/adcp_major_version are removed from the forwarded arguments,
+        even in dev mode, while a genuinely-unknown field is preserved (loud in dev).
+        """
+        ctx = _make_context(
+            "get_products",
+            {
+                "adcp_version": "3.1",
+                "adcp_major_version": 3,
+                "brief": "ads",
+                "bogus_field": "keep-me",
+            },
+        )
+        captured_ctx = None
+
+        async def capturing_call_next(context):
+            nonlocal captured_ctx
+            captured_ctx = context
+
+        with patch("src.core.config.is_production", return_value=False):
+            await middleware.on_call_tool(ctx, capturing_call_next)
+
+        assert captured_ctx is not None
+        assert captured_ctx is not ctx
+        forwarded = captured_ctx.message.arguments
+        assert "adcp_version" not in forwarded
+        assert "adcp_major_version" not in forwarded
+        # Genuinely-unknown field is NOT removed by this step — dev must still fail loudly.
+        assert forwarded["bogus_field"] == "keep-me"
+        assert forwarded["brief"] == "ads"
+
+    @pytest.mark.asyncio
+    async def test_envelope_version_fields_removed_in_production(self, middleware):
+        """The Step-0 strip is unconditional: envelope fields are removed in production too.
+
+        Pins the "all environments" contract against a future is_production() re-gate
+        (mirroring the is_production-gated Step 2 that sits right below it).
+        """
+        ctx = _make_context(
+            "get_products",
+            {"adcp_version": "3.1", "adcp_major_version": 3, "brief": "ads"},
+        )
+        captured_ctx = None
+
+        async def capturing_call_next(context):
+            nonlocal captured_ctx
+            captured_ctx = context
+
+        with patch("src.core.config.is_production", return_value=True):
+            await middleware.on_call_tool(ctx, capturing_call_next)
+
+        assert captured_ctx is not None
+        forwarded = captured_ctx.message.arguments
+        assert "adcp_version" not in forwarded
+        assert "adcp_major_version" not in forwarded
+        assert forwarded["brief"] == "ads"
+
+
 class TestMiddlewarePassthrough:
     """When no translations, original context passes through unchanged."""
 

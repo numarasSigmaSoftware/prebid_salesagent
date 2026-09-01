@@ -16,6 +16,12 @@ from src.core.schema_helpers import brand_shorthand_to_domain, is_url_shorthand
 logger = logging.getLogger(__name__)
 V25_SIGNALS: frozenset[str] = frozenset({"brand_manifest", "promoted_offerings", "campaign_ref"})
 
+# AdCP version-envelope fields (spec 3.1.1 core/version-envelope.json, allOf-composed
+# into every request schema). Official SDK clients inject these on every request; the
+# server MUST accept them. Stripped unconditionally on MCP (all environments) so they
+# never reach FastMCP's TypeAdapter (additionalProperties: false).
+ENVELOPE_VERSION_FIELDS: frozenset[str] = frozenset({"adcp_version", "adcp_major_version"})
+
 # Tools where brand_manifest → brand translation applies.
 _BRAND_TOOLS: frozenset[str] = frozenset({"get_products", "create_media_buy"})
 
