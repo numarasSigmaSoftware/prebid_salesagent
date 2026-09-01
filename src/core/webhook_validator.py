@@ -500,9 +500,13 @@ class WebhookURLValidator:
         production, staging, and ordinary dev — it requires HTTPS and blocks all
         internal targets (loopback, RFC-1918, localhost/Docker aliases), validating
         EVERY resolved A/AAAA record. Only the dedicated ``ADCP_ALLOW_PRIVATE_WEBHOOKS``
-        opt-in (set solely by the E2E harness) relaxes this to permit a trusted
-        private/loopback receiver over plain HTTP. Cloud-metadata / link-local targets
-        (169.254.x, fe80::, metadata.google.internal) stay blocked in EVERY environment.
+        opt-in relaxes this. When it is set, ANY private/loopback target is permitted
+        over plain HTTP — the relaxation is NOT scoped to a specific trusted host, so
+        the only thing keeping private targets blocked is the flag being UNSET (no
+        shipped configuration outside the E2E compose sets it; there is no
+        is_production() interlock — see FIXME(ssrf-interlock)). Cloud-metadata /
+        link-local targets (169.254.x, fe80::, metadata.google.internal) stay blocked
+        in EVERY environment regardless of the flag.
 
         Callers connect to the validated address (connection pinning in
         protocol_webhook_service) so the checked IP is the one actually used;

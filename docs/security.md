@@ -330,3 +330,24 @@ SUPER_ADMIN_DOMAINS=example.com
 3. **Rotate secrets regularly** (at least quarterly)
 4. **Audit secret access** via logs
 5. **Use secrets managers** in production (Fly.io secrets, AWS Secrets Manager, etc.)
+
+## Outbound Webhook SSRF Protection
+
+Buyer-supplied push-notification callback URLs are validated at both
+registration and delivery by `WebhookURLValidator.validate_callback_url`
+(`src/core/webhook_validator.py`). By default it requires HTTPS and blocks all
+internal targets (loopback, RFC-1918, localhost/Docker aliases), validating
+every resolved A/AAAA record, and connects to the validated address
+(connection pinning) so the checked IP is the one actually used.
+
+**`ADCP_ALLOW_PRIVATE_WEBHOOKS`** is a dedicated opt-in that relaxes this. When
+set, ANY private/loopback target is permitted over plain HTTP — the relaxation
+is not scoped to a specific trusted host. It exists solely for the E2E test
+harness (`docker-compose.e2e.yml`), which must deliver to a private compose
+alias. **Never set it in production, staging, or any internet-reachable
+deployment**: doing so turns the webhook sender into an SSRF primitive against
+internal services. It is deliberately NOT tied to `ENVIRONMENT`, and there is
+currently no `is_production()` interlock — the protection is simply that no
+shipped configuration outside the E2E compose sets it. Cloud-metadata /
+link-local targets (169.254.x, fe80::, metadata.google.internal) stay blocked
+in every environment regardless of this flag.
