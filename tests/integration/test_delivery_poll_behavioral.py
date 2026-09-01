@@ -469,6 +469,13 @@ class TestFinalWebhookSurvivesStatusHandoff:
             buy = _serving_webhook_buy(env, flight="completed")
             mb_id = buy.media_buy_id
 
+            # The sweep runs in its OWN session (it is a cross-tenant background job),
+            # so this session's writes must be committed before it can see them — and,
+            # since the sweep now flushes its UPDATE per row rather than deferring to a
+            # single commit, an open transaction on this row would block it indefinitely
+            # rather than fail.
+            env._commit_factory_data()
+
             # 1) Status scheduler runs first (its real transition), flipping the
             #    ended buy to persisted "completed" — the exact state that used to
             #    make the hourly delivery batch drop it.
@@ -1172,16 +1179,20 @@ class TestPollOmitsWebhookOnlyFieldsOnEveryTransport:
             )
             env.set_adapter_response(buy.media_buy_id, impressions=5000)
 
-            for transport in [Transport.MCP, Transport.A2A, Transport.REST, Transport.IMPL]:
+            # IMPL is deliberately absent: it has no wire by definition, and this test
+            # grades the real serialized body. require_wire() refuses a missing wire
+            # rather than reserializing the parsed model — which is the whole point,
+            # so the honest fix is to not ask IMPL for one.
+            for transport in [Transport.MCP, Transport.A2A, Transport.REST]:
                 result = env.call_via(transport, media_buy_ids=[buy.media_buy_id])
                 assert result.is_success, f"{transport}: {result.error}"
-                # result.wire_dict() owns the anti-tautology guard (only IMPL
+                # result.require_wire() owns the anti-tautology guard (only IMPL
                 # legitimately has no wire; MCP/A2A/REST require the real stashed
                 # body, or this raises rather than silently reserializing the
                 # parsed model and normalizing away the exact wire-shape
                 # regression this test exists to catch) — the same rule BDD's
                 # wire_dict(ctx) delegates to, so there is one guard, not two.
-                wire = result.wire_dict()
+                wire = result.require_wire()
                 # Anchor: the webhook-only fields only surface alongside deliveries,
                 # so an empty-deliveries response would pass the omission check vacuously.
                 assert wire.get("media_buy_deliveries"), f"{transport}: no deliveries — omission check is vacuous"

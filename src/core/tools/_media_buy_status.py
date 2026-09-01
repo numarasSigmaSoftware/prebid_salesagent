@@ -50,14 +50,11 @@ clock, a further legitimate divergence.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
 from src.core.database.models import PersistedMediaBuyStatus
-
-logger = logging.getLogger(__name__)
 
 # NOTE: ``buy`` is typed ``Any`` rather than a structural Protocol because the
 # ORM ``MediaBuy`` annotates its date columns ``Mapped[Date]`` (the SQLAlchemy
@@ -331,17 +328,18 @@ def resolve_canonical_status(buy: Any, reference_date: date, *, simulate: bool =
     Returns:
         One of ``CANONICAL_STATUSES``.
     """
-    # Casing is normalized by the ONE coercion (PersistedMediaBuyStatus.parse_or_none),
-    # not lowered by hand here. The non-raising half is the right door for this caller:
-    # an unmapped value must still be DESCRIBED, not refused — refusing it is what once
-    # made fetch-by-ID report MEDIA_BUY_NOT_FOUND for a buy that plainly exists.
-    member = PersistedMediaBuyStatus.parse_or_none(buy.status)
-    if buy.status and member not in PERSISTED_STATUS_TO_CANONICAL:
-        # Not a failure (the buy is still described, date-refined as serving), but
-        # a writer has introduced a persisted value this map doesn't know about —
-        # surface it so the map can be updated rather than silently guessing.
-        logger.warning("Unmapped persisted media-buy status %r; treating as serving state", buy.status)
-    canonical = CANONICAL_SERVING if member is None else PERSISTED_STATUS_TO_CANONICAL.get(member, CANONICAL_SERVING)
+    # previously let an undefined status reach the buyer as "active" with no
+    # commitment instant — a document the pinned schema forbids. A refusal is a real
+    # seller-side defect surfacing, not a case to absorb, and it now carries
+    # CONFIGURATION_ERROR/terminal instead of the bare ValueError that reached the
+    # buyer as VALIDATION_ERROR/correctable — advice about data the buyer does not own.
+    canonical = (
+        PERSISTED_STATUS_TO_CANONICAL[
+            PersistedMediaBuyStatus.parse(buy.status, media_buy_id=getattr(buy, "media_buy_id", None))
+        ]
+        if buy.status
+        else CANONICAL_SERVING
+    )
 
     should_refine = canonical == CANONICAL_SERVING or (simulate and canonical not in TERMINAL_STATUSES)
     if not should_refine:

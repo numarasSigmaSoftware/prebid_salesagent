@@ -245,6 +245,15 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
         """
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 
+        # The batch runs in its OWN session (it is a cross-tenant background job), so
+        # this env's writes must be committed before it can see them. Since the status
+        # write now flushes per row rather than deferring to one commit at the end, an
+        # open transaction here does not merely hide rows — it BLOCKS the batch on a
+        # row lock, and a signal-based pytest timeout cannot interrupt a blocked
+        # database call. Committing here keeps that failure impossible by construction
+        # rather than relying on each test to remember.
+        self._commit_factory_data()
+
         scheduler = DeliveryWebhookScheduler()
         with mock_webhook_post(scheduler) as mock_post:
             await scheduler._send_report_for_media_buy(

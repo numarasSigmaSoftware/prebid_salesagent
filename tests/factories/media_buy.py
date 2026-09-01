@@ -57,7 +57,16 @@ class MediaBuyFactory(factory.alchemy.SQLAlchemyModelFactory):
         seam = cls._split_seam_kwargs(kwargs)
         instance = cls._seed_seam_fields(super()._create(model_class, *args, **kwargs), seam)
         if seam and cls._meta.sqlalchemy_session is not None:
-            cls._meta.sqlalchemy_session.flush()
+            # COMMIT, not flush. ``sqlalchemy_session_persistence = "commit"`` already
+            # committed the INSERT; a bare flush leaves the seam UPDATE open, so the row
+            # stays write-locked by this session for the rest of the test. Production
+            # code called afterwards runs in its OWN session (the status sweep and the
+            # delivery batch are cross-tenant background jobs), and its UPDATE of the
+            # same row then waits on that lock forever — a hang, not a failure, and one
+            # a signal-based pytest timeout cannot interrupt because the block is inside
+            # a database call. Committing here matches the persistence this factory
+            # already declares.
+            cls._meta.sqlalchemy_session.commit()
         return instance
 
     tenant = SubFactory(TenantFactory)

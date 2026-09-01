@@ -25,6 +25,7 @@ from src.core.database.models import (
     Tenant,
 )
 from src.services.media_buy_status_scheduler import MediaBuyStatusScheduler
+from tests.helpers.media_buy_write_seam import read_media_buy_state
 
 
 def _create_test_tenant(tenant_id: str = "test_tenant") -> str:
@@ -908,6 +909,13 @@ def test_sweep_does_not_count_a_write_the_repository_declined(integration_db, ca
     row anyway would make the run report ``Updated 1 media buy status(es)`` for a
     row whose status never moved — a sweep silently lying about its own work.
     """
+    import logging
+    import re
+    from unittest.mock import patch
+
+    from src.core.database.models import PersistedMediaBuyStatus
+    from src.core.database.repositories import MediaBuyRepository
+
     tenant_id = _create_test_tenant("tenant_declined_write")
     principal_id = _create_test_principal(tenant_id)
 
