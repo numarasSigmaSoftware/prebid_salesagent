@@ -9,7 +9,7 @@ Runs after MCPAuthMiddleware.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
@@ -151,7 +151,7 @@ class RequestCompatMiddleware(Middleware):
 
             await self._emit_as_tool_error(context, tool_name, exc)
 
-    async def _emit_as_tool_error(self, context: MiddlewareContext, tool_name: str, exc: Exception) -> None:
+    async def _emit_as_tool_error(self, context: MiddlewareContext, tool_name: str, exc: Exception) -> NoReturn:
         """Record *exc* and re-raise it as the AdCP two-layer MCP error envelope.
 
         Every rejection this middleware makes has to leave through here. The tool's
