@@ -2336,7 +2336,7 @@ def _normalize_whole_number(value: int | float) -> int:
     ``int(value)`` is safe here ONLY because the float arm carries
     ``allow_inf_nan=False``: without it, ``int(float("inf"))`` raises a raw
     ``OverflowError`` straight out of the validator, which escapes as a crash
-    rather than as a buyer-facing VALIDATION_ERROR envelope.
+    rather than as a buyer-facing error envelope.
     """
     as_int = int(value)
     if as_int != value:
@@ -2365,7 +2365,7 @@ def _validate_revision(value: RawRevision) -> int:
     try:
         return RevisionValidator.validate_python(value)
     except ValidationError as exc:
-        raise AdCPValidationError(
+        raise AdCPInvalidRequestError(
             "revision must be an integer of at least 1.",
             field="revision",
             suggestion=(

@@ -75,9 +75,9 @@ class TestRevisionValueContractOnEveryWire:
             f"{transport} accepted revision={bad_value!r}, which the pinned schema forbids; payload={result.payload!r}"
         )
         # Pin the CODE, not merely "something went wrong": the buy exists and the
-        # request is otherwise valid, so VALIDATION_ERROR is the only reason this
-        # may fail. Any other code means the gate did not run.
-        result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+        # request is otherwise valid, so a schema-constraint rejection (INVALID_REQUEST)
+        # is the only reason this may fail. Any other code means the gate did not run.
+        result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
 
     def test_rejects_present_but_null(self, integration_db, transport):
         """An explicit null is a schema violation, not "no token supplied".
@@ -93,7 +93,7 @@ class TestRevisionValueContractOnEveryWire:
             f"{transport} read an explicitly-supplied null revision as 'absent' and "
             f"processed the update anyway; payload={result.payload!r}"
         )
-        result.assert_wire_error("VALIDATION_ERROR", recovery="correctable")
+        result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
 
     def test_accepts_a_whole_number_float(self, integration_db, transport):
         """2.0 is schema-valid under draft-07 `integer` and must not be rejected.

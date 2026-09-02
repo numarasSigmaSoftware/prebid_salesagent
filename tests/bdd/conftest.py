@@ -839,39 +839,22 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # (adcp_a2a_server.py, `validate_revision_wire_value`) — which is why these xpass
         # rather than staying red. This work closes #1885 as well as #1607.
         #
-        # STILL ROUTED below, and deliberately NOT graduated with the others: the rows
-        # expecting INVALID_REQUEST fail for a DIFFERENT reason, which is why they are not
-        # filed under #1607 and why enforcing CONFLICT does nothing for them. Production
-        # DOES reject revision 0, but `UpdateMediaBuyRequest.revision` carries `ge=1`, so
-        # pydantic raises during request construction inside the step — before any
-        # transport dispatch. The row cannot grade the seller's response because the
-        # request never reaches the seller. That is a harness limitation, not a production
-        # gap, and calling it one is the exact mislabelling this task exists to stop.
-        # Measured with the two arms above removed: these rows still report XFAIL, not
-        # XPASS, so nothing about this work made them gradeable.
-        if marker_names & {"T-UC-003-boundary-revision", "T-UC-003-partition-revision"}:
-            # pytest-bdd nests a Scenario Outline's Examples row under the single
-            # `_pytest_bdd_example` param rather than exposing each column, so reading
-            # `params["outcome"]` returns None and every row falls through unrouted.
-            _row = (getattr(item, "callspec", None) and item.callspec.params.get("_pytest_bdd_example")) or {}
-            _row_outcome = str(_row.get("outcome") or "")
-            if "INVALID_REQUEST" in _row_outcome:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=(
-                            "cause=harness-limitation scope=transport-independent ref=#1607 — "
-                            "revision 0 is rejected by UpdateMediaBuyRequest's ge=1 during request "
-                            "construction in the step, so the request never reaches the seller and "
-                            "this row cannot grade the seller's INVALID_REQUEST response. Not a "
-                            "production gap. REMEDY: build the raw payload instead of the typed "
-                            "model, so the seller sees the request. Note the scenario only means "
-                            "anything against a NON-conforming client — a conforming one is stopped "
-                            "by its own SDK before the wire, which is why the request-construction "
-                            "path has to be bypassed deliberately rather than fixed."
-                        ),
-                        strict=True,
-                    )
-                )
+        # Graduated ([order R3]): the two revision-below-minimum rows (partition
+        # below_min "0", boundary "revision 0 (below minimum 1)") now XPASS on every
+        # transport, so no explicit xfail is applied to them any more. This PR gates the
+        # wire-supplied `revision` at the transport boundary (validate_revision_wire_value
+        # -> AdCPInvalidRequestError) and dropped the field's `ge=1`, so a below-minimum
+        # token now reaches the seller and is answered with the INVALID_REQUEST the
+        # scenario asserts -- instead of being blocked by a construction-time `ge=1`
+        # ValidationError that never reached the wire. Reverting the boundary's
+        # INVALID_REQUEST emission reddens these rows, which is what makes the graduation
+        # real rather than vacuous.
+        #
+        # The wrong_type "7" row still XFAILs, for a DIFFERENT and true reason: its Gherkin
+        # step `Given the request revision is set to "7"` has no step definition, so the
+        # StepDefinitionNotFoundError auto-xfail hook (pytest_runtest_makereport) routes it
+        # -- a missing-step-definition harness gap, not a production gap. No explicit marker
+        # is needed; the hook carries the accurate reason.
 
         # FIXME: UC-003 extension/error scenarios — production uses
         # different error codes than spec, or doesn't validate at all. These are
