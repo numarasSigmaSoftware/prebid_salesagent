@@ -1203,7 +1203,7 @@ class AdCPInvariantViolationError(AdCPServiceUnavailableError):
     """
 
     def __init__(self, diagnostic: str, **kwargs: Any) -> None:
-        logger.error("AdCP invariant violated: %s", diagnostic, exc_info=True)
+        logger.error("AdCP invariant violated: %s", diagnostic, stack_info=True)
         super().__init__(_INVARIANT_VIOLATION_MESSAGE, **kwargs)
 
 
