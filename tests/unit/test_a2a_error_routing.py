@@ -1,11 +1,14 @@
 """A2A error routing: application failures ride in failed Tasks, not JSON-RPC.
 
-Compliance finding F7. Per AdCP 3.1.x transport rules (spec prose:
+Per AdCP 3.1.x transport rules (spec prose:
 building/operating/transport-errors.mdx "Layer Separation" and the two-layer
 error-handling model), application/task-execution failures must be RETURNED in
 the task response body as a failed Task carrying the two-layer AdCP error
 envelope artifact. JSON-RPC errors (``A2AError``) are reserved for genuine
 transport faults — malformed requests, missing auth, method-not-found.
+
+Grading: ungraded — A2A transport mechanic, unit-graded here. No conformance
+storyboard under ``dist/compliance/3.1.1/`` exercises A2A failed-Task routing.
 
 Pre-fix bug: ``on_message_send``'s outer exception handler built the correct
 failed Task with the ``processing_error`` envelope artifact, then threw it
