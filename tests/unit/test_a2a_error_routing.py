@@ -1,25 +1,22 @@
-"""A2A error routing: application failures ride in failed Tasks, not JSON-RPC.
+"""A2A error routing: typed failures use Tasks; internal crashes use JSON-RPC.
 
-Per AdCP 3.1.x transport rules (spec prose:
-building/operating/transport-errors.mdx "Layer Separation" and the two-layer
-error-handling model), application/task-execution failures must be RETURNED in
-the task response body as a failed Task carrying the two-layer AdCP error
-envelope artifact. JSON-RPC errors (``A2AError``) are reserved for genuine
-transport faults — malformed requests, missing auth, method-not-found.
+Pinned AdCP 3.1.1, ``docs/building/operating/transport-errors.mdx`` "Layer
+Separation": typed application failures belong in a failed Task carrying the
+two-layer AdCP envelope, while an untyped internal crash belongs in the
+transport channel as a sanitized JSON-RPC error.
 
 Grading: ungraded — A2A transport mechanic, unit-graded here. No conformance
 storyboard under ``dist/compliance/3.1.1/`` exercises A2A failed-Task routing.
 
-Pre-fix bug: ``on_message_send``'s outer exception handler built the correct
-failed Task with the ``processing_error`` envelope artifact, then threw it
-away by raising ``InternalError`` (a JSON-RPC error) instead of returning the
-Task. These tests pin the returned-failed-Task contract on the wire artifact.
+These tests pin both sides: typed ``AdCPError`` retains its Task envelope;
+unexpected ``Exception`` cannot become retryable ``SERVICE_UNAVAILABLE`` or
+expose its message on the transport error.
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
-from a2a.types import InvalidRequestError, SendMessageRequest, Task, TaskState
+from a2a.types import InternalError, InvalidRequestError, SendMessageRequest, Task, TaskState
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.core.exceptions import AdCPValidationError
@@ -45,41 +42,23 @@ def _make_handler() -> tuple[AdCPRequestHandler, object]:
 
 
 @pytest.mark.asyncio
-async def test_untyped_processing_failure_returns_failed_task_with_internal_error_envelope():
-    """An unexpected exception during message processing returns a failed Task.
-
-    The outer ``on_message_send`` handler must normalize the untyped exception
-    to base ``AdCPError`` (internal INTERNAL_ERROR → wire ``SERVICE_UNAVAILABLE``
-    via ``ERROR_CODE_MAPPING``), attach the two-layer envelope as the
-    ``processing_error`` artifact DataPart, and RETURN the failed Task — never
-    raise a JSON-RPC ``InternalError`` for an application failure.
-    """
+async def test_untyped_processing_failure_raises_sanitized_internal_error():
+    """An unexpected processing crash is sanitized onto the JSON-RPC path."""
     handler, ctx = _make_handler()
     params = _make_nl_request("Show me available products in the catalog")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY):
         with patch(
             "src.a2a_server.adcp_a2a_server.core_get_products_tool",
-            side_effect=RuntimeError("adapter exploded"),
+            side_effect=RuntimeError("adapter exploded: secret-canary"),
         ):
-            result = await handler.on_message_send(params, context=ctx)
+            with pytest.raises(InternalError) as exc_info:
+                await handler.on_message_send(params, context=ctx)
 
-    assert isinstance(result, Task), f"expected a returned Task, got {type(result).__name__}"
-    assert result.status.state == TaskState.TASK_STATE_FAILED, (
-        f"expected TASK_STATE_FAILED, got {result.status.state!r}"
-    )
-    envelope = extract_processing_error_envelope(result)
-    # Untyped exceptions normalize to base AdCPError (internal INTERNAL_ERROR),
-    # which maps on the wire to SERVICE_UNAVAILABLE via ERROR_CODE_MAPPING — a
-    # transient (retryable) error, so recovery is "transient".
-    assert_envelope_shape(
-        envelope,
-        "SERVICE_UNAVAILABLE",
-        recovery="transient",
-        message_substr="adapter exploded",
-    )
-    # The failed Task is also the stored lifecycle record.
-    assert handler.tasks[result.id].status.state == TaskState.TASK_STATE_FAILED
+    assert exc_info.value.message == "Internal server error"
+    assert exc_info.value.data is None
+    assert "adapter exploded" not in str(exc_info.value)
+    assert not handler.tasks, "a transport-rejected request must not leave a lifecycle Task"
 
 
 @pytest.mark.asyncio

@@ -240,6 +240,25 @@ class TestA2AJsonRpcProtocol:
             f"MethodNotFound error should name the unknown skill: {body['error']}"
         )
 
+    @patch(
+        "src.a2a_server.adcp_a2a_server.AdCPRequestHandler._resolve_a2a_identity",
+        side_effect=RuntimeError("database host secret-canary exploded"),
+    )
+    def test_untyped_boundary_crash_is_sanitized_jsonrpc_internal_error(self, mock_resolve, client, auth_headers):
+        """An internal crash reaches the real A2A wire only as JSON-RPC -32603."""
+        payload = _build_jsonrpc("get_products", {"brief": "test"}, request_id="crash-test-42")
+
+        response = client.post("/a2a", json=payload, headers=auth_headers)
+
+        error = _extract_jsonrpc_error(response)
+        assert response.status_code == 200
+        assert response.json().get("id") == "crash-test-42"
+        assert error["code"] == -32603
+        assert error["message"] == "Internal server error"
+        assert error.get("data") is None
+        assert "secret-canary" not in response.text
+        assert "SERVICE_UNAVAILABLE" not in response.text
+
     def test_response_echoes_request_id(self, client, auth_headers):
         """JSON-RPC response must echo the request id."""
         payload = _build_jsonrpc("get_products", {"brief": "test"}, request_id="echo-test-42")
