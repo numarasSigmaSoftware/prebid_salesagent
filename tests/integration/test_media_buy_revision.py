@@ -19,6 +19,7 @@ test_update_media_buy_revision_validation_wire.py.
 """
 
 import threading
+from datetime import UTC, datetime
 from unittest import mock
 
 import pytest
@@ -27,7 +28,7 @@ from src.core.config_loader import set_current_tenant
 from src.core.database.repositories import MediaBuyUoW
 from src.core.exceptions import AdCPGoneError, AdCPRevisionConflictError
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schemas import UpdateMediaBuyRequest
+from src.core.schemas import AdCPPackageUpdate, UpdateMediaBuyRequest
 from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
@@ -39,6 +40,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 TENANT_ID = "test_revision_tenant"
 PRINCIPAL_ID = "test_revision_principal"
 TOKEN = "test_revision_token_abc"
+
+#: A far-future end_time for the dates branch, chosen so the update is a real change the
+#: seeded row does not already carry.
+_FUTURE_END = datetime(2035, 1, 1, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -314,62 +319,112 @@ class TestRevisionEnforcedByUpdateFlow:
                 identity=_identity(),
             )
 
-    def test_a_row_moved_after_the_early_check_still_draws_conflict(self, seed_media_buy):
-        """The comparison the spec calls "atomic with the write" is the LATE one.
+    @pytest.mark.parametrize(
+        "branch, req_kwargs, kind",
+        [
+            # ATOMIC branches: _claim_revision() -- the LOCKING compare-and-set -- runs in
+            # the SAME transaction as, and immediately before, the field write
+            # (media_buy_update.py: `_claim_revision(); update_fields(...)`). A row moved
+            # AFTER the non-locking phase-1 check but BEFORE the write is still caught, and
+            # nothing the stale request carried is applied.
+            pytest.param("budget", {"budget": 9000.0}, "atomic", id="budget"),
+            pytest.param("dates", {"end_time": _FUTURE_END}, "atomic", id="dates"),
+            # PRE-ADAPTER branches: _claim_revision() runs only AFTER
+            # adapter.update_media_buy() (the adapter can open a nested get_db_session() and
+            # drop any lock taken earlier), so it cannot make that adapter side-effect atomic.
+            # Asserting CONFLICT-with-nothing-written here would claim a guarantee the code
+            # does not provide. What actually protects these branches is the PHASE-1
+            # fail-fast (assert_revision_matches): an already-stale token is rejected before
+            # the adapter is even acquired. So the row is moved from a second connection in
+            # phase 1's window and the test asserts the adapter was never reached.
+            pytest.param("pause", {"paused": True}, "failfast", id="pause"),
+            pytest.param(
+                "package",
+                {"packages": [AdCPPackageUpdate(package_id="pkg_window", paused=True)]},
+                "failfast",
+                id="package",
+            ),
+        ],
+    )
+    def test_a_row_moved_after_the_early_check_is_caught_per_branch(self, seed_media_buy, branch, req_kwargs, kind):
+        """Each write branch that honours ``revision`` is graded for the protection it
+        actually has -- an atomic late claim, or the phase-1 fail-fast -- never a
+        guarantee it does not provide.
 
-        The early comparison cannot be the enforcing one: it takes no lock, and it
-        could not keep one if it did, because ``resolve_principal_or_raise`` and
-        ``get_adapter`` each open a nested ``get_db_session()`` that ends this
-        request's transaction. Everything committed by anyone else in that window is
-        invisible to it.
-
-        So this test opens exactly that window. It moves the row from a SECOND
-        connection -- a separate thread, which the thread-scoped session factory gives
-        its own session and therefore its own transaction -- at a point AFTER the
-        early comparison has passed and BEFORE any write. A seller that only compared
-        early would go on to overwrite the other writer's update with the buyer's
-        stale-by-now request. The locking compare-and-set adjacent to the write is what
-        turns that into CONFLICT, and is the only thing here that can.
+        The early comparison cannot be the atomic one: it takes no lock, and it could not
+        keep one if it did, because ``resolve_principal_or_raise`` and ``get_adapter`` each
+        open a nested ``get_db_session()`` that ends this request's transaction. So for the
+        atomic branches (budget, dates) a SECOND connection moves the row AFTER the early
+        check and BEFORE the write, and only the locking compare-and-set adjacent to the
+        write can turn that into CONFLICT. For the pre-adapter branches (pause, package) the
+        token is already stale on arrival and phase 1 must reject it before the adapter is
+        acquired -- so those assert ``get_adapter`` was never called.
         """
-        seed_media_buy("mb_rev_window")
-        before = read_revision("mb_rev_window")
-        moved: list[int] = []
+        mbid = f"mb_rev_window_{branch}"
+        seed_media_buy(mbid)
+        before = read_revision(mbid)
+        req = UpdateMediaBuyRequest(media_buy_id=mbid, revision=before, **req_kwargs)
 
-        real_resolve_principal_or_raise = media_buy_update.resolve_principal_or_raise
+        if kind == "atomic":
+            moved: list[int] = []
+            real_resolve = media_buy_update.resolve_principal_or_raise
 
-        def move_the_row_then_resolve(*args, **kwargs):
-            principal = real_resolve_principal_or_raise(*args, **kwargs)
-            if not moved:
-                mover = threading.Thread(target=move_revision_on, args=("mb_rev_window",))
-                mover.start()
-                mover.join(timeout=30)
-                assert not mover.is_alive(), "the second connection never finished its write"
-                moved.append(read_revision("mb_rev_window"))
-            return principal
+            def move_the_row_then_resolve(*args, **kwargs):
+                principal = real_resolve(*args, **kwargs)
+                if not moved:
+                    mover = threading.Thread(target=move_revision_on, args=(mbid,))
+                    mover.start()
+                    mover.join(timeout=30)
+                    assert not mover.is_alive(), "the second connection never finished its write"
+                    moved.append(read_revision(mbid))
+                return principal
 
-        with mock.patch.object(media_buy_update, "resolve_principal_or_raise", move_the_row_then_resolve):
-            with pytest.raises(AdCPRevisionConflictError) as exc_info:
-                _update_media_buy_impl(
-                    req=UpdateMediaBuyRequest(media_buy_id="mb_rev_window", budget=9000.0, revision=before),
-                    identity=_identity(),
-                )
+            with mock.patch.object(media_buy_update, "resolve_principal_or_raise", move_the_row_then_resolve):
+                with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                    _update_media_buy_impl(req=req, identity=_identity())
 
-        assert moved == [before + 1], (
-            "the window was never opened -- the other writer has to land between the "
-            f"early comparison and the write for this test to grade anything (saw {moved})"
-        )
-        assert exc_info.value.wire_error_code == "CONFLICT"
-        assert exc_info.value.details == {
-            "resource_id": "mb_rev_window",
-            "expected_version": before,
-            "current_version": before + 1,
-        }
-        # And the rejected request wrote nothing: the other writer's revision stands,
-        # and the budget the stale request carried was never applied.
-        with MediaBuyUoW(TENANT_ID) as uow:
-            survivor = uow.media_buys.get_by_id_or_raise("mb_rev_window")
-            assert survivor.revision == before + 1
-            assert float(survivor.budget or 0) != 9000.0
+            assert moved == [before + 1], (
+                "the window was never opened -- the other writer has to land between the "
+                f"early comparison and the write for this test to grade anything (saw {moved})"
+            )
+            assert exc_info.value.wire_error_code == "CONFLICT"
+            assert exc_info.value.details == {
+                "resource_id": mbid,
+                "expected_version": before,
+                "current_version": before + 1,
+            }
+            # The rejected request wrote nothing: the other writer's revision stands and
+            # its marker survives, so the whole transaction rolled back.
+            with MediaBuyUoW(TENANT_ID) as uow:
+                survivor = uow.media_buys.get_by_id_or_raise(mbid)
+                assert survivor.revision == before + 1
+                assert survivor.order_name == "moved on by another writer"
+                if branch == "budget":
+                    assert float(survivor.budget or 0) != 9000.0
+        else:  # failfast
+            # A second connection moves the row before this request's session first reads
+            # it, so the token is stale by the time phase 1 compares -- the "already stale
+            # on arrival" case assert_revision_matches exists for. (A move made AFTER the
+            # session's first read would be masked by the identity map, which the
+            # non-locking read does not refresh -- exactly why phase 2 must use FOR UPDATE.)
+            move_revision_on(mbid)
+            assert read_revision(mbid) == before + 1, "the second connection never moved the row"
+
+            adapter_spy = mock.Mock(wraps=media_buy_update.get_adapter)
+            with mock.patch.object(media_buy_update, "get_adapter", adapter_spy):
+                with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                    _update_media_buy_impl(req=req, identity=_identity())
+
+            assert exc_info.value.wire_error_code == "CONFLICT"
+            assert exc_info.value.details == {
+                "resource_id": mbid,
+                "expected_version": before,
+                "current_version": before + 1,
+            }
+            # The protection is the phase-1 fail-fast, not an atomic claim: the stale token
+            # was rejected before the adapter was even acquired. Dropping the phase-1 check
+            # lets execution reach get_adapter (and the adapter call), which is the gap.
+            adapter_spy.assert_not_called()
 
 
 #: A distinctive seed, so the assertion below discriminates the three wrong answers
