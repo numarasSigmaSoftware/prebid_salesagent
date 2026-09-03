@@ -57,6 +57,28 @@ class TestMcpDevMode:
             )
             assert result.wire_error_envelope["errors"][0]["field"] == "nonsense_field"
 
+    def test_version_envelope_fields_tolerated(self, integration_db):
+        """Dev mode: adcp_version/adcp_major_version are tolerated via the Step-0 strip.
+
+        The AdCP version-envelope fields (spec 3.1.1 core/version-envelope.json,
+        allOf-composed into every request) are injected by every official SDK client.
+        The MCP compat middleware strips them at Step 0 in ALL environments, so the
+        call succeeds where a genuinely-unknown field is rejected
+        (test_unknown_field_rejected, same transport) — the two named fields succeed
+        only because Step 0 removes them before FastMCP's TypeAdapter.
+        """
+        from tests.harness.product import ProductEnv
+
+        with ProductEnv(tenant_id=TENANT_ID) as env:
+            _create_tenant_with_product()
+            result = env.call_via(
+                Transport.MCP,
+                brief="test ads",
+                adcp_version="3.1",
+                adcp_major_version=3,
+            )
+            assert result.is_success
+
     def test_deprecated_field_translated_even_in_dev(self, integration_db):
         """Deprecated field translation works in dev mode (always active)."""
         from tests.harness.product import ProductEnv
