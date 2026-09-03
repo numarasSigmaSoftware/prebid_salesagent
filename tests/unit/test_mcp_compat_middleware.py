@@ -114,8 +114,12 @@ class TestMiddlewareStripsEnvelopeVersionFields:
 
     @pytest.mark.asyncio
     async def test_envelope_version_fields_removed_in_dev(self, middleware):
-        """adcp_version/adcp_major_version are removed from the forwarded arguments,
-        even in dev mode, while a genuinely-unknown field is preserved (loud in dev).
+        """adcp_version/adcp_major_version are absent from the forwarded arguments in
+        dev mode, while a genuinely-unknown field is preserved (loud in dev).
+
+        The field-absence assertions run before the ``is not ctx`` identity check so a
+        Step-0 regression reddens on the contract (fields leaked through), not on the
+        copy-identity detail.
         """
         ctx = _make_context(
             "get_products",
@@ -136,39 +140,38 @@ class TestMiddlewareStripsEnvelopeVersionFields:
             await middleware.on_call_tool(ctx, capturing_call_next)
 
         assert captured_ctx is not None
-        assert captured_ctx is not ctx
         forwarded = captured_ctx.message.arguments
         assert "adcp_version" not in forwarded
         assert "adcp_major_version" not in forwarded
         # Genuinely-unknown field is NOT removed by this step — dev must still fail loudly.
         assert forwarded["bogus_field"] == "keep-me"
         assert forwarded["brief"] == "ads"
+        assert captured_ctx is not ctx
 
     @pytest.mark.asyncio
     async def test_envelope_version_fields_removed_in_production(self, middleware):
-        """The Step-0 strip is unconditional: envelope fields are removed in production too.
+        """The Step-0 strip is unconditional — it runs before Step 1 in production too.
 
-        Pins the "all environments" contract against a future is_production() re-gate
-        (mirroring the is_production-gated Step 2 that sits right below it).
+        Spies on normalize_request_params (Step 1): it must receive the envelope-free
+        dict. Step 2 runs *after* Step 1, so it cannot mask a Step-0 regression, and
+        the harness sets fastmcp_context=None (which disables Step 2 entirely) — so
+        asserting on the forwarded arguments alone would be vacuous. Pinning Step 1's
+        input pins Step 0 in production as well as dev.
         """
         ctx = _make_context(
             "get_products",
             {"adcp_version": "3.1", "adcp_major_version": 3, "brief": "ads"},
         )
-        captured_ctx = None
+        call_next = AsyncMock()
 
-        async def capturing_call_next(context):
-            nonlocal captured_ctx
-            captured_ctx = context
+        with (
+            patch("src.core.config.is_production", return_value=True),
+            patch("src.core.mcp_compat_middleware.normalize_request_params") as mock_norm,
+        ):
+            mock_norm.return_value = NormalizationResult(params={"brief": "ads"}, translations_applied=[])
+            await middleware.on_call_tool(ctx, call_next)
 
-        with patch("src.core.config.is_production", return_value=True):
-            await middleware.on_call_tool(ctx, capturing_call_next)
-
-        assert captured_ctx is not None
-        forwarded = captured_ctx.message.arguments
-        assert "adcp_version" not in forwarded
-        assert "adcp_major_version" not in forwarded
-        assert forwarded["brief"] == "ads"
+        mock_norm.assert_called_once_with("get_products", {"brief": "ads"})
 
     @pytest.mark.asyncio
     async def test_envelope_strip_is_logged_at_debug(self, middleware):
