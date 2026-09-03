@@ -26,6 +26,12 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from src.core.exceptions import AdCPInvalidRequestError
+
+# SSOT: the version-envelope field set lives in src/core/request_compat.py. Import it
+# (aliased to the historical local name) rather than re-listing it here, so the MCP
+# strip and this alignment suite can never disagree. Set-equality with the pinned
+# schema is graded by test_envelope_version_fields_match_pinned_schema below.
+from src.core.request_compat import ENVELOPE_VERSION_FIELDS as _VERSION_FIELDS
 from src.core.schemas import (
     CreateMediaBuyRequest,
     CreateMediaBuySuccess,
@@ -92,7 +98,7 @@ SCHEMA_TO_MODEL_PARAMS_WITH_GET_PRODUCTS_DRIFT_XFAIL = [
 
 # Version metadata fields present in AdCP JSON schemas that models don't declare explicitly.
 # These have defaults or are managed by the library base class — exclude from all comparisons.
-_VERSION_FIELDS: frozenset[str] = frozenset({"adcp_version", "adcp_major_version"})
+# _VERSION_FIELDS is imported above from src.core.request_compat (single source of truth).
 
 # Fields the SDK's current schema tree defines but the local model does not yet
 # model. These are spec-vs-library mismatches, not bugs in our code.
@@ -121,6 +127,25 @@ def load_json_schema(schema_ref: str) -> dict[str, Any]:
     never a silent skip.
     """
     return pinned_schema.load_canonicalized(pinned_schema.normalize_ref(schema_ref))
+
+
+def test_envelope_version_fields_match_pinned_schema():
+    """Oracle: the MCP Step-0 strip set (ENVELOPE_VERSION_FIELDS, imported here as
+    _VERSION_FIELDS) must equal the ``properties`` of the pinned
+    ``core/version-envelope.json``.
+
+    Closes this PR's own regression class: an upstream-added version-envelope field
+    would otherwise be silently stripped-and-rejected by the MCP middleware with no
+    failing test. The version directory is derived from the installed adcp pin via
+    ``load_json_schema`` — never a hardcoded ``3.1`` literal. Fails on set-inequality
+    in EITHER direction: a stray member added to the strip set, or a schema member
+    the strip set no longer covers.
+    """
+    schema_props = set(load_json_schema("core/version-envelope.json").get("properties", {}))
+    assert set(_VERSION_FIELDS) == schema_props, (
+        "ENVELOPE_VERSION_FIELDS is out of sync with pinned core/version-envelope.json. "
+        f"Strip set: {sorted(_VERSION_FIELDS)}; schema properties: {sorted(schema_props)}"
+    )
 
 
 class _CannotSynthesize(AssertionError):
