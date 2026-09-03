@@ -62,7 +62,12 @@ class RequestCompatMiddleware(Middleware):
         # clients inject these on every request; FastMCP's TypeAdapter rejects them.
         # Folded into initialization so on_call_tool adds no net statements (PLR0915).
         normalized = {k: v for k, v in arguments.items() if k not in ENVELOPE_VERSION_FIELDS}
-        modified = bool(ENVELOPE_VERSION_FIELDS & arguments.keys())
+        stripped_envelope = ENVELOPE_VERSION_FIELDS & arguments.keys()
+        modified = bool(stripped_envelope)
+        if stripped_envelope:
+            logger.debug(
+                "Stripped AdCP version-envelope fields from %s: %s", tool_name, ", ".join(sorted(stripped_envelope))
+            )
 
         # Step 1: Translate deprecated fields
         compat_result = normalize_request_params(tool_name, normalized)

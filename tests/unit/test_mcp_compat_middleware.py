@@ -170,6 +170,29 @@ class TestMiddlewareStripsEnvelopeVersionFields:
         assert "adcp_major_version" not in forwarded
         assert forwarded["brief"] == "ads"
 
+    @pytest.mark.asyncio
+    async def test_envelope_strip_is_logged_at_debug(self, middleware):
+        """The Step-0 strip emits a debug log naming the stripped fields (non-silent)."""
+        ctx = _make_context(
+            "get_products",
+            {"adcp_version": "3.1", "adcp_major_version": 3, "brief": "ads"},
+        )
+
+        async def capturing_call_next(context):
+            return None
+
+        with (
+            patch("src.core.config.is_production", return_value=False),
+            patch("src.core.mcp_compat_middleware.logger") as mock_logger,
+        ):
+            await middleware.on_call_tool(ctx, capturing_call_next)
+
+        mock_logger.debug.assert_called_once_with(
+            "Stripped AdCP version-envelope fields from %s: %s",
+            "get_products",
+            "adcp_major_version, adcp_version",
+        )
+
 
 class TestMiddlewarePassthrough:
     """When no translations, original context passes through unchanged."""
