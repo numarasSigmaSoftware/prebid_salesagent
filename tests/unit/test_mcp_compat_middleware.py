@@ -186,7 +186,7 @@ class TestMiddlewareStripsEnvelopeVersionFields:
 
         with (
             patch("src.core.config.is_production", return_value=False),
-            patch("src.core.mcp_compat_middleware.logger") as mock_logger,
+            patch("src.core.request_compat.logger") as mock_logger,
         ):
             await middleware.on_call_tool(ctx, capturing_call_next)
 

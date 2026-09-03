@@ -18,9 +18,9 @@ from pydantic import ValidationError
 
 from src.core.exceptions import normalize_to_adcp_error
 from src.core.request_compat import (
-    ENVELOPE_VERSION_FIELDS,
     deep_strip_to_schema,
     normalize_request_params,
+    strip_envelope_version_fields,
     strip_unknown_params,
 )
 from src.core.tool_error_logging import _translate_to_tool_error, record_boundary_error
@@ -58,21 +58,13 @@ class RequestCompatMiddleware(Middleware):
             return await call_next(context)
 
         tool_name = context.message.name
-        # Step 0: Strip AdCP version-envelope fields (all environments). Official SDK
-        # clients inject these on every request; FastMCP's TypeAdapter rejects them.
-        # Folded into initialization so on_call_tool adds no net statements (PLR0915).
+        # Step 0: Strip AdCP version-envelope fields (all environments) via the helper.
         # The declared values (incl. adcp_major_version) are intentionally dropped for
         # request tolerance — this does NOT negotiate cross-major support. Emitting
         # VERSION_UNSUPPORTED for a mismatched major is deferred to #2181; if that work
         # needs the declared version it can read the raw payload from mcp_auth_middleware's
         # "raw_wire_payload" state stash rather than reconstructing it here.
-        normalized = {k: v for k, v in arguments.items() if k not in ENVELOPE_VERSION_FIELDS}
-        stripped_envelope = ENVELOPE_VERSION_FIELDS & arguments.keys()
-        modified = bool(stripped_envelope)
-        if stripped_envelope:
-            logger.debug(
-                "Stripped AdCP version-envelope fields from %s: %s", tool_name, ", ".join(sorted(stripped_envelope))
-            )
+        normalized, modified = strip_envelope_version_fields(tool_name, arguments)
 
         # Step 1: Translate deprecated fields
         compat_result = normalize_request_params(tool_name, normalized)
