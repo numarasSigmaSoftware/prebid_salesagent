@@ -61,6 +61,11 @@ class RequestCompatMiddleware(Middleware):
         # Step 0: Strip AdCP version-envelope fields (all environments). Official SDK
         # clients inject these on every request; FastMCP's TypeAdapter rejects them.
         # Folded into initialization so on_call_tool adds no net statements (PLR0915).
+        # The declared values (incl. adcp_major_version) are intentionally dropped for
+        # request tolerance — this does NOT negotiate cross-major support. Emitting
+        # VERSION_UNSUPPORTED for a mismatched major is deferred to #2181; if that work
+        # needs the declared version it can read the raw payload from mcp_auth_middleware's
+        # "raw_wire_payload" state stash rather than reconstructing it here.
         normalized = {k: v for k, v in arguments.items() if k not in ENVELOPE_VERSION_FIELDS}
         stripped_envelope = ENVELOPE_VERSION_FIELDS & arguments.keys()
         modified = bool(stripped_envelope)
