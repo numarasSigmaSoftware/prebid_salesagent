@@ -60,22 +60,35 @@ def _make_handler() -> tuple[AdCPRequestHandler, object]:
 
 @pytest.mark.asyncio
 async def test_untyped_processing_failure_raises_sanitized_internal_error():
-    """An unexpected processing crash is sanitized onto the JSON-RPC path."""
-    handler, ctx = _make_handler()
-    params = _make_nl_request("Show me available products in the catalog")
+    """An unexpected processing crash is sanitized onto the JSON-RPC path.
 
-    with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY):
-        with patch(
+    The crash path must also tear down BOTH per-task registries — the lifecycle
+    Task AND the accepted push config — so a transport-rejected request leaves
+    no orphaned state, and attempts no webhook.
+    """
+    handler, ctx = _make_handler()
+    params = _make_nl_request_with_push(
+        "Show me available products in the catalog", "https://buyer.example.com/webhook"
+    )
+    handler._send_protocol_webhook = AsyncMock()
+
+    with (
+        patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
+        patch("src.a2a_server.adcp_a2a_server._accept_a2a_push_config", return_value=MagicMock()),
+        patch(
             "src.a2a_server.adcp_a2a_server.core_get_products_tool",
             side_effect=RuntimeError("adapter exploded: secret-canary"),
-        ):
-            with pytest.raises(InternalError) as exc_info:
-                await handler.on_message_send(params, context=ctx)
+        ),
+        pytest.raises(InternalError) as exc_info,
+    ):
+        await handler.on_message_send(params, context=ctx)
 
     assert exc_info.value.message == "Internal server error"
     assert exc_info.value.data is None
     assert "adapter exploded" not in str(exc_info.value)
     assert not handler.tasks, "a transport-rejected request must not leave a lifecycle Task"
+    assert not handler._task_push_configs, "a transport-rejected request must not leave an orphaned push config"
+    handler._send_protocol_webhook.assert_not_awaited()
 
 
 @pytest.mark.asyncio
