@@ -58,10 +58,14 @@ _DEGRADING_CONVERTERS = [
     (to_property_list_reference, PropertyListReference),
 ]
 
-# How a wire-value converter is spelled in this module. Both spellings are here on
+# How a wire-value converter is spelled in this module. Every spelling is here on
 # purpose: ``coerce_creative_filters`` already establishes that a converter need
-# not be spelled ``to_*``, so keying membership on ``to_`` alone was escapable.
-_CONVERTER_PREFIXES = ("to_", "coerce_")
+# not be spelled ``to_*``, and ``require_push_notification_config`` that it need
+# not be spelled ``to_*``/``coerce_*`` either — so keying membership on a subset of
+# the prefixes was escapable, the exact escape this pin exists to close. ``ensure_``
+# matches no converter today (future-proofing) — the escape is answered by WIDENING
+# the rule, not by hand-listing the one instance.
+_CONVERTER_PREFIXES = ("to_", "coerce_", "require_", "ensure_")
 
 # Converters that own their dict → model boundary directly instead of routing
 # through ``_coerce_wire_object``. They cannot inherit the ``strict=False``
@@ -69,6 +73,18 @@ _CONVERTER_PREFIXES = ("to_", "coerce_")
 # names, so the membership pin needs them classified explicitly. They are
 # invisible to the delegation pin by construction.
 _OWN_BOUNDARY_CONVERTERS = {"to_brand_reference", "coerce_creative_filters"}
+
+# The converters that reach ``_coerce_wire_object`` — the SHARED core both pins
+# classify. Kept in one place so the two pins cannot drift: the name pin adds only
+# its legitimate extra (``_OWN_BOUNDARY_CONVERTERS``, which own their boundary and
+# so never delegate), the delegation pin adds nothing.
+_CLASSIFIED_DELEGATING = {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS} | {
+    "to_account_reference",  # strict: rejects non-dict (tested below)
+    # Non-optional wrapper over the degrading ``to_push_notification_config``: a
+    # non-dict degrades to None inside the delegate, then the require-guard raises
+    # rather than returning None. Rejects (never returns None) — pinned below.
+    "require_push_notification_config",
+}
 
 
 def test_every_exported_converter_is_classified() -> None:
@@ -95,11 +111,7 @@ def test_every_exported_converter_is_classified() -> None:
         for name in schema_helpers.__all__
         if name.startswith(_CONVERTER_PREFIXES) and inspect.isfunction(getattr(schema_helpers, name, None))
     }
-    classified = (
-        {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS}
-        | {"to_account_reference"}  # strict: rejects non-dict (tested above)
-        | _OWN_BOUNDARY_CONVERTERS
-    )
+    classified = _CLASSIFIED_DELEGATING | _OWN_BOUNDARY_CONVERTERS
     assert exported == classified, (
         "an exported converter is unclassified — decide whether it degrades (add it to "
         "_DEGRADING_CONVERTERS), rejects (strict=True, and test it), or owns its own "
@@ -152,13 +164,7 @@ def test_every_coercing_converter_is_classified() -> None:
             with contextlib.suppress(Exception):
                 fn(probe)  # a dict reaches the delegate on every coercing helper
 
-    classified = {converter.__name__ for converter, _ in _DEGRADING_CONVERTERS} | {
-        "to_account_reference",  # strict: rejects non-dict (tested above)
-        # Non-optional wrapper over the degrading ``to_push_notification_config``: a
-        # non-dict degrades to None inside the delegate, then the require-guard raises
-        # rather than returning None. Rejects (never returns None) — pinned below.
-        "require_push_notification_config",
-    }
+    classified = _CLASSIFIED_DELEGATING
     assert delegating == classified, (
         "a helper delegating to _coerce_wire_object is unclassified — decide whether it "
         "degrades (add it to _DEGRADING_CONVERTERS) or rejects (strict=True, and test it)"
