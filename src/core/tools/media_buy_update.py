@@ -698,7 +698,15 @@ def _update_media_buy_impl(
 
                 # Create ObjectWorkflowMapping so the admin approval flow can
                 # find this update and execute it after human approval.
-                _claim_revision()
+                #
+                # Submission must REJECT a stale token without SPENDING a good one:
+                # the update is deferred, not applied, and UpdateMediaBuySubmitted has
+                # no successor revision to report, so advancing here would strand the
+                # buyer holding a token the seller already consumed. Compare-only.
+                if req.revision is not None:
+                    uow.media_buys.assert_revision_matches(
+                        media_buy_id_to_use, expected_revision=req.revision, context=req.context
+                    )
                 mapping = ObjectWorkflowMapping(
                     step_id=step.step_id,
                     object_type="media_buy",

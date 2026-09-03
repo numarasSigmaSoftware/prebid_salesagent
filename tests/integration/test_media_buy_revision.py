@@ -27,8 +27,9 @@ import pytest
 from src.core.config_loader import set_current_tenant
 from src.core.database.repositories import MediaBuyUoW
 from src.core.exceptions import AdCPGoneError, AdCPRevisionConflictError
+from src.core.helpers.adapter_helpers import get_adapter as _real_get_adapter
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schemas import AdCPPackageUpdate, UpdateMediaBuyRequest
+from src.core.schemas import AdCPPackageUpdate, UpdateMediaBuyRequest, UpdateMediaBuySubmitted
 from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
@@ -141,6 +142,20 @@ def read_revision(media_buy_id: str) -> int:
     """
     with MediaBuyUoW(TENANT_ID) as uow:
         return uow.media_buys.get_by_id_or_raise(media_buy_id).revision
+
+
+def _force_manual_approval_adapter(*args, **kwargs):
+    """Return the real adapter with manual approval forced on for update_media_buy.
+
+    Mutates the genuine adapter (rather than substituting a Mock) so every other
+    call the submission branch makes on it -- ``property_list_unsupported_advisories``
+    included -- keeps its real behaviour. Calls the source ``get_adapter`` (not the
+    ``media_buy_update`` binding this is patched onto) to avoid recursing into itself.
+    """
+    adapter = _real_get_adapter(*args, **kwargs)
+    adapter.manual_approval_required = True
+    adapter.manual_approval_operations = {"update_media_buy"}
+    return adapter
 
 
 class TestRevisionEnforcedByUpdateFlow:
@@ -318,6 +333,53 @@ class TestRevisionEnforcedByUpdateFlow:
                 req=UpdateMediaBuyRequest(media_buy_id="mb_rev_terminal_ok", paused=True, revision=current),
                 identity=_identity(),
             )
+
+    def test_submission_with_a_matching_token_submits_without_spending_the_revision(self, seed_media_buy):
+        """Manual approval defers the update, so a good token must NOT be spent.
+
+        UpdateMediaBuySubmitted carries no successor revision: the update is not
+        applied yet. Advancing the counter here would hand the buyer a token for a
+        state the seller has not entered and leave its held token dead, so submission
+        compares WITHOUT advancing. The persisted revision must be exactly what it
+        was before the request.
+        """
+        seed_media_buy("mb_rev_submit_match")
+        before = read_revision("mb_rev_submit_match")
+
+        with mock.patch.object(media_buy_update, "get_adapter", _force_manual_approval_adapter):
+            result = _update_media_buy_impl(
+                req=UpdateMediaBuyRequest(media_buy_id="mb_rev_submit_match", paused=True, revision=before),
+                identity=_identity(),
+            )
+
+        assert isinstance(result, UpdateMediaBuySubmitted)
+        assert read_revision("mb_rev_submit_match") == before, (
+            f"submission moved the revision from {before} to {read_revision('mb_rev_submit_match')}; a "
+            f"deferred update must not spend the token, which has no successor value to report"
+        )
+
+    def test_submission_with_a_stale_token_still_conflicts(self, seed_media_buy):
+        """Not spending the token must not become not comparing it.
+
+        A stale token against a manual-approval update still has to be rejected with
+        CONFLICT -- deferral is not a way to smuggle a stale update into the approval
+        queue.
+        """
+        seed_media_buy("mb_rev_submit_stale")
+        move_revision_on("mb_rev_submit_stale")
+        current = read_revision("mb_rev_submit_stale")
+        assert current > 1
+
+        with mock.patch.object(media_buy_update, "get_adapter", _force_manual_approval_adapter):
+            with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                _update_media_buy_impl(
+                    req=UpdateMediaBuyRequest(media_buy_id="mb_rev_submit_stale", paused=True, revision=1),
+                    identity=_identity(),
+                )
+
+        assert exc_info.value.wire_error_code == "CONFLICT"
+        assert exc_info.value.details["expected_version"] == 1
+        assert exc_info.value.details["current_version"] == current
 
     @pytest.mark.parametrize(
         "branch, req_kwargs, kind",
