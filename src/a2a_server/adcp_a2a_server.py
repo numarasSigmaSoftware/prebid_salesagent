@@ -1047,9 +1047,11 @@ class AdCPRequestHandler(RequestHandler):
                 )
             )
 
-            # Send protocol-level webhook notification for failure if configured
-            await self._send_protocol_webhook(task, status="failed")
-
+            # No webhook here: this branch returns a terminal failed Task
+            # synchronously (inline response). Pinned AdCP 3.1.1
+            # webhooks.mdx:160 (MUST NOT) + a2a-guide:484 — an inline terminal
+            # response emits no push notification.
+            #
             # The exception is a typed application failure, so return its
             # failed Task. The untyped transport-crash branch returned above.
 

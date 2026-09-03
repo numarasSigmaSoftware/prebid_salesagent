@@ -13,10 +13,18 @@ unexpected ``Exception`` cannot become retryable ``SERVICE_UNAVAILABLE`` or
 expose its message on the transport error.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from a2a.types import InternalError, InvalidRequestError, SendMessageRequest, Task, TaskState
+from a2a.types import (
+    InternalError,
+    InvalidRequestError,
+    SendMessageConfiguration,
+    SendMessageRequest,
+    Task,
+    TaskPushNotificationConfig,
+    TaskState,
+)
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.core.exceptions import AdCPValidationError
@@ -31,6 +39,15 @@ from tests.utils.a2a_helpers import create_a2a_message_with_skill
 
 _MOCK_IDENTITY = make_mock_a2a_identity()
 _make_nl_request = make_nl_send_message_request
+
+
+def _make_nl_request_with_push(text: str, url: str) -> SendMessageRequest:
+    """NL request carrying a protocol-level push-notification config."""
+    request = _make_nl_request(text)
+    request.configuration.CopyFrom(
+        SendMessageConfiguration(task_push_notification_config=TaskPushNotificationConfig(url=url))
+    )
+    return request
 
 
 def _make_handler() -> tuple[AdCPRequestHandler, object]:
@@ -89,6 +106,42 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
         recovery="correctable",
         message_substr="brief must not be empty",
     )
+
+
+@pytest.mark.asyncio
+async def test_no_webhook_on_inline_typed_failure():
+    """A typed failure returns a terminal failed Task inline — no push webhook.
+
+    Pinned AdCP 3.1.1 ``webhooks.mdx:160`` (MUST NOT) + ``a2a-guide:484``: an
+    inline terminal response emits no push notification, even when the caller
+    registered an accepted push config. The failed Task carries the envelope
+    synchronously, so a webhook would be a duplicate delivery of the same
+    terminal state.
+    """
+    handler, ctx = _make_handler()
+    params = _make_nl_request_with_push(
+        "Show me available products in the catalog", "https://buyer.example.com/webhook"
+    )
+    handler._send_protocol_webhook = AsyncMock()
+
+    with (
+        patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
+        patch("src.a2a_server.adcp_a2a_server._accept_a2a_push_config", return_value=MagicMock()),
+        patch(
+            "src.a2a_server.adcp_a2a_server.core_get_products_tool",
+            side_effect=AdCPValidationError("brief must not be empty"),
+        ),
+    ):
+        result = await handler.on_message_send(params, context=ctx)
+
+    assert isinstance(result, Task), f"expected a returned Task, got {type(result).__name__}"
+    assert result.status.state == TaskState.TASK_STATE_FAILED, (
+        f"expected TASK_STATE_FAILED, got {result.status.state!r}"
+    )
+    # An accepted push config WAS registered for this task ...
+    assert handler._task_push_configs, "push config should have been registered for the task"
+    # ... yet no webhook is emitted for the inline terminal failed Task.
+    handler._send_protocol_webhook.assert_not_awaited()
 
 
 @pytest.mark.asyncio
