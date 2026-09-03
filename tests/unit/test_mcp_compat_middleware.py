@@ -153,10 +153,12 @@ class TestMiddlewareStripsEnvelopeVersionFields:
         """The Step-0 strip is unconditional — it runs before Step 1 in production too.
 
         Spies on normalize_request_params (Step 1): it must receive the envelope-free
-        dict. Step 2 runs *after* Step 1, so it cannot mask a Step-0 regression, and
-        the harness sets fastmcp_context=None (which disables Step 2 entirely) — so
-        asserting on the forwarded arguments alone would be vacuous. Pinning Step 1's
-        input pins Step 0 in production as well as dev.
+        dict. Spying on Step 1 rather than asserting the final forwarded arguments
+        isolates Step 0's work — in production Step 2's own strip_unknown_params would
+        also remove these schema-unknown fields, so the final arguments can't tell
+        whether Step 0 or Step 2 stripped them. Step 1 runs before Step 2, so reverting
+        Step 0 lets the envelope fields reach Step 1 and reddens this test in
+        production as well as dev.
         """
         ctx = _make_context(
             "get_products",
