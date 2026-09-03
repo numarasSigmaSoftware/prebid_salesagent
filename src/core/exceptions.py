@@ -1145,7 +1145,14 @@ class AdCPRevisionConflictError(AdCPConflictError):
     )
 
     @classmethod
-    def mismatch(cls, *, media_buy_id: str, expected: int, current: int) -> AdCPRevisionConflictError:
+    def mismatch(
+        cls,
+        *,
+        media_buy_id: str,
+        expected: int,
+        current: int,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> AdCPRevisionConflictError:
         """The row was read and its revision is not the one the buyer expected."""
         return cls(
             f"Media buy {media_buy_id} has been modified: the update expected revision "
@@ -1155,10 +1162,17 @@ class AdCPRevisionConflictError(AdCPConflictError):
                 "expected_version": expected,
                 "current_version": current,
             },
+            context=context,
         )
 
     @classmethod
-    def unobserved(cls, *, media_buy_id: str, expected: int) -> AdCPRevisionConflictError:
+    def unobserved(
+        cls,
+        *,
+        media_buy_id: str,
+        expected: int,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> AdCPRevisionConflictError:
         """The row could not be read under lock, so the current revision is unknown.
 
         ``current_version`` is OMITTED rather than sent as ``null``. Verified against
@@ -1175,6 +1189,7 @@ class AdCPRevisionConflictError(AdCPConflictError):
                 "resource_id": media_buy_id,
                 "expected_version": expected,
             },
+            context=context,
         )
 
 

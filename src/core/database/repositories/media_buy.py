@@ -628,7 +628,13 @@ class MediaBuyRepository:
         self._session.flush()
         return media_buy
 
-    def _lock_row_for_revision_check(self, media_buy_id: str, *, expected_revision: int) -> MediaBuy | None:
+    def _lock_row_for_revision_check(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy | None:
         """Re-read the row under a row lock, bounded by a lock timeout.
 
         ``with_for_update()`` is what makes the comparison correct: it is the lock, and
@@ -668,9 +674,17 @@ class MediaBuyRepository:
         except OperationalError as exc:
             if getattr(exc.orig, "pgcode", None) != _LOCK_NOT_AVAILABLE:
                 raise
-            raise AdCPRevisionConflictError.unobserved(media_buy_id=media_buy_id, expected=expected_revision) from exc
+            raise AdCPRevisionConflictError.unobserved(
+                media_buy_id=media_buy_id, expected=expected_revision, context=context
+            ) from exc
 
-    def assert_revision_matches(self, media_buy_id: str, *, expected_revision: int) -> MediaBuy:
+    def assert_revision_matches(
+        self,
+        media_buy_id: str,
+        *,
+        expected_revision: int,
+        context: ContextObject | dict[str, Any] | None = None,
+    ) -> MediaBuy:
         """Compare the buyer's expected ``revision`` WITHOUT locking or advancing.
 
         This is the fail-fast half of the two-phase enforcement the pinned
@@ -696,13 +710,15 @@ class MediaBuyRepository:
         if media_buy is None:
             raise AdCPInvariantViolationError(
                 f"media buy {media_buy_id} (tenant {self._tenant_id}) disappeared between the "
-                f"ownership check and the revision comparison"
+                f"ownership check and the revision comparison",
+                context=context,
             )
         if media_buy.revision != expected_revision:
             raise AdCPRevisionConflictError.mismatch(
                 media_buy_id=media_buy_id,
                 expected=expected_revision,
                 current=media_buy.revision,
+                context=context,
             )
         return media_buy
 
@@ -712,6 +728,7 @@ class MediaBuyRepository:
         *,
         expected_revision: int,
         seller_committed: bool = False,
+        context: ContextObject | dict[str, Any] | None = None,
     ) -> MediaBuy:
         """Enforce the buyer's expected ``revision`` atomically with this transaction's write.
 
@@ -742,17 +759,21 @@ class MediaBuyRepository:
                 having already read the row (ownership is verified first), so a
                 locked read that finds nothing means it was deleted mid-request.
         """
-        media_buy = self._lock_row_for_revision_check(media_buy_id, expected_revision=expected_revision)
+        media_buy = self._lock_row_for_revision_check(
+            media_buy_id, expected_revision=expected_revision, context=context
+        )
         if media_buy is None:
             raise AdCPInvariantViolationError(
                 f"media buy {media_buy_id} (tenant {self._tenant_id}) disappeared between the "
-                f"ownership check and the locked revision re-read"
+                f"ownership check and the locked revision re-read",
+                context=context,
             )
         if media_buy.revision != expected_revision:
             raise AdCPRevisionConflictError.mismatch(
                 media_buy_id=media_buy_id,
                 expected=expected_revision,
                 current=media_buy.revision,
+                context=context,
             )
         # Same ordering rule as update_status/update_fields: stamp (which reads
         # attributes) before the bump (which replaces one with a SQL expression).

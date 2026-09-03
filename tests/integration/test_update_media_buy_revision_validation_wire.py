@@ -29,6 +29,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 _MEDIA_BUY_ID = "mb_revision_wire"
 
+#: A nontrivial buyer-supplied context. The two-layer error envelope MUST echo it on
+#: a CONFLICT so an async buyer can correlate the rejection back to its own request
+#: (get_media_buys keys off these fields). ContextObject is free-form
+#: (additionalProperties), so any populated dict exercises the echo.
+_BUYER_CONTEXT = {"internal_campaign_id": "camp-xyz", "trace": "t-123"}
+
 #: The three real wire transports. IMPL is excluded deliberately -- it has no wire,
 #: and the boundary gate under test is precisely what IMPL does not run.
 WIRE_TRANSPORTS = [Transport.MCP, Transport.REST, Transport.A2A]
@@ -202,3 +208,27 @@ class TestRevisionEmittedOnEveryWire:
             assert details["resource_id"] == _MEDIA_BUY_ID
             assert_wire_number(details["expected_version"], 99, transport, what=f"{layer}.expected_version")
             assert_wire_number(details["current_version"], 2, transport, what=f"{layer}.current_version")
+
+    def test_conflict_echoes_buyer_context(self, integration_db, transport):
+        """A stale-token CONFLICT must echo the buyer's context on every wire.
+
+        An async buyer receives the conflict out-of-band and needs its own context
+        back to correlate the rejection with the request it sent. The context is
+        threaded from ``req.context`` into the revision-conflict error and lands at
+        the two-layer envelope's top level; reverting that pass-through drops the
+        echo and reddens this test.
+        """
+        with MediaBuyDualEnv() as env:
+            _seed(env)
+            # Advance the revision to 2 so a token of 99 is unambiguously stale.
+            _update(env, transport, revision=1)
+            result = _update(env, transport, revision=99, context=dict(_BUYER_CONTEXT))
+
+        assert result.is_error, f"{transport} accepted a stale revision token"
+        result.assert_wire_error("CONFLICT", recovery="transient")
+
+        echoed = result.wire_error_envelope.get("context")
+        assert echoed == _BUYER_CONTEXT, (
+            f"{transport} did not echo the buyer's context on the CONFLICT envelope: "
+            f"got {echoed!r}, expected {_BUYER_CONTEXT!r}"
+        )

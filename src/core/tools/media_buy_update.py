@@ -471,7 +471,9 @@ def _update_media_buy_impl(
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
 
             if req.revision is not None:
-                uow.media_buys.assert_revision_matches(media_buy_id_to_use, expected_revision=req.revision)
+                uow.media_buys.assert_revision_matches(
+                    media_buy_id_to_use, expected_revision=req.revision, context=req.context
+                )
 
             # PHASE 2 of 2, deferred. A dry run never calls this: it returns below having
             # written nothing, so it must also leave the buyer's counter where it found
@@ -490,7 +492,9 @@ def _update_media_buy_impl(
                 if req.revision is None or claimed_revision:
                     return
                 assert uow.media_buys is not None
-                uow.media_buys.compare_and_set_revision(media_buy_id_to_use, expected_revision=req.revision)
+                uow.media_buys.compare_and_set_revision(
+                    media_buy_id_to_use, expected_revision=req.revision, context=req.context
+                )
                 claimed_revision = True
 
             # State-machine precondition: terminal states reject all mutations,
