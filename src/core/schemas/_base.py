@@ -147,6 +147,7 @@ from pydantic import (
     StrictInt,
     TypeAdapter,
     ValidationError,
+    WithJsonSchema,
     model_serializer,
     model_validator,
 )
@@ -2327,7 +2328,12 @@ def validate_idempotency_key_shape(key: str | None) -> None:
 #: annotation, while a plain dict boundary hands "7" through untouched. The result
 #: would be one rule on paper and three behaviours on the wire. Carry the wire value
 #: under this alias, then run it through ``validate_revision_wire_value``.
-type RawRevision = Any
+#:
+#: ``WithJsonSchema`` is schema-only: it publishes the buyer-facing contract (an integer
+#: >= 1) on generated interfaces without adding a validator, so the ``Any`` runtime
+#: carrier -- and the string/null distinction it preserves -- is unchanged. A revision
+#: of 0 still reaches ``validate_revision_wire_value`` and is rejected there.
+type RawRevision = Annotated[Any, WithJsonSchema({"type": "integer", "minimum": 1})]
 
 
 def _normalize_whole_number(value: int | float) -> int:

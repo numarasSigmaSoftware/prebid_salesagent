@@ -18,7 +18,7 @@ from adcp import PushNotificationConfig
 from adcp.server.helpers import MEDIA_BUY_STATE_MACHINE, is_terminal_status, valid_actions_for_status
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
 
 from src.core.tools.media_buy_list import _compute_status
 
@@ -1664,7 +1664,14 @@ async def update_media_buy(
     reporting_webhook: ReportingWebhook | None = None,  # AdCP ReportingWebhook
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
     idempotency_key: Annotated[str | None, Field(description="Idempotency key for retry safety")] = None,
-    revision: Annotated[int | None, Field(description="Expected current revision (optimistic concurrency)")] = None,
+    revision: Annotated[
+        int | None,
+        Field(description="Expected current revision (optimistic concurrency)"),
+        # Schema-only: publish the buyer-facing contract (integer >= 1) on the MCP tool
+        # schema. Not a validator — revision=0 still reaches _validate_revision (the shared
+        # gate) and is rejected there with INVALID_REQUEST, same as REST/A2A.
+        WithJsonSchema({"type": "integer", "minimum": 1}),
+    ] = None,
     ctx: Context | ToolContext | None = None,
 ):
     """Update a media buy with campaign-level and/or package-level changes.

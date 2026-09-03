@@ -3724,5 +3724,39 @@ class TestRevisionConflictErrorShape:
         assert "row mb_1 vanished between SELECT FOR UPDATE and mutate" in caplog.text
 
 
+class TestRevisionPublishedSchema:
+    """S1 (#2173): the ``revision`` optimistic-concurrency token must publish the same
+    buyer-facing contract on BOTH generated interfaces -- an integer >= 1 -- so generated
+    clients are not handed a schema the server rejects. ``RawRevision`` is an ``Any``
+    runtime carrier (it must survive the string/null distinction to
+    ``validate_revision_wire_value``); ``WithJsonSchema`` supplies the published shape
+    without adding a validator, so revision=0 is still rejected by the shared gate.
+    """
+
+    def test_rest_openapi_publishes_revision_as_integer_min_1(self):
+        """The REST/OpenAPI component for RawRevision is a bounded integer, not ``{}``."""
+        from fastapi import FastAPI
+
+        from src.routes.api_v1 import router
+
+        app = FastAPI()
+        app.include_router(router)
+        schema = app.openapi()["components"]["schemas"]["RawRevision"]
+        assert schema.get("type") == "integer", schema
+        assert schema.get("minimum") == 1, schema
+
+    def test_mcp_tool_publishes_revision_as_integer_min_1(self):
+        """The registered update_media_buy MCP tool publishes revision as a bounded
+        integer, not a nullable integer with no lower bound."""
+        import asyncio
+
+        from src.core.main import mcp
+
+        tool = asyncio.run(mcp.get_tool("update_media_buy"))
+        revision = tool.parameters["properties"]["revision"]
+        assert revision.get("type") == "integer", revision
+        assert revision.get("minimum") == 1, revision
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
