@@ -219,18 +219,24 @@ class TestA2AJsonRpcProtocol:
         response = client.post("/a2a", json=payload, headers=auth_headers)
         body = response.json()
         assert "error" in body, "Unknown method should return JSON-RPC error"
+        assert body["error"]["code"] == -32601, (
+            f"unknown JSON-RPC method must map to the standard method-not-found code -32601: {body['error']}"
+        )
 
     @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
     def test_unknown_skill_returns_error(self, mock_resolve, client, auth_headers):
-        """Unknown skill name should return a JSON-RPC error (not crash).
+        """Unknown skill name returns a JSON-RPC error naming the skill (not crash).
 
-        An unroutable skill is a transport-protocol fault (MethodNotFoundError,
-        an A2AError) — per AdCP 3.1.x transport-errors.mdx "Layer Separation"
-        it belongs on the JSON-RPC error layer, unlike application failures
-        which return failed Tasks. Identity is mocked so the request reaches
-        skill dispatch; pre-fix this test passed for the wrong reason (the
-        unmocked DB crashed identity resolution first, and the old outer
-        handler converted that crash to a JSON-RPC InternalError).
+        Grounding note: an unknown skill supplied as ``message/send`` *data* is
+        NOT one of the transport faults the AdCP Layer-Separation table
+        enumerates (connection-refused, malformed request, internal crash), so
+        this test does not claim spec Layer-Separation grounding for it. It pins
+        only the observable contract — an unrouted skill surfaces as a JSON-RPC
+        error whose message names the skill, rather than crashing. Identity is
+        mocked so the request reaches skill dispatch; pre-fix this test passed
+        for the wrong reason (the unmocked DB crashed identity resolution first,
+        and the old outer handler converted that crash to a JSON-RPC
+        InternalError).
         """
         payload = _build_jsonrpc("nonexistent_skill", {})
         response = client.post("/a2a", json=payload, headers=auth_headers)
