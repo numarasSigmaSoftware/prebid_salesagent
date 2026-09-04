@@ -295,6 +295,24 @@ class AdCPRequestHandler(RequestHandler):
             "success": False,
         }
 
+    @staticmethod
+    def _error_artifact_parts(envelope: dict[str, Any]) -> list[Part]:
+        """Parts for a failed-Task artifact: recommended TextPart + required DataPart.
+
+        Pinned AdCP 3.1.1 a2a-response-format.mdx "Required Structure": the adcp_error
+        DataPart is required and a human/LLM-readable TextPart is recommended. Single
+        source of shape shared by the top-level ``on_message_send`` failure path and the
+        per-skill dispatcher, so both failed-Task artifacts read identically. The text is
+        the envelope's own error message (``errors[0].message``), never re-derived.
+        """
+        errors = envelope.get("errors") or []
+        text = errors[0].get("message") if errors else None
+        parts: list[Part] = []
+        if text:
+            parts.append(Part(text=text))
+        parts.append(Part(data=_dict_to_value(envelope)))
+        return parts
+
     def _get_auth_token(self, context: ServerCallContext | None = None) -> str | None:
         """Extract Bearer token from ServerCallContext.
 
@@ -766,15 +784,17 @@ class AdCPRequestHandler(RequestHandler):
                     # a reference to the dict about to go on the wire, and one of
                     # them mutated it in place (the list_creatives format_id
                     # bare-string defect). Nothing rebuilds an outbound payload.
-                    text_message = None
-                    if res["success"] and isinstance(artifact_data, dict):
-                        text_message = artifact_data.get("message")
-
-                    # Build parts list per A2A spec: optional text Part + required data Part
-                    parts = []
-                    if text_message:
-                        parts.append(Part(text=text_message))
-                    parts.append(Part(data=_dict_to_value(artifact_data)))
+                    # Build parts per A2A spec: recommended text Part + required data Part.
+                    # A failed skill goes through the shared error-artifact builder so its
+                    # DataPart+TextPart shape matches the top-level on_message_send failure.
+                    if not res["success"]:
+                        parts = self._error_artifact_parts(artifact_data)
+                    else:
+                        text_message = artifact_data.get("message") if isinstance(artifact_data, dict) else None
+                        parts = []
+                        if text_message:
+                            parts.append(Part(text=text_message))
+                        parts.append(Part(data=_dict_to_value(artifact_data)))
 
                     task.artifacts.append(
                         Artifact(
@@ -1040,7 +1060,7 @@ class AdCPRequestHandler(RequestHandler):
                 Artifact(
                     artifact_id="error_1",
                     name="processing_error",
-                    parts=[Part(data=_dict_to_value(self._build_error_envelope(e)))],
+                    parts=self._error_artifact_parts(self._build_error_envelope(e)),
                 )
             )
 

@@ -130,6 +130,13 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
         recovery="correctable",
         message_substr="brief must not be empty",
     )
+    # Failed-task artifact pairs a human-readable TextPart with the adcp_error DataPart
+    # (a2a-response-format.mdx "Required Structure": DataPart required, TextPart recommended).
+    parts = result.artifacts[0].parts
+    assert any(p.HasField("text") and "brief must not be empty" in p.text for p in parts), (
+        "failed-task artifact must carry a TextPart with the error message"
+    )
+    assert any(p.HasField("data") for p in parts), "failed-task artifact must carry the DataPart"
 
 
 @pytest.mark.asyncio

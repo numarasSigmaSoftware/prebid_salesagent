@@ -40,16 +40,18 @@ def extract_processing_error_envelope(task) -> dict:
 
     ``on_message_send``'s outer error handler attaches the envelope built by
     ``AdCPRequestHandler._build_error_envelope`` to the failed Task as a
-    single ``processing_error`` artifact with one DataPart (AdCP 3.1.x
-    transport-errors.mdx "Layer Separation": application failures ride in
-    the task body, not JSON-RPC errors).
+    ``processing_error`` artifact carrying the adcp_error DataPart plus a
+    recommended human-readable TextPart (AdCP 3.1.1 a2a-response-format.mdx
+    "Where the Error Lives": a Task-execution failure rides in the task body).
+    Scan for the DataPart — it is not necessarily ``parts[0]`` once a TextPart leads.
     """
     assert task.artifacts, "failed Task must carry the error envelope artifact"
     artifact = task.artifacts[0]
     assert artifact.name == "processing_error", f"expected processing_error artifact, got {artifact.name!r}"
-    part = artifact.parts[0]
-    assert part.HasField("data"), "envelope artifact part must be a DataPart"
-    return json.loads(json_format.MessageToJson(part.data))
+    for part in artifact.parts:
+        if part.HasField("data"):
+            return json.loads(json_format.MessageToJson(part.data))
+    raise AssertionError("processing_error artifact must carry a DataPart")
 
 
 def make_mock_a2a_identity():
