@@ -101,10 +101,9 @@ def seed_media_buy(revision_tenant, bound_factory_session):
 
     ``revision`` is a repository-managed seam field that ``MediaBuy.__init__`` refuses
     outright; the factory assigns it the way the repository does, so a test can start
-    from a row in a state production actually reaches. Seeding it also makes the factory
-    flush AFTER its own commit, which leaves this session holding an open transaction --
-    and therefore a ROW LOCK. The compare-and-set under test takes SELECT ... FOR UPDATE
-    on that row, so the commit below is required, not tidiness.
+    from a row in a state production actually reaches. The commit below closes the
+    factory's own transaction so the seeded row is visible to the separate unit of work
+    the update flow opens, rather than being pinned behind an uncommitted writer.
     """
     tenant, principal = revision_tenant
 
@@ -175,6 +174,38 @@ class TestRevisionEnforcedByUpdateFlow:
         # be the persisted one, not the token it just sent.
         assert result.response.revision == after
 
+    def test_a_tokened_pause_advances_the_same_as_an_untokened_pause(self, seed_media_buy):
+        """Supplying a token must not change how far the counter moves.
+
+        The pause branch used to advance the revision only when a token was present
+        (the two-phase claim ran there but a bare pause wrote nothing), so a tokened
+        pause and an untokened pause moved the counter by different amounts and the
+        divergence was asserted as correct. Under the single-advance design both are one
+        mutating request and advance by exactly the same amount. Graded as an equality
+        between the two shapes, not against a literal, so a design that moved both by two
+        would still be caught if they ever diverged.
+        """
+        seed_media_buy("mb_pause_untokened")
+        untokened_before = read_revision("mb_pause_untokened")
+        _update_media_buy_impl(
+            req=UpdateMediaBuyRequest(media_buy_id="mb_pause_untokened", paused=True),
+            identity=_identity(),
+        )
+        untokened_advance = read_revision("mb_pause_untokened") - untokened_before
+
+        seed_media_buy("mb_pause_tokened")
+        tokened_before = read_revision("mb_pause_tokened")
+        _update_media_buy_impl(
+            req=UpdateMediaBuyRequest(media_buy_id="mb_pause_tokened", paused=True, revision=tokened_before),
+            identity=_identity(),
+        )
+        tokened_advance = read_revision("mb_pause_tokened") - tokened_before
+
+        assert tokened_advance == untokened_advance, (
+            f"a tokened pause advanced the revision by {tokened_advance} and an untokened "
+            f"pause by {untokened_advance}; a token must not change how far the counter moves"
+        )
+
     def test_a_field_writing_update_advances_the_revision_exactly_once(self, seed_media_buy):
         """Honouring a token must not cost the buyer a second revision, nor none.
 
@@ -185,14 +216,10 @@ class TestRevisionEnforcedByUpdateFlow:
         obligation is that supplying a token changes nothing about how far the
         counter moves, and a hardcoded 8 would still pass if both shapes moved two.
 
-        This is the oracle for the UNDER-count. The update flow's nested
-        ``get_db_session()`` blocks close the unit of work's own session mid-request,
-        which can roll the compare-and-set's advance back; a suppression rule that
-        merely remembers "already advanced" then declines the write's advance too and
-        the token stands still, which this assertion catches at 0. The OVER-count --
-        the compare-and-set and the write each advancing -- is graded by
-        ``test_a_field_writing_update_emits_one_advance_on_every_wire`` below, which
-        runs against a harness that does not close the session and so sees both.
+        Both the UNDER-count (a honoured token that leaves the counter still) and the
+        OVER-count (a token that advances twice) fail this equality. The single-advance
+        design has one advance point per request -- the atomic ``advance_revision`` -- so
+        there is no second advance to cancel and no prepayment ledger to lose.
         """
         seed_media_buy("mb_rev_untokened")
         untokened_before = read_revision("mb_rev_untokened")
@@ -222,11 +249,11 @@ class TestRevisionEnforcedByUpdateFlow:
     def test_a_dry_run_with_a_token_reports_the_current_revision_and_moves_nothing(self, seed_media_buy):
         """A simulation applies nothing -- including the token spend.
 
-        The compare-and-set runs before the dry-run early return, deliberately: a
-        simulated update that WOULD be rejected has to report the rejection. But the
-        branch it precedes writes nothing, so an advance taken here would be the one
-        persistent side effect of a request that promises none, and it would hand the
-        buyer a token for a state the seller never entered.
+        The compare-only ``_reject_stale_revision`` runs before the dry-run early return,
+        deliberately: a simulated update that WOULD be rejected has to report the
+        rejection. But it takes no advance, so a matching-token dry run leaves the
+        counter exactly where it found it rather than handing the buyer a token for a
+        state the seller never entered.
         """
         seed_media_buy("mb_rev_dry")
         before = read_revision("mb_rev_dry")
@@ -384,21 +411,16 @@ class TestRevisionEnforcedByUpdateFlow:
     @pytest.mark.parametrize(
         "branch, req_kwargs, kind",
         [
-            # ATOMIC branches: _claim_revision() -- the LOCKING compare-and-set -- runs in
-            # the SAME transaction as, and immediately before, the field write
-            # (media_buy_update.py: `_claim_revision(); update_fields(...)`). A row moved
-            # AFTER the non-locking phase-1 check but BEFORE the write is still caught, and
-            # nothing the stale request carried is applied.
+            # MID-REQUEST MOVE: a second connection moves the row AFTER this request read
+            # it but BEFORE the write. The compare-only early check has already passed, so
+            # only the atomic advance (UPDATE ... WHERE revision = :expected) can turn that
+            # into CONFLICT, and it does -- the whole transaction rolls back.
             pytest.param("budget", {"budget": 9000.0}, "atomic", id="budget"),
             pytest.param("dates", {"end_time": _FUTURE_END}, "atomic", id="dates"),
-            # PRE-ADAPTER branches: _claim_revision() runs only AFTER
-            # adapter.update_media_buy() (the adapter can open a nested get_db_session() and
-            # drop any lock taken earlier), so it cannot make that adapter side-effect atomic.
-            # Asserting CONFLICT-with-nothing-written here would claim a guarantee the code
-            # does not provide. What actually protects these branches is the PHASE-1
-            # fail-fast (assert_revision_matches): an already-stale token is rejected before
-            # the adapter is even acquired. So the row is moved from a second connection in
-            # phase 1's window and the test asserts the adapter was never reached.
+            # STALE ON ARRIVAL: the token is already stale before this request reads the
+            # row, so _reject_stale_revision rejects it up front -- before the adapter is
+            # even acquired. That is the protection for a doomed pause/package update: the
+            # ad server is never touched. The test asserts get_adapter was never called.
             pytest.param("pause", {"paused": True}, "failfast", id="pause"),
             pytest.param(
                 "package",
@@ -410,16 +432,15 @@ class TestRevisionEnforcedByUpdateFlow:
     )
     def test_a_row_moved_after_the_early_check_is_caught_per_branch(self, seed_media_buy, branch, req_kwargs, kind):
         """Each write branch that honours ``revision`` is graded for the protection it
-        actually has -- an atomic late claim, or the phase-1 fail-fast -- never a
+        actually has -- the atomic advance, or the compare-only fail-fast -- never a
         guarantee it does not provide.
 
-        The early comparison cannot be the atomic one: it takes no lock, and it could not
-        keep one if it did, because ``resolve_principal_or_raise`` and ``get_adapter`` each
-        open a nested ``get_db_session()`` that ends this request's transaction. So for the
-        atomic branches (budget, dates) a SECOND connection moves the row AFTER the early
-        check and BEFORE the write, and only the locking compare-and-set adjacent to the
-        write can turn that into CONFLICT. For the pre-adapter branches (pause, package) the
-        token is already stale on arrival and phase 1 must reject it before the adapter is
+        The compare-only early check takes no lock, so it cannot cover a row moved AFTER
+        it runs. For the atomic branches (budget, dates) a SECOND connection moves the row
+        after the early check and before the write, and only the atomic advance
+        (UPDATE ... WHERE revision = :expected) turns that into CONFLICT. For the
+        stale-on-arrival branches (pause, package) the token is already stale when the
+        request reads the row, so the early check rejects it before the adapter is
         acquired -- so those assert ``get_adapter`` was never called.
         """
         mbid = f"mb_rev_window_{branch}"
@@ -464,11 +485,9 @@ class TestRevisionEnforcedByUpdateFlow:
                 if branch == "budget":
                     assert float(survivor.budget or 0) != 9000.0
         else:  # failfast
-            # A second connection moves the row before this request's session first reads
-            # it, so the token is stale by the time phase 1 compares -- the "already stale
-            # on arrival" case assert_revision_matches exists for. (A move made AFTER the
-            # session's first read would be masked by the identity map, which the
-            # non-locking read does not refresh -- exactly why phase 2 must use FOR UPDATE.)
+            # A second connection moves the row before this request reads it, so the token
+            # is already stale when _reject_stale_revision compares -- the "stale on
+            # arrival" case the compare-only early check exists for.
             move_revision_on(mbid)
             assert read_revision(mbid) == before + 1, "the second connection never moved the row"
 
@@ -483,9 +502,9 @@ class TestRevisionEnforcedByUpdateFlow:
                 "expected_version": before,
                 "current_version": before + 1,
             }
-            # The protection is the phase-1 fail-fast, not an atomic claim: the stale token
-            # was rejected before the adapter was even acquired. Dropping the phase-1 check
-            # lets execution reach get_adapter (and the adapter call), which is the gap.
+            # The protection is the compare-only fail-fast, not the atomic advance: the
+            # stale token was rejected before the adapter was even acquired. Dropping the
+            # early check lets execution reach get_adapter (and the adapter call).
             adapter_spy.assert_not_called()
 
 
@@ -541,6 +560,6 @@ def test_a_field_writing_update_emits_one_advance_on_every_wire(integration_db, 
         f"{transport} emitted revision={wire['revision']!r} for an update of a buy at "
         f"{_WIRE_SEED_REVISION}. The pinned update-media-buy-response.json defines the field as "
         f"the revision AFTER this update, so it must be {_WIRE_SEED_REVISION + 1}: "
-        f"{_WIRE_SEED_REVISION} is the pre-write value, {_WIRE_SEED_REVISION + 2} is the token "
-        f"being spent twice (compare-and-set plus the write), and 1 is the schema default"
+        f"{_WIRE_SEED_REVISION} is the pre-write value, {_WIRE_SEED_REVISION + 2} is a double "
+        f"advance (a field write bumping on top of the request's one advance), and 1 is the schema default"
     )

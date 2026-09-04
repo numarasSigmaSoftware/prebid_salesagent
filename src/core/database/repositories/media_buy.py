@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Collection
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, joinedload
@@ -32,6 +32,7 @@ from src.core.exceptions import (
 
 if TYPE_CHECKING:
     from adcp.types import ContextObject
+    from sqlalchemy import CursorResult
 
 
 class MediaBuyRepository:
@@ -640,7 +641,7 @@ class MediaBuyRepository:
         if expected_revision is not None:
             stmt = stmt.where(MediaBuy.revision == expected_revision)
 
-        result = self._session.execute(stmt)
+        result = cast("CursorResult[Any]", self._session.execute(stmt))
         if result.rowcount == 0:
             # No row matched. get_by_id_or_raise answers "gone" with MEDIA_BUY_NOT_FOUND;
             # if it returns, the row exists and only its revision failed the WHERE — which
