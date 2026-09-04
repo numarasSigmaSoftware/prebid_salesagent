@@ -53,6 +53,8 @@ def _mock_uow(media_buy, currency_limit):
     # The tool re-reads the row through the repository's typed not-found accessor;
     # stubbing only get_by_id left that returning a bare MagicMock.
     uow.media_buys.get_by_id_or_raise.return_value = media_buy
+    # The single atomic revision advance returns the row it advanced.
+    uow.media_buys.advance_revision.return_value = media_buy
     uow.media_buys.get_packages.return_value = []
     uow.media_buys.update_fields.return_value = media_buy
     uow.currency_limits.get_for_currency.return_value = currency_limit
@@ -102,4 +104,7 @@ def test_mcp_wrapper_preserves_existing_currency_for_float_budget():
         )
 
     assert result.structured_content["media_buy_id"] == "mb_transport"
-    mock_uow.media_buys.update_fields.assert_called_once_with("mb_transport", budget=5000.0, currency="EUR")
+    # advance=False: the update flow owns its one revision advance via advance_revision.
+    mock_uow.media_buys.update_fields.assert_called_once_with(
+        "mb_transport", budget=5000.0, currency="EUR", advance=False
+    )
