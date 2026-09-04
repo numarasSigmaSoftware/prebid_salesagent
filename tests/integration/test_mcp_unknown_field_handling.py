@@ -13,7 +13,7 @@ import pytest
 
 from tests.factories import PricingOptionFactory, ProductFactory, TenantFactory
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_shape
+from tests.helpers import REQUEST_WITH_ENVELOPE_FIELDS, assert_envelope_shape
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -71,13 +71,13 @@ class TestMcpDevMode:
 
         with ProductEnv(tenant_id=TENANT_ID) as env:
             _create_tenant_with_product()
-            result = env.call_via(
-                Transport.MCP,
-                brief="test ads",
-                adcp_version="3.1",
-                adcp_major_version=3,
-            )
-            assert result.is_success
+            result = env.call_via(Transport.MCP, **REQUEST_WITH_ENVELOPE_FIELDS)
+            # Assert the real success wire, not just is_success: require_wire() fails
+            # loudly if the call errored or no wire body was stashed, and the products
+            # payload proves the request reached get_products with the envelope fields
+            # stripped (a Step-0 regression reddens here).
+            products = result.require_wire()["products"]
+            assert [p["product_id"] for p in products] == ["mcp_prod_1"], products
 
     def test_deprecated_field_translated_even_in_dev(self, integration_db):
         """Deprecated field translation works in dev mode (always active)."""

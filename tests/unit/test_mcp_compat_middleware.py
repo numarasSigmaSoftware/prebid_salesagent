@@ -4,6 +4,7 @@ Tests that the middleware calls normalize_request_params and replaces
 the context message when translations are applied.
 """
 
+import logging
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +13,7 @@ from src.core.exceptions import AdCPValidationError
 from src.core.mcp_compat_middleware import RequestCompatMiddleware
 from src.core.request_compat import NormalizationResult
 from src.core.tool_error_logging import AdCPToolError
-from tests.helpers import assert_envelope_shape, assert_no_raw_validation_leak
+from tests.helpers import REQUEST_WITH_ENVELOPE_FIELDS, assert_envelope_shape, assert_no_raw_validation_leak
 
 
 @pytest.fixture()
@@ -123,12 +124,7 @@ class TestMiddlewareStripsEnvelopeVersionFields:
         """
         ctx = _make_context(
             "get_products",
-            {
-                "adcp_version": "3.1",
-                "adcp_major_version": 3,
-                "brief": "ads",
-                "bogus_field": "keep-me",
-            },
+            {**REQUEST_WITH_ENVELOPE_FIELDS, "bogus_field": "keep-me"},
         )
         captured_ctx = None
 
@@ -160,10 +156,7 @@ class TestMiddlewareStripsEnvelopeVersionFields:
         Step 0 lets the envelope fields reach Step 1 and reddens this test in
         production as well as dev.
         """
-        ctx = _make_context(
-            "get_products",
-            {"adcp_version": "3.1", "adcp_major_version": 3, "brief": "ads"},
-        )
+        ctx = _make_context("get_products", REQUEST_WITH_ENVELOPE_FIELDS)
         call_next = AsyncMock()
 
         with (
@@ -176,26 +169,38 @@ class TestMiddlewareStripsEnvelopeVersionFields:
         mock_norm.assert_called_once_with("get_products", {"brief": "ads"})
 
     @pytest.mark.asyncio
-    async def test_envelope_strip_is_logged_at_debug(self, middleware):
-        """The Step-0 strip emits a debug log naming the stripped fields (non-silent)."""
-        ctx = _make_context(
-            "get_products",
-            {"adcp_version": "3.1", "adcp_major_version": 3, "brief": "ads"},
-        )
+    async def test_envelope_strip_is_logged_at_debug(self, middleware, caplog):
+        """The Step-0 strip emits a debug log naming the stripped fields (non-silent).
+
+        Asserts the record via ``caplog`` at the ``src.core.request_compat`` logger
+        rather than a call-count on the whole module logger: the module emits other
+        debug lines (brand-manifest parsing, schema-candidate matching), so an
+        ``assert_called_once`` on the logger is fragile to unrelated emits. We pin the
+        one record that names ``get_products`` and BOTH stripped envelope fields.
+        """
+        ctx = _make_context("get_products", REQUEST_WITH_ENVELOPE_FIELDS)
 
         async def capturing_call_next(context):
             return None
 
         with (
             patch("src.core.config.is_production", return_value=False),
-            patch("src.core.request_compat.logger") as mock_logger,
+            caplog.at_level(logging.DEBUG, logger="src.core.request_compat"),
         ):
             await middleware.on_call_tool(ctx, capturing_call_next)
 
-        mock_logger.debug.assert_called_once_with(
-            "Stripped AdCP version-envelope fields from %s: %s",
-            "get_products",
-            "adcp_major_version, adcp_version",
+        strip_records = [
+            r
+            for r in caplog.records
+            if r.name == "src.core.request_compat"
+            and r.levelno == logging.DEBUG
+            and "get_products" in r.getMessage()
+            and "adcp_version" in r.getMessage()
+            and "adcp_major_version" in r.getMessage()
+        ]
+        assert len(strip_records) == 1, (
+            "expected exactly one DEBUG strip record naming get_products and both envelope "
+            f"fields; got: {[r.getMessage() for r in caplog.records]}"
         )
 
 
