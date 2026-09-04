@@ -2863,13 +2863,15 @@ class TestUC003StateMachine:
             # hardcode would return ``valid_actions_for_status('paused')`` and miss
             # 'sync_creatives' and 'add_packages'.
             post_action_mb = _make_mock_media_buy("mb_post_action", status="pending_creatives")
-            env.mock["uow"].return_value.media_buys.get_by_id.return_value = active_mb  # state-machine precondition
-            # The pause branch re-reads the post-action row through advance_revision (the
-            # single atomic revision advance returns the row it advanced), so the
-            # DB-derived post-action status is configured there, not on a getter.
-            env.mock["uow"].return_value.media_buys.advance_revision.side_effect = (
-                lambda *a, **k: post_action_mb  # noqa: ARG005 — harness stub ignores call args
-            )
+            # The two reads a bare pause makes, in order: the state-machine precondition
+            # reads the pre-action row (active); the pause branch then re-reads the
+            # post-action row through get_by_id_or_raise AFTER the atomic claim, so the
+            # DB-derived post-action status is the second read. (The claim itself,
+            # advance_revision, no longer returns the row the branch reads.)
+            env.mock["uow"].return_value.media_buys.get_by_id.side_effect = [
+                active_mb,  # state-machine precondition (terminal-state gate)
+                post_action_mb,  # post-action read (get_by_id_or_raise -> get_by_id)
+            ]
 
             env.mock["adapter"].return_value.update_media_buy.return_value = UpdateMediaBuySuccess.carrier(
                 media_buy_id="mb_post_action",
