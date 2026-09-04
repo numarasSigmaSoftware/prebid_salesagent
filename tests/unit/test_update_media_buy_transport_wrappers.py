@@ -92,7 +92,8 @@ def test_mcp_wrapper_preserves_existing_currency_for_float_budget():
     )
 
     mock_ctx = MagicMock(spec=Context)
-    mock_ctx.get_state = AsyncMock(side_effect=[identity, "ctx_transport"])
+    _state = {"identity": identity, "context_id": "ctx_transport", "raw_wire_payload": None}
+    mock_ctx.get_state = AsyncMock(side_effect=lambda key: _state.get(key))
 
     with uow_patch, principal_patch, adapter_patch, ctx_patch, audit_patch, verify_patch:
         result = asyncio.run(

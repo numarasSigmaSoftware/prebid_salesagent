@@ -17,6 +17,15 @@ shared gate itself, and each is graded here.
 Dispatch goes through MediaBuyDualEnv's RAW flat-kwargs form on purpose. Building an
 UpdateMediaBuyRequest in the test process would raise inside the test for exactly the
 values under test, so the rejection would never reach a wire to be graded.
+
+Spec grounding (CLAUDE.md Spec-Grounding Gate): a `revision` value the pinned schema
+does not admit is a schema-value violation -> VALIDATION_ERROR, the same class and code
+as a malformed idempotency_key on this model (one model, one violation class, one code).
+The pin is dist/schemas/3.1.1/media-buy/update-media-buy-request.json (revision:
+{"type": "integer", "minimum": 1}). The 3.1.1 conformance storyboard does NOT grade
+revision: `grep -rn "revision" dist/compliance/3.1.1 --include=*.yaml` returns only
+narrative and a sample body, so the code choice is anchored to the value/range taxonomy,
+not to a graded step (ungraded).
 """
 
 import pytest
@@ -81,9 +90,11 @@ class TestRevisionValueContractOnEveryWire:
             f"{transport} accepted revision={bad_value!r}, which the pinned schema forbids; payload={result.payload!r}"
         )
         # Pin the CODE, not merely "something went wrong": the buy exists and the
-        # request is otherwise valid, so a schema-constraint rejection (INVALID_REQUEST)
-        # is the only reason this may fail. Any other code means the gate did not run.
-        result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
+        # request is otherwise valid, so a schema-value rejection (VALIDATION_ERROR) is
+        # the only reason this may fail. Any other code means the gate did not run.
+        # recovery is not hand-passed: assert_wire_error defaults it to the pinned enum's
+        # classification (pin-wins), so the test does not restate a pinned fact.
+        result.assert_wire_error("VALIDATION_ERROR")
 
     def test_rejects_present_but_null(self, integration_db, transport):
         """An explicit null is a schema violation, not "no token supplied".
@@ -99,7 +110,7 @@ class TestRevisionValueContractOnEveryWire:
             f"{transport} read an explicitly-supplied null revision as 'absent' and "
             f"processed the update anyway; payload={result.payload!r}"
         )
-        result.assert_wire_error("INVALID_REQUEST", recovery="correctable")
+        result.assert_wire_error("VALIDATION_ERROR")
 
     def test_accepts_a_whole_number_float(self, integration_db, transport):
         """2.0 is schema-valid under draft-07 `integer` and must not be rejected.

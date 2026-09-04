@@ -120,6 +120,52 @@ class TestA2AParameterMapping:
             assert len(call_kwargs["packages"]) == 1, "Should have extracted 1 package"
             assert call_kwargs["packages"][0]["package_id"] == "pkg_1", "Package ID should match"
 
+    def test_update_media_buy_forwards_every_field_not_a_hand_list(self):
+        """#2173/#1885: the A2A update handler forwards EVERY field, not a hand-list.
+
+        The prior handler picked ~10 keys by hand and dropped flight_start_date,
+        flight_end_date, currency, pacing, daily_budget, ext, and idempotency_key -- so
+        BR-RULE-215 INV-6 ("revision and idempotency_key are evaluated independently")
+        could not hold on A2A. Routing through the shared builder forwards them all; this
+        pins that idempotency_key (and the other formerly-dropped fields) reach the tool,
+        and that the payload AS SENT is threaded as raw_wire_payload.
+        """
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        handler = AdCPRequestHandler()
+
+        with (
+            patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
+            patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool") as mock_update,
+        ):
+            mock_update.return_value = {"status": "success", "media_buy_id": "mb_123"}
+
+            parameters = {
+                "media_buy_id": "mb_123",
+                "flight_start_date": "2026-01-01",
+                "flight_end_date": "2026-02-01",
+                "currency": "EUR",
+                "pacing": "asap",
+                "daily_budget": 250.0,
+                "ext": {"campaign_ref": "abc"},
+                "idempotency_key": "idem-key-0123456789abcdef",
+            }
+
+            import asyncio
+
+            asyncio.run(handler._handle_update_media_buy_skill(parameters=parameters, identity=_MOCK_IDENTITY))
+
+            mock_update.assert_called_once()
+            call_kwargs = mock_update.call_args.kwargs
+            for field, expected in parameters.items():
+                assert call_kwargs.get(field) == expected, (
+                    f"A2A update handler dropped {field!r} (got {call_kwargs.get(field)!r}); it must "
+                    "forward every field, not a hand-list"
+                )
+            # The payload AS SENT is threaded, so revision presence and the idempotency
+            # hash read the buyer's literal bytes on A2A as on the other transports.
+            assert call_kwargs.get("raw_wire_payload") == parameters
+
     def test_update_media_buy_validates_required_parameters(self):
         """
         Test that update_media_buy validates required parameters per AdCP spec.

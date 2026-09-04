@@ -18,7 +18,7 @@ from adcp import PushNotificationConfig
 from adcp.server.helpers import MEDIA_BUY_STATE_MACHINE, is_terminal_status, valid_actions_for_status
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import MediaBuyStatus
-from pydantic import Field, WithJsonSchema
+from pydantic import Field
 
 from src.core.tools.media_buy_list import _compute_status
 
@@ -82,6 +82,7 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
     Budget,
+    RawRevision,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
     UpdateMediaBuyResult,
@@ -1570,11 +1571,19 @@ def _build_update_request(
     ext: Any = None,
     idempotency_key: Annotated[str | None, Field(description="Idempotency key for retry safety")] = None,
     revision: Annotated[int | None, Field(description="Expected current revision (optimistic concurrency)")] = None,
+    raw_wire_payload: dict[str, Any] | None = None,
 ) -> UpdateMediaBuyRequest:
     """Build UpdateMediaBuyRequest from flat parameters.
 
     Handles deprecated field mapping and budget object construction.
     Used by both MCP wrapper and A2A raw function.
+
+    ``raw_wire_payload`` is the request dict AS SENT on the wire. When present, it is the
+    authority on the optimistic-concurrency ``revision``: it alone can still tell an
+    omitted key from an explicitly-supplied ``null`` (both read as None on the typed
+    param), and it carries the un-coerced value so the one shared gate in
+    ``UpdateMediaBuyRequest`` decides what a ``revision`` may be. The typed ``revision``
+    kwarg is the fallback for direct (non-wire) callers.
     """
     # Handle deprecated field names
     effective_start = start_time or flight_start_date
@@ -1625,7 +1634,13 @@ def _build_update_request(
         request_params["ext"] = ext
     if idempotency_key is not None:
         request_params["idempotency_key"] = idempotency_key
-    if revision is not None:
+    # revision presence comes from the raw wire payload when available, so an explicit
+    # wire null (key present, value None) survives to the model's gate as a rejection
+    # rather than being read as "no token supplied". Direct callers fall back to the
+    # typed kwarg, where None unambiguously means omitted.
+    if raw_wire_payload is not None and "revision" in raw_wire_payload:
+        request_params["revision"] = raw_wire_payload["revision"]
+    elif revision is not None:
         request_params["revision"] = revision
 
     with adcp_validation_boundary(context="update_media_buy request"):
@@ -1670,14 +1685,12 @@ async def update_media_buy(
     reporting_webhook: ReportingWebhook | None = None,  # AdCP ReportingWebhook
     ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
     idempotency_key: Annotated[str | None, Field(description="Idempotency key for retry safety")] = None,
-    revision: Annotated[
-        int | None,
-        Field(description="Expected current revision (optimistic concurrency)"),
-        # Schema-only: publish the buyer-facing contract (integer >= 1) on the MCP tool
-        # schema. Not a validator — revision=0 still reaches _validate_revision (the shared
-        # gate) and is rejected there with INVALID_REQUEST, same as REST/A2A.
-        WithJsonSchema({"type": "integer", "minimum": 1}),
-    ] = None,
+    # RawRevision: an ``Any`` runtime carrier whose PUBLISHED fragment is read from the
+    # pin (one value feeds MCP, REST and the runtime gate), so the wire value survives
+    # to the shared gate and revision=0 is rejected there, same as REST/A2A. The value
+    # actually used comes from the raw wire payload (below), which preserves the
+    # explicit-null-vs-omitted distinction FastMCP coercion would erase.
+    revision: RawRevision = None,
     ctx: Context | ToolContext | None = None,
 ):
     """Update a media buy with campaign-level and/or package-level changes.
@@ -1712,6 +1725,13 @@ async def update_media_buy(
     Returns:
         ToolResult with UpdateMediaBuyResponse data
     """
+    # Read identity, context_id, and the raw wire payload pre-stashed by the MCP
+    # middleware. The payload AS SENT is the presence source for `revision` (FastMCP has
+    # already coerced the `revision` param, erasing the explicit-null-vs-omitted
+    # distinction), so it is threaded into the shared builder like create_media_buy does.
+    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
+    _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
+    raw_wire_payload = (await ctx.get_state("raw_wire_payload")) if isinstance(ctx, Context) else None
     # Construct spec-compliant request at the boundary — no model_dump needed
     # FastMCP already coerced JSON inputs to typed Pydantic models
     req = _build_update_request(
@@ -1732,10 +1752,8 @@ async def update_media_buy(
         ext=ext,
         idempotency_key=idempotency_key,
         revision=revision,
+        raw_wire_payload=raw_wire_payload,
     )
-    # Read identity and context_id pre-resolved by MCPAuthMiddleware
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
     response = _update_media_buy_impl(req=req, identity=identity, context_id=_ctx_id)
     return mcp_result(response)
 
@@ -1764,6 +1782,7 @@ def update_media_buy_raw(
     revision: int | None = None,  # AdCP expected-current optimistic-concurrency token
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
+    raw_wire_payload: dict[str, Any] | None = None,
 ):
     """Update an existing media buy (raw function for A2A server use).
 
@@ -1816,6 +1835,7 @@ def update_media_buy_raw(
         ext=ext,
         idempotency_key=idempotency_key,
         revision=revision,
+        raw_wire_payload=raw_wire_payload,
     )
     if identity is None:
         identity = resolve_identity_from_context(ctx, require_valid_token=True)

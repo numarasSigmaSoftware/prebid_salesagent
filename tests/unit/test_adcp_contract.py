@@ -3719,37 +3719,66 @@ class TestRevisionConflictErrorShape:
 
 
 class TestRevisionPublishedSchema:
-    """S1 (#2173): the ``revision`` optimistic-concurrency token must publish the same
-    buyer-facing contract on BOTH generated interfaces -- an integer >= 1 -- so generated
-    clients are not handed a schema the server rejects. ``RawRevision`` is an ``Any``
-    runtime carrier (it must survive the string/null distinction to
-    ``validate_revision_wire_value``); ``WithJsonSchema`` supplies the published shape
-    without adding a validator, so revision=0 is still rejected by the shared gate.
+    """#2173 (#6): the ``revision`` optimistic-concurrency token must publish the SAME
+    buyer-facing contract on BOTH generated interfaces -- so a generated client is never
+    handed a schema the server rejects. One value feeds both: ``RawRevision``'s published
+    fragment is read from the pin (``update_media_buy_revision_schema``), so the bound
+    cannot drift, and neither interface may publish a ``default`` (FastMCP injects
+    ``default: null`` for optional params, which is schema-INVALID against an integer>=1
+    fragment -- a client that sends the published default would be rejected).
     """
 
-    def test_rest_openapi_publishes_revision_as_integer_min_1(self):
-        """The REST/OpenAPI component for RawRevision is a bounded integer, not ``{}``."""
+    @staticmethod
+    def _rest_revision_fragment() -> dict:
         from fastapi import FastAPI
 
         from src.routes.api_v1 import router
 
         app = FastAPI()
         app.include_router(router)
-        schema = app.openapi()["components"]["schemas"]["RawRevision"]
-        assert schema.get("type") == "integer", schema
-        assert schema.get("minimum") == 1, schema
+        return app.openapi()["components"]["schemas"]["RawRevision"]
 
-    def test_mcp_tool_publishes_revision_as_integer_min_1(self):
-        """The registered update_media_buy MCP tool publishes revision as a bounded
-        integer, not a nullable integer with no lower bound."""
+    @staticmethod
+    def _mcp_revision_fragment() -> dict:
         import asyncio
 
         from src.core.main import mcp
 
         tool = asyncio.run(mcp.get_tool("update_media_buy"))
-        revision = tool.parameters["properties"]["revision"]
-        assert revision.get("type") == "integer", revision
-        assert revision.get("minimum") == 1, revision
+        wire = tool.to_mcp_tool().inputSchema
+        prop = wire["properties"]["revision"]
+        # RawRevision is a named type, so the wire references it as a $def; resolve it.
+        if "$ref" in prop:
+            return wire["$defs"][prop["$ref"].rsplit("/", 1)[-1]]
+        return prop
+
+    def test_rest_publishes_revision_as_the_pinned_integer_bound(self):
+        from src.core.schemas._pinned_fields import update_media_buy_revision_minimum
+
+        schema = self._rest_revision_fragment()
+        assert schema.get("type") == "integer", schema
+        assert schema.get("minimum") == update_media_buy_revision_minimum(), schema
+
+    def test_mcp_publishes_revision_as_the_pinned_integer_bound(self):
+        from src.core.schemas._pinned_fields import update_media_buy_revision_minimum
+
+        schema = self._mcp_revision_fragment()
+        assert schema.get("type") == "integer", schema
+        assert schema.get("minimum") == update_media_buy_revision_minimum(), schema
+
+    def test_mcp_and_rest_publish_equal_fragments_with_no_default(self):
+        """The two interfaces publish the same fragment, and neither advertises a
+        ``default`` the fragment itself rejects.
+
+        ``1 == 1.0`` in Python, so dict equality tolerates the int/float rendering
+        difference while still catching a genuine divergence (a lost ``minimum``, a
+        re-introduced ``default``).
+        """
+        mcp_frag = self._mcp_revision_fragment()
+        rest_frag = self._rest_revision_fragment()
+        assert "default" not in mcp_frag, mcp_frag
+        assert "default" not in rest_frag, rest_frag
+        assert mcp_frag == rest_frag, (mcp_frag, rest_frag)
 
 
 if __name__ == "__main__":

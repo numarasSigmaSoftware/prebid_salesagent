@@ -833,22 +833,24 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         #
         # Graduated (#1885, a2a, 4 rows — the same 4 CONFLICT rows on a2a): its reason
         # said implementing CONFLICT ALONE would leave these red, because
-        # _handle_update_media_buy_skill rebuilt the request from hand-listed fields and
+        # _handle_update_media_buy_skill rebuilt the request from a hand-list and
         # `revision` was in none of them, so the token never reached the tool. That drop
-        # is fixed too — the handler now gates and forwards `revision`
-        # (adcp_a2a_server.py, `validate_revision_wire_value`) — which is why these xpass
-        # rather than staying red. This work closes #1885 as well as #1607.
+        # is fixed for the update_media_buy leg: the A2A handler now routes EVERY field
+        # (plus the raw wire payload) through update_media_buy_raw / _build_update_request
+        # (adcp_a2a_server.py), the same seam as create, so `revision` — and the
+        # formerly-dropped idempotency_key/currency/pacing/flight dates/ext — reach the
+        # tool. This addresses the update_media_buy leg of #1885 (that issue is broader
+        # and stays open); it graduates these #1607 CONFLICT rows on a2a.
         #
         # Graduated ([order R3]): the two revision-below-minimum rows (partition
         # below_min "0", boundary "revision 0 (below minimum 1)") now XPASS on every
-        # transport, so no explicit xfail is applied to them any more. This PR gates the
-        # wire-supplied `revision` at the transport boundary (validate_revision_wire_value
-        # -> AdCPInvalidRequestError) and dropped the field's `ge=1`, so a below-minimum
-        # token now reaches the seller and is answered with the INVALID_REQUEST the
-        # scenario asserts -- instead of being blocked by a construction-time `ge=1`
-        # ValidationError that never reached the wire. Reverting the boundary's
-        # INVALID_REQUEST emission reddens these rows, which is what makes the graduation
-        # real rather than vacuous.
+        # transport, so no explicit xfail is applied to them any more. A below-minimum
+        # token is rejected by the ONE shared value contract inside UpdateMediaBuyRequest
+        # (`_normalize_revision` -> `_validate_revision`, ge from the pin) with
+        # VALIDATION_ERROR — the same code and class as a malformed idempotency_key on
+        # this model. Reverting that shared gate reddens these rows, which is what makes
+        # the graduation real rather than vacuous. (The field's Field(ge=...) is NOT
+        # dropped; it is the gate.)
         #
         # The wrong_type "7" row still XFAILs, for a DIFFERENT and true reason: its Gherkin
         # step `Given the request revision is set to "7"` has no step definition, so the
