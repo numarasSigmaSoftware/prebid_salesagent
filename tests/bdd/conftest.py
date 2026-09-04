@@ -26,7 +26,7 @@ from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -512,99 +512,6 @@ _MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = []
 # UC-005 filter tags that still cannot hold are not REST-specific: inv-031-1-holds
 # / inv-031-1-violated stay xfailed via _XFAIL_TAGS because adcp 3.12 removed the
 # `type` filter for ALL transports (not a REST body issue).
-
-
-#: Causes a typed xfail reason may declare. A reason whose ``cause=`` is not here is a
-#: typo or an invention, and either way the row it exempts would be silently mis-routed.
-#:
-#: ENUMERATED FROM THE TREE, not chosen. The first version of this set was written from
-#: imagination -- "spec-gap", "harness-gap", "upstream-defect" -- none of which exists
-#: here, while the real "harness-limitation" was missing, so every typed reason in the
-#: suite failed to parse. An AST scan of the strings that actually BEGIN with "cause="
-#: gives the population; extend these sets from that scan, never from a guess.
-_XFAIL_CAUSES = frozenset({"transport-drops-parameter", "production-gap", "harness-limitation"})
-
-#: Scopes a typed xfail reason may declare.
-_XFAIL_SCOPES = frozenset({"per-transport", "transport-independent"})
-
-#: The DECLARATION: a run of ``key=value`` tokens at the HEAD of the reason, ending at
-#: the first word that is not one. Anchored with ``\A`` so prose later in the string is
-#: not part of the declaration -- which is the entire point of parsing instead of
-#: substring-matching.
-_XFAIL_DECLARATION_RE = re.compile(r"\A(?:\s*(?:cause|scope|ref)=\S+)+")
-_XFAIL_TOKEN_RE = re.compile(r"(?P<key>cause|scope|ref)=(?P<value>\S+)")
-
-
-class XfailReasonError(AssertionError):
-    """A typed xfail reason declares a token this suite does not recognise."""
-
-
-class XfailReason(NamedTuple):
-    """The parsed form of a ``cause=... scope=... ref=...`` xfail reason."""
-
-    cause: str
-    scope: str
-    ref: str
-
-
-def parse_xfail_reason(reason: str) -> XfailReason | None:
-    """Parse a typed xfail reason, or return None if it is free text.
-
-    Why a parse and not a tighter substring match. The predicate this replaces asked
-    ``"scope=per-transport" in reason``, and that is satisfied by any text CONTAINING the
-    phrase -- including a sentence *describing* the token. Measured: retyping the
-    declaration at :687 while leaving the prose at :706 ("scope=per-transport because each
-    transport enforces ... independently") changed the collected set by ZERO rows. The
-    declaration was decorative and the English sentence was load-bearing, by accident.
-    A substring predicate cannot tell a declaration from a description of one; only
-    position can, so ONLY the leading run of ``key=value`` tokens is read — the
-    declaration ends at the first word that is not one, and everything after it is prose
-    the parser never consults.
-
-    Free text returns None rather than raising: 62 reasons in this tree are prose, three
-    of them carrying unrelated ``k=`` pairs, and sweeping them is not this change's job.
-    Only a reason that ANNOUNCES itself typed -- by OPENING with a run of ``key=value``
-    tokens, in any order -- is held to the vocabulary. A reason that merely mentions one
-    later is prose.
-
-    The residue, stated rather than papered over: a typo in ``cause=`` ITSELF -- or in the
-    leading token's key, which is the same thing -- degrades the reason into free text and
-    returns None. So this DETECTS an unknown value; it does not make one unrepresentable.
-    Leading whitespace is tolerated (``lstrip``) so that a reason indented in a source
-    literal is still recognised as typed rather than silently becoming prose.
-    """
-    # Recognition is the leading TOKEN RUN, not the literal "cause=". Gating on that
-    # keyword made a complete, in-vocabulary declaration whose tokens were written in a
-    # different ORDER — `scope=... cause=... ref=...` — classify as free text and route
-    # nothing, silently: exactly the drop this function exists to prevent, reachable by
-    # word order rather than by a typo. All three live reasons happen to lead with
-    # `cause=`, so it was latent, in the same way the first-occurrence bug was.
-    # Only the leading declaration is parsed. Scanning the whole string was the first
-    # version of this function and it carried the defect it was written to remove:
-    #   'cause=production-gap — unlike scope=per-transport rows this one is global.
-    #    scope=transport-independent ref=#1607'
-    # parsed to scope='per-transport', because finditer took the first match ANYWHERE and
-    # the first one was inside an English sentence. A reason DECLARING
-    # transport-independent would have been routed per-transport by its own prose. The
-    # live reason at conftest.py:781 contains 'This is NOT scope=per-transport' and
-    # parsed correctly only because its declaration happened to come first — one word
-    # order away from wrong.
-    declaration = _XFAIL_DECLARATION_RE.match(reason.lstrip())
-    if declaration is None:
-        return None
-    found: dict[str, str] = {}
-    for match in _XFAIL_TOKEN_RE.finditer(declaration.group(0)):
-        found.setdefault(match.group("key"), match.group("value").rstrip(",;."))
-    missing = {"cause", "scope", "ref"} - found.keys()
-    if missing:
-        raise XfailReasonError(f"typed xfail reason is missing {sorted(missing)}: {reason!r}")
-    if found["cause"] not in _XFAIL_CAUSES:
-        raise XfailReasonError(f"unknown xfail cause={found['cause']!r} in {reason!r}; known: {sorted(_XFAIL_CAUSES)}")
-    if found["scope"] not in _XFAIL_SCOPES:
-        raise XfailReasonError(f"unknown xfail scope={found['scope']!r} in {reason!r}; known: {sorted(_XFAIL_SCOPES)}")
-    if not found["ref"].startswith("#"):
-        raise XfailReasonError(f"xfail ref={found['ref']!r} must be an issue reference like '#1607': {reason!r}")
-    return XfailReason(cause=found["cause"], scope=found["scope"], ref=found["ref"])
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -3012,17 +2919,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     # xfail still proves out and an xpass is still caught when production catches
     # up) and deselect the redundant ones.
     #
-    # That rationale holds only when the failure IS transport-independent. It is
-    # not always: an obligation each transport enforces separately fails three
-    # times for three reasons, and each has to xpass on its own when production
-    # catches up — deselecting two of them would grade a cross-transport MUST on
-    # one transport and call it covered.
-    #
-    # So the exemption is keyed on the xfail reason declaring `scope=per-transport`,
-    # not on a list of node ids. A node list is an allowlist under another name and
-    # rots the moment someone adds a row; a declared property is inherited by every
-    # future row that carries it. See the cause taxonomy the UC-003 revision rows
-    # use above (`cause=... scope=... ref=...`).
     # IMPL was dropped from the BDD default parametrization (#1417), so
     # a2a is now the canonical transport that always runs; mcp/rest are the
     # redundant transports deselected when the scenario carries a strict xfail.
@@ -3033,11 +2929,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     if not os.environ.get("BDD_ALL_TRANSPORTS"):
         deselected: list[pytest.Item] = []
         remaining: list[pytest.Item] = []
-        # Collected rather than raised in-loop: an exception escaping
-        # pytest_collection_modifyitems surfaces as INTERNALERROR, which reports the
-        # hook rather than the malformed reason and truncates the run. Gathering them
-        # and failing once at the end names every offender.
-        reason_errors: list[str] = []
         for item in items:
             nodeid = item.nodeid
             is_redundant_transport = "[mcp]" in nodeid or "[mcp-" in nodeid or "[rest]" in nodeid or "[rest-" in nodeid
@@ -3046,28 +2937,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 continue
             # Check if this item has a strict xfail marker
             strict_xfails = [m for m in item.iter_markers() if m.name == "xfail" and m.kwargs.get("strict", False)]
-            # Consult the PARSE, not the string. A substring match here was satisfied by
-            # prose quoting the token, so the declaration it appeared to read was
-            # decorative.
-            per_transport = False
-            for marker in strict_xfails:
-                try:
-                    parsed = parse_xfail_reason(str(marker.kwargs.get("reason", "")))
-                except XfailReasonError as exc:
-                    reason_errors.append(f"{item.nodeid}: {exc}")
-                    parsed = None
-                if parsed is not None and parsed.scope == "per-transport":
-                    per_transport = True
-            if strict_xfails and not per_transport:
+            if strict_xfails:
                 deselected.append(item)
             else:
                 remaining.append(item)
-
-        if reason_errors:
-            raise pytest.UsageError(
-                "malformed typed xfail reason(s) — a row whose reason does not parse would be "
-                "routed by accident:\n  " + "\n  ".join(reason_errors)
-            )
 
         if deselected:
             items[:] = remaining
