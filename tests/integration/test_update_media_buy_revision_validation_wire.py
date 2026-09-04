@@ -78,6 +78,30 @@ class TestRevisionValueContractOnEveryWire:
         # classification (pin-wins), so the test does not restate a pinned fact.
         result.assert_wire_error("VALIDATION_ERROR")
 
+    def test_a_malformed_revision_echoes_buyer_context(self, integration_db, transport):
+        """A malformed-revision rejection must echo the buyer's context on every wire.
+
+        An async buyer receives the rejection out-of-band and needs its own context back to
+        correlate it with the request it sent -- the same correlation the CONFLICT path
+        already gives. The context is threaded from the raw payload into the
+        malformed-revision VALIDATION_ERROR (``_validate_revision``) and lands at the
+        two-layer envelope's top level; dropping that pass-through reddens this test.
+        """
+        with MediaBuyDualEnv() as env:
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
+            # 0 is below the pinned minimum (a schema-value violation), so the gate rejects
+            # before any concurrency comparison — the malformed-value path under test.
+            result = _update(env, transport, revision=0, context=dict(_BUYER_CONTEXT))
+        assert result.is_error, (
+            f"{transport} accepted revision=0, which the pinned schema forbids; payload={result.payload!r}"
+        )
+        result.assert_wire_error("VALIDATION_ERROR")
+        echoed = result.wire_error_envelope.get("context")
+        assert echoed == _BUYER_CONTEXT, (
+            f"{transport} did not echo the buyer's context on the malformed-revision envelope: "
+            f"got {echoed!r}, expected {_BUYER_CONTEXT!r}"
+        )
+
     def test_rejects_present_but_null(self, integration_db, transport):
         """An explicit null is a schema violation, not "no token supplied".
 

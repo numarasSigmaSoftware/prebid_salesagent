@@ -2374,8 +2374,14 @@ RevisionValidator: TypeAdapter[int] = TypeAdapter(
 )
 
 
-def _validate_revision(value: RawRevision) -> int:
-    """Run ``RevisionValidator``, translating a rejection into a buyer-facing error."""
+def _validate_revision(value: RawRevision, context: Any = None) -> int:
+    """Run ``RevisionValidator``, translating a rejection into a buyer-facing error.
+
+    ``context`` is the buyer-supplied context from the raw payload, threaded through so a
+    malformed revision echoes it on the two-layer error envelope -- an async buyer needs
+    its own context back to correlate the rejection with the request it sent, exactly as
+    the revision-CONFLICT path already does.
+    """
     try:
         return RevisionValidator.validate_python(value)
     except ValidationError as exc:
@@ -2395,6 +2401,7 @@ def _validate_revision(value: RawRevision) -> int:
                 "recent create/update response or in get_media_buys, or omit revision "
                 "entirely to skip the optimistic-concurrency check."
             ),
+            context=context,
         ) from exc
 
 
@@ -2505,7 +2512,9 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
         if not isinstance(values, dict) or "revision" not in values:
             return values
         values = copy_before_mutating(values)
-        values["revision"] = _validate_revision(values["revision"])
+        # Pass the buyer's context (raw payload form) so a malformed revision echoes it on
+        # the error envelope, the same correlation the CONFLICT path gives an async buyer.
+        values["revision"] = _validate_revision(values["revision"], context=values.get("context"))
         return values
 
     @model_validator(mode="after")
