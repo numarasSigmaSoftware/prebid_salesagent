@@ -749,21 +749,22 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # tool. This addresses the update_media_buy leg of #1885 (that issue is broader
         # and stays open); it graduates these #1607 CONFLICT rows on a2a.
         #
-        # Graduated ([order R3]): the two revision-below-minimum rows (partition
-        # below_min "0", boundary "revision 0 (below minimum 1)") now XPASS on every
-        # transport, so no explicit xfail is applied to them any more. A below-minimum
-        # token is rejected by the ONE shared value contract inside UpdateMediaBuyRequest
-        # (`_normalize_revision` -> `_validate_revision`, ge from the pin) with
-        # VALIDATION_ERROR — the same code and class as a malformed idempotency_key on
-        # this model. Reverting that shared gate reddens these rows, which is what makes
-        # the graduation real rather than vacuous. (The field's Field(ge=...) is NOT
-        # dropped; it is the gate.)
+        # Graduated ([order R3]): the schema-violation revision rows (partition below_min
+        # "0" and wrong_type "7", boundary "revision 0 (below minimum 1)") now PASS on
+        # every transport, and are graded ON THE WIRE: the UC-003 When step dispatches the
+        # revision rows as RAW flat kwargs (ctx["dispatch_update_raw"]), so a value the
+        # pinned schema forbids is refused by the one shared gate inside
+        # UpdateMediaBuyRequest (`_normalize_revision` -> `_validate_revision`, ge from the
+        # pin) as a VALIDATION_ERROR wire envelope — the same code and class as a malformed
+        # idempotency_key on this model — instead of by a model built in the test process.
+        # Reverting `_normalize_revision` reddens the wrong_type row (the numeric string
+        # would coerce through); below_min carries a redundant library `Ge(ge=1)` backstop,
+        # so it is doubly guarded but still wire-graded.
         #
-        # The wrong_type "7" row still XFAILs, for a DIFFERENT and true reason: its Gherkin
-        # step `Given the request revision is set to "7"` has no step definition, so the
-        # StepDefinitionNotFoundError auto-xfail hook (pytest_runtest_makereport) routes it
-        # -- a missing-step-definition harness gap, not a production gap. No explicit marker
-        # is needed; the hook carries the accurate reason.
+        # The wrong_type "7" row is NO LONGER dormant: `given_request_revision_quoted`
+        # (uc003_update_media_buy.py) is its step definition, so it dispatches and grades
+        # on the wire rather than being absorbed by the StepDefinitionNotFoundError
+        # auto-xfail.
 
         # FIXME: UC-003 extension/error scenarios — production uses
         # different error codes than spec, or doesn't validate at all. These are
