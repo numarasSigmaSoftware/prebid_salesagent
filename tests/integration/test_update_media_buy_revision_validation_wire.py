@@ -94,19 +94,33 @@ class TestRevisionValueContractOnEveryWire:
         )
         result.assert_wire_error("VALIDATION_ERROR")
 
-    def test_accepts_a_whole_number_float(self, integration_db, transport):
-        """2.0 is schema-valid under draft-07 `integer` and must not be rejected.
+    def test_uses_a_whole_number_float_as_the_token(self, integration_db, transport):
+        """2.0 is schema-valid under draft-07 `integer` AND must be USED as the token.
 
         A2A delivers integers as doubles, so refusing this form would refuse a
-        conformant buyer on one transport and accept it on the others.
+        conformant buyer on one transport and accept it on the others -- but merely
+        accepting it is not enough: a boundary that coerced the float to None (dropping
+        the token) would also produce "no error" on a matching value, so accepting a
+        MATCHING float proves nothing about coercion. Seed the row at 2 and send a stale
+        whole-number float 1.0: the only way this yields CONFLICT naming expected 1 /
+        current 2 is if 1.0 was accepted, coerced to the int 1, and compared as the token.
+        A float->None mutation drops the token, the update succeeds, and this reddens.
         """
         with MediaBuyDualEnv() as env:
-            env.seed_existing_media_buy(_MEDIA_BUY_ID)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID, revision=2)
             result = _update(env, transport, revision=1.0)
-        assert not result.is_error, (
-            f"{transport} rejected the schema-valid whole-number float 1.0: "
-            f"{result.wire_error_envelope or result.error!r}"
+        assert result.is_error, (
+            f"{transport} accepted the stale whole-number float 1.0 against a row at revision 2; "
+            f"the float was not used as the concurrency token. payload={result.payload!r}"
         )
+        result.assert_wire_error("CONFLICT", recovery="transient")
+        envelope = result.wire_error_envelope
+        for layer, payload in (("adcp_error", envelope["adcp_error"]), ("errors[0]", envelope["errors"][0])):
+            details = payload.get("details")
+            assert details is not None, f"{transport} {layer} carried no details"
+            assert details["resource_id"] == _MEDIA_BUY_ID
+            assert_wire_number(details["expected_version"], 1, transport, what=f"{layer}.expected_version")
+            assert_wire_number(details["current_version"], 2, transport, what=f"{layer}.current_version")
 
     def test_accepts_a_plain_integer(self, integration_db, transport):
         with MediaBuyDualEnv() as env:
