@@ -1002,7 +1002,12 @@ class AdCPRequestHandler(RequestHandler):
             await self._send_protocol_webhook(task, status=task_status_str)
 
         except A2AError:
-            # Re-raise A2AError as-is (will be caught by JSON-RPC handler)
+            # Transport fault: the request could not be routed to a skill, so the
+            # buyer receives a JSON-RPC error and no Task exists to query. Drop the
+            # Task and push registration stashed before the try so neither orphans
+            # (a2a-response-format.mdx@3.1.1 "no artifact produced" row).
+            self.tasks.pop(task_id, None)
+            self._task_push_configs.pop(task_id, None)
             raise
         except Exception as e:
             # Use identity resolved at transport boundary (if available).
@@ -1021,23 +1026,15 @@ class AdCPRequestHandler(RequestHandler):
                 principal_id=err_principal_id,
             )
 
-            # Pinned AdCP 3.1.1, docs/building/operating/transport-errors.mdx
-            # "Layer Separation": an internal crash belongs to the transport
-            # channel. Do not normalize an untyped bug to SERVICE_UNAVAILABLE /
-            # transient — that tells the buyer to retry a potentially
-            # deterministic defect. The A2A SDK serializes this InternalError as
-            # JSON-RPC -32603. Its static message and absent data deliberately
-            # keep exception text and internals off the buyer wire.
-            if not isinstance(e, AdCPError):
-                self.tasks.pop(task_id, None)
-                self._task_push_configs.pop(task_id, None)
-                raise InternalError(message="Internal server error") from e
-
+            # A Task exists and structured error data is in hand, so per pinned AdCP
+            # 3.1.1 a2a-response-format.mdx "Where the Error Lives: Decision Rule" the
+            # failure is RETURNED as a failed Task carrying the adcp_error DataPart —
+            # the same path MCP (tool_error_logging), REST, and the A2A explicit-skill
+            # loop already take. ``_build_error_envelope`` routes an untyped crash
+            # through ``normalize_to_adcp_error`` to base AdCPError (wire
+            # SERVICE_UNAVAILABLE) and passes a typed AdCPError's own wire code. JSON-RPC
+            # is reserved for failures where no Task was produced (the A2AError branch).
             task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-            # Attach error to task artifacts as a spec-compliant two-layer
-            # envelope (same shape as failed-skill DataParts).
-            # ``_build_error_envelope`` preserves the typed AdCPError's wire
-            # code and recovery metadata.
             del task.artifacts[:]
             task.artifacts.append(
                 Artifact(
@@ -1047,13 +1044,10 @@ class AdCPRequestHandler(RequestHandler):
                 )
             )
 
-            # No webhook here: this branch returns a terminal failed Task
-            # synchronously (inline response). Pinned AdCP 3.1.1
-            # webhooks.mdx:160 (MUST NOT) + a2a-guide:484 — an inline terminal
-            # response emits no push notification.
-            #
-            # The exception is a typed application failure, so return its
-            # failed Task. The untyped transport-crash branch returned above.
+            # Inline terminal failed Task: no webhook (webhooks.mdx:160 MUST NOT), and
+            # the accepted push config is dropped here — a terminal task returned
+            # synchronously has no future consumer for it.
+            self._task_push_configs.pop(task_id, None)
 
         self.tasks[task_id] = task
         return task

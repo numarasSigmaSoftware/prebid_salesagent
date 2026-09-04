@@ -250,20 +250,31 @@ class TestA2AJsonRpcProtocol:
         "src.a2a_server.adcp_a2a_server.AdCPRequestHandler._resolve_a2a_identity",
         side_effect=RuntimeError("database host secret-canary exploded"),
     )
-    def test_untyped_boundary_crash_is_sanitized_jsonrpc_internal_error(self, mock_resolve, client, auth_headers):
-        """An internal crash reaches the real A2A wire only as JSON-RPC -32603."""
+    def test_untyped_boundary_crash_returns_failed_task_envelope_on_wire(self, mock_resolve, client, auth_headers):
+        """An untyped crash reaches the real A2A wire as a failed-Task envelope.
+
+        Pinned AdCP 3.1.1 a2a-response-format.mdx "Where the Error Lives: Decision
+        Rule": a system error where a Task exists is returned as ``status: failed``
+        with the adcp_error DataPart (wire SERVICE_UNAVAILABLE), NOT a JSON-RPC
+        -32603 — matching the MCP/REST/explicit-skill paths. (Scrubbing the untyped
+        message off the wire is a shared-seam concern tracked separately.)
+        """
         payload = _build_jsonrpc("get_products", {"brief": "test"}, request_id="crash-test-42")
 
         response = client.post("/a2a", json=payload, headers=auth_headers)
 
-        error = _extract_jsonrpc_error(response)
         assert response.status_code == 200
         assert response.json().get("id") == "crash-test-42"
-        assert error["code"] == -32603
-        assert error["message"] == "Internal server error"
-        assert error.get("data") is None
-        assert "secret-canary" not in response.text
-        assert "SERVICE_UNAVAILABLE" not in response.text
+        result = _extract_jsonrpc_result(response)
+        task = result.get("task", result)
+        assert task["status"]["state"] in ("TASK_STATE_FAILED", "failed"), (
+            f"untyped crash must surface as a failed Task, got status: {task.get('status')}"
+        )
+        envelope = _extract_artifact_data(result)
+        code = envelope.get("adcp_error", {}).get("code") or (envelope.get("errors", [{}])[0].get("code"))
+        assert code == "SERVICE_UNAVAILABLE", (
+            f"untyped crash must carry a SERVICE_UNAVAILABLE envelope, got: {envelope}"
+        )
 
     def test_response_echoes_request_id(self, client, auth_headers):
         """JSON-RPC response must echo the request id."""

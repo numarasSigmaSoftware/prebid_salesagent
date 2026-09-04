@@ -1,23 +1,25 @@
-"""A2A error routing: typed failures use Tasks; internal crashes use JSON-RPC.
+"""A2A error routing: a Task-execution failure rides in a failed Task; only a
+transport fault with no Task uses JSON-RPC.
 
-Pinned AdCP 3.1.1, ``docs/building/operating/transport-errors.mdx`` "Layer
-Separation": typed application failures belong in a failed Task carrying the
-two-layer AdCP envelope, while an untyped internal crash belongs in the
-transport channel as a sanitized JSON-RPC error.
+Pinned AdCP 3.1.1, ``a2a-response-format.mdx`` "Where the Error Lives: Decision
+Rule": when a Task exists and structured error data is in hand — a typed
+``AdCPError`` OR an untyped system crash alike — the failure is RETURNED as
+``status: failed`` carrying the two-layer AdCP envelope in a DataPart. JSON-RPC
+is reserved for failures where no Task artifact was produced (parse/auth-handshake/
+malformed request — the re-raised ``A2AError``). An untyped crash normalizes to
+base ``AdCPError`` → wire ``SERVICE_UNAVAILABLE``, the same as MCP/REST/explicit-skill.
 
 Grading: ungraded — A2A transport mechanic, unit-graded here. No conformance
 storyboard under ``dist/compliance/3.1.1/`` exercises A2A failed-Task routing.
 
-These tests pin both sides: typed ``AdCPError`` retains its Task envelope;
-unexpected ``Exception`` cannot become retryable ``SERVICE_UNAVAILABLE`` or
-expose its message on the transport error.
+These tests pin both sides: typed and untyped Task-execution failures return a
+failed Task envelope; only a genuine ``A2AError`` transport fault raises to JSON-RPC.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from a2a.types import (
-    InternalError,
     InvalidRequestError,
     SendMessageConfiguration,
     SendMessageRequest,
@@ -59,12 +61,16 @@ def _make_handler() -> tuple[AdCPRequestHandler, object]:
 
 
 @pytest.mark.asyncio
-async def test_untyped_processing_failure_raises_sanitized_internal_error():
-    """An unexpected processing crash is sanitized onto the JSON-RPC path.
+async def test_untyped_processing_failure_returns_service_unavailable_failed_task():
+    """An untyped crash returns a failed Task envelope, not a JSON-RPC error.
 
-    The crash path must also tear down BOTH per-task registries — the lifecycle
-    Task AND the accepted push config — so a transport-rejected request leaves
-    no orphaned state, and attempts no webhook.
+    Pinned AdCP 3.1.1 a2a-response-format.mdx "Where the Error Lives: Decision
+    Rule": a system error where a Task exists is RETURNED as ``status: failed``
+    carrying the adcp_error DataPart — the same path MCP/REST/explicit-skill take
+    via ``normalize_to_adcp_error`` (base AdCPError → wire SERVICE_UNAVAILABLE).
+    The inline terminal failure drops the accepted push config and emits no
+    webhook. (Scrubbing the untyped error message off the wire is a shared-seam
+    concern tracked separately, not asserted here.)
     """
     handler, ctx = _make_handler()
     params = _make_nl_request_with_push(
@@ -79,15 +85,20 @@ async def test_untyped_processing_failure_raises_sanitized_internal_error():
             "src.a2a_server.adcp_a2a_server.core_get_products_tool",
             side_effect=RuntimeError("adapter exploded: secret-canary"),
         ),
-        pytest.raises(InternalError) as exc_info,
     ):
-        await handler.on_message_send(params, context=ctx)
+        result = await handler.on_message_send(params, context=ctx)
 
-    assert exc_info.value.message == "Internal server error"
-    assert exc_info.value.data is None
-    assert "adapter exploded" not in str(exc_info.value)
-    assert not handler.tasks, "a transport-rejected request must not leave a lifecycle Task"
-    assert not handler._task_push_configs, "a transport-rejected request must not leave an orphaned push config"
+    assert isinstance(result, Task), f"expected a returned Task, got {type(result).__name__}"
+    assert result.status.state == TaskState.TASK_STATE_FAILED, (
+        f"expected TASK_STATE_FAILED, got {result.status.state!r}"
+    )
+    assert_envelope_shape(
+        extract_processing_error_envelope(result),
+        "SERVICE_UNAVAILABLE",
+        recovery="transient",
+    )
+    # Inline terminal failure: the accepted push config is dropped, no webhook fires.
+    assert not handler._task_push_configs, "terminal failure must not retain the push config"
     handler._send_protocol_webhook.assert_not_awaited()
 
 
@@ -139,7 +150,7 @@ async def test_no_webhook_on_inline_typed_failure():
 
     with (
         patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
-        patch("src.a2a_server.adcp_a2a_server._accept_a2a_push_config", return_value=MagicMock()),
+        patch("src.a2a_server.adcp_a2a_server._accept_a2a_push_config", return_value=MagicMock()) as mock_accept,
         patch(
             "src.a2a_server.adcp_a2a_server.core_get_products_tool",
             side_effect=AdCPValidationError("brief must not be empty"),
@@ -151,9 +162,11 @@ async def test_no_webhook_on_inline_typed_failure():
     assert result.status.state == TaskState.TASK_STATE_FAILED, (
         f"expected TASK_STATE_FAILED, got {result.status.state!r}"
     )
-    # An accepted push config WAS registered for this task ...
-    assert handler._task_push_configs, "push config should have been registered for the task"
-    # ... yet no webhook is emitted for the inline terminal failed Task.
+    # An accepted push config WAS registered for this task (the buyer's URL) ...
+    mock_accept.assert_called_once_with("https://buyer.example.com/webhook", None, None)
+    # ... but the inline terminal failure drops it — no orphaned URL/credentials.
+    assert not handler._task_push_configs, "terminal typed failure must not retain the push config"
+    # ... and no webhook is emitted for the inline terminal failed Task.
     handler._send_protocol_webhook.assert_not_awaited()
 
 
