@@ -833,7 +833,7 @@ class AdCPRequestHandler(RequestHandler):
                     # All skills failed - mark task as failed
                     task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
 
-                    # Send protocol-level webhook notification for failure
+                    # Delivery is gated centrally in _send_protocol_webhook (inline terminal → skip).
                     error_messages = [
                         res["error_envelope"]["errors"][0]["message"] for res in results if not res["success"]
                     ]
@@ -1039,7 +1039,7 @@ class AdCPRequestHandler(RequestHandler):
             # Mark task with appropriate status
             task.status.CopyFrom(TaskStatus(state=task_state))
 
-            # Send protocol-level webhook notification if configured
+            # Delivery is gated centrally in _send_protocol_webhook (inline terminal → skip).
             await self._send_protocol_webhook(task, status=task_status_str)
 
         except A2AError:
@@ -1085,9 +1085,9 @@ class AdCPRequestHandler(RequestHandler):
                 )
             )
 
-            # Inline terminal failed Task: no webhook (webhooks.mdx:160 MUST NOT), and
-            # the accepted push config is dropped here — a terminal task returned
-            # synchronously has no future consumer for it.
+            # No webhook: an inline terminal failed Task is gated out centrally in
+            # _send_protocol_webhook. The accepted push config is dropped — a terminal
+            # task returned synchronously has no future consumer for it.
             self._task_push_configs.pop(task_id, None)
 
         self.tasks[task_id] = task

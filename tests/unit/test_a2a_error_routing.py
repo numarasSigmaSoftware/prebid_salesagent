@@ -236,3 +236,34 @@ async def test_send_protocol_webhook_delivers_for_non_terminal_state():
         await handler._send_protocol_webhook(task, status="submitted")
 
     notify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_webhook_on_inline_explicit_skill_failure():
+    """The explicit-skill all-failed path returns a terminal Task inline — no webhook.
+
+    Converges with the NL-outer failure path: neither notifies on the inline terminal
+    response (KM :1050 — outcome must not depend on NL vs explicit-skill request shape).
+    """
+    handler, ctx = _make_handler()
+    message = create_a2a_message_with_skill("get_products", {"brief": "test"})
+    params = _make_nl_request_with_push("unused", "https://buyer.example.com/webhook")
+    params.message.CopyFrom(message)
+    notify = AsyncMock(return_value=True)
+
+    with (
+        patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY),
+        patch("src.a2a_server.adcp_a2a_server._accept_a2a_push_config", return_value=MagicMock()),
+        patch(
+            "src.a2a_server.adcp_a2a_server.core_get_products_tool",
+            side_effect=RuntimeError("adapter exploded"),
+        ),
+        patch(
+            "src.a2a_server.adcp_a2a_server.get_protocol_webhook_service",
+            return_value=MagicMock(notify=notify),
+        ),
+    ):
+        result = await handler.on_message_send(params, context=ctx)
+
+    assert result.status.state == TaskState.TASK_STATE_FAILED
+    notify.assert_not_awaited()
