@@ -115,8 +115,9 @@ async def test_nl_media_buy_returns_failed_task_with_envelope():
     ``AdCPCapabilityNotSupportedError`` which propagates to the outer
     ``on_message_send`` error handler that attaches a spec-compliant
     envelope to the failed Task artifact and RETURNS the failed Task
-    (per AdCP 3.1.x transport-errors.mdx "Layer Separation" — JSON-RPC
-    errors are reserved for transport faults, never application failures).
+    (per AdCP 3.1.1 a2a-response-format.mdx "Where the Error Lives" — a
+    Task-execution failure rides in the task body; JSON-RPC is reserved for
+    transport faults where no Task was produced).
 
     Pin: identity resolution still runs once (the route dispatch happens
     before ``_create_media_buy`` raises), and the failed Task must surface

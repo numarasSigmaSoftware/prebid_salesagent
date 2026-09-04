@@ -8,11 +8,15 @@ on_message_send's outer error handler.
 """
 
 import json
+import uuid
 
 from a2a.server.context import ServerCallContext
+from a2a.types import Message, Part, Role, SendMessageRequest
 from google.protobuf import json_format
 
 from src.core.auth_context import AUTH_CONTEXT_STATE_KEY, AuthContext
+from src.core.resolved_identity import ResolvedIdentity
+from tests.factories import PrincipalFactory
 
 
 def make_a2a_context(
@@ -54,10 +58,8 @@ def extract_processing_error_envelope(task) -> dict:
     raise AssertionError("processing_error artifact must carry a DataPart")
 
 
-def make_mock_a2a_identity():
+def make_mock_a2a_identity() -> ResolvedIdentity:
     """Standard mock ResolvedIdentity for A2A handler unit tests."""
-    from tests.factories import PrincipalFactory
-
     return PrincipalFactory.make_identity(
         principal_id="test-principal",
         tenant_id="test-tenant",
@@ -66,12 +68,8 @@ def make_mock_a2a_identity():
     )
 
 
-def make_nl_send_message_request(text: str):
+def make_nl_send_message_request(text: str) -> SendMessageRequest:
     """Build a minimal A2A SendMessageRequest carrying NL text (no skills)."""
-    import uuid
-
-    from a2a.types import Message, Part, Role, SendMessageRequest
-
     message = Message(
         message_id=str(uuid.uuid4()),
         role=Role.ROLE_USER,
