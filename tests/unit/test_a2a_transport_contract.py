@@ -242,8 +242,14 @@ class TestA2AJsonRpcProtocol:
         response = client.post("/a2a", json=payload, headers=auth_headers)
         body = response.json()
         assert "error" in body, "Unknown skill should return JSON-RPC error"
+        # Pin the buyer-visible code, not just the message: an unrouted skill surfaces as
+        # method-not-found (-32601). Reclassifying the raise to InternalError would keep
+        # the message but move the code to -32603, which a buyer branches on.
+        assert body["error"]["code"] == -32601, (
+            f"unrouted skill should surface as method-not-found (-32601): {body['error']}"
+        )
         assert "nonexistent_skill" in body["error"].get("message", ""), (
-            f"MethodNotFound error should name the unknown skill: {body['error']}"
+            f"error should name the unknown skill: {body['error']}"
         )
 
     @patch(

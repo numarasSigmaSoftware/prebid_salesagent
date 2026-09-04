@@ -53,9 +53,12 @@ def _make_nl_request_with_push(text: str, url: str) -> SendMessageRequest:
 
 
 def _make_handler() -> tuple[AdCPRequestHandler, object]:
-    """Handler + authenticated call context for driving on_message_send."""
+    """Handler + authenticated call context for driving on_message_send.
+
+    The token lives in the context state where the real ``_get_auth_token`` reads
+    it, so token extraction runs for real — the unit does not stub it.
+    """
     handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value="test-token")
     ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
     return handler, ctx
 
