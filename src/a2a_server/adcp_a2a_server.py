@@ -166,14 +166,14 @@ def _accept_a2a_push_config(url: str, scheme: str | None, credentials: str | Non
     tool path on either precondition.
 
     Why both surfaces must come through here rather than call the constructor
-    directly: ``on_message_send``'s body runs inside a ``try`` whose handlers are
-    ``except A2AError: raise`` / ``except Exception`` -> ``_internal_error_for``.
-    ``AdCPValidationError`` is not an ``A2AError``, so a raw constructor call
-    there would surface a buyer's correctable credential refusal as
-    ``INTERNAL_ERROR``. The translation below preserves the raised
-    ``AdCPValidationError`` verbatim (see
-    :func:`_invalid_params_from_ssrf_error`'s isinstance branch), which is what
-    keeps a credential refusal naming the credentials field instead of being
+    directly: a push-config refusal is a protocol-level precondition failure and
+    must surface as a JSON-RPC ``InvalidParamsError``. ``AdCPValidationError`` is
+    not an ``A2AError``, so a raw constructor call inside ``on_message_send``'s
+    ``try`` would fall to its typed-error branch and be returned as a task-level
+    ``VALIDATION_ERROR`` failed Task instead. The translation below re-raises the
+    refusal as ``InvalidParamsError`` (see
+    :func:`_invalid_params_from_ssrf_error`'s isinstance branch), keeping it on
+    the transport layer and naming the credentials field instead of being
     re-labelled as a URL problem.
     """
     try:
@@ -470,14 +470,14 @@ class AdCPRequestHandler(RequestHandler):
         result: dict[str, Any] | None = None,
         error: str | None = None,
     ):
-        """Send protocol-level push notification if configured.
+        """Send a protocol-level push notification for a non-terminal status, if configured.
 
-        Per AdCP A2A spec (https://docs.adcontextprotocol.org/docs/protocols/a2a-guide#push-notifications-a2a-specific):
-        - Final states (completed, failed, canceled): Send full Task object with artifacts
-        - Intermediate states (working, input-required, submitted): Send TaskStatusUpdateEvent
-
-        ``notify`` selects the payload type from the status: Task for final states,
-        TaskStatusUpdateEvent for intermediate ones.
+        This sender delivers only on the INITIAL synchronous response, which today is
+        always non-terminal here (``submitted``): an inline terminal response is guarded
+        out below (pinned AdCP 3.1.1 webhooks.mdx:160 — the buyer already has the result).
+        The terminal completion of a ``submitted`` operation is delivered later by an async
+        worker, which does not exist yet and would need its own entry point (see the guard).
+        For the non-terminal states that reach ``notify``, it sends a TaskStatusUpdateEvent.
         """
         # This sender notifies on the INITIAL synchronous response only. Per pinned AdCP
         # 3.1.1 webhooks.mdx:160, an inline terminal response MUST NOT emit a webhook — the
@@ -544,9 +544,9 @@ class AdCPRequestHandler(RequestHandler):
                 notification_type=None,
             )
 
-            # notify() picks the payload type: Task for final states,
-            # TaskStatusUpdateEvent for intermediate ones. protocol is "a2a"
-            # unconditionally -- this IS the A2A server.
+            # notify() picks the payload type by status; terminal states are guarded out
+            # above, so in practice this delivers a TaskStatusUpdateEvent for the
+            # non-terminal (submitted) case. protocol is "a2a" -- this IS the A2A server.
             sent = await push_notification_service.notify(
                 push_notification_config,
                 task=webhook_task,
@@ -830,15 +830,11 @@ class AdCPRequestHandler(RequestHandler):
                 successful_skills = [res["skill"] for res in results if res["success"]]
 
                 if failed_skills and not successful_skills:
-                    # All skills failed - mark task as failed
+                    # All skills failed - mark task as failed and return it inline.
+                    # No webhook: an inline terminal response is gated out centrally in
+                    # _send_protocol_webhook (webhooks.mdx:160), so a call here would be a
+                    # guaranteed no-op — the buyer already has the failed Task.
                     task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
-
-                    # Delivery is gated centrally in _send_protocol_webhook (inline terminal → skip).
-                    error_messages = [
-                        res["error_envelope"]["errors"][0]["message"] for res in results if not res["success"]
-                    ]
-                    await self._send_protocol_webhook(task, status="failed", error="; ".join(error_messages))
-
                     return task
                 elif successful_skills:
                     # Log successful skill invocations with rich context

@@ -202,6 +202,10 @@ async def test_genuine_transport_fault_still_raises_json_rpc_error():
     assert "authentication" in str(exc_info.value).lower(), (
         f"transport fault should name the missing authentication; got: {exc_info.value}"
     )
+    # The provisional Task is registered before the auth gate raises; the A2AError branch
+    # must pop it so a transport-rejected request leaves no orphaned lifecycle Task
+    # (buyer-observable via tasks/get). Removing that pop reddens this assertion.
+    assert not handler.tasks, "A2AError transport fault must not leave an orphaned Task"
 
 
 @pytest.mark.asyncio
