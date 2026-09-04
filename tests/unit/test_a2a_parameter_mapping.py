@@ -155,16 +155,31 @@ class TestA2AParameterMapping:
 
             asyncio.run(handler._handle_update_media_buy_skill(parameters=parameters, identity=_MOCK_IDENTITY))
 
-            mock_update.assert_called_once()
-            call_kwargs = mock_update.call_args.kwargs
-            for field, expected in parameters.items():
-                assert call_kwargs.get(field) == expected, (
-                    f"A2A update handler dropped {field!r} (got {call_kwargs.get(field)!r}); it must "
-                    "forward every field, not a hand-list"
-                )
-            # The payload AS SENT is threaded, so revision presence and the idempotency
-            # hash read the buyer's literal bytes on A2A as on the other transports.
-            assert call_kwargs.get("raw_wire_payload") == parameters
+            # Pin the WHOLE forwarding contract in one assertion: every field the buyer
+            # sent reaches the tool (idempotency_key/currency/pacing/flight dates/ext —
+            # the ones the old hand-list dropped), every unsent field is None, and the
+            # payload AS SENT is threaded as raw_wire_payload so revision presence and the
+            # idempotency hash read the buyer's literal bytes on A2A as on the other wires.
+            mock_update.assert_called_once_with(
+                media_buy_id="mb_123",
+                paused=None,
+                flight_start_date="2026-01-01",
+                flight_end_date="2026-02-01",
+                budget=None,
+                currency="EUR",
+                start_time=None,
+                end_time=None,
+                pacing="asap",
+                daily_budget=250.0,
+                packages=None,
+                push_notification_config=None,
+                context=None,
+                reporting_webhook=None,
+                ext={"campaign_ref": "abc"},
+                idempotency_key="idem-key-0123456789abcdef",
+                identity=_MOCK_IDENTITY,
+                raw_wire_payload=parameters,
+            )
 
     def test_update_media_buy_validates_required_parameters(self):
         """
