@@ -8,20 +8,18 @@ queries via resolve_identity(). Fix: reuse the identity from the handler call.
 This test verifies resolve_identity() is called at most once per NL request.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from tests.a2a_helpers import (
     extract_processing_error_envelope,
-    make_a2a_context,
+    make_a2a_handler,
     make_mock_a2a_identity,
     make_nl_send_message_request,
 )
 
 _MOCK_IDENTITY = make_mock_a2a_identity()
-_make_nl_message = make_nl_send_message_request
 
 
 @pytest.mark.asyncio
@@ -34,11 +32,9 @@ async def test_nl_product_query_calls_resolve_identity_once():
     """
     from src.core.schemas import GetProductsResponse
 
-    handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value="test-token")
-    ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
+    handler, ctx = make_a2a_handler()
 
-    params = _make_nl_message("Show me available products in the catalog")
+    params = make_nl_send_message_request("Show me available products in the catalog")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY) as mock_resolve:
         with patch("src.a2a_server.adcp_a2a_server.core_get_products_tool") as mock_products:
@@ -62,11 +58,9 @@ async def test_nl_pricing_query_calls_resolve_identity_once():
     Pricing NL path (line 674) → _handle_get_products_skill (line 1398 calls
     _create_tool_context_from_a2a) → then line 682 calls it AGAIN for logging.
     """
-    handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value="test-token")
-    ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
+    handler, ctx = make_a2a_handler()
 
-    params = _make_nl_message("What is the pricing for CPM ads?")
+    params = make_nl_send_message_request("What is the pricing for CPM ads?")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY) as mock_resolve:
         with patch("src.a2a_server.adcp_a2a_server.core_get_products_tool") as mock_products:
@@ -87,11 +81,9 @@ async def test_nl_targeting_query_calls_resolve_identity_once():
     Targeting NL path (line 708) → _handle_get_adcp_capabilities_skill (line 1769
     calls _create_tool_context_from_a2a) → then line 713 calls it AGAIN for logging.
     """
-    handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value="test-token")
-    ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
+    handler, ctx = make_a2a_handler()
 
-    params = _make_nl_message("Show me audience targeting options")
+    params = make_nl_send_message_request("Show me audience targeting options")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY) as mock_resolve:
         # Mock the core capabilities function (not the handler — to expose both calls)
@@ -127,11 +119,9 @@ async def test_nl_media_buy_returns_failed_task_with_envelope():
 
     from tests.helpers import assert_envelope_shape
 
-    handler = AdCPRequestHandler()
-    handler._get_auth_token = MagicMock(return_value="test-token")
-    ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
+    handler, ctx = make_a2a_handler()
 
-    params = _make_nl_message("Create a campaign for Nike")
+    params = make_nl_send_message_request("Create a campaign for Nike")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY) as mock_resolve:
         task = await handler.on_message_send(params, context=ctx)

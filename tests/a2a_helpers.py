@@ -7,16 +7,14 @@ read the two-layer AdCP error envelope off a failed Task returned by
 on_message_send's outer error handler.
 """
 
-import json
-import uuid
-
 from a2a.server.context import ServerCallContext
-from a2a.types import Message, Part, Role, SendMessageRequest
-from google.protobuf import json_format
+from a2a.types import SendMessageRequest
 
+from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.core.auth_context import AUTH_CONTEXT_STATE_KEY, AuthContext
 from src.core.resolved_identity import ResolvedIdentity
 from tests.factories import PrincipalFactory
+from tests.utils.a2a_helpers import create_a2a_text_message, extract_data_from_artifact
 
 
 def make_a2a_context(
@@ -39,6 +37,21 @@ def make_a2a_context(
     return ServerCallContext(state={AUTH_CONTEXT_STATE_KEY: auth_ctx})
 
 
+def make_a2a_handler(
+    auth_token: str | None = "test-token",
+    headers: dict[str, str] | None = None,
+) -> tuple[AdCPRequestHandler, ServerCallContext]:
+    """Handler + authenticated call context for driving on_message_send.
+
+    The token lives in the context state where the real ``_get_auth_token`` reads
+    it, so token extraction runs for real — the unit does not stub it. Single
+    source for the handler+context setup shared across the A2A handler unit tests.
+    """
+    handler = AdCPRequestHandler()
+    ctx = make_a2a_context(auth_token=auth_token, headers=headers or {"host": "test.example.com"})
+    return handler, ctx
+
+
 def extract_processing_error_envelope(task) -> dict:
     """Read the two-layer AdCP envelope from a failed Task's processing_error artifact.
 
@@ -47,15 +60,15 @@ def extract_processing_error_envelope(task) -> dict:
     ``processing_error`` artifact carrying the adcp_error DataPart plus a
     recommended human-readable TextPart (AdCP 3.1.1 a2a-response-format.mdx
     "Where the Error Lives": a Task-execution failure rides in the task body).
-    Scan for the DataPart — it is not necessarily ``parts[0]`` once a TextPart leads.
+    Reads the DataPart via the shared ``extract_data_from_artifact`` scanner, so
+    a leading TextPart does not shift it.
     """
     assert task.artifacts, "failed Task must carry the error envelope artifact"
     artifact = task.artifacts[0]
     assert artifact.name == "processing_error", f"expected processing_error artifact, got {artifact.name!r}"
-    for part in artifact.parts:
-        if part.HasField("data"):
-            return json.loads(json_format.MessageToJson(part.data))
-    raise AssertionError("processing_error artifact must carry a DataPart")
+    data = extract_data_from_artifact(artifact)
+    assert data, "processing_error artifact must carry a DataPart"
+    return data
 
 
 def make_mock_a2a_identity() -> ResolvedIdentity:
@@ -70,9 +83,4 @@ def make_mock_a2a_identity() -> ResolvedIdentity:
 
 def make_nl_send_message_request(text: str) -> SendMessageRequest:
     """Build a minimal A2A SendMessageRequest carrying NL text (no skills)."""
-    message = Message(
-        message_id=str(uuid.uuid4()),
-        role=Role.ROLE_USER,
-    )
-    message.parts.append(Part(text=text))
-    return SendMessageRequest(message=message)
+    return SendMessageRequest(message=create_a2a_text_message(text))

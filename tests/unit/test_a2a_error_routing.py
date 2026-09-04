@@ -34,6 +34,7 @@ from src.core.exceptions import AdCPValidationError
 from tests.a2a_helpers import (
     extract_processing_error_envelope,
     make_a2a_context,
+    make_a2a_handler,
     make_mock_a2a_identity,
     make_nl_send_message_request,
 )
@@ -41,27 +42,15 @@ from tests.helpers import assert_envelope_shape
 from tests.utils.a2a_helpers import create_a2a_message_with_skill
 
 _MOCK_IDENTITY = make_mock_a2a_identity()
-_make_nl_request = make_nl_send_message_request
 
 
 def _make_nl_request_with_push(text: str, url: str) -> SendMessageRequest:
     """NL request carrying a protocol-level push-notification config."""
-    request = _make_nl_request(text)
+    request = make_nl_send_message_request(text)
     request.configuration.CopyFrom(
         SendMessageConfiguration(task_push_notification_config=TaskPushNotificationConfig(url=url))
     )
     return request
-
-
-def _make_handler() -> tuple[AdCPRequestHandler, object]:
-    """Handler + authenticated call context for driving on_message_send.
-
-    The token lives in the context state where the real ``_get_auth_token`` reads
-    it, so token extraction runs for real — the unit does not stub it.
-    """
-    handler = AdCPRequestHandler()
-    ctx = make_a2a_context(auth_token="test-token", headers={"host": "test.example.com"})
-    return handler, ctx
 
 
 @pytest.mark.asyncio
@@ -76,7 +65,7 @@ async def test_untyped_processing_failure_returns_service_unavailable_failed_tas
     webhook. (Scrubbing the untyped error message off the wire is a shared-seam
     concern tracked separately, not asserted here.)
     """
-    handler, ctx = _make_handler()
+    handler, ctx = make_a2a_handler()
     params = _make_nl_request_with_push(
         "Show me available products in the catalog", "https://buyer.example.com/webhook"
     )
@@ -114,8 +103,8 @@ async def test_typed_adcp_error_keeps_its_own_wire_code_on_failed_task():
     not a blanket ``INTERNAL_ERROR`` — ``_build_error_envelope`` passes typed
     errors through ``normalize_to_adcp_error`` unchanged.
     """
-    handler, ctx = _make_handler()
-    params = _make_nl_request("Show me available products in the catalog")
+    handler, ctx = make_a2a_handler()
+    params = make_nl_send_message_request("Show me available products in the catalog")
 
     with patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY):
         with patch(
@@ -153,7 +142,7 @@ async def test_no_webhook_on_inline_typed_failure():
     synchronously, so a webhook would be a duplicate delivery of the same
     terminal state.
     """
-    handler, ctx = _make_handler()
+    handler, ctx = make_a2a_handler()
     params = _make_nl_request_with_push(
         "Show me available products in the catalog", "https://buyer.example.com/webhook"
     )
@@ -249,7 +238,7 @@ async def test_no_webhook_on_inline_explicit_skill_failure():
     Converges with the NL-outer failure path: neither notifies on the inline terminal
     response (KM :1050 — outcome must not depend on NL vs explicit-skill request shape).
     """
-    handler, ctx = _make_handler()
+    handler, ctx = make_a2a_handler()
     message = create_a2a_message_with_skill("get_products", {"brief": "test"})
     params = _make_nl_request_with_push("unused", "https://buyer.example.com/webhook")
     params.message.CopyFrom(message)
