@@ -34,7 +34,8 @@ from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
 from tests.harness.media_buy_dual import MediaBuyDualEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import WIRE_TRANSPORTS
+from tests.helpers.media_buy_write_seam import assert_revision_advanced, read_media_buy_state
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -132,17 +133,6 @@ def move_revision_on(media_buy_id: str) -> None:
         uow.media_buys.update_fields(media_buy_id, order_name="moved on by another writer")
 
 
-def read_revision(media_buy_id: str) -> int:
-    """Read the COMMITTED revision through a fresh unit of work.
-
-    Deliberately not the bound factory session: that one holds the row it wrote, so it
-    would answer from its own identity map rather than from what the update actually
-    persisted.
-    """
-    with MediaBuyUoW(TENANT_ID) as uow:
-        return uow.media_buys.get_by_id_or_raise(media_buy_id).revision
-
-
 def _force_manual_approval_adapter(*args, **kwargs):
     """Return the real adapter with manual approval forced on for update_media_buy.
 
@@ -160,7 +150,7 @@ def _force_manual_approval_adapter(*args, **kwargs):
 class TestRevisionEnforcedByUpdateFlow:
     def test_matching_token_succeeds_and_advances_the_revision(self, seed_media_buy):
         seed_media_buy("mb_rev_match")
-        before = read_revision("mb_rev_match")
+        before = read_media_buy_state(TENANT_ID, "mb_rev_match").revision
 
         result = _update_media_buy_impl(
             req=UpdateMediaBuyRequest(media_buy_id="mb_rev_match", paused=True, revision=before),
@@ -168,7 +158,7 @@ class TestRevisionEnforcedByUpdateFlow:
         )
 
         assert result.response.media_buy_id == "mb_rev_match"
-        after = read_revision("mb_rev_match")
+        after = read_media_buy_state(TENANT_ID, "mb_rev_match").revision
         assert after > before, "an honoured token must be spent -- the revision has to move"
         # The buyer is told the value it must send next, so the reported revision has to
         # be the persisted one, not the token it just sent.
@@ -186,20 +176,20 @@ class TestRevisionEnforcedByUpdateFlow:
         would still be caught if they ever diverged.
         """
         seed_media_buy("mb_pause_untokened")
-        untokened_before = read_revision("mb_pause_untokened")
+        untokened_before = read_media_buy_state(TENANT_ID, "mb_pause_untokened").revision
         _update_media_buy_impl(
             req=UpdateMediaBuyRequest(media_buy_id="mb_pause_untokened", paused=True),
             identity=_identity(),
         )
-        untokened_advance = read_revision("mb_pause_untokened") - untokened_before
+        untokened_advance = read_media_buy_state(TENANT_ID, "mb_pause_untokened").revision - untokened_before
 
         seed_media_buy("mb_pause_tokened")
-        tokened_before = read_revision("mb_pause_tokened")
+        tokened_before = read_media_buy_state(TENANT_ID, "mb_pause_tokened").revision
         _update_media_buy_impl(
             req=UpdateMediaBuyRequest(media_buy_id="mb_pause_tokened", paused=True, revision=tokened_before),
             identity=_identity(),
         )
-        tokened_advance = read_revision("mb_pause_tokened") - tokened_before
+        tokened_advance = read_media_buy_state(TENANT_ID, "mb_pause_tokened").revision - tokened_before
 
         assert tokened_advance == untokened_advance, (
             f"a tokened pause advanced the revision by {tokened_advance} and an untokened "
@@ -217,33 +207,33 @@ class TestRevisionEnforcedByUpdateFlow:
         counter moves, and a hardcoded 8 would still pass if both shapes moved two.
 
         Both the UNDER-count (a honoured token that leaves the counter still) and the
-        OVER-count (a token that advances twice) fail this equality. The single-advance
-        design has one advance point per request -- the atomic ``advance_revision`` -- so
-        there is no second advance to cancel and no prepayment ledger to lose.
+        OVER-count (a token that advances twice) fail the exact-delta assertion. The
+        single-advance design has one advance point per request -- the atomic
+        ``advance_revision`` -- so there is no second advance to cancel and no prepayment
+        ledger to lose. The exact-delta is asserted through the shared
+        ``assert_revision_advanced(..., bumps=1)`` owner, applied identically to the
+        tokened and untokened shape, so a token cannot change how far the counter moves.
         """
         seed_media_buy("mb_rev_untokened")
-        untokened_before = read_revision("mb_rev_untokened")
+        untokened_before = read_media_buy_state(TENANT_ID, "mb_rev_untokened")
         _update_media_buy_impl(
             req=UpdateMediaBuyRequest(media_buy_id="mb_rev_untokened", budget=9000.0),
             identity=_identity(),
         )
-        untokened_advance = read_revision("mb_rev_untokened") - untokened_before
+        assert_revision_advanced(untokened_before, read_media_buy_state(TENANT_ID, "mb_rev_untokened"), bumps=1)
 
         seed_media_buy("mb_rev_tokened")
-        before = read_revision("mb_rev_tokened")
+        before = read_media_buy_state(TENANT_ID, "mb_rev_tokened")
         result = _update_media_buy_impl(
-            req=UpdateMediaBuyRequest(media_buy_id="mb_rev_tokened", budget=9000.0, revision=before),
+            req=UpdateMediaBuyRequest(media_buy_id="mb_rev_tokened", budget=9000.0, revision=before.revision),
             identity=_identity(),
         )
 
-        after = read_revision("mb_rev_tokened")
-        assert after - before == untokened_advance == 1, (
-            f"the untokened update advanced the revision by {untokened_advance} and the "
-            f"tokened one by {after - before}; both must advance by exactly 1"
-        )
-        assert result.response.revision == after, (
+        after = read_media_buy_state(TENANT_ID, "mb_rev_tokened")
+        assert_revision_advanced(before, after, bumps=1)
+        assert result.response.revision == after.revision, (
             f"the response reported revision {result.response.revision} while the row holds "
-            f"{after} -- the buyer's next token must be the value AFTER this update"
+            f"{after.revision} -- the buyer's next token must be the value AFTER this update"
         )
 
     def test_a_dry_run_with_a_token_reports_the_current_revision_and_moves_nothing(self, seed_media_buy):
@@ -256,15 +246,15 @@ class TestRevisionEnforcedByUpdateFlow:
         state the seller never entered.
         """
         seed_media_buy("mb_rev_dry")
-        before = read_revision("mb_rev_dry")
+        before = read_media_buy_state(TENANT_ID, "mb_rev_dry").revision
 
         result = _update_media_buy_impl(
             req=UpdateMediaBuyRequest(media_buy_id="mb_rev_dry", budget=9000.0, revision=before),
             identity=_identity(dry_run=True),
         )
 
-        assert read_revision("mb_rev_dry") == before, (
-            f"the dry run moved the persisted revision to {read_revision('mb_rev_dry')}; a "
+        assert read_media_buy_state(TENANT_ID, "mb_rev_dry").revision == before, (
+            f"the dry run moved the persisted revision to {read_media_buy_state(TENANT_ID, 'mb_rev_dry').revision}; a "
             f"simulation must leave the row exactly as it found it"
         )
         assert result.response.revision == before
@@ -298,7 +288,7 @@ class TestRevisionEnforcedByUpdateFlow:
         seed_media_buy("mb_rev_stale")
         # Someone else writes first, moving the revision past the buyer's token.
         move_revision_on("mb_rev_stale")
-        current = read_revision("mb_rev_stale")
+        current = read_media_buy_state(TENANT_ID, "mb_rev_stale").revision
         assert current > 1
 
         with pytest.raises(AdCPRevisionConflictError) as exc_info:
@@ -319,7 +309,7 @@ class TestRevisionEnforcedByUpdateFlow:
         """A CONFLICT must be a no-op, not a partial write."""
         seed_media_buy("mb_rev_noop")
         move_revision_on("mb_rev_noop")
-        after_first = read_revision("mb_rev_noop")
+        after_first = read_media_buy_state(TENANT_ID, "mb_rev_noop").revision
 
         with pytest.raises(AdCPRevisionConflictError):
             _update_media_buy_impl(
@@ -327,7 +317,7 @@ class TestRevisionEnforcedByUpdateFlow:
                 identity=_identity(),
             )
 
-        assert read_revision("mb_rev_noop") == after_first
+        assert read_media_buy_state(TENANT_ID, "mb_rev_noop").revision == after_first
 
     def test_stale_token_on_a_terminal_buy_yields_conflict_not_gone(self, seed_media_buy):
         """Order matters: the CONFLICT check runs BEFORE the terminal-state gate.
@@ -353,7 +343,7 @@ class TestRevisionEnforcedByUpdateFlow:
         state is the real answer and must still be given.
         """
         seed_media_buy("mb_rev_terminal_ok", status="completed")
-        current = read_revision("mb_rev_terminal_ok")
+        current = read_media_buy_state(TENANT_ID, "mb_rev_terminal_ok").revision
 
         with pytest.raises(AdCPGoneError):
             _update_media_buy_impl(
@@ -371,7 +361,7 @@ class TestRevisionEnforcedByUpdateFlow:
         was before the request.
         """
         seed_media_buy("mb_rev_submit_match")
-        before = read_revision("mb_rev_submit_match")
+        before = read_media_buy_state(TENANT_ID, "mb_rev_submit_match").revision
 
         with mock.patch.object(media_buy_update, "get_adapter", _force_manual_approval_adapter):
             result = _update_media_buy_impl(
@@ -380,8 +370,8 @@ class TestRevisionEnforcedByUpdateFlow:
             )
 
         assert isinstance(result, UpdateMediaBuySubmitted)
-        assert read_revision("mb_rev_submit_match") == before, (
-            f"submission moved the revision from {before} to {read_revision('mb_rev_submit_match')}; a "
+        assert read_media_buy_state(TENANT_ID, "mb_rev_submit_match").revision == before, (
+            f"submission moved the revision from {before} to {read_media_buy_state(TENANT_ID, 'mb_rev_submit_match').revision}; a "
             f"deferred update must not spend the token, which has no successor value to report"
         )
 
@@ -394,7 +384,7 @@ class TestRevisionEnforcedByUpdateFlow:
         """
         seed_media_buy("mb_rev_submit_stale")
         move_revision_on("mb_rev_submit_stale")
-        current = read_revision("mb_rev_submit_stale")
+        current = read_media_buy_state(TENANT_ID, "mb_rev_submit_stale").revision
         assert current > 1
 
         with mock.patch.object(media_buy_update, "get_adapter", _force_manual_approval_adapter):
@@ -445,7 +435,7 @@ class TestRevisionEnforcedByUpdateFlow:
         """
         mbid = f"mb_rev_window_{branch}"
         seed_media_buy(mbid)
-        before = read_revision(mbid)
+        before = read_media_buy_state(TENANT_ID, mbid).revision
         req = UpdateMediaBuyRequest(media_buy_id=mbid, revision=before, **req_kwargs)
 
         if kind == "atomic":
@@ -459,7 +449,7 @@ class TestRevisionEnforcedByUpdateFlow:
                     mover.start()
                     mover.join(timeout=30)
                     assert not mover.is_alive(), "the second connection never finished its write"
-                    moved.append(read_revision(mbid))
+                    moved.append(read_media_buy_state(TENANT_ID, mbid).revision)
                 return principal
 
             with mock.patch.object(media_buy_update, "resolve_principal_or_raise", move_the_row_then_resolve):
@@ -489,12 +479,12 @@ class TestRevisionEnforcedByUpdateFlow:
             # is already stale when _reject_stale_revision compares -- the "stale on
             # arrival" case the compare-only early check exists for.
             move_revision_on(mbid)
-            assert read_revision(mbid) == before + 1, "the second connection never moved the row"
+            assert read_media_buy_state(TENANT_ID, mbid).revision == before + 1, (
+                "the second connection never moved the row"
+            )
 
-            adapter_spy = mock.Mock(wraps=media_buy_update.get_adapter)
-            with mock.patch.object(media_buy_update, "get_adapter", adapter_spy):
-                with pytest.raises(AdCPRevisionConflictError) as exc_info:
-                    _update_media_buy_impl(req=req, identity=_identity())
+            with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                _update_media_buy_impl(req=req, identity=_identity())
 
             assert exc_info.value.wire_error_code == "CONFLICT"
             assert exc_info.value.details == {
@@ -502,10 +492,17 @@ class TestRevisionEnforcedByUpdateFlow:
                 "expected_version": before,
                 "current_version": before + 1,
             }
-            # The protection is the compare-only fail-fast, not the atomic advance: the
-            # stale token was rejected before the adapter was even acquired. Dropping the
-            # early check lets execution reach get_adapter (and the adapter call).
-            adapter_spy.assert_not_called()
+            # Buyer-observable, not a mock-call assertion: the stale-on-arrival token was
+            # rejected and NOTHING was applied. Re-reading the row shows the other writer's
+            # revision still standing and its marker intact -- the request never wrote (and
+            # so never reached the ad server), which is what "reject with CONFLICT, apply
+            # nothing" means on the wire. Dropping the early compare would let the write run.
+            with MediaBuyUoW(TENANT_ID) as uow:
+                survivor = uow.media_buys.get_by_id_or_raise(mbid)
+                assert survivor.revision == before + 1
+                assert survivor.order_name == "moved on by another writer"
+                if branch == "budget":
+                    assert float(survivor.budget or 0) != 9000.0
 
 
 #: A distinctive seed, so the assertion below discriminates the three wrong answers
@@ -518,10 +515,9 @@ _WIRE_SEED_REVISION = 7
 #: and REST emit 8 -- both conformant under draft-07 ``integer``. Mirrors the table in
 #: test_update_media_buy_revision_validation_wire.py; the comparison below is by value,
 #: so the fork does not need repeating here.
-_WIRE_TRANSPORTS = [Transport.MCP, Transport.REST, Transport.A2A]
 
 
-@pytest.mark.parametrize("transport", _WIRE_TRANSPORTS)
+@pytest.mark.parametrize("transport", WIRE_TRANSPORTS)
 def test_a_field_writing_update_emits_one_advance_on_every_wire(integration_db, transport):
     """The post-write revision is a protocol contract, so it is graded on wire bytes.
 
@@ -533,19 +529,7 @@ def test_a_field_writing_update_emits_one_advance_on_every_wire(integration_db, 
     """
     media_buy_id = "mb_rev_wire_post_write"
     with MediaBuyDualEnv() as env:
-        tenant, principal, _product, _pricing = env.setup_media_buy_data()
-        MediaBuyFactory(
-            tenant=tenant,
-            principal=principal,
-            media_buy_id=media_buy_id,
-            status="active",
-            revision=_WIRE_SEED_REVISION,
-        )
-        env._commit_factory_data()  # noqa: SLF001 — the harness's factory/session flush seam
-        # REST builds its PUT URL from this attribute; leaving it unset points the
-        # request at a buy that does not exist, which answers MEDIA_BUY_NOT_FOUND.
-        env._seeded_media_buy_id = media_buy_id  # noqa: SLF001 — harness routing seam
-
+        env.seed_existing_media_buy(media_buy_id, revision=_WIRE_SEED_REVISION)
         result = env.call_via(
             transport,
             media_buy_id=media_buy_id,
@@ -554,8 +538,7 @@ def test_a_field_writing_update_emits_one_advance_on_every_wire(integration_db, 
         )
 
     assert not result.is_error, f"{transport} rejected a matching token: {result.wire_error_envelope or result.error!r}"
-    wire = result.wire_response
-    assert wire is not None, f"{transport} captured no success wire body to grade"
+    wire = result.require_wire()
     assert wire["revision"] == _WIRE_SEED_REVISION + 1, (
         f"{transport} emitted revision={wire['revision']!r} for an update of a buy at "
         f"{_WIRE_SEED_REVISION}. The pinned update-media-buy-response.json defines the field as "

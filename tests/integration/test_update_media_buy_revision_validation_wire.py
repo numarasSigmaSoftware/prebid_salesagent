@@ -30,9 +30,8 @@ not to a graded step (ungraded).
 
 import pytest
 
-from tests.factories import MediaBuyFactory
 from tests.harness.media_buy_dual import MediaBuyDualEnv
-from tests.harness.transport import Transport
+from tests.harness.transport import WIRE_TRANSPORTS, Transport
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -44,9 +43,8 @@ _MEDIA_BUY_ID = "mb_revision_wire"
 #: (additionalProperties), so any populated dict exercises the echo.
 _BUYER_CONTEXT = {"internal_campaign_id": "camp-xyz", "trace": "t-123"}
 
-#: The three real wire transports. IMPL is excluded deliberately -- it has no wire,
-#: and the boundary gate under test is precisely what IMPL does not run.
-WIRE_TRANSPORTS = [Transport.MCP, Transport.REST, Transport.A2A]
+#: The real wire transports come from the harness (WIRE_TRANSPORTS): IMPL is excluded --
+#: it has no wire, and the boundary gate under test is precisely what IMPL does not run.
 
 #: Values the pinned schema does not admit. Each must be refused identically everywhere.
 REJECTED_VALUES = [
@@ -56,22 +54,6 @@ REJECTED_VALUES = [
     pytest.param(0, id="below-minimum"),
     pytest.param(-1, id="negative"),
 ]
-
-
-def _seed(env: MediaBuyDualEnv) -> None:
-    tenant, principal, _product, _pricing = env.setup_media_buy_data()
-    MediaBuyFactory(
-        tenant=tenant,
-        principal=principal,
-        media_buy_id=_MEDIA_BUY_ID,
-        status="active",
-    )
-    env._commit_factory_data()
-    # The REST leg builds its PUT URL from this attribute (the flat-kwargs form has no
-    # request model to read media_buy_id off). Leaving it unset points REST at
-    # "NOT_SEEDED", which answers MEDIA_BUY_NOT_FOUND -- an error, so a bare
-    # "is_error" assertion would pass without the gate ever running.
-    env._seeded_media_buy_id = _MEDIA_BUY_ID
 
 
 def _update(env: MediaBuyDualEnv, transport: Transport, **kwargs):
@@ -84,7 +66,7 @@ class TestRevisionValueContractOnEveryWire:
     @pytest.mark.parametrize("bad_value", REJECTED_VALUES)
     def test_rejects_a_schema_violation(self, integration_db, transport, bad_value):
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport, revision=bad_value)
         assert result.is_error, (
             f"{transport} accepted revision={bad_value!r}, which the pinned schema forbids; payload={result.payload!r}"
@@ -104,7 +86,7 @@ class TestRevisionValueContractOnEveryWire:
         to prevent. Only the boundary can still tell null from omitted.
         """
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport, revision=None)
         assert result.is_error, (
             f"{transport} read an explicitly-supplied null revision as 'absent' and "
@@ -119,7 +101,7 @@ class TestRevisionValueContractOnEveryWire:
         conformant buyer on one transport and accept it on the others.
         """
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport, revision=1.0)
         assert not result.is_error, (
             f"{transport} rejected the schema-valid whole-number float 1.0: "
@@ -128,7 +110,7 @@ class TestRevisionValueContractOnEveryWire:
 
     def test_accepts_a_plain_integer(self, integration_db, transport):
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport, revision=1)
         assert not result.is_error, (
             f"{transport} rejected a matching integer token: {result.wire_error_envelope or result.error!r}"
@@ -137,7 +119,7 @@ class TestRevisionValueContractOnEveryWire:
     def test_omitting_revision_is_still_accepted(self, integration_db, transport):
         """revision is optional; the gate must not turn absence into a rejection."""
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport)
         assert not result.is_error, (
             f"{transport} rejected an update that supplied no revision at all: "
@@ -183,12 +165,11 @@ class TestRevisionEmittedOnEveryWire:
         nothing about what crossed the wire.
         """
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             result = _update(env, transport, revision=1)
 
         assert not result.is_error, result.wire_error_envelope
-        wire = result.wire_response
-        assert wire is not None, f"{transport} captured no success wire body to grade"
+        wire = result.require_wire()
         assert "revision" in wire, (
             f"{transport} omitted `revision` from the success body; the buyer has no token "
             f"to send with its next update. Got keys: {sorted(wire)}"
@@ -203,7 +184,7 @@ class TestRevisionEmittedOnEveryWire:
         next, which is the whole point of the conflict details shape.
         """
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             # Move the revision to 2 so a token of 99 is unambiguously stale.
             _update(env, transport, revision=1)
             result = _update(env, transport, revision=99)
@@ -230,7 +211,7 @@ class TestRevisionEmittedOnEveryWire:
         echo and reddens this test.
         """
         with MediaBuyDualEnv() as env:
-            _seed(env)
+            env.seed_existing_media_buy(_MEDIA_BUY_ID)
             # Advance the revision to 2 so a token of 99 is unambiguously stale.
             _update(env, transport, revision=1)
             result = _update(env, transport, revision=99, context=dict(_BUYER_CONTEXT))
