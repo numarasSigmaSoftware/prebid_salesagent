@@ -1784,8 +1784,8 @@ def update_media_buy_raw(
         idempotency_key: Idempotency key for retry safety (optional, per AdCP spec)
         revision: Buyer's expected-current revision, per the pinned
             update-media-buy-request.json. Accepted on every transport so a buyer can
-            hand back the token it read; the stale-token CONFLICT check itself is a
-            separate, still-ungraded gap.
+            hand back the token it read; a supplied token is enforced by an atomic
+            compare-and-set that rejects a stale value with CONFLICT.
         ctx: Context for authentication (deprecated, use identity)
         identity: Pre-resolved identity (if available)
 
