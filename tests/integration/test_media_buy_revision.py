@@ -20,6 +20,7 @@ test_update_media_buy_revision_validation_wire.py.
 
 import threading
 from datetime import UTC, datetime
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -32,7 +33,8 @@ from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import AdCPPackageUpdate, UpdateMediaBuyRequest, UpdateMediaBuySubmitted
 from src.core.tools import media_buy_update
 from src.core.tools.media_buy_update import _update_media_buy_impl
-from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+from tests.factories import MediaBuyFactory, MediaPackageFactory, PrincipalFactory, TenantFactory
+from tests.factories.creative_asset import build_assets, image_spec
 from tests.harness.media_buy_dual import MediaBuyDualEnv
 from tests.harness.transport import WIRE_TRANSPORTS
 from tests.helpers.media_buy_write_seam import assert_revision_advanced, read_media_buy_state
@@ -145,6 +147,48 @@ def _force_manual_approval_adapter(*args, **kwargs):
     adapter.manual_approval_required = True
     adapter.manual_approval_operations = {"update_media_buy"}
     return adapter
+
+
+def _spying_get_adapter(spies: list) -> Any:
+    """A ``get_adapter`` replacement that wraps ``update_media_buy`` in a spy.
+
+    Returns the genuine adapter (so every other call it makes keeps its real
+    behaviour) with only ``update_media_buy`` wrapped, so a test can assert whether the
+    ad server was touched. Calls the source ``get_adapter`` (not the ``media_buy_update``
+    binding this patches) to avoid recursing into itself; appends each wrapped method to
+    ``spies`` so the caller can read it back.
+    """
+
+    def _factory(*args, **kwargs):
+        adapter = _real_get_adapter(*args, **kwargs)
+        adapter.update_media_buy = mock.Mock(wraps=adapter.update_media_buy)
+        spies.append(adapter.update_media_buy)
+        return adapter
+
+    return _factory
+
+
+def _move_the_row_then_resolve(mbid: str, moved: list[int]):
+    """Patch target: on the first resolve, a SECOND connection advances the row.
+
+    Opens the mid-request window that B1 is about -- the compare-only early check has
+    already passed, and this lands another writer's advance BEFORE the branch reaches its
+    own atomic claim. ``moved`` records the post-move revision so the test can assert the
+    window actually opened (an unexercised window would grade nothing).
+    """
+    real_resolve = media_buy_update.resolve_principal_or_raise
+
+    def _resolve(*args, **kwargs):
+        principal = real_resolve(*args, **kwargs)
+        if not moved:
+            mover = threading.Thread(target=move_revision_on, args=(mbid,))
+            mover.start()
+            mover.join(timeout=30)
+            assert not mover.is_alive(), "the second connection never finished its write"
+            moved.append(read_media_buy_state(TENANT_ID, mbid).revision)
+        return principal
+
+    return _resolve
 
 
 class TestRevisionEnforcedByUpdateFlow:
@@ -503,6 +547,138 @@ class TestRevisionEnforcedByUpdateFlow:
                 assert survivor.order_name == "moved on by another writer"
                 if branch == "budget":
                     assert float(survivor.budget or 0) != 9000.0
+
+    @pytest.mark.parametrize(
+        "branch, package_update, needs_package",
+        [
+            pytest.param("campaign_pause", None, False, id="campaign-pause"),
+            pytest.param("package_pause", {"paused": True}, False, id="package-pause"),
+            pytest.param("package_budget", {"budget": 9000.0}, True, id="package-budget"),
+        ],
+    )
+    def test_a_mid_request_move_conflicts_before_the_adapter_is_touched(
+        self, seed_media_buy, revision_tenant, bound_factory_session, branch, package_update, needs_package
+    ):
+        """B1: the atomic claim runs BEFORE the adapter, so a token that goes stale in the
+        window AFTER the compare-only early check is CONFLICT before the ad server is touched.
+
+        These branches are adapter-first: the adapter effects the change on the ad server,
+        then it is persisted. If the claim ran after the adapter (the pre-fix ordering), a
+        concurrent writer advancing the row in the window would let the early check pass,
+        the adapter change the ad server, then the advance fail -- the buyer told CONFLICT
+        while the ad server was already changed. The claim is a distinct step ahead of the
+        adapter, so a stale token stops the request before ``update_media_buy`` is called.
+
+        The spy records every ``update_media_buy`` call; asserting it was NOT called is the
+        mutation oracle -- restore the post-adapter ordering and the adapter IS called, so
+        "reject with CONFLICT, apply nothing" would be violated.
+        """
+        _tenant, _principal = revision_tenant
+        mbid = f"mb_mw_{branch}"
+        buy = seed_media_buy(mbid)
+        if needs_package:
+            MediaPackageFactory(
+                media_buy=buy,
+                package_id="pkg_mw",
+                package_config={"package_id": "pkg_mw", "product_id": "prod_mw"},
+            )
+            bound_factory_session.commit()
+
+        before = read_media_buy_state(TENANT_ID, mbid).revision
+        if branch == "campaign_pause":
+            req = UpdateMediaBuyRequest(media_buy_id=mbid, paused=True, revision=before)
+        else:
+            req = UpdateMediaBuyRequest(
+                media_buy_id=mbid,
+                revision=before,
+                packages=[AdCPPackageUpdate(package_id="pkg_mw", **package_update)],
+            )
+
+        moved: list[int] = []
+        spies: list = []
+        with (
+            mock.patch.object(media_buy_update, "resolve_principal_or_raise", _move_the_row_then_resolve(mbid, moved)),
+            mock.patch.object(media_buy_update, "get_adapter", _spying_get_adapter(spies)),
+        ):
+            with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                _update_media_buy_impl(req=req, identity=_identity())
+
+        assert moved == [before + 1], (
+            f"the mid-request window never opened -- the other writer has to land between the "
+            f"early comparison and the claim for this test to grade anything (saw {moved})"
+        )
+        assert exc_info.value.wire_error_code == "CONFLICT"
+        assert exc_info.value.details == {
+            "resource_id": mbid,
+            "expected_version": before,
+            "current_version": before + 1,
+        }
+        # The claim ran BEFORE the adapter, so the stale token stopped the request before
+        # the ad server was ever touched: no update_media_buy call was recorded.
+        assert spies, "get_adapter was never called, so the branch never reached the adapter path"
+        for spy in spies:
+            spy.assert_not_called()
+        # Buyer-observable: the other writer's revision still stands and its marker survives,
+        # so the whole transaction (including this request's claim) rolled back.
+        survivor = read_media_buy_state(TENANT_ID, mbid)
+        assert survivor.revision == before + 1
+
+    def test_a_mid_request_move_conflicts_before_the_inline_creative_sync(self, seed_media_buy):
+        """B1, worst case: ``_sync_creatives_impl`` commits through its OWN CreativeUoW, so
+        its writes are NOT inside the update's transaction to roll back. The claim MUST
+        precede it, or a stale token leaves committed creatives behind a CONFLICT.
+
+        The sync spy asserts the independently-committing write never ran; the creative
+        store is then checked directly (buyer-observable) to prove nothing was committed.
+        Restoring the post-sync ordering would call the sync and commit the creative.
+        """
+        mbid = "mb_mw_creatives"
+        seed_media_buy(mbid)
+        before = read_media_buy_state(TENANT_ID, mbid).revision
+        req = UpdateMediaBuyRequest(
+            media_buy_id=mbid,
+            revision=before,
+            packages=[
+                AdCPPackageUpdate(
+                    package_id="pkg_mw",
+                    creatives=[
+                        {
+                            "creative_id": "mw_cr1",
+                            "name": "Mid-window creative",
+                            "format_id": {
+                                "agent_url": "https://creative.adcontextprotocol.org",
+                                "id": "display_300x250",
+                            },
+                            "assets": build_assets(image_spec("banner")),
+                        }
+                    ],
+                )
+            ],
+        )
+
+        moved: list[int] = []
+        sync_spy = mock.Mock(wraps=media_buy_update._sync_creatives_impl)
+        with (
+            mock.patch.object(media_buy_update, "resolve_principal_or_raise", _move_the_row_then_resolve(mbid, moved)),
+            mock.patch.object(media_buy_update, "_sync_creatives_impl", sync_spy),
+        ):
+            with pytest.raises(AdCPRevisionConflictError) as exc_info:
+                _update_media_buy_impl(req=req, identity=_identity())
+
+        assert moved == [before + 1], f"the mid-request window never opened (saw {moved})"
+        assert exc_info.value.details == {
+            "resource_id": mbid,
+            "expected_version": before,
+            "current_version": before + 1,
+        }
+        # The claim ran BEFORE the sync, so the independently-committing creative write never ran.
+        sync_spy.assert_not_called()
+        # Buyer-observable: no creative was committed behind the CONFLICT.
+        with MediaBuyUoW(TENANT_ID) as uow:
+            assert uow.creatives is not None
+            assert uow.creatives.get_by_id("mw_cr1", PRINCIPAL_ID) is None, (
+                "a creative was committed behind a CONFLICT -- the inline sync ran before the claim"
+            )
 
 
 #: A distinctive seed, so the assertion below discriminates the three wrong answers
