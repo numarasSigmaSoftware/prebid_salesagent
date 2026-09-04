@@ -220,6 +220,19 @@ DISCOVERY_SKILLS = frozenset(
 )
 
 
+# Terminal A2A task states. `_send_protocol_webhook` notifies on the INITIAL synchronous
+# response only; an inline terminal response must not emit a webhook (pinned AdCP 3.1.1
+# webhooks.mdx:160 — the buyer already has the result).
+_TERMINAL_TASK_STATES = frozenset(
+    {
+        TaskState.TASK_STATE_COMPLETED,
+        TaskState.TASK_STATE_FAILED,
+        TaskState.TASK_STATE_CANCELED,
+        TaskState.TASK_STATE_REJECTED,
+    }
+)
+
+
 def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     """Canonical InternalError shape for non-Task A2A boundary failures.
 
@@ -466,6 +479,14 @@ class AdCPRequestHandler(RequestHandler):
         ``notify`` selects the payload type from the status: Task for final states,
         TaskStatusUpdateEvent for intermediate ones.
         """
+        # This sender notifies on the INITIAL synchronous response only. Per pinned AdCP
+        # 3.1.1 webhooks.mdx:160, an inline terminal response MUST NOT emit a webhook — the
+        # buyer already has the result. No async completion-delivery path exists today; if
+        # one is added it MUST use a distinct entry point, because this guard would
+        # otherwise suppress its legitimate terminal completion webhook.
+        if task.status.state in _TERMINAL_TASK_STATES:
+            return
+
         try:
             # Check if task has push notification config stored
             webhook_config = self._task_push_configs.get(task.id)

@@ -26,6 +26,7 @@ from a2a.types import (
     Task,
     TaskPushNotificationConfig,
     TaskState,
+    TaskStatus,
 )
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
@@ -201,3 +202,37 @@ async def test_genuine_transport_fault_still_raises_json_rpc_error():
     assert "authentication" in str(exc_info.value).lower(), (
         f"transport fault should name the missing authentication; got: {exc_info.value}"
     )
+
+
+@pytest.mark.asyncio
+async def test_send_protocol_webhook_skips_inline_terminal_state():
+    """A terminal task is the inline response — the sender must not deliver a webhook.
+
+    Pinned AdCP 3.1.1 webhooks.mdx:160 (MUST NOT). The guard returns before the service
+    is even resolved, so an inline completed/failed/rejected/canceled task never notifies.
+    """
+    handler = AdCPRequestHandler()
+    task = Task(id="task_term", status=TaskStatus(state=TaskState.TASK_STATE_FAILED))
+    handler._task_push_configs[task.id] = MagicMock(url="https://buyer.example.com/webhook")
+
+    with patch("src.a2a_server.adcp_a2a_server.get_protocol_webhook_service") as mock_get_service:
+        await handler._send_protocol_webhook(task, status="failed")
+
+    mock_get_service.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_protocol_webhook_delivers_for_non_terminal_state():
+    """A non-terminal (submitted) status is a legitimate notification and is delivered."""
+    handler = AdCPRequestHandler()
+    task = Task(id="task_sub", status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
+    handler._task_push_configs[task.id] = MagicMock(url="https://buyer.example.com/webhook")
+    notify = AsyncMock(return_value=True)
+
+    with patch(
+        "src.a2a_server.adcp_a2a_server.get_protocol_webhook_service",
+        return_value=MagicMock(notify=notify),
+    ):
+        await handler._send_protocol_webhook(task, status="submitted")
+
+    notify.assert_awaited_once()
