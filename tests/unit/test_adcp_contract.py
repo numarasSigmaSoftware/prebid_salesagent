@@ -3675,27 +3675,6 @@ class TestRevisionConflictErrorShape:
             "current_version": 5,
         }
 
-    def test_unobserved_details_omit_the_unknown_version_rather_than_nulling_it(self):
-        """An unobserved version is absent, not null.
-
-        conflict.json types current_version as ["number", "string"] with no null
-        arm and declares no `required` array, so omission is valid and an explicit
-        null is a schema violation.
-        """
-        exc = AdCPRevisionConflictError.unobserved(media_buy_id="mb_1", expected=3)
-        validate_against_pinned_schema("conflict.json", exc.details)
-        assert "current_version" not in exc.details
-        assert exc.details == {"resource_id": "mb_1", "expected_version": 3}
-
-    def test_explicit_null_version_would_violate_the_pinned_schema(self):
-        """Pins WHY the unobserved arm omits: the null form is not merely a style choice."""
-        with pytest.raises(AssertionError) as exc_info:
-            validate_against_pinned_schema(
-                "conflict.json",
-                {"resource_id": "mb_1", "expected_version": 3, "current_version": None},
-            )
-        assert "None is not of type 'number', 'string'" in str(exc_info.value)
-
     def test_conflict_carries_the_spec_mandated_wire_identity(self):
         exc = AdCPRevisionConflictError.mismatch(media_buy_id="mb_1", expected=3, current=5)
         assert exc.wire_error_code == "CONFLICT"
@@ -3717,10 +3696,25 @@ class TestRevisionConflictErrorShape:
         assert diagnostic not in exc.message
         assert "mb_1" not in exc.message
 
-    def test_invariant_violation_logs_the_diagnostic(self, caplog):
-        """The diagnostic is not discarded -- it goes to the log, at error level."""
-        with caplog.at_level(logging.ERROR, logger="src.core.exceptions"):
-            AdCPInvariantViolationError("row mb_1 vanished between SELECT FOR UPDATE and mutate")
+    def test_invariant_violation_does_not_log_from_its_constructor(self, caplog):
+        """Constructing the exception has no logging side effect.
+
+        The diagnostic is carried as a non-wire attribute and emitted only when the
+        exception reaches a transport boundary (record_boundary_error), not from the
+        constructor -- so building the exception is free of side effects.
+        """
+        with caplog.at_level(logging.ERROR):
+            exc = AdCPInvariantViolationError("row mb_1 vanished between SELECT FOR UPDATE and mutate")
+        assert "row mb_1 vanished" not in caplog.text
+        assert exc.diagnostic == "row mb_1 vanished between SELECT FOR UPDATE and mutate"
+
+    def test_invariant_diagnostic_is_emitted_at_the_boundary(self, caplog):
+        """record_boundary_error owns the diagnostic emission, with a traceback."""
+        from src.core.tool_error_logging import record_boundary_error
+
+        exc = AdCPInvariantViolationError("row mb_1 vanished between SELECT FOR UPDATE and mutate")
+        with caplog.at_level(logging.ERROR):
+            record_boundary_error("mcp", "update_media_buy", exc)
         assert "row mb_1 vanished between SELECT FOR UPDATE and mutate" in caplog.text
 
 

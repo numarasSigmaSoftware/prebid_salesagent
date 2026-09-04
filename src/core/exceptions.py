@@ -1165,33 +1165,6 @@ class AdCPRevisionConflictError(AdCPConflictError):
             context=context,
         )
 
-    @classmethod
-    def unobserved(
-        cls,
-        *,
-        media_buy_id: str,
-        expected: int,
-        context: ContextObject | dict[str, Any] | None = None,
-    ) -> AdCPRevisionConflictError:
-        """The row could not be read under lock, so the current revision is unknown.
-
-        ``current_version`` is OMITTED rather than sent as ``null``. Verified against
-        the pinned ``error-details/conflict.json``: the property is typed
-        ``["number", "string"]`` with no null arm, so an explicit null fails
-        validation with "None is not of type 'number', 'string'", while omission is
-        valid -- the schema declares no ``required`` array. Reporting a version that
-        was never observed would be worse than reporting none.
-        """
-        return cls(
-            f"Media buy {media_buy_id} is being modified by another request, so the "
-            f"revision {expected} check could not be completed.",
-            details={
-                "resource_id": media_buy_id,
-                "expected_version": expected,
-            },
-            context=context,
-        )
-
 
 #: The only thing a buyer is told when a seller-side invariant breaks. The diagnostic
 #: goes to the log, never onto the wire: it names internal state the buyer neither
@@ -1213,13 +1186,17 @@ class AdCPInvariantViolationError(AdCPServiceUnavailableError):
     ``INTERNAL_ERROR`` is deliberately not used -- it is absent from the pinned enum
     and would only be remapped to ``SERVICE_UNAVAILABLE`` anyway.
 
-    The diagnostic is logged in ``__init__`` rather than at the raise sites so that
-    no raise site can drop it, and so the buyer-facing message stays fixed.
+    The diagnostic names internal state and is carried as a non-wire attribute
+    (``diagnostic``): it stays out of ``to_dict``/``details`` (the buyer-facing
+    message is fixed) and is emitted by ``record_boundary_error`` when the
+    exception reaches a transport boundary — never from ``__init__``, so
+    constructing the exception has no logging side effect.
     """
 
     def __init__(self, diagnostic: str, **kwargs: Any) -> None:
-        logger.error("AdCP invariant violated: %s", diagnostic, stack_info=True)
         super().__init__(_INVARIANT_VIOLATION_MESSAGE, **kwargs)
+        #: Internal diagnostic, kept off the wire. ``record_boundary_error`` logs it.
+        self.diagnostic = diagnostic
 
 
 class AdCPCreativeRejectedError(AdCPError):
