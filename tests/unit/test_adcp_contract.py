@@ -57,7 +57,6 @@ from src.core.schemas import (
     Targeting,
     TaskStatus,
     UpdateMediaBuyRequest,
-    validate_revision_wire_value,
 )
 from src.core.schemas import (
     Principal as PrincipalSchema,
@@ -3641,21 +3640,25 @@ class TestRevisionValueContract:
         metadata = UpdateMediaBuyRequest.model_fields["revision"].metadata
         assert any(getattr(m, "ge", None) == 1 for m in metadata), metadata
 
-    def test_boundary_helper_rejects_present_but_null(self):
+    def test_explicit_null_revision_is_rejected_at_the_model(self):
         """An explicit `null` is a schema violation, not "no token supplied".
 
-        Only a transport boundary can tell the two apart; by the time the request
-        model exists, an omitted key and an explicit null both read as None.
+        Presence is answered inside the model, from the input dict: a caller threads the
+        payload AS SENT, so an explicit null (key present, value None) reaches the one
+        shared gate and is rejected -- while an omitted key is accepted
+        (test_absent_revision_is_accepted_as_no_token). Reading an explicit null as
+        "absent" would hand the buyer a 200 on an update whose concurrency check never ran.
         """
-        assert validate_revision_wire_value(present=False, value=None) is None
-        with pytest.raises(AdCPValidationError):
-            validate_revision_wire_value(present=True, value=None)
+        with pytest.raises(AdCPValidationError) as exc_info:
+            UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True, revision=None)
+        assert exc_info.value.field == "revision"
 
-    def test_boundary_helper_applies_the_same_table(self):
-        """The boundary helper and the request model share one rule, not two."""
-        assert validate_revision_wire_value(present=True, value=2.0) == 2
+    def test_the_one_rule_applies_at_the_model(self):
+        """One rule decides a revision value: a whole-number float is accepted and
+        normalized to int; the numeric string "7" is refused."""
+        assert UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True, revision=2.0).revision == 2
         with pytest.raises(AdCPValidationError):
-            validate_revision_wire_value(present=True, value="7")
+            UpdateMediaBuyRequest(media_buy_id="mb_1", paused=True, revision="7")
 
 
 class TestRevisionConflictErrorShape:
