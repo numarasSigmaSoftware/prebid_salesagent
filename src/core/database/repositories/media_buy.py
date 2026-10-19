@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Collection
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +27,45 @@ from src.core.database.models import (
 )
 from src.core.errors.details import EntityRefDetails
 from src.core.idempotency_canonical import canonical_request_hash
+
+
+@dataclass(frozen=True)
+class SandboxBuyState:
+    """Persisted sandbox state copied inside the repository session."""
+
+    status: str
+    currency: str
+    package_ids: tuple[str, ...]
+    seeded_delivery: dict[str, Any] | None
+
+
+def read_sandbox_buy_state(
+    tenant_id: str,
+    principal_id: str,
+    account_id: str,
+    media_buy_id: str,
+) -> SandboxBuyState | None:
+    """Read independently so adapter reporting cannot close a caller's transaction."""
+    from src.core.config import get_settings
+    from src.core.database.database_session import get_engine
+    from src.core.database.repositories.delivery_simulation import DeliverySimulationConfigRepository
+
+    with Session(get_engine()) as session:
+        repo = MediaBuyRepository(session, tenant_id)
+        buy = repo.get_by_id_for_account(media_buy_id, principal_id, account_id)
+        if buy is None:
+            return None
+        seeded = None
+        if get_settings().mock_delivery_seed_enabled:
+            row = DeliverySimulationConfigRepository(session, tenant_id).get(media_buy_id)
+            if row is not None:
+                seeded = dict(row.response_payload)
+        return SandboxBuyState(
+            status=buy.status,
+            currency=buy.currency or "USD",
+            package_ids=tuple(package.package_id for package in repo.get_packages(media_buy_id)),
+            seeded_delivery=seeded,
+        )
 
 
 class MediaBuyRepository:
@@ -70,6 +110,17 @@ class MediaBuyRepository:
         return self._session.scalars(
             select(MediaBuy).where(
                 MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.media_buy_id == media_buy_id,
+            )
+        ).first()
+
+    def get_by_id_for_account(self, media_buy_id: str, principal_id: str, account_id: str) -> MediaBuy | None:
+        """Find a buy only inside its tenant, requesting principal and account."""
+        return self._session.scalars(
+            select(MediaBuy).where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.principal_id == principal_id,
+                MediaBuy.account_id == account_id,
                 MediaBuy.media_buy_id == media_buy_id,
             )
         ).first()

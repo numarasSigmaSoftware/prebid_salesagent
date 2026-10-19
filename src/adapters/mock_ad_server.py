@@ -172,8 +172,9 @@ class MockAdServer(AdServerAdapter):
             uk_itl2=True,
         )
 
-    def validate_media_buy_request(
-        self,
+    @classmethod
+    def validate_request(
+        cls,
         request: AdapterCreateRequest,
         packages: list[MediaPackage],
         start_time: datetime,
@@ -188,7 +189,7 @@ class MockAdServer(AdServerAdapter):
         (salesagent-rys3u.4): the same facts, in fields a machine can read, with the
         sentence coming from CODE_TABLE.
         """
-        problems = super().validate_media_buy_request(request, packages, start_time, end_time, package_pricing_info)
+        problems = super().validate_request(request, packages, start_time, end_time, package_pricing_info)
 
         # Date validation (like GAM)
         if start_time >= end_time:

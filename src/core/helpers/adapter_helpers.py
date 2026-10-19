@@ -196,14 +196,9 @@ def resolve_tenant_adapter_type(tenant: TenantLike) -> str:
     tenant_id, selected_adapter = _resolve_tenant_id_and_fallback_adapter(resolved_tenant)
     logger.info(f"[ADAPTER_SELECT] Initial selected_adapter from tenant.ad_server: {selected_adapter}")
 
-    from src.core.database.repositories.adapter_config import read_adapter_config
+    from src.core.database.repositories.adapter_config import read_adapter_execution_policy
 
-    config_row = read_adapter_config(tenant_id)
-    if config_row and config_row.adapter_type:
-        selected_adapter = config_row.adapter_type
-        logger.info(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
-
-    return selected_adapter or "mock"
+    return read_adapter_execution_policy(tenant_id, selected_adapter).adapter_type
 
 
 @dataclass(frozen=True)
@@ -299,7 +294,7 @@ def resolve_manual_approval_signal(tenant: IdentityTenant) -> bool:
     return bool(row and getattr(row, column, None) is True)
 
 
-def get_adapter(identity: ResolvedIdentity) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+def get_adapter(identity: ResolvedIdentity) -> AdServerAdapter:
     """The ad-server adapter that acts for *identity*.
 
     The tenant decides which ad server answers and with what configuration; the
@@ -308,12 +303,25 @@ def get_adapter(identity: ResolvedIdentity) -> MockAdServerAdapter | GoogleAdMan
     """
     principal = identity.principal
     tenant = identity.tenant
-    ctx = resolve_adapter_context(tenant)
-    selected_adapter = ctx.adapter_type
-    tenant_id = ctx.tenant_id
+    from src.adapters import get_adapter_class
+    from src.adapters.sandbox import SandboxAdServerAdapter
+    from src.core.database.repositories.adapter_config import (
+        AdapterConfigRepository,
+        read_adapter_config,
+        read_adapter_execution_policy,
+    )
+    from src.core.resolved_identity import AccountIdentity
 
-    # Get adapter config via repository
-    from src.core.database.repositories.adapter_config import AdapterConfigRepository, read_adapter_config
+    tenant_id, fallback_adapter = _resolve_tenant_id_and_fallback_adapter(tenant)
+    policy = read_adapter_execution_policy(tenant_id, fallback_adapter)
+    selected_adapter = policy.adapter_type
+    if isinstance(identity, AccountIdentity) and identity.account.sandbox:
+        return SandboxAdServerAdapter(
+            identity,
+            configured_adapter_type=selected_adapter,
+            validation_class=get_adapter_class(selected_adapter),
+            manual_approval_required=policy.manual_approval_required,
+        )
 
     targeting_config: dict[str, object] | None = None
     naming_templates: tuple[str | None, str | None] | None = None
@@ -325,14 +333,10 @@ def get_adapter(identity: ResolvedIdentity) -> MockAdServerAdapter | GoogleAdMan
         adapter_type = config_row.adapter_type
         logger.info(f"[ADAPTER_SELECT] adapter_type from AdapterConfig: {adapter_type}")
         if adapter_type == "mock":
-            # Default to True (require approval) for safety
-            adapter_config["manual_approval_required"] = (
-                config_row.mock_manual_approval_required
-                if config_row.mock_manual_approval_required is not None
-                else True
-            )
+            adapter_config["manual_approval_required"] = policy.manual_approval_required
         elif adapter_type == "google_ad_manager":
             adapter_config = AdapterConfigRepository.get_gam_config(config_row)
+            adapter_config["manual_approval_required"] = policy.manual_approval_required
             targeting_config = AdapterConfigRepository.get_gam_targeting_config(config_row)
             naming_templates = AdapterConfigRepository.get_gam_naming_templates(config_row)
 
@@ -360,12 +364,7 @@ def get_adapter(identity: ResolvedIdentity) -> MockAdServerAdapter | GoogleAdMan
         elif adapter_type == "kevel":
             adapter_config["network_id"] = config_row.kevel_network_id or ""
             adapter_config["api_key"] = config_row.kevel_api_key or ""
-            # Default to True (require approval) for safety
-            adapter_config["manual_approval_required"] = (
-                config_row.kevel_manual_approval_required
-                if config_row.kevel_manual_approval_required is not None
-                else True
-            )
+            adapter_config["manual_approval_required"] = policy.manual_approval_required
         elif adapter_type == "triton":
             adapter_config["station_id"] = config_row.triton_station_id or ""
             adapter_config["api_key"] = config_row.triton_api_key or ""
