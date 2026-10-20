@@ -356,6 +356,8 @@ class AdCPRequestHandler(RequestHandler):
             task.status.CopyFrom(TaskStatus(state=_TASK_STATE_BY_ADCP_STATUS[LibraryTaskStatus(result["status"])]))
 
         except A2AError:
+            # A protocol refusal returns no Task for the caller to track.
+            self.tasks.pop(task_id, None)
             raise
         except Exception as e:
             # Raised before any tool ran -- reading the headers off the context, framing the
