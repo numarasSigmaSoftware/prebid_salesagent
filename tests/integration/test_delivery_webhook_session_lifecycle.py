@@ -9,6 +9,7 @@ import pytest
 
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
 from tests.harness.sandbox_lifecycle import SchedulerLifecycleEnv
+from tests.helpers.log_capture import capture_logs
 
 pytestmark = [pytest.mark.requires_db, pytest.mark.asyncio]
 
@@ -84,3 +85,22 @@ async def test_failed_scheduled_send_remains_eligible_and_advances_sequence(inte
 
         assert env.delivery_attempts == 2
         assert env.report_sequences("retry-report") == [(1, "failed", "scheduled"), (2, "success", "scheduled")]
+
+
+@pytest.mark.parametrize("separator", ["\r", "\n", "\r\n"], ids=["cr", "lf", "crlf"])
+async def test_missing_report_buy_logs_one_line_without_changing_lookup(integration_db, separator):
+    with SchedulerLifecycleEnv() as env:
+        env.seed_lifecycle()
+        env.seed_reporting_buy("sandbox", "missingbuy")
+        scheduler = DeliveryWebhookScheduler()
+
+        with capture_logs("src.services.delivery_webhook_scheduler") as logs:
+            found = await scheduler.trigger_report_for_media_buy_by_id(f"missing{separator}buy", env.tenant_id)
+
+        assert found is False
+        assert env.delivery_attempts == 0
+        assert logs.records == ["Cannot trigger report: Media buy missingbuy not found or has no reporting_webhook"]
+
+        assert await scheduler.trigger_report_for_media_buy_by_id("missingbuy", env.tenant_id) is True
+        assert env.delivery_attempts == 1
+        assert env.delivered_requests[0].json()["result"]["media_buy_deliveries"][0]["media_buy_id"] == "missingbuy"

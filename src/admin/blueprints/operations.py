@@ -18,6 +18,7 @@ from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.principal import PrincipalRepository
 from src.core.errors.details import RejectionReasonDetails
 from src.core.exceptions import AdCPMediaBuyRejectedError
+from src.core.logging_config import log_safe
 from src.core.schemas import CreateMediaBuyError, CreateMediaBuySuccess, Error
 from src.core.tools.media_buy_create import ApprovalOutcome, ApprovalResult
 from src.core.webhooks.delivery import WebhookTaskContext
@@ -376,7 +377,7 @@ def _notify_approved_buy(
     try:
         service = get_protocol_webhook_service()
         asyncio.run(service.notify(target, task=task, status=AdcpTaskStatus.completed, result=result))
-        logger.info(f"Sent webhook notification for approved media buy {media_buy_id}")
+        logger.info(log_safe(f"Sent webhook notification for approved media buy {media_buy_id}"))
     except Exception as webhook_err:
         logger.warning(f"Failed to send webhook notification: {webhook_err}")
 
@@ -553,7 +554,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
             approval = approve_media_buy_through_writer(media_buy_id, tenant_id, approved_by=user_email)
             if approval.outcome is ApprovalOutcome.HELD_PENDING_CREATIVES or not approval.ok:
                 return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))
-            logger.info(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}")
+            logger.info(log_safe(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}"))
             _notify_approved_buy(tenant_id, media_buy_id, media_buy_data, step_data, approval)
             flash("Media buy approved and order created successfully", "success")
         return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))

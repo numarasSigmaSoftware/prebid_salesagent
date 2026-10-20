@@ -22,6 +22,7 @@ from src.core.database.repositories.media_buy import (
     recent_delivery_webhook_id,
 )
 from src.core.exceptions import AdCPValidationError
+from src.core.logging_config import log_safe
 from src.core.schemas import GetMediaBuyDeliveryResponse
 from src.core.tools.media_buy_delivery import delivery_for_media_buy
 from src.core.utils import utc_flight_start
@@ -115,7 +116,9 @@ class DeliveryWebhookScheduler:
         try:
             media_buys = read_delivery_webhook_buys(media_buy_id=media_buy_id, tenant_id=tenant_id)
             if not media_buys:
-                logger.warning(f"Cannot trigger report: Media buy {media_buy_id} not found or has no reporting_webhook")
+                logger.warning(
+                    log_safe(f"Cannot trigger report: Media buy {media_buy_id} not found or has no reporting_webhook")
+                )
                 return False
             return await self._send_report_for_media_buy(media_buys[0], force=True)
         except Exception as e:
