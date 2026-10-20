@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from src.adapters.base import AdapterCreateRequest, AdapterCreateResult, AdapterUpdateResult, AdServerAdapter
+from src.adapters.base import (
+    AdapterCapabilities,
+    AdapterCreateRequest,
+    AdapterCreateResult,
+    AdapterUpdateResult,
+    AdServerAdapter,
+)
 from src.core.database.repositories.media_buy import SandboxBuyState, read_sandbox_buy_state
 from src.core.errors.details import EntityRefDetails, ErrorProblem
 from src.core.exceptions import AdCPMediaBuyNotFoundError
@@ -26,6 +32,7 @@ class SandboxAdServerAdapter(AdServerAdapter):
     """Never owns a vendor instance, credentials or process-global simulated state."""
 
     adapter_name = "sandbox"
+    capabilities = AdapterCapabilities(supports_realtime_reporting=True)
 
     def __init__(
         self,
