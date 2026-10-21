@@ -39,6 +39,7 @@ class SandboxLifecycleEnv(MediaBuyCreateUpdateListEnv, SandboxAdapterEnv):
             tenant=tenant,
             adapter_type=adapter_type,
             mock_manual_approval_required=approval if adapter_approval is None else adapter_approval,
+            kevel_manual_approval_required=approval if adapter_approval is None else adapter_approval,
             gam_manual_approval_required=approval if adapter_approval is None else adapter_approval,
             gam_network_code="12345",
             gam_refresh_token="test-token",
@@ -253,6 +254,14 @@ class SandboxLifecycleEnv(MediaBuyCreateUpdateListEnv, SandboxAdapterEnv):
         from src.core.database.models import Account
 
         self.get_one(Account, tenant_id=self.tenant_id, account_id="sandbox").status = "suspended"
+        self._commit_factory_data()
+
+    def remove_gam_credentials(self) -> None:
+        from src.core.database.models import AdapterConfig
+
+        config = self.get_one(AdapterConfig, tenant_id=self.tenant_id)
+        config.gam_refresh_token = None
+        config.gam_service_account_json = None
         self._commit_factory_data()
 
     def approval_session_states(self):

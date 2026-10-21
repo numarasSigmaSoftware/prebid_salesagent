@@ -62,8 +62,9 @@ AdCP 3.1.1 [error-code schema](https://github.com/adcontextprotocol/adcp/blob/v3
 `enumDescriptions.CONFIGURATION_ERROR` and `enumMetadata.CONFIGURATION_ERROR`,
 define seller misconfiguration as terminal for the buyer and prohibit secrets in
 the error message. Applying that existing category to a missing stored account is
-a local safety decision, ungraded by the inspected storyboards. Optional snapshot
-failures retain the endpoint's existing partial-result behavior.
+a local safety decision, ungraded by the inspected storyboards. This code requires
+transport failure markers. Other optional snapshot failures retain the endpoint's
+existing partial-result behavior.
 
 Preserving the tenant's approval policy is an explicit user requirement. The upstream
 async storyboard does not mandate a particular seller approval configuration.
@@ -110,7 +111,11 @@ Make the existing adapter request validator callable without constructing a vend
 sharing its implementation with the live path. The sandbox adapter delegates to that
 configured validator. A GAM sandbox therefore uses GAM's supported pricing models and
 does not acquire the mock's extra budget/impression limits. A tenant configured to use
-the mock retains its existing mock rules.
+the mock retains its existing mock rules. GAM's locally decidable builder refusals
+run during prevalidation too. Kevel and Triton reuse their existing targeting checks;
+Kevel's optional feature flags retain their live defaults. GAM's tenant-specific
+AXE/custom-key resolution stays in live execution because it depends on configured
+keys and vendor lookups.
 
 Replace the create path's concrete-class check for GAM product configuration with the
 resolved configured adapter type. Reuse `GAMProductConfigService` and generate missing
@@ -169,9 +174,12 @@ result rather than silently skip an unsupported manager.
 
 For stored-buy execution, a missing or unresolvable account is a seller configuration
 failure, never permission to assume live mode. Use the existing typed error machinery.
-Retain each read endpoint's established partial-result behavior: an optional snapshot
-failure leaves its row unavailable with an advisory. Do not turn one failed optional
-snapshot into an unrelated listing failure. This safety rule can expose legacy buys
+The pinned `enums/error-code.json` requires transport failure markers for
+`CONFIGURATION_ERROR`, so unresolved stored-account failures propagate through the
+shared error boundary on both reporting endpoints. Other optional snapshot failures
+retain their unavailable-row advisory behavior. Listing without snapshots needs no
+adapter execution and still returns the stored row. These cases are locally graded;
+the inspected storyboards do not cover them. This safety rule can expose legacy buys
 with null accounts; this PR does not infer or backfill their ownership.
 
 `identity_of` opens database sessions, and the current session helper is thread-scoped.
@@ -189,7 +197,7 @@ adjacent cleanup; any further subsystem or migration requires a new scope decisi
 | Area | Expected files and reason |
 | --- | --- |
 | Adapter selection/policy | `src/core/helpers/adapter_helpers.py`; `src/core/database/repositories/adapter_config.py`: central routing and non-secret policy projection. |
-| Simulation/validation | New `src/adapters/sandbox.py`; `src/adapters/base.py`; `src/adapters/mock_ad_server.py`: sandbox execution plus shared validation/calculation helpers. |
+| Simulation/validation | New `src/adapters/sandbox.py`; `src/adapters/base.py`; `src/adapters/mock_ad_server.py`: sandbox execution plus shared validation/calculation helpers. Approved review extensions: `src/adapters/google_ad_manager.py`, `src/adapters/gam/managers/targeting.py`, `src/adapters/kevel.py`, and `src/adapters/triton_digital.py` share existing local targeting refusals.  |
 | Buy ownership lookup | `src/core/database/repositories/media_buy.py`: account-scoped lookup where existing methods are insufficient. |
 | Lifecycle orchestration | `src/core/tools/media_buy_create.py`, `media_buy_update.py`, `media_buy_delivery.py`, `media_buy_list.py`: affected account propagation and dispatch. |
 | Scheduled delivery | `src/services/delivery_webhook_scheduler.py`: close caller sessions before stored-account execution; retain duplicate-send behavior. Remove its obsolete nested-UoW and raw-select guard entries and add focused scheduler regressions. |
@@ -205,7 +213,7 @@ identity-enrichment registry or AST allowlist is proposed.
 | --- | --- |
 | Central selection | Sandbox operations cannot construct any configured vendor client or invoke credential builders; paired live controls still select the configured adapter. Cover configuration precedence. |
 | Approval preservation | With the same tenant settings, live and sandbox create produce the same approval decision. Sandbox remains pending until approval; after approval its domain state and workflow completion persist with zero vendor calls. Cover nullable flags and product auto-creation settings. |
-| Validation equivalence | Paired configured-adapter cases cover supported/unsupported pricing and budget/impression values exceeding mock-only limits. Invalid common inputs produce the existing error envelope. GAM product validation runs without shared catalog writes. |
+| Validation equivalence | Paired configured-adapter cases cover supported/unsupported pricing and the existing local targeting refusals in GAM, Kevel, and Triton. GAM cases exercise its real targeting builder as an independent execution oracle, including technology fields and metro-system restrictions. Positive controls accept GAM/Kevel display and Triton audio. Kevel controls preserve enabled feature flags and media-buy frequency-cap refusal. These targeting checks are locally graded, ungraded by the inspected storyboards. Mock-only budget/impression limits stay scoped to mock; GAM product validation runs without shared catalog writes. |
 | Account isolation | Wrong-account update is rejected before writes. Scoped reports omit sibling accounts. Mixed live/sandbox reads route each group correctly. Missing stored account cannot fall back to a vendor. |
 | Creative callbacks | Initial and later approval complete through sandbox creative execution; a shared creative's live platform data remains unchanged. Query persisted results from a fresh session to catch closed-session write loss. |
 | Simulation continuity | Fresh adapter instances/process state can read a stored sandbox buy. Repeated purchase-order text across accounts cannot alias simulated buys; missing buys do not receive fabricated delivery. |

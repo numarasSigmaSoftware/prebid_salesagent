@@ -80,7 +80,32 @@ Feature: Account-safe sandbox lifecycle
       | adapter            | account | field           | value |
       | mock               | live    | geo_countries   | US    |
       | mock               | sandbox | geo_countries   | US    |
-      | google_ad_manager | sandbox | device_platform | ios   |
+      | google_ad_manager | sandbox | media_type_any_of | display |
+      | kevel             | sandbox | media_type_any_of | display |
+      | triton            | sandbox | media_type_any_of | audio   |
+
+  @T-SANDBOX-LIFECYCLE-gam-targeting-refusal
+  Scenario Outline: Sandbox rejects targeting that the configured adapter cannot execute
+    Given a seller configured for "<adapter>" with automatic approval
+    And the requesting account is "sandbox"
+    When that account requests targeting "<field>" with value "<value>"
+    Then the wire error is "UNSUPPORTED_FEATURE" with recovery "correctable"
+
+    Examples:
+      | adapter           | field              | value  |
+      | google_ad_manager | media_type_any_of  | audio  |
+      | google_ad_manager | device_platform    | ios    |
+      | google_ad_manager | device_type_any_of | mobile |
+      | google_ad_manager | os_any_of          | ios    |
+      | google_ad_manager | browser_any_of     | chrome |
+      | google_ad_manager | content_cat_any_of | IAB1   |
+      | google_ad_manager | keywords_any_of    | sports |
+      | kevel             | media_type_any_of  | video  |
+      | kevel             | device_type_any_of | ctv    |
+      | triton            | media_type_any_of  | display |
+      | triton            | device_type_any_of | tablet |
+      | triton            | browser_any_of     | chrome |
+      | triton            | content_cat_any_of | IAB1   |
 
   @T-SANDBOX-LIFECYCLE-pending-create
   Scenario: Sandbox creation preserves normal approval
@@ -177,11 +202,13 @@ Feature: Account-safe sandbox lifecycle
     And the shared live creative reference is unchanged
 
   @T-SANDBOX-LIFECYCLE-unresolved-account
+  # AdCP 3.1.1 enums/error-code.json, CONFIGURATION_ERROR: transport failure
+  # markers are mandatory. This stored-account mapping is locally graded.
   Scenario Outline: An unresolved stored account cannot select live execution
     Given a sandbox seller configured for GAM
     And a stored buy whose account is "<condition>"
     When the buyer requests "<tool>" for the broken stored buy
-    Then a terminal configuration advisory identifies the broken buy
+    Then the wire error is "CONFIGURATION_ERROR" with recovery "terminal"
 
     Examples:
       | condition | tool                   |
@@ -189,6 +216,18 @@ Feature: Account-safe sandbox lifecycle
       | absent    | get_media_buy_delivery |
       | suspended | get_media_buys         |
       | suspended | get_media_buy_delivery |
+
+  @T-SANDBOX-LIFECYCLE-misconfigured-adapter
+  Scenario Outline: Stored live buys require valid adapter configuration for reporting
+    Given a sandbox seller configured for GAM
+    And a live stored buy whose GAM credentials are absent
+    When the buyer requests "<tool>" for the broken stored buy
+    Then the wire error is "CONFIGURATION_ERROR" with recovery "terminal"
+
+    Examples:
+      | tool                   |
+      | get_media_buys          |
+      | get_media_buy_delivery |
 
   @T-SANDBOX-LIFECYCLE-no-snapshot-execution
   Scenario: Listing without snapshots needs no stored account execution

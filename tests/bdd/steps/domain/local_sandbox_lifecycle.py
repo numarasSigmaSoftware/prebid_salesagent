@@ -309,14 +309,10 @@ def broken_account_report(ctx: dict, tool: str) -> None:
     dispatch_via_client(ctx, tool, params)
 
 
-@then("a terminal configuration advisory identifies the broken buy")
-def broken_account_advisory(ctx: dict) -> None:
-    from tests.bdd.steps._outcome_helpers import wire_advisory_errors
-
-    errors = wire_advisory_errors(ctx)
-    assert [(error["code"], error["recovery"], error["details"]["media_buy_id"]) for error in errors] == [
-        ("CONFIGURATION_ERROR", "terminal", "broken-buy")
-    ]
+@given("a live stored buy whose GAM credentials are absent")
+def missing_gam_credentials(ctx: dict) -> None:
+    ctx["env"].seed_owned_buy("live", media_buy_id="broken-buy")
+    ctx["env"].remove_gam_credentials()
 
 
 @when("the buyer lists the broken stored buy without snapshots")

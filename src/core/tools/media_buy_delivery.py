@@ -17,10 +17,10 @@ from pydantic import RootModel
 from rich.console import Console
 
 from src.core.errors.codes import AppErrorCode, ErrorCode
-from src.core.errors.details import ConfigurationDetails, EntityRefDetails
+from src.core.errors.details import EntityRefDetails
 from src.core.exceptions import (
+    AdCPConfigurationError,
     AdCPInternalError,
-    AdCPPersistedStateError,
     AdCPSalesAgentError,
     AdCPValidationError,
 )
@@ -348,6 +348,9 @@ def get_media_buy_delivery(
                     adapter_conversion_value = float(raw_conversion_value) if raw_conversion_value is not None else None
                     adapter_viewability = getattr(adapter_response.totals, "viewability", None)
 
+                except AdCPConfigurationError:
+                    # CONFIGURATION_ERROR requires transport failure markers in AdCP 3.1.1.
+                    raise
                 except Exception as e:
                     logger.error("Error getting delivery for %s: %s", media_buy_id, e)
                     # Write adapter failure to audit trail (NFR-003)
@@ -368,11 +371,7 @@ def get_media_buy_delivery(
                     except Exception as audit_err:
                         logger.error("Failed to write adapter failure audit log: %s", audit_err)
                     adapter_errors.append(
-                        Error.from_exception(
-                            AdCPPersistedStateError(details=ConfigurationDetails(media_buy_id=media_buy_id))
-                        )
-                        if isinstance(e, AdCPPersistedStateError)
-                        else Error.of(  # structural-guard: advisory per-buy result in GetMediaBuyDeliveryResponse.errors[]
+                        Error.of(  # structural-guard: advisory per-buy result in GetMediaBuyDeliveryResponse.errors[]
                             ErrorCode.SERVICE_UNAVAILABLE,
                             details=EntityRefDetails(media_buy_id=media_buy_id),
                         )

@@ -35,8 +35,9 @@ takes two questions, in this order.
   missing cannot be reconciled against. Graded by
   ``@T-UC-019-listing-omits-unrenderable-row``.
 
-So: never fabricate a required field; never fail a whole listing over one row;
-never answer "not found" when the buyer named the row that broke.
+These rules govern stored-row projection. Optional snapshot execution also resolves
+the stored account; an unresolved account raises ``CONFIGURATION_ERROR`` through
+the shared boundary, with the transport failure markers required by AdCP 3.1.1.
 """
 
 from __future__ import annotations
@@ -125,6 +126,7 @@ from src.core.database.models import CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.exceptions import (
+    AdCPConfigurationError,
     AdCPPersistedStateError,
     AdCPSalesAgentError,
     AdCPValidationError,
@@ -429,16 +431,15 @@ def _account_snapshots(
                     for pkg in packages_by_media_buy.get(buy.media_buy_id, [])
                 ]
                 snapshot_data.update(adapter.get_packages_snapshot(package_refs))
+            except AdCPConfigurationError:
+                # CONFIGURATION_ERROR requires transport failure markers in AdCP 3.1.1.
+                raise
             except Exception as exc:
                 logger.warning("Snapshot unavailable for account %s: %s", account_id, exc)
                 for buy in account_buys:
                     unavailable_reasons[buy.media_buy_id] = SnapshotUnavailableReason.SNAPSHOT_TEMPORARILY_UNAVAILABLE
                     row_advisories.append(
-                        Error.from_exception(
-                            AdCPPersistedStateError(details=ConfigurationDetails(media_buy_id=buy.media_buy_id))
-                        )
-                        if isinstance(exc, AdCPPersistedStateError)
-                        else Error.from_exception(exc)
+                        Error.from_exception(exc)
                         if isinstance(exc, AdCPSalesAgentError)
                         else Error.of(  # structural-guard: optional snapshot advisory in GetMediaBuysResponse.errors[]
                             ErrorCode.SERVICE_UNAVAILABLE, details=ConfigurationDetails(media_buy_id=buy.media_buy_id)

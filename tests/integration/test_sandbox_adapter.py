@@ -4,18 +4,22 @@ AdCP 3.1.1 sandbox.mdx requires normal validation and simulated execution.
 Vendor-call suppression is ungraded by the inspected upstream storyboards.
 """
 
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from src.adapters.base import AdapterCreateRequest
 from src.adapters.google_ad_manager import GoogleAdManager
+from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer
 from src.adapters.sandbox import SandboxAdServerAdapter
-from src.core.exceptions import AdCPMediaBuyNotFoundError
+from src.adapters.triton_digital import TritonDigital
+from src.core.exceptions import AdCPCapabilityNotSupportedError, AdCPMediaBuyNotFoundError
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import identity_of
 from src.core.schemas import MediaPackage, ReportingPeriod
+from tests.factories import PrincipalFactory, TargetingFactory
 from tests.harness.sandbox_adapter import SandboxAdapterEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -82,17 +86,20 @@ def test_missing_configuration_retains_tenant_fallback_and_no_approval_default(i
 
 
 @pytest.mark.parametrize(
-    "adapter_type,pricing,expected",
+    "adapter_type,pricing,media_type,expected",
     [
-        ("google_ad_manager", "cpm", []),
-        ("google_ad_manager", "cpcv", [("UNSUPPORTED_FEATURE", "packages[0].pricing_option_id")]),
-        ("mock", "cpm", [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")]),
+        ("google_ad_manager", "cpm", None, []),
+        ("google_ad_manager", "cpm", "display", []),
+        ("google_ad_manager", "cpm", "audio", None),
+        ("google_ad_manager", "cpcv", None, [("UNSUPPORTED_FEATURE", "packages[0].pricing_option_id")]),
+        ("mock", "cpm", None, [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")]),
     ],
 )
-def test_validation_uses_configured_rules_without_vendor_instance(integration_db, adapter_type, pricing, expected):
+def test_validation_uses_configured_rules_without_vendor_instance(
+    integration_db, adapter_type, pricing, media_type, expected
+):
     with SandboxAdapterEnv() as env:
         tenant, principal = env.seed_configuration(adapter_type, credentials=True)
-        adapter = get_adapter(identity_of(tenant, principal, "sandbox"))
         start = datetime.now(UTC) + timedelta(days=1)
         package = MediaPackage(
             package_id="package",
@@ -102,27 +109,113 @@ def test_validation_uses_configured_rules_without_vendor_instance(integration_db
             impressions=2_000_000,
             budget=2_000_000,
             format_ids=[],
+            targeting_overlay=TargetingFactory(media_type_any_of=[media_type]) if media_type else None,
         )
-        problems = adapter.validate_media_buy_request(
-            AdapterCreateRequest(total_budget=2_000_000),
-            [package],
-            start,
-            start + timedelta(days=7),
-            {"package": {"pricing_model": pricing}},
+        for account in ("sandbox", "live"):
+            adapter = get_adapter(identity_of(tenant, principal, account))
+            refusal = pytest.raises(AdCPCapabilityNotSupportedError) if expected is None else nullcontext()
+            with refusal:
+                problems = adapter.validate_media_buy_request(
+                    AdapterCreateRequest(total_budget=2_000_000),
+                    [package],
+                    start,
+                    start + timedelta(days=7),
+                    {"package": {"pricing_model": pricing}},
+                )
+                if expected is not None:
+                    assert [(str(p.code), p.field) for p in problems] == expected
+            if account == "sandbox":
+                assert env.mock["gam_client"].call_count == 0
+                assert env.mock["gam_oauth"].call_count == 0
+
+
+@pytest.mark.parametrize(
+    "adapter_type,targeting",
+    [
+        ("google_ad_manager", {"device_platform": ["ios"]}),
+        ("google_ad_manager", {"device_type_any_of": ["mobile"]}),
+        ("google_ad_manager", {"os_any_of": ["ios"]}),
+        ("google_ad_manager", {"browser_any_of": ["chrome"]}),
+        ("google_ad_manager", {"content_cat_any_of": ["IAB1"]}),
+        ("google_ad_manager", {"keywords_any_of": ["sports"]}),
+        ("google_ad_manager", {"audiences_any_of": ["segment"]}),
+        ("google_ad_manager", {"signals": ["signal"]}),
+        ("google_ad_manager", {"media_type_any_of": ["display", "video"]}),
+        ("google_ad_manager", {"geo_metros": [{"system": "uk_itl1", "values": ["TLG"]}]}),
+        ("google_ad_manager", {"geo_metros_exclude": [{"system": "eurostat_nuts2", "values": ["DE1"]}]}),
+        ("kevel", {"media_type_any_of": ["video"]}),
+        ("kevel", {"device_type_any_of": ["ctv"]}),
+        ("kevel", {"audiences_any_of": ["segment"]}),
+        ("kevel", {"frequency_cap": {"suppress_minutes": 60}}),
+        ("triton", {"media_type_any_of": ["display"]}),
+        ("triton", {"device_type_any_of": ["tablet"]}),
+        ("triton", {"browser_any_of": ["chrome"]}),
+        ("triton", {"content_cat_any_of": ["IAB1"]}),
+    ],
+)
+def test_sandbox_refuses_existing_local_execution_constraints(integration_db, adapter_type, targeting):
+    with SandboxAdapterEnv() as env:
+        tenant, principal = env.seed_configuration(adapter_type, credentials=True)
+        sandbox = get_adapter(identity_of(tenant, principal, "sandbox"))
+        package = MediaPackage(
+            package_id="package",
+            name="Package",
+            delivery_type="guaranteed",
+            cpm=10,
+            impressions=1000,
+            format_ids=[],
+            targeting_overlay=TargetingFactory(**targeting),
         )
-        assert [(str(p.code), p.field) for p in problems] == expected
+        start = datetime.now(UTC) + timedelta(days=1)
+        with pytest.raises(AdCPCapabilityNotSupportedError):
+            sandbox.validate_media_buy_request(
+                AdapterCreateRequest(total_budget=10), [package], start, start + timedelta(days=7)
+            )
         assert env.mock["gam_client"].call_count == 0
         assert env.mock["gam_oauth"].call_count == 0
+        # Independently exercise the live execution guard, not only its prevalidator.
+        if adapter_type == "google_ad_manager":
+            live = get_adapter(identity_of(tenant, principal, "live"))
+            with pytest.raises(AdCPCapabilityNotSupportedError):
+                live.targeting_manager.build_targeting(package.targeting_overlay)
+        else:
+            adapter_class = Kevel if adapter_type == "kevel" else TritonDigital
+            identity = PrincipalFactory.make_identity(platform_mappings={adapter_type: {"advertiser_id": "123"}})
+            live = adapter_class(
+                {"network_id": "123", "api_key": "test", "auth_token": "test"}, identity.principal, tenant_id=tenant
+            )
+            assert live._validate_targeting(package.targeting_overlay)
+            with pytest.raises(AdCPCapabilityNotSupportedError):
+                live.validate_media_buy_request(
+                    AdapterCreateRequest(total_budget=10), [package], start, start + timedelta(days=7)
+                )
 
-        live = get_adapter(identity_of(tenant, principal, "live"))
-        live_problems = live.validate_media_buy_request(
-            AdapterCreateRequest(total_budget=2_000_000),
-            [package],
-            start,
-            start + timedelta(days=7),
-            {"package": {"pricing_model": pricing}},
+
+@pytest.mark.parametrize("scope,refused", [("package", False), ("media_buy", True)])
+def test_kevel_prevalidation_preserves_enabled_feature_flags(integration_db, scope, refused):
+    identity = PrincipalFactory.make_identity(platform_mappings={"kevel": {"advertiser_id": "123"}})
+    live = Kevel(
+        {"network_id": "123", "api_key": "test", "userdb_enabled": True, "frequency_capping_enabled": True},
+        identity.principal,
+        tenant_id=identity.tenant_id,
+    )
+    package = MediaPackage(
+        package_id="package",
+        name="Package",
+        delivery_type="guaranteed",
+        cpm=10,
+        impressions=1000,
+        format_ids=[],
+        targeting_overlay=TargetingFactory(
+            audiences_any_of=["segment"], frequency_cap={"suppress_minutes": 60, "scope": scope}
+        ),
+    )
+    start = datetime.now(UTC) + timedelta(days=1)
+    with pytest.raises(AdCPCapabilityNotSupportedError) if refused else nullcontext():
+        problems = live.validate_media_buy_request(
+            AdapterCreateRequest(total_budget=10), [package], start, start + timedelta(days=7)
         )
-        assert [(str(p.code), p.field) for p in live_problems] == expected
+        assert problems == []
 
 
 def test_synthetic_ids_do_not_alias_purchase_order_text(integration_db):
