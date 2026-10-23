@@ -4,6 +4,7 @@ import pytest
 
 from tests.harness.sandbox_lifecycle import SandboxLifecycleEnv
 from tests.helpers.media_buy_approval import login_as
+from tests.helpers.settings_injection import inject_limits
 
 pytestmark = [pytest.mark.admin, pytest.mark.requires_db]
 
@@ -44,9 +45,13 @@ def test_admin_delivery_uses_stored_sandbox_account(admin_client, integration_db
 
 
 @pytest.mark.parametrize("action,status", [("approve", "completed"), ("reject", "rejected")])
-def test_approval_notification_uses_latest_active_registration(admin_client, integration_db, action, status):
+def test_approval_notification_uses_latest_active_registration(
+    admin_client, integration_db, monkeypatch, action, status
+):
     from tests.harness.sandbox_lifecycle import SchedulerLifecycleEnv
 
+    # admin_client has already cached settings before the local TLS origin starts.
+    inject_limits(monkeypatch, adcp_outbound_allow_private=True)
     with SchedulerLifecycleEnv() as env:
         env.seed_lifecycle(approval=True)
         _, step_id = env.seed_shared_creative(pending_buy=True)
