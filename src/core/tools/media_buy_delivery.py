@@ -371,7 +371,9 @@ def get_media_buy_delivery(
                     except Exception as audit_err:
                         logger.error("Failed to write adapter failure audit log: %s", audit_err)
                     adapter_errors.append(
-                        Error.of(  # structural-guard: advisory per-buy result in GetMediaBuyDeliveryResponse.errors[]
+                        Error.from_exception(e)
+                        if isinstance(e, AdCPSalesAgentError)
+                        else Error.of(  # structural-guard: advisory per-buy result in GetMediaBuyDeliveryResponse.errors[]
                             ErrorCode.SERVICE_UNAVAILABLE,
                             details=EntityRefDetails(media_buy_id=media_buy_id),
                         )

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
@@ -13,9 +12,10 @@ from flask import Blueprint, request
 from sqlalchemy import select
 
 from src.admin.utils import approve_media_buy_through_writer, require_auth, require_tenant_access
-from src.core.database.models import PersistedMediaBuyStatus, PushNotificationConfig
+from src.core.database.models import PersistedMediaBuyStatus
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.principal import PrincipalRepository
+from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
 from src.core.errors.details import RejectionReasonDetails
 from src.core.exceptions import AdCPMediaBuyRejectedError
 from src.core.logging_config import log_safe
@@ -324,17 +324,6 @@ def _media_buy_webhook_task(
     )
 
 
-@dataclass(frozen=True, repr=False)
-class _ApprovalWebhookTarget:
-    """Detached notification values; credentials never appear in its repr."""
-
-    url: str
-    authentication_type: str | None
-    authentication_token: str | None
-    operation_id: str | None
-    token: str | None
-
-
 def _notify_approved_buy(
     tenant_id: str,
     media_buy_id: str,
@@ -348,21 +337,11 @@ def _notify_approved_buy(
         return
     with PushNotificationConfigUoW(tenant_id) as config_uow:
         assert config_uow.push_notification_configs is not None
-        matches = [
-            config
-            for config in config_uow.push_notification_configs.list_active_by_principal(media_buy_data["principal_id"])
-            if config.url == media_buy_data["push_notification_url"]
-        ]
-        if not matches:
-            return
-        config = max(matches, key=lambda row: row.created_at)
-        target = _ApprovalWebhookTarget(
-            url=config.url,
-            authentication_type=config.authentication_type,
-            authentication_token=config.authentication_token,
-            operation_id=config.operation_id,
-            token=config.token,
+        target = config_uow.push_notification_configs.find_target_by_url(
+            media_buy_data["principal_id"], media_buy_data["push_notification_url"]
         )
+        if target is None:
+            return
     with MediaBuyUoW(tenant_id) as buy_uow:
         assert buy_uow.media_buys is not None
         packages = [Package(package_id=package.package_id) for package in buy_uow.media_buys.get_packages(media_buy_id)]
@@ -484,17 +463,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 # Send webhook notification to buyer
                 webhook_config = None
                 if media_buy_data and media_buy_data["push_notification_url"]:
-                    stmt_webhook = (
-                        select(PushNotificationConfig)
-                        .filter_by(
-                            tenant_id=tenant_id,
-                            principal_id=media_buy_data["principal_id"],
-                            url=media_buy_data["push_notification_url"],
-                            is_active=True,
-                        )
-                        .order_by(PushNotificationConfig.created_at.desc())
+                    webhook_config = PushNotificationConfigRepository(db_session, tenant_id).find_target_by_url(
+                        media_buy_data["principal_id"], media_buy_data["push_notification_url"]
                     )
-                    webhook_config = db_session.scalars(stmt_webhook).first()
 
                 if webhook_config and media_buy_data:
                     # A rejection is NOT a completed media buy. adcp 6.6 defaults

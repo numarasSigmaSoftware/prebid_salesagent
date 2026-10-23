@@ -26,6 +26,7 @@ from src.core.database.models import (
     MediaPackage,
     PersistedMediaBuyStatus,
 )
+from src.core.database.repositories.push_notification_config import StoredWebhookTarget
 from src.core.errors.details import EntityRefDetails
 from src.core.idempotency_canonical import canonical_request_hash
 
@@ -39,21 +40,6 @@ class DeliveryWebhookBuy:
     principal_id: str
     account_id: str | None
     reporting_webhook: dict[str, Any] = field(repr=False)
-
-
-@dataclass(frozen=True)
-class StoredWebhookTarget:
-    """The sender's stored registration fields, copied before releasing the read session.
-
-    Invalid legacy authentication remains the egress gate's decision; copying a row
-    does not claim it passed today's registration policy.
-    """
-
-    url: str = field(repr=False)
-    authentication_type: str | None
-    authentication_token: str | None = field(repr=False)
-    operation_id: str | None
-    token: str | None = field(repr=False)
 
 
 def read_delivery_webhook_buys(
@@ -111,13 +97,8 @@ def read_delivery_webhook_send_state(buy: DeliveryWebhookBuy) -> tuple[int, Stor
             logging.getLogger(__name__).warning(
                 "Could not get sequence number for media buy %s: %s", buy.media_buy_id, exc
             )
-        row = PushNotificationConfigRepository(session, buy.tenant_id).find_by_url(
+        target = PushNotificationConfigRepository(session, buy.tenant_id).find_target_by_url(
             buy.principal_id, buy.reporting_webhook["url"]
-        )
-        target = (
-            StoredWebhookTarget(row.url, row.authentication_type, row.authentication_token, row.operation_id, row.token)
-            if row is not None
-            else None
         )
         return sequence_number, target
 
@@ -139,7 +120,6 @@ def read_sandbox_buy_state(
     media_buy_id: str,
 ) -> SandboxBuyState | None:
     """Read independently so adapter reporting cannot close a caller's transaction."""
-    from src.core.config import get_settings
     from src.core.database.database_session import get_engine
     from src.core.database.repositories.delivery_simulation import DeliverySimulationConfigRepository
 
@@ -148,11 +128,8 @@ def read_sandbox_buy_state(
         buy = repo.get_by_id_for_account(media_buy_id, principal_id, account_id)
         if buy is None:
             return None
-        seeded = None
-        if get_settings().mock_delivery_seed_enabled:
-            row = DeliverySimulationConfigRepository(session, tenant_id).get(media_buy_id)
-            if row is not None:
-                seeded = dict(row.response_payload)
+        row = DeliverySimulationConfigRepository(session, tenant_id).get(media_buy_id)
+        seeded = dict(row.response_payload) if row is not None else None
         return SandboxBuyState(
             status=buy.status,
             currency=buy.currency or "USD",

@@ -564,7 +564,7 @@ def identity_for_stored_buy(
         return resolved_identity
     try:
         return identity_of(tenant_id, principal_id, account_id)
-    except AdCPSalesAgentError as exc:
+    except AdCPConfigurationError as exc:
         raise AdCPPersistedStateError(details=ConfigurationDetails(media_buy_id=media_buy_id)) from exc
 
 

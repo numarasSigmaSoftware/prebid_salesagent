@@ -206,6 +206,22 @@ def _persist_sandbox_package_state(
     )
 
 
+def _sandbox_affected_packages(
+    repo: MediaBuyRepository, media_buy_id: str, changes: list[AffectedPackage]
+) -> list[AffectedPackage]:
+    """Return each changed package once with its final persisted pause state."""
+    by_package: dict[str, AffectedPackage] = {}
+    for change in changes:
+        if change.package_id in by_package:
+            previous = by_package[change.package_id]
+            previous.changes_applied = {**(previous.changes_applied or {}), **(change.changes_applied or {})}
+        else:
+            package = repo.get_package_or_raise(media_buy_id, change.package_id)
+            change.paused = bool((package.package_config or {}).get("paused", False))
+            by_package[change.package_id] = change
+    return list(by_package.values())
+
+
 def _validate_creatives_for_assignment(
     creative_ids: list[str],
     *,
@@ -1303,6 +1319,11 @@ def _update_media_buy_impl(
                 action="update",
             )
             session.add(mapping)
+
+            if identity.account.sandbox:
+                affected_packages_list = _sandbox_affected_packages(
+                    uow.media_buys, req.media_buy_id, affected_packages_list
+                )
 
             # Build final response first
             logger.info(f"[update_media_buy] Final affected_packages before return: {affected_packages_list}")

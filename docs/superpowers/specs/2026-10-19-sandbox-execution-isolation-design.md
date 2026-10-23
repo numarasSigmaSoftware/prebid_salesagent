@@ -237,3 +237,35 @@ Do not close the credential/capability/marker follow-ups as part of this work.
 Refresh main and repeat the overlap search immediately before implementation and again
 before PR creation. Keep the old PR open until the replacement is available for review;
 closing it requires a separate user instruction.
+
+
+## Review corrections approved 2026-10-23
+
+The replacement review at `1dc19db09` identifies six corrections. GAM targeting
+validation was completed in `db7da6d6e`. The remaining changes preserve live adapter
+selection, including its mock fallback, and share that selection with sandbox
+validation. Broadstreet dispatch changes remain in #2024. Seeded sandbox delivery
+reads the tenant-scoped `DeliverySimulationConfig` row directly; the pre-existing
+mock adapter test-flag dependency remains in #2255.
+
+Stored-account resolution retains the central resolver's typed account refusals.
+AdCP 3.1.1 [error-code schema](https://github.com/adcontextprotocol/adcp/blob/v3.1.1/dist/schemas/3.1.1/enums/error-code.json)
+classifies `ACCOUNT_SETUP_REQUIRED` and `PERMISSION_DENIED` as correctable, and
+`ACCOUNT_SUSPENDED` and `ACCOUNT_PAYMENT_REQUIRED` as terminal. Reporting preserves
+these codes in its per-buy advisories. Missing stored ownership or missing seller
+identity state still fails with `CONFIGURATION_ERROR`. This reporting placement is
+a local policy, ungraded by the inspected storyboards.
+
+The approved one-file extension, `repositories/push_notification_config.py`, owns
+the newest-active-registration lookup for both approval decisions and scheduled
+reports. A stable ID breaks equal creation-time ties. Each caller copies the same
+registration fields before releasing its session. This preserves the existing
+registration and notification contracts.
+
+For combined sandbox package updates, the response contains one entry per package
+with its final stored pause state. This follows the post-update-state requirement
+in AdCP 3.1.1 [update_media_buy, Success Response](https://github.com/adcontextprotocol/adcp/blob/v3.1.1/docs/media-buy/task-reference/update_media_buy.mdx#success-response).
+The broader, pre-existing sparse-package response shape remains outside this PR.
+Combined-update consistency is locally graded, ungraded by the inspected storyboards.
+The mixed-account snapshot scenario creates its live buy through the real seller
+and checks positive metrics and an empty advisory array.

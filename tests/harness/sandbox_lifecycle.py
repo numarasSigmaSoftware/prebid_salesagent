@@ -88,6 +88,10 @@ class SandboxLifecycleEnv(MediaBuyCreateUpdateListEnv, SandboxAdapterEnv):
         self._commit_factory_data()
         return buy.media_buy_id
 
+    def seed_live_reporting_buy(self, transport) -> str:
+        result = self.call_via(transport, req=self.create_request("live", start_time="asap"))
+        return result.require_wire()["media_buy_id"]
+
     def buy_state(self, media_buy_id: str) -> tuple[str, bool, int]:
         from src.core.database.repositories.uow import MediaBuyUoW
 
@@ -111,7 +115,10 @@ class SandboxLifecycleEnv(MediaBuyCreateUpdateListEnv, SandboxAdapterEnv):
         if action.startswith("campaign_"):
             changes = {"paused": action == "campaign_pause"}
         else:
-            package_changes = {"budget": 6000} if action == "budget" else {"paused": action == "pause"}
+            operation = action.removesuffix("_targeting")
+            package_changes = {"budget": 6000} if operation == "budget" else {"paused": operation == "pause"}
+            if action.endswith("_targeting"):
+                package_changes["targeting_overlay"] = {"geo_countries": ["US"]}
             changes = {"packages": [{"package_id": "owned-package", **package_changes}]}
         return UpdateMediaBuyRequestFactory(account={"account_id": account_id}, media_buy_id=media_buy_id, **changes)
 
@@ -250,11 +257,21 @@ class SandboxLifecycleEnv(MediaBuyCreateUpdateListEnv, SandboxAdapterEnv):
             packages = uow.media_buys.get_packages(media_buy_id)
             return packages[0].package_config["sandbox_creative_ids"][creative_id]
 
-    def suspend_sandbox_account(self) -> None:
+    def _persist_sandbox_account_condition(self, condition: str) -> None:
         from src.core.database.models import Account
+        from src.core.database.repositories.uow import AccountUoW
 
-        self.get_one(Account, tenant_id=self.tenant_id, account_id="sandbox").status = "suspended"
-        self._commit_factory_data()
+        if condition == "revoked":
+            with AccountUoW(self.tenant_id) as uow:
+                uow.accounts.revoke_access(self._principal_id, "sandbox")
+        else:
+            self.get_one(Account, tenant_id=self.tenant_id, account_id="sandbox").status = condition
+            self._commit_factory_data()
+
+    @realize_e2e(_persist_sandbox_account_condition)
+    def set_sandbox_account_condition(self, condition: str) -> None:
+        """Persist the account refusal in the database used by the selected transport."""
+        self._persist_sandbox_account_condition(condition)
 
     def remove_gam_credentials(self) -> None:
         from src.core.database.models import AdapterConfig
@@ -306,20 +323,45 @@ class SchedulerLifecycleEnv(LocalOriginMixin, WebhookOutcomeRowsMixin, SandboxLi
         }
         self._commit_factory_data()
 
-    def register_reporting_target(self) -> None:
+    def register_reporting_target(self, **overrides: Any) -> None:
         from tests.factories import PushNotificationConfigFactory
 
         tenant, principal = self.setup_default_data()
-        PushNotificationConfigFactory(
-            tenant=tenant,
-            principal=principal,
-            url=self.webhook_url,
-            authentication_type="Bearer",
-            authentication_token="stored-registration-secret-at-least-32-characters",
-            operation_id="stored-operation",
-            token="stored-correlation-token",
-        )
+        fields = {
+            "url": self.webhook_url,
+            "authentication_type": "Bearer",
+            "authentication_token": "stored-registration-secret-at-least-32-characters",
+            "operation_id": "stored-operation",
+            "token": "stored-correlation-token",
+            **overrides,
+        }
+        PushNotificationConfigFactory(tenant=tenant, principal=principal, **fields)
         self._commit_factory_data()
+
+    def register_competing_targets(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        self.register_reporting_target(
+            created_at=now - timedelta(days=1),
+            operation_id="obsolete-operation",
+            authentication_token="obsolete-registration-secret-at-least-32-characters",
+            token="obsolete-correlation-token",
+        )
+        self.register_reporting_target(created_at=now)
+        self.register_reporting_target(created_at=now + timedelta(days=1), is_active=False)
+
+    def _persist_approval_webhook(self, step_id: str) -> None:
+        from src.core.database.models import WorkflowStep
+
+        step = self.get_one(WorkflowStep, step_id=step_id)
+        step.request_data = {**step.request_data, "push_notification_config": {"url": self.webhook_url}}
+        self._commit_factory_data()
+
+    @realize_e2e(_persist_approval_webhook)
+    def set_approval_webhook(self, step_id: str) -> None:
+        """Persist the notification target in the database used by the selected transport."""
+        self._persist_approval_webhook(step_id)
 
     def report_sequences(self, media_buy_id: str) -> list[tuple[int, str, str]]:
         return sorted(

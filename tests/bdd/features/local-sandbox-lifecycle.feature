@@ -20,6 +20,9 @@ Feature: Account-safe sandbox lifecycle
       | sandbox | budget          | false          | false           |
       | sandbox | pause           | true           | false           |
       | sandbox | resume          | false          | false           |
+      | sandbox | pause_targeting | true           | false           |
+      | sandbox | resume_targeting | false         | false           |
+      | sandbox | budget_targeting | true          | false           |
       | sandbox | campaign_pause  | false          | true            |
       | sandbox | campaign_resume | false          | false           |
       | live    | campaign_pause  | false          | true            |
@@ -158,7 +161,7 @@ Feature: Account-safe sandbox lifecycle
   @T-SANDBOX-LIFECYCLE-snapshot-selection
   Scenario: Unscoped snapshots select each stored account
     Given a configured seller with automatic approval
-    And stored buys belonging to sandbox and live accounts
+    And a stored sandbox buy and a live buy created through the seller
     When the buyer requests snapshots across accounts
     Then the sandbox buy has a zero delivery snapshot
 
@@ -214,8 +217,26 @@ Feature: Account-safe sandbox lifecycle
       | condition | tool                   |
       | absent    | get_media_buys         |
       | absent    | get_media_buy_delivery |
-      | suspended | get_media_buys         |
-      | suspended | get_media_buy_delivery |
+
+  @T-SANDBOX-LIFECYCLE-account-refusals
+  # AdCP 3.1.1 enums/error-code.json: preserve account refusal codes/recovery.
+  # Per-buy reporting advisory placement is a local policy, ungraded by storyboards.
+  Scenario Outline: Stored account refusals retain their specific reporting advisory
+    Given a sandbox seller configured for GAM
+    And a stored buy whose account is "<condition>"
+    When the buyer requests "<tool>" for the broken stored buy
+    Then the reporting advisory is "<code>" with recovery "<recovery>"
+
+    Examples:
+      | condition        | tool                   | code                     | recovery    |
+      | suspended        | get_media_buys         | ACCOUNT_SUSPENDED         | terminal    |
+      | suspended        | get_media_buy_delivery | ACCOUNT_SUSPENDED         | terminal    |
+      | pending_approval | get_media_buys         | ACCOUNT_SETUP_REQUIRED    | correctable |
+      | pending_approval | get_media_buy_delivery | ACCOUNT_SETUP_REQUIRED    | correctable |
+      | payment_required | get_media_buys         | ACCOUNT_PAYMENT_REQUIRED  | terminal    |
+      | payment_required | get_media_buy_delivery | ACCOUNT_PAYMENT_REQUIRED  | terminal    |
+      | revoked          | get_media_buys         | PERMISSION_DENIED         | correctable |
+      | revoked          | get_media_buy_delivery | PERMISSION_DENIED         | correctable |
 
   @T-SANDBOX-LIFECYCLE-misconfigured-adapter
   Scenario Outline: Stored live buys require valid adapter configuration for reporting

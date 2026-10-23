@@ -63,7 +63,17 @@ def test_sandbox_preserves_configured_approval(integration_db, adapter_type, app
         assert adapter.configured_adapter_type == adapter_type
 
 
-@pytest.mark.parametrize("adapter_type,adapter_class", [("google_ad_manager", GoogleAdManager), ("mock", MockAdServer)])
+@pytest.mark.parametrize(
+    "adapter_type,adapter_class",
+    [
+        ("google_ad_manager", GoogleAdManager),
+        ("mock", MockAdServer),
+        ("broadstreet", MockAdServer),
+        ("gam", MockAdServer),
+        ("creative_engine", MockAdServer),
+        ("unregistered", MockAdServer),
+    ],
+)
 @pytest.mark.parametrize("approval", [True, False])
 def test_live_control_keeps_configured_adapter_and_policy(integration_db, adapter_type, adapter_class, approval):
     with SandboxAdapterEnv() as env:
@@ -93,6 +103,20 @@ def test_missing_configuration_retains_tenant_fallback_and_no_approval_default(i
         ("google_ad_manager", "cpm", "audio", None),
         ("google_ad_manager", "cpcv", None, [("UNSUPPORTED_FEATURE", "packages[0].pricing_option_id")]),
         ("mock", "cpm", None, [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")]),
+        ("broadstreet", "cpm", None, [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")]),
+        ("gam", "cpm", None, [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")]),
+        (
+            "creative_engine",
+            "cpm",
+            None,
+            [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")],
+        ),
+        (
+            "unregistered",
+            "cpm",
+            None,
+            [("VALIDATION_ERROR", "packages[0].impressions"), ("VALIDATION_ERROR", "budget")],
+        ),
     ],
 )
 def test_validation_uses_configured_rules_without_vendor_instance(
@@ -234,7 +258,11 @@ def test_synthetic_ids_do_not_alias_purchase_order_text(integration_db):
 
 
 @pytest.mark.parametrize("seeded", [False, True])
-def test_fresh_adapter_reads_only_owning_account_state(integration_db, seeded):
+@pytest.mark.parametrize("testing", [False, True])
+def test_fresh_adapter_reads_only_owning_account_state(integration_db, monkeypatch, seeded, testing):
+    from src.core.config import get_settings
+
+    monkeypatch.setattr(get_settings().testing, "adcp_testing", testing)
     with SandboxAdapterEnv() as env:
         tenant, principal = env.seed_configuration()
         env.stored_buy(status="active")

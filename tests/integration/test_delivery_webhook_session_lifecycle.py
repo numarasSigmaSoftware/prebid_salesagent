@@ -47,7 +47,7 @@ async def test_manual_report_forces_frequency_and_duplicate_checks_with_stored_r
     with SchedulerLifecycleEnv() as env:
         env.seed_lifecycle()
         env.seed_reporting_buy(account_id, "manual-report", frequency="hourly")
-        env.register_reporting_target()
+        env.register_competing_targets()
         scheduler = DeliveryWebhookScheduler()
 
         await scheduler._send_reports()

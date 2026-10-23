@@ -15,8 +15,8 @@ def updateable_buy(ctx: dict, account: str, action: str) -> None:
         account,
         status="paused" if action == "campaign_resume" else "active",
         is_paused=action == "campaign_resume",
-        package_paused=action == "resume",
-        package_budget=5000 if action == "budget" else 6000,
+        package_paused=action in {"resume", "resume_targeting", "budget_targeting"},
+        package_budget=5000 if action.startswith("budget") else 6000,
     )
     ctx["sandbox_before"] = ctx["env"].buy_state(ctx["sandbox_buy_id"])
     ctx["package_before"] = ctx["env"].package_state(ctx["sandbox_buy_id"])
@@ -37,6 +37,8 @@ def persisted_update(ctx: dict, budget: int, package_paused: str, campaign_pause
     package_budget, config = ctx["env"].package_state(ctx["sandbox_buy_id"])
     assert package_budget == config["budget"] == budget
     assert config["paused"] is (package_paused == "true")
+    if ctx["update_action"].endswith("_targeting"):
+        assert config["targeting_overlay"]["geo_countries"] == ["US"]
     assert state[1] is (campaign_paused == "true")
     assert state[2] > ctx["sandbox_before"][2]
     assert wire_field(ctx, "revision") == state[2]
@@ -197,6 +199,12 @@ def scoped_rows(ctx: dict, field: str) -> None:
     assert wire_advisory_errors(ctx) == []
 
 
+@given("a stored sandbox buy and a live buy created through the seller")
+def executing_reporting_buys(ctx: dict) -> None:
+    ctx["env"].seed_owned_buy("sandbox", media_buy_id="sandbox-report", status="active")
+    ctx["live_report_id"] = ctx["env"].seed_live_reporting_buy(ctx["transport"])
+
+
 @when("the buyer requests snapshots across accounts")
 def all_snapshots(ctx: dict) -> None:
     from tests.factories.request import GetMediaBuysRequestFactory
@@ -204,7 +212,7 @@ def all_snapshots(ctx: dict) -> None:
     dispatch_request(
         ctx,
         req=GetMediaBuysRequestFactory(
-            account=None, media_buy_ids=["sandbox-report", "live-report"], include_snapshot=True
+            account=None, media_buy_ids=["sandbox-report", ctx["live_report_id"]], include_snapshot=True
         ),
     )
 
@@ -214,9 +222,15 @@ def sandbox_snapshot(ctx: dict) -> None:
     buy = next(row for row in wire_field(ctx, "media_buys") if row["media_buy_id"] == "sandbox-report")
     assert buy["packages"][0]["snapshot"]["impressions"] == 0
     assert buy["packages"][0]["snapshot"]["spend"] == 0
-    live = next(row for row in wire_field(ctx, "media_buys") if row["media_buy_id"] == "live-report")
-    assert live["packages"][0].get("snapshot") is None
-    assert live["packages"][0]["snapshot_unavailable_reason"] == "SNAPSHOT_TEMPORARILY_UNAVAILABLE"
+    from tests.bdd.steps._outcome_helpers import wire_advisory_errors
+
+    live = next(row for row in wire_field(ctx, "media_buys") if row["media_buy_id"] == ctx["live_report_id"])
+    snapshot = live["packages"][0]["snapshot"]
+    assert snapshot["impressions"] > 0
+    assert snapshot["spend"] > 0
+    assert snapshot["impressions"] == snapshot["spend"] / 0.01
+    assert "snapshot_unavailable_reason" not in live["packages"][0]
+    assert wire_advisory_errors(ctx) == []
 
 
 @when("the buyer requests delivery across accounts")
@@ -295,8 +309,8 @@ def live_reference_unchanged(ctx: dict) -> None:
 @given(parsers.parse('a stored buy whose account is "{condition}"'))
 def broken_account(ctx: dict, condition: str) -> None:
     ctx["env"].seed_owned_buy(None if condition == "absent" else "sandbox", media_buy_id="broken-buy")
-    if condition == "suspended":
-        ctx["env"].suspend_sandbox_account()
+    if condition != "absent":
+        ctx["env"].set_sandbox_account_condition(condition)
 
 
 @when(parsers.parse('the buyer requests "{tool}" for the broken stored buy'))
@@ -330,3 +344,12 @@ def no_snapshot_no_execution(ctx: dict) -> None:
 
     assert [buy["media_buy_id"] for buy in wire_field(ctx, "media_buys")] == ["broken-buy"]
     assert wire_advisory_errors(ctx) == []
+
+
+@then(parsers.parse('the reporting advisory is "{code}" with recovery "{recovery}"'))
+def account_refusal_advisory(ctx: dict, code: str, recovery: str) -> None:
+    from tests.bdd.steps._outcome_helpers import wire_advisory_errors
+
+    assert wire_field(ctx, "status") == "completed"
+    errors = wire_advisory_errors(ctx)
+    assert [(error["code"], error["recovery"]) for error in errors] == [(code, recovery)]

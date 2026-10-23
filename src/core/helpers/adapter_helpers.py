@@ -303,7 +303,6 @@ def get_adapter(identity: ResolvedIdentity) -> AdServerAdapter:
     """
     principal = identity.principal
     tenant = identity.tenant
-    from src.adapters import get_adapter_class
     from src.adapters.sandbox import SandboxAdServerAdapter
     from src.core.database.repositories.adapter_config import (
         AdapterConfigRepository,
@@ -315,11 +314,21 @@ def get_adapter(identity: ResolvedIdentity) -> AdServerAdapter:
     tenant_id, fallback_adapter = _resolve_tenant_id_and_fallback_adapter(tenant)
     policy = read_adapter_execution_policy(tenant_id, fallback_adapter)
     selected_adapter = policy.adapter_type
+    # Preserve the live factory's supported types and mock fallback (#2024).
+    # Sandbox validates against the class that live execution would construct.
+    adapter_classes: dict[str, type[AdServerAdapter]] = {
+        "mock": MockAdServerAdapter,
+        "google_ad_manager": GoogleAdManager,
+        "kevel": Kevel,
+        "triton": TritonDigital,
+        "triton_digital": TritonDigital,
+    }
+    adapter_class = adapter_classes.get(selected_adapter, MockAdServerAdapter)
     if isinstance(identity, AccountIdentity) and identity.account.sandbox:
         return SandboxAdServerAdapter(
             identity,
             configured_adapter_type=selected_adapter,
-            validation_class=get_adapter_class(selected_adapter),
+            validation_class=adapter_class,
             manual_approval_required=policy.manual_approval_required,
         )
 
@@ -369,17 +378,8 @@ def get_adapter(identity: ResolvedIdentity) -> AdServerAdapter:
             adapter_config["station_id"] = config_row.triton_station_id or ""
             adapter_config["api_key"] = config_row.triton_api_key or ""
 
-    if not selected_adapter:
-        # Default to mock if no adapter specified
-        selected_adapter = "mock"
-        if not adapter_config:
-            adapter_config = {"enabled": True}
-
     logger.info(f"[ADAPTER_SELECT] FINAL selected_adapter: {selected_adapter}")
-    if selected_adapter == "mock":
-        logger.info("[ADAPTER_SELECT] Instantiating MockAdServerAdapter")
-        return MockAdServerAdapter(adapter_config, principal, tenant_id=tenant_id)
-    elif selected_adapter == "google_ad_manager":
+    if adapter_class is GoogleAdManager:
         # network_code is required for GoogleAdManager
         network_code = adapter_config.get("network_code")
         if not network_code or not isinstance(network_code, str):
@@ -404,10 +404,4 @@ def get_adapter(identity: ResolvedIdentity) -> AdServerAdapter:
             targeting_config=targeting_config,
             naming_templates=naming_templates,
         )
-    elif selected_adapter == "kevel":
-        return Kevel(adapter_config, principal, tenant_id=tenant_id)
-    elif selected_adapter in ["triton", "triton_digital"]:
-        return TritonDigital(adapter_config, principal, tenant_id=tenant_id)
-    else:
-        # Default to mock for unsupported adapters
-        return MockAdServerAdapter(adapter_config, principal, tenant_id=tenant_id)
+    return adapter_class(adapter_config, principal, tenant_id=tenant_id)
