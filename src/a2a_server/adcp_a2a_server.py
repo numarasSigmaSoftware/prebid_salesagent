@@ -291,6 +291,7 @@ class AdCPRequestHandler(RequestHandler):
             )
 
         task_id = f"task_{uuid.uuid4().hex[:12]}"
+        # Register only at return sites: protocol errors expose no Task to track.
         # In protobuf, message_id is always a string (empty string default).
         msg_id = params.message.message_id or None
         task = Task(
@@ -301,7 +302,6 @@ class AdCPRequestHandler(RequestHandler):
             metadata=_dict_to_struct({"request_text": " ".join(text_parts).strip(), "skill": skill}),
         )
         owned_task = _OwnedTask(task)
-        self.tasks[task_id] = owned_task
 
         try:
             # The request HEADERS, not an identity: the boundary resolves the caller once and
@@ -344,6 +344,7 @@ class AdCPRequestHandler(RequestHandler):
                     )
                 )
                 logger.info("Task %s requires manual approval, returning status=submitted with no artifacts", task_id)
+                self.tasks[task_id] = owned_task
                 return task
 
             task.artifacts.append(
@@ -375,11 +376,11 @@ class AdCPRequestHandler(RequestHandler):
             # SDK's dispatcher serializes structurally, with the failure response in ``data``:
             # a non-``A2AError`` would be flattened to a bare InternalError with no body.
             response = failure_response(TransportProtocol.A2A, "message_processing", e)
-            task.status.CopyFrom(TaskStatus(state=TaskState.TASK_STATE_FAILED))
             raise InternalError(
                 message=f"message processing failed: {response.errors[0].message}", data=to_wire(response)
             ) from e
 
+        self.tasks[task_id] = owned_task
         return task
 
     async def on_message_send_stream(
