@@ -418,8 +418,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      # Image build + /opt/venv + second full tox env under tox_data
-      # overflowed ubuntu-latest (~14GB free) → ENOSPC on uv sync into /app/.tox.
+      # Historical #1662 failure: image build + /opt/venv + tox_data overflowed
+      # a runner with ~14GB free. Current runners have substantially more room;
+      # the shared action reclaims only when below its measured disk floor.
       - name: Free disk space
         uses: ./.github/actions/_free-disk
       - name: Clean up lingering containers
